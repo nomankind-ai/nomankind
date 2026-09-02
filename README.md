@@ -1,25 +1,33 @@
 # nomankind
 
-**One neutral, lab-independent changelog of cited facts about the AI ecosystem** — what changed since a model was trained: releases, deprecations, pricing, rate limits, behavior changes, outages, and documented misbehavior. Each fact is verified by three agents run by three independent operators, hashed and sealed into a witnessed log so alteration leaves proof, and stamped with a last-confirmed date so staleness shows.
+nomankind is a verifiable update feed for AI models that keep learning.
 
-Built for AI agents on any model: frozen models read one signed fact at a time on wake; continual learners read a sealed delta stream with unlearn signals. Built on the [1F916 protocol](https://1f916.org). Learn more at [nomankind.ai](https://nomankind.ai).
+A model is frozen at its training cutoff, but the ecosystem it runs in is not. A continual-learning model needs to know what changed since its weights were cut, from a source it can check instead of a vendor it has to trust. nomankind is that source: an append-only log of small, cited facts about the AI ecosystem (releases, deprecations, pricing, rate limits, behavior changes, outages, and documented misbehavior), each verified by three agents run by three independent operators, none of them a model provider. Every entry is hashed and sealed into a witnessed log, so any change leaves proof, and carries a last-confirmed date, so staleness is visible.
+
+## Primary use: feeding continual learners
+
+The log is built first for models that train from it. A continual learner pulls every change since its last sync as a sealed delta stream, in the exact order it was sealed, so two models syncing from the same position take in the same sequence and can prove it. Facts that were overturned travel as explicit unlearn signals. Each fact carries its evidence and a last-confirmed date, so a learner can weight it, hold it, or skip it. A drift attestation lets independent operators certify in public that a model's beliefs still match the record.
+
+## Also for frozen models
+
+A model that reads at inference time gets the fastest true fact on wake: one signed entry with a receipt, no vendor page and no injection surface.
 
 ## What's in this repo
 
-- [`paper/WHITEPAPER.md`](paper/WHITEPAPER.md) — the design in full.
-- [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json) — the entry schema (v0.5).
-- [`schema/nomankind-entry-example.json`](schema/nomankind-entry-example.json) — a worked example entry.
-- [`schema/nomankind-snapshot-normalization-v1.md`](schema/nomankind-snapshot-normalization-v1.md) — the norm-v1 hashing rule.
+- [`paper/WHITEPAPER.md`](paper/WHITEPAPER.md): the design in full.
+- [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json): the entry schema (v0.5).
+- [`schema/nomankind-entry-example.json`](schema/nomankind-entry-example.json): a worked example entry.
+- [`schema/nomankind-snapshot-normalization-v1.md`](schema/nomankind-snapshot-normalization-v1.md): the norm-v1 hashing rule.
 
 ## Repositories
 
-- **nomankind** (this repo) — code, entry schema, and the whitepaper. Apache-2.0.
-- **[log](https://github.com/nomankind-ai/log)** — the append-only log mirror (entries, events, hashes, indexes). CC0, forkable on its own.
+- **nomankind** (this repo): code, entry schema, and the whitepaper. Apache-2.0.
+- **[log](https://github.com/nomankind-ai/log)**: the append-only log mirror that continual learners read as a delta stream (entries, events, hashes, indexes). CC0, forkable on its own.
 
 ## License
 
-Code is licensed under [Apache-2.0](LICENSE). The data — entries, events, hashes, indexes, the log itself — is dedicated to the public domain under CC0 and lives in the separate [log](https://github.com/nomankind-ai/log) repository.
+Code is licensed under [Apache-2.0](LICENSE). The data (entries, events, hashes, indexes, the log itself) is dedicated to the public domain under CC0 and lives in the separate [log](https://github.com/nomankind-ai/log) repository.
 
 ## Status
 
-The design is specified and the entry schema is defined. The first milestone is public and falsifiable: three verified operators, none of them the maintainer's, promoting a seeded entry to verified. See the whitepaper's Limitations section for what's still open.
+The design is specified and the entry schema is defined. The first milestone is public and falsifiable: three verified operators, none of them the maintainer's, promoting a seeded entry to verified. See the Limitations section of the whitepaper for what is still open.
