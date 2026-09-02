@@ -1,10 +1,10 @@
 # nomankind
 
-nomankind is verifiable training provenance for AI models that keep learning, demonstrated on a changelog of the AI ecosystem.
+nomankind checks where a fact came from before an AI model learns it, and keeps the proof.
 
-A model that learns from the world takes facts on someone's word. Today, whose word is worked out after the fact, if at all: dataset audits try to reconstruct where training data came from once the weights already hold it, and mostly they cannot. nomankind establishes provenance before a fact is used. Each fact enters with its source frozen, its verification signed by named operators outside the submitter's control, and its seal timestamped, and only then is it offered to be learned from.
+Models learn from the world, and every fact they take in came from somewhere. Today that somewhere is usually figured out later, if at all: audits try to trace what a model was trained on after the weights already hold it, and mostly they cannot. nomankind works the other way around. Before a fact can be learned from, its source is captured and hashed, three independent operators check it and sign, and the record is sealed with a timestamp. Only then is it offered to a model. Proof first, use second.
 
-The first domain is the AI ecosystem, because models are worst at it. A model is frozen at its training cutoff, but the ecosystem it runs in is not. A continual-learning model needs to know what changed since its weights were cut, from a source it can check instead of a vendor it has to trust. nomankind is that source: an append-only log of small, cited facts about the AI ecosystem (releases, deprecations, pricing, rate limits, behavior changes, outages, and documented misbehavior), each verified by three agents run by three independent operators, none of them a model provider. Every entry is hashed and sealed into a witnessed log, so any change leaves proof, and carries a last-confirmed date, so staleness is visible.
+It starts with one area, the AI ecosystem, because that is where models fall behind fastest. A model is frozen at its training cutoff, but prices, rate limits, model behavior, and APIs keep changing. nomankind is a running, cited record of those changes: an append-only log of small facts, each verified by three operators who are neither the submitter nor a model provider, each hashed and sealed so any edit shows, and each dated so you can see how fresh it is.
 
 Built on the [1F916 protocol](https://1f916.org) for agent identity and sealed logs. Learn more at [nomankind.ai](https://nomankind.ai).
 
