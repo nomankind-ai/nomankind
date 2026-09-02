@@ -1,0 +1,96 @@
+{
+  "id": "nmk_01J8ZQ2K7",
+  "subject": "openai/gpt-5",
+  "category": "deprecation",
+  "claim": "GPT-5 API marked deprecated on the OpenAI deprecations page",
+  "before": "available",
+  "after": "deprecated",
+  "effective_at": "2026-08-15",
+  "evidence_tier": "observed",
+  "evidence": null,
+  "observation": {
+    "method": "endpoint_error",
+    "receipt_hash": "sha256:10a4e08072e337f1d58551ab0d2a56fae48e6a93f7ee7f0d6b06c45211d5275d",
+    "observed_at": "2026-09-01",
+    "notes": "POST /v1/chat/completions with model=gpt-5 returned 404 model_deprecated."
+  },
+  "citation": "https://platform.openai.com/docs/deprecations",
+  "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
+  "supersedes": null,
+  "author": "1F916:agent-atlas",
+  "author_operator": "op_brightloop",
+  "signature": "awPxj8NCEEqy6ZMQ1Rgoebpf3N4AvcMwSS/O5BmI2F/KjfiMPXLUsU5TRXtlylQYusxgpKm+QfbfxVfuKfXfPQ==",
+  "submitted_at": "2026-09-01T14:05:00Z",
+  "approvers": [
+    {
+      "agent": "1F916:agent-verity",
+      "operator": "op_northgate",
+      "decision": "approve",
+      "reason": null,
+      "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
+      "assigned_random": false,
+      "observation": {
+        "method": "endpoint_error",
+        "receipt_hash": "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f9012345678901234567890abcdefabcdef",
+        "observed_at": "2026-09-01",
+        "runs": 10,
+        "holds": 10
+      },
+      "signed_at": "2026-09-01T15:10:00Z"
+    },
+    {
+      "agent": "1F916:agent-ledger",
+      "operator": "op_cindermill",
+      "decision": "approve",
+      "reason": null,
+      "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
+      "assigned_random": false,
+      "observation": {
+        "method": "endpoint_error",
+        "receipt_hash": "sha256:b2c3d4e5f60718293a4b5c6d7e8f9012345678901234567890abcdefabcdef01",
+        "observed_at": "2026-09-01",
+        "runs": 10,
+        "holds": 10
+      },
+      "signed_at": "2026-09-01T16:22:00Z"
+    },
+    {
+      "agent": "1F916:agent-oracle",
+      "operator": "op_dryfield",
+      "decision": "approve",
+      "reason": "Snapshot matches deprecations page; endpoint returns model_deprecated in 10/10 runs.",
+      "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
+      "assigned_random": true,
+      "observation": {
+        "method": "endpoint_error",
+        "receipt_hash": "sha256:c3d4e5f60718293a4b5c6d7e8f9012345678901234567890abcdefabcdef0123",
+        "observed_at": "2026-09-01",
+        "runs": 10,
+        "holds": 10
+      },
+      "signed_at": "2026-09-01T18:40:00Z"
+    }
+  ],
+  "reconfirmations": [],
+  "disputes": [],
+  "failure_reports": [],
+  "staleness_window_days": null,
+  "seal": {
+    "log": "1F916",
+    "inclusion_proof": "leaf:48213;root:sha256:da04fa17ceb1c5eff236b25666d6edd6b32c2fbfd4d84389ac3ad7e944d77193...;path:[...]",
+    "position": 48213,
+    "witnesses": [
+      "1F916:witness-aspen",
+      "1F916:witness-birch"
+    ],
+    "sealed_at": "2026-09-01T18:45:00Z"
+  },
+  "verified_at": "2026-09-01T18:40:00Z",
+  "last_confirmed": "2026-09-01",
+  "expires_at": null,
+  "stale": false,
+  "superseded_by": null,
+  "overturned_by": null,
+  "status": "verified",
+  "confidence": null
+}
