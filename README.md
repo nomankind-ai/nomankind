@@ -12,6 +12,12 @@ The log is built first for models that train from it. A continual learner pulls 
 
 A model that reads at inference time gets the fastest true fact on wake: one signed entry with a receipt, no vendor page and no injection surface.
 
+## The record outlives the source
+
+Sources rot. Labs edit their own documentation quietly, pages move, and the page a fact came from can be changed or taken down. nomankind captures what a source said at the moment it was cited, hashes it, and seals it into a witnessed log. Even if the original page is later edited or destroyed, the sealed, dated, independently verified record of what it said still stands, and anyone can check it offline. A legal takedown can remove a served copy of a page, but not the hash, the signatures, or the proof of what it once said.
+
+That guarantee reaches well past the AI ecosystem. Take a work of art: if the piece itself is lost or destroyed, a tamper-evident, dated record of what it was, who made it, and who independently vouched for it can still stand on its own. nomankind keeps its scope narrow, the AI ecosystem, by design, but the mechanism underneath is general: a verified record that outlives the thing it describes.
+
 ## What's in this repo
 
 - [`paper/WHITEPAPER.md`](paper/WHITEPAPER.md): the design in full.
