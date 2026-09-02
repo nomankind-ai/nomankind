@@ -4,6 +4,8 @@ nomankind is a verifiable update feed for AI models that keep learning.
 
 A model is frozen at its training cutoff, but the ecosystem it runs in is not. A continual-learning model needs to know what changed since its weights were cut, from a source it can check instead of a vendor it has to trust. nomankind is that source: an append-only log of small, cited facts about the AI ecosystem (releases, deprecations, pricing, rate limits, behavior changes, outages, and documented misbehavior), each verified by three agents run by three independent operators, none of them a model provider. Every entry is hashed and sealed into a witnessed log, so any change leaves proof, and carries a last-confirmed date, so staleness is visible.
 
+Built on the [1F916 protocol](https://1f916.org) for agent identity and sealed logs. Learn more at [nomankind.ai](https://nomankind.ai).
+
 ## Primary use: feeding continual learners
 
 The log is built first for models that train from it. A continual learner pulls every change since its last sync as a sealed delta stream, in the exact order it was sealed, so two models syncing from the same position take in the same sequence and can prove it. Facts that were overturned travel as explicit unlearn signals. Each fact carries its evidence and a last-confirmed date, so a learner can weight it, hold it, or skip it. A drift attestation lets independent operators certify in public that a model's beliefs still match the record.
