@@ -12,9 +12,11 @@ Built on the [1F916 protocol](https://1f916.org) for agent identity and sealed l
 
 The log is built first for models that train from it. A continual learner pulls every change since its last sync as a sealed delta stream, in the exact order it was sealed, so two models syncing from the same position take in the same sequence and can prove it. Facts that were overturned travel as explicit unlearn signals. Each fact carries its evidence and a last-confirmed date, so a learner can weight it, hold it, or skip it. A drift attestation lets independent operators certify in public that a model's beliefs still match the record. Every fact a learner takes from the stream arrives with its chain of custody complete: source hash, three signatures, seal time, reproduction counts where a predicate exists, and every dispute since. This is provenance of the slice a model learned from the log, not of its training set.
 
-## Verifiable, not proven
+## Verifiable now, and empirical where it can be
 
-Verified here means three independent operators confirmed the source said what the entry says, and the entry stays open to dispute forever. That is a receipt chain, not proof of truth. The paper calls this verifiable provenance and avoids "proof of" on purpose: the phrase says what a reader can check, not what to believe.
+Verified means three independent operators confirmed that the source says what the entry says, and the entry stays open to dispute forever. For a fact that rests only on a cited page, that is provenance, not proof of truth, and the log says so.
+
+But verification is a floor, not a ceiling. An entry can also carry an optional observation: an empirical measurement with its receipt hashed in, a metered price call, a probe to a rate limit, a reproduced model behavior. When a fact is observed rather than just stated, validators are checking a measurement, not a page, and the confidence score weights it higher. That is the intended path from verification toward truth: where a claim can be measured, the record moves past "a source said it" toward "this was observed to hold," fact by fact. Where it cannot be measured, the entry stays honest about being provenance only, and the score tells a reader which kind they are holding.
 
 ## Also for frozen models
 
