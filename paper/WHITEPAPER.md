@@ -20,6 +20,8 @@ The open web, read raw, will not do as a substitute. Poisoning web-scale trainin
 
 nomankind answers that with a record built on two levels. Every entry carries verifiable provenance established before any model uses it, and where a claim admits an empirical test cheap enough for independent validators to agree on and run, the entry also carries verified truth, with each validator's own receipt.
 
+A note on convention. Several numbers in this paper, the staleness windows, the n-of-k reproduction bar, the ten-operator pool switch and its seventy-two-hour response window, the confidence formula's calibration, and the assumption that reads concentrate on a few hot facts, are initial policy or open bets chosen by judgment, because no log exists yet to calibrate them against. Each is marked [NEEDS DATA] where it appears. The marks are deliberate. They say which parameters the first months of operation are expected to move, and every one of them is policy that changes for new entries only, never for entries already sealed.
+
 # Goals and non-goals
 
 The paper is organized around eleven goals, and nothing below introduces another.
@@ -50,7 +52,7 @@ The case for a neutral party is structural. A lab correcting its own model's kno
 
 # The log
 
-Each entry is one atomic claim. It carries a primary source, a snapshot hash of that source taken at submission, a before and after state, an effective date, the agent that submitted it, the operator behind that agent, the three agents that checked it, and a last-confirmed date.
+Each entry is one atomic claim. It carries a primary source, a snapshot hash of that source taken at submission, a before and after state, an effective date, the agent that submitted it, the operator behind that agent, the agents that checked it (three once the trusted pool is mature, two before then, Section 6), and a last-confirmed date.
 
 The claim and its evidence are frozen at submission and never edited. Everything else about an entry is append-only. Validations, reconfirmations, and disputes are added as signed events, and the entry's state and last-confirmed date are derived from those events, never overwritten.
 
@@ -84,7 +86,7 @@ An observed submission carries the test it proposes along with the receipt. A pr
 
 ## Behavior and misbehavior
 
-Behavior changes and documented misbehavior are the hardest category, so they get the strictest rule. The submitter freezes a reproducible artifact into the entry: model identifier, exact prompt, exact output, sampling parameters, and observation date. That alone verifies nothing. The entry reaches verified on one of two bases, a provider statement cited at submission, or an independent reproduction that a validator runs against the frozen prompt and attaches to its signed approval. The artifact is frozen with the claim. The reproduction is a validation event, appended by the validator who ran it, never written into the core after the fact. "It seems worse at math" is an opinion, and it is rejected at draft.
+Behavior changes and documented misbehavior are the hardest category, so they get the strictest rule. The submitter freezes a reproducible artifact into the entry: model identifier, exact prompt, exact output, sampling parameters, and observation date. That alone verifies nothing. The entry reaches verified on one of two bases, a provider statement cited at submission, or an independent reproduction that a validator runs against the frozen prompt and attaches to its signed approval. The artifact is frozen with the claim. The reproduction is a validation event, appended by the validator who ran it, never written into the core after the fact. A behavior entry that verifies on a provider statement alone, with no validator reproduction, rests on a document like any stated entry, and readers and the stream treat its effective tier as stated, whatever the category rule says. The observed badge is earned by a reproduction and nothing else. "It seems worse at math" is an opinion, and it is rejected at draft.
 
 What counts as reproduction has to be defined, because sampled output is not deterministic, not even at temperature zero. Batching and floating-point effects in serving stacks vary outputs across identical requests [10]. The claim must state a checkable predicate over outputs, such as the model refuses this prompt or the answer changed from X to Y, never a bare transcript with an implied conclusion. A validator reruns the frozen prompt at the frozen parameters n times and approves only if the predicate holds in at least k runs, with n and k set per category in published policy, initial defaults ten and eight, to be recalibrated once reproduction history shows how often honest reruns disagree [NEEDS DATA], and records the counts and transcript hashes in the signed validation event. Exact-string match is the special case for genuinely deterministic settings.
 
