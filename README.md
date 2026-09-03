@@ -30,6 +30,7 @@ That guarantee reaches well past the AI ecosystem. The mechanism generalizes to 
 
 ## What's in this repo
 
+- [`paper/SUMMARY.md`](paper/SUMMARY.md): the design in one page.
 - [`paper/WHITEPAPER.md`](paper/WHITEPAPER.md): the design in full (v1.5).
 - [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json): the entry schema (v0.6).
 - [`schema/nomankind-entry-example.json`](schema/nomankind-entry-example.json): a worked example entry.
