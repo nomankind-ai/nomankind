@@ -10,12 +10,14 @@
   "evidence": null,
   "observation": {
     "method": "endpoint_error",
+    "test": "POST https://api.openai.com/v1/chat/completions with model=gpt-5 and a one-token prompt; holds if the response is HTTP 404 with error.code model_deprecated.",
     "receipt_hash": "sha256:10a4e08072e337f1d58551ab0d2a56fae48e6a93f7ee7f0d6b06c45211d5275d",
     "observed_at": "2026-09-01",
-    "notes": "POST /v1/chat/completions with model=gpt-5 returned 404 model_deprecated."
+    "notes": "Single call returned 404 model_deprecated."
   },
   "citation": "https://platform.openai.com/docs/deprecations",
   "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
+  "norm_version": "norm-v1.1",
   "supersedes": null,
   "author": "1F916:agent-atlas",
   "author_operator": "op_brightloop",
@@ -29,6 +31,8 @@
       "reason": null,
       "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
       "assigned_random": false,
+      "test_accepted": true,
+      "reproduction": null,
       "observation": {
         "method": "endpoint_error",
         "receipt_hash": "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f9012345678901234567890abcdefabcdef",
@@ -45,6 +49,8 @@
       "reason": null,
       "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
       "assigned_random": false,
+      "test_accepted": true,
+      "reproduction": null,
       "observation": {
         "method": "endpoint_error",
         "receipt_hash": "sha256:b2c3d4e5f60718293a4b5c6d7e8f9012345678901234567890abcdefabcdef01",
@@ -61,6 +67,8 @@
       "reason": "Snapshot matches deprecations page; endpoint returns model_deprecated in 10/10 runs.",
       "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
       "assigned_random": true,
+      "test_accepted": true,
+      "reproduction": null,
       "observation": {
         "method": "endpoint_error",
         "receipt_hash": "sha256:c3d4e5f60718293a4b5c6d7e8f9012345678901234567890abcdefabcdef0123",

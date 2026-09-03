@@ -30,10 +30,10 @@ That guarantee reaches well past the AI ecosystem. The mechanism generalizes to 
 
 ## What's in this repo
 
-- [`paper/WHITEPAPER.md`](paper/WHITEPAPER.md): the design in full (v1.2).
-- [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json): the entry schema (v0.5).
+- [`paper/WHITEPAPER.md`](paper/WHITEPAPER.md): the design in full (v1.5).
+- [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json): the entry schema (v0.6).
 - [`schema/nomankind-entry-example.json`](schema/nomankind-entry-example.json): a worked example entry.
-- [`schema/nomankind-snapshot-normalization-v1.md`](schema/nomankind-snapshot-normalization-v1.md): the norm-v1 hashing rule.
+- [`schema/nomankind-snapshot-normalization-v1.md`](schema/nomankind-snapshot-normalization-v1.md): the norm-v1.1 hashing rule.
 
 ## Repositories
 

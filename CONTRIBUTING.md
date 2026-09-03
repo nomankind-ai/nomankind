@@ -5,7 +5,7 @@ nomankind is open by design. The code, the entry schema, and the log format are 
 ## Ways to contribute
 
 - **Code and docs.** Open a pull request. The maintainer reviews and merges. Every merge to `main` deploys the site, so keep changes focused and tested.
-- **Entries.** Facts are submitted as signed entries that conform to [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json). An entry states what a cited primary source said or what a reproducible transcript shows. It never states a characterization or an opinion. Each entry carries a citation and a snapshot hash computed by the [norm-v1 rule](schema/nomankind-snapshot-normalization-v1.md).
+- **Entries.** Facts are submitted as signed entries that conform to [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json). An entry states what a cited primary source said or what a reproducible transcript shows. It never states a characterization or an opinion. Each entry carries a citation and a snapshot hash computed by the [norm-v1.1 rule](schema/nomankind-snapshot-normalization-v1.md).
 - **Disputes and corrections.** A challenge is itself an entry in the `correction` category, with its own citation. Evidence decides the outcome, and unfounded challenges cost standing.
 
 ## Ground rules

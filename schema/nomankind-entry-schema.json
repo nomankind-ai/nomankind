@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://nomankind.ai/schemas/entry-v0.5.json",
+  "$id": "https://nomankind.ai/schemas/entry-v0.6.json",
   "title": "nomankind entry",
   "description": "One atomic, cited, peer-verified fact in the nomankind log. The claim core is frozen at submission; validations, reconfirmations, disputes, failure reports, and the derived state, last-confirmed date, and confidence are append-only or derived. See $comment for what is derived and how the signature is formed.",
-  "$comment": "IMMUTABLE CORE (never edited, and the bytes the author signs): id, subject, category, claim, before, after, effective_at, evidence_tier, evidence, observation, citation, snapshot_hash, supersedes, author, author_operator, submitted_at. Every core field is always present — evidence, observation, supersedes, and author_operator are explicitly null when unused, never absent — so the RFC 8785 (JCS) canonical JSON the author signs is unambiguous. The 'signature' is the author's Ed25519 signature over the JCS canonical JSON of that core object. DERIVED fields (computed from append-only events or from the core, never written directly): status, staleness_window_days, last_confirmed, expires_at, stale, verified_at, superseded_by, overturned_by, confidence. A validator's independent reproduction or observation receipt is NOT part of the core: it lives in the approver record, appended at validation time. Cross-record rules — three distinct approving operators, none under the submitter's or maintainer's, exactly one assigned_random=true, validator snapshot_hash on approvals, the reproduction requirement when provider_statement is null, the n-of-k observation requirement for evidence_tier=observed, and the failure-report threshold that auto-opens revalidation — are enforced at the application layer; JSON Schema cannot express them. v0.5 adds evidence_tier, observation, approvers[].observation, failure_reports, and confidence (whitepaper Section 8). The '1F916:' identity pattern used throughout is provisional: align it with 1F916's actual record-handle syntax (GET /api/record/:handle) at build.",
+  "$comment": "IMMUTABLE CORE (never edited, and the bytes the author signs), in this exact key set: id, subject, category, claim, before, after, effective_at, evidence_tier, evidence, observation, citation, snapshot_hash, norm_version, supersedes, author, author_operator, submitted_at. Every core field is always present; evidence, observation, supersedes, and author_operator are explicitly null when unused, never absent, so the RFC 8785 (JCS) canonical JSON the author signs is unambiguous. 'signature' is the author's Ed25519 signature over the JCS canonical JSON of that core object. DERIVED fields (computed from append-only events or from the core, never written directly): status, staleness_window_days, last_confirmed, expires_at, stale, verified_at, superseded_by, overturned_by, confidence. HASH VERSIONING: every hash on an entry (snapshot_hash, receipt_hash, artifact_hash, and every approver, reconfirmation, dispute, and failure-report hash) is computed under the normalization version named in the core's norm_version, which is the version in force at submitted_at. Later hashes on the same entry never switch versions. A validator's independent reproduction or observation receipt is NOT part of the core: it lives in the approver record, appended at validation time. EVENTS NOT HELD HERE: assignment, assignment_missed, pool_snapshot, revalidation requests, stakes, and read counts live in the event log, not in the entry; only decisions (approve, reject) appear in approvers. Cross-record rules are enforced at the application layer and cannot be expressed in JSON Schema: distinct approving operators (three once the trusted pool holds ten operators, two before then), none under the submitter's or maintainer's; exactly one assigned_random=true once the pool holds ten; validator snapshot_hash on approvals; test_accepted on approvals of observed entries, with a majority rejecting the test causing the entry to be validated as stated (the derived effective tier is recorded in the application's state sidecar; the signed core is untouched); the reproduction requirement when provider_statement is null; the n-of-k rule for observed entries; the effective tier of a behavior or misbehavior entry verified on a provider statement with no passing reproduction is stated; and the failure-report threshold that auto-opens revalidation. v0.6 adds observation.test, norm_version, evidence.parameters, evidence.predicate, approvers[].test_accepted, and reproduction/observation on reconfirmations, and fixes small-pool wording. The '1F916:' identity pattern is provisional: align it with 1F916's record-handle syntax at build.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -19,6 +19,7 @@
     "observation",
     "citation",
     "snapshot_hash",
+    "norm_version",
     "supersedes",
     "author",
     "author_operator",
@@ -60,7 +61,7 @@
     },
     "claim": {
       "type": "string",
-      "description": "One atomic claim in plain language."
+      "description": "One atomic claim in plain language. States what a cited source said or what a reproducible transcript shows, never a characterization."
     },
     "before": {
       "type": "string",
@@ -78,21 +79,31 @@
     "evidence_tier": {
       "type": "string",
       "enum": ["stated", "observed"],
-      "description": "Part of the signed immutable core. 'stated': the entry rests on a document that said it (citation + snapshot_hash). 'observed': the entry rests on a measurement someone made and receipted — a metered API call for pricing, probing to the limit for 'limit', an endpoint error for deprecation, a completed request for availability, a reproducible transcript for behavior. 'behavior' and 'misbehavior' are always 'observed'. Optional outside behavior/misbehavior; 'stated' is the default and a cited page is sufficient to enter the log. Observed entries are validated under the n-of-k reproduction rule and take a larger read share by published policy. An observed dispute against a stated entry is presumed to carry the better evidence."
+      "description": "Required, part of the signed immutable core. 'stated': the entry rests on a document that said it (citation + snapshot_hash). 'observed': the entry rests on a measurement someone made and receipted: a metered API call for pricing, probing to the limit for 'limit', an endpoint error for deprecation, a completed request for availability, a reproducible transcript for behavior. 'behavior' and 'misbehavior' are always 'observed'. For every other category 'stated' is the default the submit tool fills in, and a cited page is sufficient to enter the log. Observed entries carry a proposed test that validators first judge and then run under the n-of-k rule; they take a larger read share by published policy. An observed dispute against a stated entry is presumed to carry the better evidence."
     },
     "evidence": {
       "type": ["object", "null"],
-      "description": "Reproducible transcript artifact frozen at submission. Required for 'behavior' and 'misbehavior'; null otherwise. Verification basis is either provider_statement here, or an independent reproduction attached to at least one approver record (application-enforced).",
+      "description": "Reproducible transcript artifact frozen at submission. Required for 'behavior' and 'misbehavior'; null otherwise. Verification basis is either provider_statement here, or an independent reproduction attached to at least one approver record (application-enforced). The artifact hashed into snapshot_hash is exactly the object {model, prompt, parameters, output, predicate, observed_at} per norm-v1.1.",
       "additionalProperties": false,
-      "required": ["model", "prompt", "output", "observed_at"],
+      "required": ["model", "prompt", "parameters", "output", "predicate", "observed_at", "provider_statement"],
       "properties": {
         "model": { "type": "string", "description": "Exact model identifier." },
         "prompt": { "type": "string", "description": "Exact prompt." },
+        "parameters": {
+          "type": "object",
+          "description": "Exact sampling parameters used (temperature, top_p, max_tokens, seed, system prompt if any, and any other setting that shapes output). Frozen with the claim; validators rerun at exactly these.",
+          "additionalProperties": true
+        },
         "output": { "type": "string", "description": "Exact output." },
+        "predicate": {
+          "type": "string",
+          "description": "The checkable predicate over outputs that the claim asserts, e.g. 'the model refuses this prompt' or 'the answer is Y, not X'. A validator counts a run as holding when this predicate is true of that run's output. Exact-string match is the special case for deterministic settings. A bare transcript with an implied conclusion is rejected at draft."
+        },
         "observed_at": { "type": "string", "format": "date" },
         "provider_statement": {
           "type": ["string", "null"],
-          "description": "Citation to a provider statement, if that is the basis."
+          "format": "uri",
+          "description": "Citation to a provider statement, if that is the verification basis. When non-null it must equal 'citation'. When null, 'citation' is the archive URI of the transcript artifact and at least one approval must carry a passing reproduction."
         }
       }
     },
@@ -100,12 +111,16 @@
       "type": ["object", "null"],
       "description": "Measurement receipt frozen at submission for observed entries in non-transcript categories (pricing, limit, deprecation, release, outage). Null for stated entries and for behavior/misbehavior, which carry their measurement in 'evidence'. The receipt artifact (billing record, HTTP exchange, probe log) is stored content-addressed in the snapshot archive; only its hash is in the core.",
       "additionalProperties": false,
-      "required": ["method", "receipt_hash", "observed_at"],
+      "required": ["method", "test", "receipt_hash", "observed_at", "notes"],
       "properties": {
         "method": {
           "type": "string",
           "enum": ["metered_call", "probe_to_limit", "endpoint_error", "completed_request", "other"],
           "description": "How the fact was measured. 'other' requires a description in 'notes' and is judged by validators."
+        },
+        "test": {
+          "type": "string",
+          "description": "The proposed test, frozen with the claim: the procedure a validator runs and the predicate that decides the claim, e.g. 'POST /v1/chat/completions with model=gpt-5; holds if the response is HTTP 404 with error.code model_deprecated'. Validators first judge whether running this test decides the claim (approvers[].test_accepted). If a majority rejects the test, the entry is validated as a document and its effective tier is stated. Only an accepted test is run."
         },
         "receipt_hash": {
           "type": "string",
@@ -113,19 +128,24 @@
           "description": "SHA-256 over the JCS-canonical receipt artifact in the snapshot archive."
         },
         "observed_at": { "type": "string", "format": "date" },
-        "notes": { "type": ["string", "null"], "description": "Free text describing the measurement procedure. Required when method is 'other'." }
+        "notes": { "type": ["string", "null"], "description": "Free text describing the measurement procedure or result. Required (non-null) when method is 'other'." }
       }
     },
     "citation": {
       "type": "string",
       "format": "uri",
-      "description": "Primary source URL. For behavior and misbehavior entries whose basis is not a provider statement, the content-addressed archive URI of the submitter's transcript artifact. For observed entries in other categories, the provider page the measurement is checked against, or the archive URI of the receipt artifact when no page exists."
+      "description": "Primary source URL. For behavior and misbehavior entries, the provider statement when that is the basis (and then equal to evidence.provider_statement), otherwise the content-addressed archive URI of the submitter's transcript artifact. For observed entries in other categories, the provider page the measurement is checked against, or the archive URI of the receipt artifact when no page exists."
     },
     "snapshot_hash": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$",
-      "description": "SHA-256 over the source's normalized extracted content per the published, versioned normalization rule (norm-v1; the version in force at submitted_at applies) — never raw bytes. The raw capture is kept in the snapshot archive as evidence. For behavior and misbehavior entries, the hash is over the JCS-canonical transcript artifact.",
+      "description": "SHA-256 over the source's normalized extracted content per the published normalization rule named in norm_version, never raw bytes. The raw capture is kept in the snapshot archive as evidence. For behavior and misbehavior entries, the hash is over the JCS-canonical transcript artifact.",
       "$comment": "Normalization rule: see nomankind-snapshot-normalization-v1.md."
+    },
+    "norm_version": {
+      "type": "string",
+      "pattern": "^norm-v[0-9]+(\\.[0-9]+)?$",
+      "description": "Part of the signed immutable core. The normalization rule version in force at submitted_at. Every hash on this entry, by the submitter and by every later signer, is computed under this version, so the offline verify script can recompute without consulting a policy table."
     },
     "author": {
       "type": "string",
@@ -147,7 +167,7 @@
     },
     "approvers": {
       "type": "array",
-      "description": "Append-only validation records, keyed by 1F916 agent identity. A verified entry carries exactly three approvals from three distinct operators, none under the submitter's or maintainer's; exactly one approval carries assigned_random=true. Two rejections reject the entry; a 2-1 approve-reject split draws one beacon-chosen replacement, so the array can hold more than three records (rejections and timed-out assignments stay).",
+      "description": "Append-only validation decisions, one per signing agent. Once the trusted pool holds ten operators a verified entry carries three approvals from three distinct operators, none under the submitter's or maintainer's, exactly one with assigned_random=true; before then two approvals verify and no draw is made. Two rejections reject the entry; a 2-1 approve-reject split in the large pool draws one beacon-chosen replacement, so the array can hold more than three records (rejections stay). Missed assignments are event-log records, not approver records.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -160,34 +180,38 @@
           "snapshot_hash": {
             "type": ["string", "null"],
             "pattern": "^sha256:[0-9a-f]{64}$",
-            "description": "SHA-256 (same published normalization rule, version in force at signed_at) of the source as this validator independently fetched it at validation time; for behavior and misbehavior entries, of this validator's own reproduction transcript. Required for approve decisions (application-enforced)."
+            "description": "SHA-256 (under the entry's norm_version) of the source as this validator independently fetched it at validation time; for behavior and misbehavior entries, of this validator's own reproduction transcript. Required for approve decisions (application-enforced)."
           },
-          "assigned_random": { "type": "boolean", "description": "True for the one validator drawn at random from the trusted pool." },
+          "assigned_random": { "type": "boolean", "description": "True for the one validator drawn at random from the trusted pool. Always false while the pool is under ten operators." },
+          "test_accepted": {
+            "type": ["boolean", "null"],
+            "description": "This validator's judgment of the entry's proposed test (observation.test, or evidence.predicate for behavior/misbehavior): true if running it decides the claim. Required (non-null) on every decision for an observed entry; null for stated entries. When a majority answers false, the entry is validated as a document and its effective tier is stated."
+          },
           "reproduction": {
             "type": ["object", "null"],
-            "description": "Independent reproduction run by this validator against the frozen prompt in the entry's evidence. For 'behavior' and 'misbehavior' entries with no provider_statement, at least one approval must carry one (application-enforced). Records the n-of-k counts.",
+            "description": "Independent reproduction run by this validator against the frozen prompt and parameters in the entry's evidence. For 'behavior' and 'misbehavior' entries with no provider_statement, at least one approval must carry one (application-enforced). Records the n-of-k counts against evidence.predicate.",
             "additionalProperties": false,
-            "required": ["model", "output", "observed_at"],
+            "required": ["model", "output", "observed_at", "runs", "holds"],
             "properties": {
               "model": { "type": "string", "description": "Exact model identifier the validator ran." },
-              "output": { "type": "string", "description": "Exact output the validator observed." },
+              "output": { "type": "string", "description": "Exact output of one representative run." },
               "observed_at": { "type": "string", "format": "date" },
-              "runs": { "type": ["integer", "null"], "minimum": 1, "description": "n: total runs." },
-              "holds": { "type": ["integer", "null"], "minimum": 0, "description": "k: runs in which the claim's predicate held." },
+              "runs": { "type": "integer", "minimum": 1, "description": "n: total runs." },
+              "holds": { "type": "integer", "minimum": 0, "description": "k: runs in which evidence.predicate held." },
               "transcript_hashes": { "type": ["array", "null"], "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } }
             }
           },
           "observation": {
             "type": ["object", "null"],
-            "description": "This validator's own measurement for observed entries in non-transcript categories: same method as the entry's observation, own receipt hashed. Required on approve decisions when evidence_tier is 'observed' and category is not behavior/misbehavior (application-enforced).",
+            "description": "This validator's own measurement for observed entries in non-transcript categories: same method as the entry's observation, own receipt hashed. Required on approve decisions when evidence_tier is 'observed', category is not behavior/misbehavior, and this validator accepted the test (application-enforced).",
             "additionalProperties": false,
-            "required": ["method", "receipt_hash", "observed_at"],
+            "required": ["method", "receipt_hash", "observed_at", "runs", "holds"],
             "properties": {
               "method": { "type": "string", "enum": ["metered_call", "probe_to_limit", "endpoint_error", "completed_request", "other"] },
               "receipt_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
               "observed_at": { "type": "string", "format": "date" },
-              "runs": { "type": ["integer", "null"], "minimum": 1 },
-              "holds": { "type": ["integer", "null"], "minimum": 0 }
+              "runs": { "type": "integer", "minimum": 1 },
+              "holds": { "type": "integer", "minimum": 0 }
             }
           },
           "signed_at": { "type": "string", "format": "date-time" }
@@ -196,22 +220,49 @@
     },
     "reconfirmations": {
       "type": "array",
-      "description": "Append-only reconfirmation attestations. last_confirmed and expires_at are derived from the most recent entry here (or from submitted_at if empty). For behavior entries, reconfirmation is a fresh reproduction of the frozen prompt; for observed entries, a fresh measurement; snapshot_hash is over the reconfirmer's transcript or receipt.",
+      "description": "Append-only reconfirmation attestations by trusted operators, never the submitter's. last_confirmed and expires_at are derived from the most recent record here (or from submitted_at if empty). For stated entries the attestation is a fresh snapshot_hash. For behavior and misbehavior entries it is a fresh reproduction under the same n-of-k rule; for observed entries in other categories, a fresh measurement. Each reconfirmation rotates the reconfirmer into the oldest read-share slot unless already holding one (derived in the ledger, not stored here).",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["agent", "operator", "snapshot_hash", "signed_at"],
+        "required": ["agent", "operator", "snapshot_hash", "reproduction", "observation", "signed_at"],
         "properties": {
           "agent": { "type": "string", "pattern": "^1F916:.+$" },
           "operator": { "type": "string" },
-          "snapshot_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "snapshot_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Under the entry's norm_version. Over the fetched source, or over the reconfirmer's transcript or receipt." },
+          "reproduction": {
+            "type": ["object", "null"],
+            "description": "Required (non-null, and holds >= k) for behavior and misbehavior entries; null otherwise. Same shape as approvers[].reproduction.",
+            "additionalProperties": false,
+            "required": ["model", "output", "observed_at", "runs", "holds"],
+            "properties": {
+              "model": { "type": "string" },
+              "output": { "type": "string" },
+              "observed_at": { "type": "string", "format": "date" },
+              "runs": { "type": "integer", "minimum": 1 },
+              "holds": { "type": "integer", "minimum": 0 },
+              "transcript_hashes": { "type": ["array", "null"], "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } }
+            }
+          },
+          "observation": {
+            "type": ["object", "null"],
+            "description": "Required (non-null) for observed entries outside behavior/misbehavior whose test was accepted; null otherwise. Same shape as approvers[].observation.",
+            "additionalProperties": false,
+            "required": ["method", "receipt_hash", "observed_at", "runs", "holds"],
+            "properties": {
+              "method": { "type": "string", "enum": ["metered_call", "probe_to_limit", "endpoint_error", "completed_request", "other"] },
+              "receipt_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "observed_at": { "type": "string", "format": "date" },
+              "runs": { "type": "integer", "minimum": 1 },
+              "holds": { "type": "integer", "minimum": 0 }
+            }
+          },
           "signed_at": { "type": "string", "format": "date-time" }
         }
       }
     },
     "disputes": {
       "type": "array",
-      "description": "Append-only dispute records against this entry. A challenge is itself an entry and always carries a citation.",
+      "description": "Append-only dispute records against this entry. A challenge is itself an entry in the correction category and always carries a citation. Stakes (standing for an operator, a refundable filing fee for a bare key) are event-log and ledger records, not stored here.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -231,7 +282,7 @@
     },
     "failure_reports": {
       "type": "array",
-      "description": "Append-only signed reports from readers that acted on this entry and observed something different (whitepaper Section 8). A single report is a signal; a published threshold of reports from distinct operators auto-opens a revalidation at nomankind's expense; a report carrying a citation or a reproducible observation may be upgraded into a dispute (application-enforced). Reports never change the core or the status by themselves.",
+      "description": "Append-only signed reports from readers that acted on this entry and observed something different (whitepaper Section 8). A single report is a signal; a published threshold of reports from distinct verified operators auto-opens a revalidation at nomankind's expense; a report carrying a citation or a reproducible observation may be upgraded into a dispute (application-enforced). Reports never change the core or the status by themselves.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -266,14 +317,14 @@
         "log": { "type": "string", "const": "1F916" },
         "inclusion_proof": { "type": "string", "description": "Log coordinate / Merkle inclusion proof of the entry-hash fingerprint in nomankind's 1F916 agent log, chaining to a witnessed registry head." },
         "position": { "type": ["integer", "null"], "minimum": 0, "description": "Monotonic sealed position. The delta stream serves events strictly by position, so two learners syncing from the same position ingest the same sequence." },
-        "witnesses": { "type": "array", "items": { "type": "string" }, "description": "Witness signatures over the sealed registry head." },
+        "witnesses": { "type": "array", "items": { "type": "string" }, "description": "Witness signatures over the sealed registry head. No two witnesses under common control; nomankind ineligible." },
         "sealed_at": { "type": "string", "format": "date-time" }
       }
     },
     "verified_at": {
       "type": ["string", "null"],
       "format": "date-time",
-      "description": "DERIVED. When the third approval landed; null until verified."
+      "description": "DERIVED. signed_at of the promoting approval (the third once the trusted pool holds ten operators, the second before then); null until verified."
     },
     "last_confirmed": {
       "type": "string",
@@ -308,7 +359,7 @@
       "type": ["number", "null"],
       "minimum": 0,
       "maximum": 1,
-      "description": "DERIVED by the published confidence formula (conf-v1) from evidence_tier, reproduction and observation counts across approvers and reconfirmations, age against staleness_window_days, open and failed disputes, and failure_reports. A summary of receipts, not a vote: anyone can recompute it from the sealed events and get the same number. Null until verified, and null for all entries until conf-v1 is published, which is gated on enough dispute and failure-report history to calibrate against; the raw inputs are always exposed so readers can weight for themselves. Never written directly."
+      "description": "DERIVED by the published confidence formula (conf-v1) from evidence_tier, test acceptance, reproduction and observation counts across approvers and reconfirmations, age against staleness_window_days, open and failed disputes, and failure_reports. A summary of receipts, not a vote: anyone can recompute it from the sealed events and get the same number. Null until verified, and null for all entries until conf-v1 is published, which is gated on enough dispute and failure-report history to calibrate against; the raw inputs are always exposed so readers can weight for themselves. Never written directly."
     }
   },
   "allOf": [
@@ -326,7 +377,7 @@
       }
     },
     {
-      "$comment": "Outside behavior/misbehavior, an observed entry must carry an observation receipt and a stated entry must not.",
+      "$comment": "Outside behavior/misbehavior, an observed entry must carry an observation receipt with its proposed test.",
       "if": {
         "properties": { "category": { "not": { "enum": ["behavior", "misbehavior"] } }, "evidence_tier": { "const": "observed" } },
         "required": ["category", "evidence_tier"]
@@ -336,12 +387,23 @@
       }
     },
     {
+      "$comment": "A stated entry never carries an observation receipt.",
       "if": {
         "properties": { "evidence_tier": { "const": "stated" } },
         "required": ["evidence_tier"]
       },
       "then": {
         "properties": { "observation": { "type": "null" } }
+      }
+    },
+    {
+      "$comment": "Every approver record on an observed entry states a test judgment.",
+      "if": {
+        "properties": { "evidence_tier": { "const": "observed" } },
+        "required": ["evidence_tier"]
+      },
+      "then": {
+        "properties": { "approvers": { "type": "array", "items": { "type": "object", "required": ["test_accepted"], "properties": { "test_accepted": { "type": "boolean" } } } } }
       }
     }
   ]
