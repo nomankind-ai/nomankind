@@ -1,6 +1,6 @@
 # Proof-of-concept retrospective
 
-The proof of concept (September 2026, fourteen milestones plus a storage port) was retired on 2026-09-06 and does not live in this repository; see decision 0001. This document is what it taught. The application is rebuilt from the spec with these lessons in hand.
+The proof of concept (September 2026, fourteen milestones plus a storage port) was retired on 2026-09-06 and does not live in this repository. This document is what it taught.
 
 ## 1. Summary
 

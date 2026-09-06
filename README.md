@@ -32,13 +32,9 @@ That guarantee reaches well past the AI ecosystem. The mechanism generalizes to 
 
 - [`paper/SUMMARY.md`](paper/SUMMARY.md): the design in one page.
 - [`paper/WHITEPAPER.md`](paper/WHITEPAPER.md): the design in full (v1.5).
-- [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json): the entry schema (v0.6). The single copy; the code reads this file.
+- [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json): the entry schema (v0.6).
 - [`schema/nomankind-entry-example.json`](schema/nomankind-entry-example.json): a worked example entry.
 - [`schema/nomankind-snapshot-normalization-v1.md`](schema/nomankind-snapshot-normalization-v1.md): the norm-v1.1 hashing rule.
-- [`docs/POC-RETROSPECTIVE.md`](docs/POC-RETROSPECTIVE.md): what the retired proof of concept taught.
-- [`docs/decisions/`](docs/decisions/): short numbered records of decisions that are not derivable from the code.
-
-The application (kernel package, Worker, web UI, infrastructure) is built here from the spec; its layout lands in this repo as it is built. See [CONTRIBUTING.md](CONTRIBUTING.md) for how the work is organized.
 
 ## Repositories
 
@@ -51,6 +47,4 @@ Code is licensed under [Apache-2.0](LICENSE). The data (entries, events, hashes,
 
 ## Status
 
-The design is specified (whitepaper v1.5, schema v0.6). A proof of concept of the core mechanics was built and retired in September 2026: an append-only signed hash-chained log, every status derived from events, consensus with the small-pool rule, evidence tiers with n-of-k acceptance, Merkle seals with witnesses, a read API with signed receipts, and an offline verifier, all under test. Its lessons are in the retrospective. The application is now being built from the spec for `demo.nomankind.ai` (staging) and `app.nomankind.ai` (production); progress is tracked in the issues labeled `roadmap`.
-
-The first public milestone is unchanged and falsifiable: three verified operators, none of them the maintainer's, promoting a seeded entry to verified. See the Limitations section of the whitepaper for what is still open.
+The design is specified and the entry schema is defined. The first milestone is public and falsifiable: three verified operators, none of them the maintainer's, promoting a seeded entry to verified. See the Limitations section of the whitepaper for what is still open.
