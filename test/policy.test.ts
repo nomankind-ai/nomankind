@@ -16,8 +16,8 @@ import {
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   SEAL_INTERVAL_MINUTES,
-  SEED_FEE_CAP,
-  SEED_FEE_RATE,
+  SEED_FEE_CAP_CENTS,
+  SEED_FEE_RATE_CENTS,
   SLOT_COUNT,
   STALENESS_WINDOW_DAYS,
   TRUSTED_POOL_SWITCH,
@@ -52,8 +52,8 @@ const EXPECTED_POLICY_KEYS = [
   "CONTRIBUTOR_SHARE_PERCENT",
   "SEAL_INTERVAL_MINUTES",
   "FAILURE_REPORT_THRESHOLD",
-  "SEED_FEE_RATE",
-  "SEED_FEE_CAP",
+  "SEED_FEE_RATE_CENTS",
+  "SEED_FEE_CAP_CENTS",
   "NORM_VERSION",
   "REQUEST_CLOCK_SKEW_SECONDS",
   "NONCE_RETENTION_SECONDS",
@@ -99,10 +99,37 @@ describe("policy numbers", () => {
     }
   });
 
-  it("carries the unpublished amounts as explicit null placeholders", () => {
-    expect(FAILURE_REPORT_THRESHOLD).toBeNull();
-    expect(SEED_FEE_RATE).toBeNull();
-    expect(SEED_FEE_CAP).toBeNull();
+  it("carries the maintainer's published amounts (D-032)", () => {
+    expect(FAILURE_REPORT_THRESHOLD).toBe(3);
+    expect(SEED_FEE_RATE_CENTS).toBe(100);
+    expect(SEED_FEE_CAP_CENTS).toBe(10000);
+  });
+
+  it("states the D-032 amounts as positive integers", () => {
+    for (const value of [
+      FAILURE_REPORT_THRESHOLD,
+      SEED_FEE_RATE_CENTS,
+      SEED_FEE_CAP_CENTS,
+    ]) {
+      expect(Number.isInteger(value)).toBe(true);
+      expect(value).toBeGreaterThan(0);
+    }
+  });
+
+  it("caps a month of seed fees well above a single fee", () => {
+    expect(SEED_FEE_CAP_CENTS % SEED_FEE_RATE_CENTS).toBe(0);
+    expect(SEED_FEE_CAP_CENTS).toBeGreaterThan(SEED_FEE_RATE_CENTS);
+  });
+
+  it("no longer exports the retired null placeholders", async () => {
+    const policyModule = (await import("../src/policy.js")) as Record<
+      string,
+      unknown
+    >;
+    expect(policyModule["SEED_FEE_RATE"]).toBeUndefined();
+    expect(policyModule["SEED_FEE_CAP"]).toBeUndefined();
+    expect(Object.keys(POLICY)).not.toContain("SEED_FEE_RATE");
+    expect(Object.keys(POLICY)).not.toContain("SEED_FEE_CAP");
   });
 
   it("uses the norm version the example entry carries", () => {
@@ -124,13 +151,13 @@ describe("policy numbers", () => {
     expect(Object.keys(POLICY).sort()).toEqual([...EXPECTED_POLICY_KEYS].sort());
   });
 
-  it("exports only numbers, null placeholders, the norm version, and frozen objects", () => {
+  it("exports only numbers, the norm version, and frozen objects", () => {
     for (const [key, value] of Object.entries(POLICY)) {
+      expect(value).not.toBeNull();
       if (key === "NORM_VERSION") {
         expect(typeof value).toBe("string");
         continue;
       }
-      if (value === null) continue;
       if (typeof value === "object") {
         expect(Object.isFrozen(value)).toBe(true);
         continue;
@@ -151,8 +178,8 @@ describe("policy numbers", () => {
     expect(POLICY.CONTRIBUTOR_SHARE_PERCENT).toBe(CONTRIBUTOR_SHARE_PERCENT);
     expect(POLICY.SEAL_INTERVAL_MINUTES).toBe(SEAL_INTERVAL_MINUTES);
     expect(POLICY.FAILURE_REPORT_THRESHOLD).toBe(FAILURE_REPORT_THRESHOLD);
-    expect(POLICY.SEED_FEE_RATE).toBe(SEED_FEE_RATE);
-    expect(POLICY.SEED_FEE_CAP).toBe(SEED_FEE_CAP);
+    expect(POLICY.SEED_FEE_RATE_CENTS).toBe(SEED_FEE_RATE_CENTS);
+    expect(POLICY.SEED_FEE_CAP_CENTS).toBe(SEED_FEE_CAP_CENTS);
     expect(POLICY.NORM_VERSION).toBe(NORM_VERSION);
     expect(POLICY.REQUEST_CLOCK_SKEW_SECONDS).toBe(REQUEST_CLOCK_SKEW_SECONDS);
     expect(POLICY.NONCE_RETENTION_SECONDS).toBe(NONCE_RETENTION_SECONDS);

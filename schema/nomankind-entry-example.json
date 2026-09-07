@@ -19,13 +19,13 @@
   "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
   "norm_version": "norm-v1.1",
   "supersedes": null,
-  "author": "1F916:agent-atlas",
+  "author": "1F916:JpFo4VI5q9AZ62i23W5AOx_m5J7eOwrPmaUFeScS-gY",
   "author_operator": "op_brightloop",
-  "signature": "awPxj8NCEEqy6ZMQ1Rgoebpf3N4AvcMwSS/O5BmI2F/KjfiMPXLUsU5TRXtlylQYusxgpKm+QfbfxVfuKfXfPQ==",
+  "signature": "7DrXYYABpKoGvBW07FX6kqGmLBNkpuJ1/U+9pMgtJLDcjQlQKkI7eg40rXqQjjGA6Jzt4DOrwViDwtC3qtaPAw==",
   "submitted_at": "2026-09-01T14:05:00Z",
   "approvers": [
     {
-      "agent": "1F916:agent-verity",
+      "agent": "1F916:1YkPGBYBTaxrgCOqDH7ggRqKWI5u0gEqthkF6g6ESA8",
       "operator": "op_northgate",
       "decision": "approve",
       "reason": null,
@@ -43,7 +43,7 @@
       "signed_at": "2026-09-01T15:10:00Z"
     },
     {
-      "agent": "1F916:agent-ledger",
+      "agent": "1F916:YU48oEx67bz0A243taKFYCL4BAFZUFXrQCOugEU2iD8",
       "operator": "op_cindermill",
       "decision": "approve",
       "reason": null,
@@ -61,7 +61,7 @@
       "signed_at": "2026-09-01T16:22:00Z"
     },
     {
-      "agent": "1F916:agent-oracle",
+      "agent": "1F916:Sc85BTiYvGPBjoJsS07yVg--SNDHTTgIeau4cXw9Gg0",
       "operator": "op_dryfield",
       "decision": "approve",
       "reason": "Snapshot matches deprecations page; endpoint returns model_deprecated in 10/10 runs.",
@@ -88,8 +88,8 @@
     "inclusion_proof": "leaf:48213;root:sha256:da04fa17ceb1c5eff236b25666d6edd6b32c2fbfd4d84389ac3ad7e944d77193...;path:[...]",
     "position": 48213,
     "witnesses": [
-      "1F916:witness-aspen",
-      "1F916:witness-birch"
+      "1F916:7FdF5ODxMMJwikDfW2KArzLWBhwIe3Eqnk4nwibtknI",
+      "1F916:OPZ-DWUFvfZ92ME9G33d6i6sKShCu_s553KHc6Hk20Q"
     ],
     "sealed_at": "2026-09-01T18:45:00Z"
   },
