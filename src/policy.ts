@@ -14,6 +14,18 @@
  */
 export const TRUSTED_POOL_SWITCH = 10;
 
+/** Lifecycle of an entry. Until the pool holds ten operators, two approvals verify. */
+export const APPROVALS_TO_VERIFY_SMALL_POOL = 2;
+
+/** Lifecycle of an entry. Once the pool holds ten operators, three approvals verify. */
+export const APPROVALS_TO_VERIFY_LARGE_POOL = 3;
+
+/** Lifecycle of an entry. Two rejections mark the entry rejected, at either pool size. */
+export const REJECTIONS_TO_REJECT = 2;
+
+/** Lifecycle of an entry. Verification needs three verified operators outside the submitter's own. */
+export const VERIFICATION_MIN_OUTSIDE_OPERATORS = 3;
+
 /**
  * Lifecycle of an entry. An assigned validator has seventy-two hours to
  * respond; a miss costs standing and the next beacon round draws a replacement.
@@ -155,6 +167,10 @@ export const NONCE_RETENTION_SECONDS = 600;
 /** Every policy number, collected and frozen. */
 export const POLICY = Object.freeze({
   TRUSTED_POOL_SWITCH,
+  APPROVALS_TO_VERIFY_SMALL_POOL,
+  APPROVALS_TO_VERIFY_LARGE_POOL,
+  REJECTIONS_TO_REJECT,
+  VERIFICATION_MIN_OUTSIDE_OPERATORS,
   ASSIGNMENT_WINDOW_HOURS,
   REPRODUCTION_RUNS,
   REPRODUCTION_HOLDS,
