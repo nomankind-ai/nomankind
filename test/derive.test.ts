@@ -179,7 +179,7 @@ describe("the derived entry", () => {
       signature: SIGNATURE,
     });
 
-    const { entry, derived } = deriveEntry(log.events, ENTRY_ID, {
+    const { entry, derived, sidecar } = deriveEntry(log.events, ENTRY_ID, {
       now: "2026-09-10T00:00:00Z",
     });
 
@@ -188,6 +188,11 @@ describe("the derived entry", () => {
     expect(result.ok).toBe(true);
 
     expect(derived.status).toBe("verified");
+    // The tier lives beside the entry, never on it: the schema has no field
+    // for it, and the example's approvals carry the measurement it takes.
+    expect(sidecar.effective_tier).toBe("observed");
+    expect(sidecar.test_verdict).toBe("accepted");
+    expect(Object.keys(entry)).not.toContain("effective_tier");
     expect(entry["confidence"]).toBeNull();
     expect(entry["seal"]).toBeNull();
     expect(entry["disputes"]).toEqual([]);
@@ -326,6 +331,27 @@ describe("supersession and disputes", () => {
     expect(deriveEntry(log.events, SECOND, clock).derived.status).toBe(
       "verified",
     );
+  });
+
+  it("keeps the tier it verified at once superseded or overturned", () => {
+    const log = supersessionLog();
+    verifyIt(log, SECOND, "2026-09-03T01:00:00Z", "2026-09-03T02:00:00Z");
+    const superseded = deriveEntry(log.events, FIRST, clock);
+    expect(superseded.derived.status).toBe("superseded");
+    expect(superseded.sidecar.effective_tier).toBe("observed");
+    expect(superseded.sidecar.test_verdict).toBe("accepted");
+
+    log.add("dispute_upheld", FIRST, { correction_entry_id: CORRECTION });
+    const overturned = deriveEntry(log.events, FIRST, clock);
+    expect(overturned.derived.status).toBe("overturned");
+    expect(overturned.sidecar.effective_tier).toBe("observed");
+    expect(overturned.sidecar.test_verdict).toBe("accepted");
+  });
+
+  it("carries no tier on an entry that never verified", () => {
+    const sidecar = deriveEntry(supersessionLog().events, SECOND, clock).sidecar;
+    expect(sidecar.effective_tier).toBeNull();
+    expect(sidecar.test_verdict).toBeNull();
   });
 
   it("overturns the entry on an upheld dispute", () => {

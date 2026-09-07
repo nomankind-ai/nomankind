@@ -362,6 +362,13 @@ describe("the consensus table", () => {
     expect(derived.sidecar.trusted_count_at_decision).toBe(
       testCase.trustedCountAtDecision,
     );
+    // Every fixture record here accepts the test and carries a passing
+    // measurement, so the evidence gate never stands in the count's way: an
+    // entry that verifies verifies as observed, and one that does not carries
+    // no tier at all.
+    const verified = testCase.status === "verified";
+    expect(derived.sidecar.effective_tier).toBe(verified ? "observed" : null);
+    expect(derived.sidecar.test_verdict).toBe(verified ? "accepted" : null);
     // Every record stays on the entry, counted or not.
     expect((derived.entry["approvers"] as unknown[]).length).toBe(
       testCase.records.length,
