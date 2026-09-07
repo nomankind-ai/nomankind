@@ -139,9 +139,11 @@ export const SEED_FEE_CAP_CENTS = 10000;
 
 /**
  * Hash versioning. The normalization rule version in force at submission; every
- * hash on an entry is computed under it.
+ * hash on an entry is computed under it. norm-v1.2 is in force for entries
+ * submitted on or after 2026-09-08; entries submitted before that keep the
+ * version they were signed under.
  */
-export const NORM_VERSION = "norm-v1.1";
+export const NORM_VERSION = "norm-v1.2";
 
 /**
  * Request authentication (decision D-014). A signed write request carries a

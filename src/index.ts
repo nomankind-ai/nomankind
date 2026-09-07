@@ -1,14 +1,17 @@
 // Placeholder module: product code starts in later milestones.
 export const NAME = "nomankind";
 
+export * from "./artifact.js";
 export * from "./assign.js";
 export * from "./core.js";
 export * from "./derive.js";
 export * from "./encoding.js";
 export * from "./events.js";
 export * from "./evidence.js";
+export * from "./extract.js";
 export * from "./hash.js";
 export * from "./identity.js";
+export * from "./normalize.js";
 export * from "./policy.js";
 export * from "./reconfirm.js";
 export * from "./request.js";

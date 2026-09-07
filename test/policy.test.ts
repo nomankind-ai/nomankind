@@ -136,12 +136,14 @@ describe("policy numbers", () => {
     expect(Object.keys(POLICY)).not.toContain("SEED_FEE_CAP");
   });
 
-  it("uses the norm version the example entry carries", () => {
-    expect(NORM_VERSION).toBe("norm-v1.1");
-    expect(NORM_VERSION).toBe(example.norm_version);
-    expect(NORM_VERSION).toMatch(
-      new RegExp(schema.properties.norm_version.pattern),
-    );
+  it("holds the norm version in force, which the example predates", () => {
+    expect(NORM_VERSION).toBe("norm-v1.2");
+    // The example entry was submitted under norm-v1.1 and its signed core
+    // cannot change, so a new norm version leaves it where it is.
+    expect(example.norm_version).toBe("norm-v1.1");
+    const pattern = new RegExp(schema.properties.norm_version.pattern);
+    expect(NORM_VERSION).toMatch(pattern);
+    expect(example.norm_version).toMatch(pattern);
   });
 
   it("holds the request authentication windows", () => {

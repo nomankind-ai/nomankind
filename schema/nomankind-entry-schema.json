@@ -83,7 +83,7 @@
     },
     "evidence": {
       "type": ["object", "null"],
-      "description": "Reproducible transcript artifact frozen at submission. Required for 'behavior' and 'misbehavior'; null otherwise. Verification basis is either provider_statement here, or an independent reproduction attached to at least one approver record (application-enforced). The artifact hashed into snapshot_hash is exactly the object {model, prompt, parameters, output, predicate, observed_at} per norm-v1.1.",
+      "description": "Reproducible transcript artifact frozen at submission. Required for 'behavior' and 'misbehavior'; null otherwise. Verification basis is either provider_statement here, or an independent reproduction attached to at least one approver record (application-enforced). The artifact hashed into snapshot_hash is exactly the object {model, prompt, parameters, output, predicate, observed_at} per the norm rule named in norm_version.",
       "additionalProperties": false,
       "required": ["model", "prompt", "parameters", "output", "predicate", "observed_at", "provider_statement"],
       "properties": {

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Guide: retries</title></head>
+<body>
+  <main>
+    <header class="page-head"><p>Guides &rsaquo; Retries</p></header>
+    <h1>Retries</h1>
+    <p>Retry on 429 and on 5xx, with full jitter.</p>
+    <aside class="callout">
+      <header><h3>Note</h3></header>
+      <p>Do not retry a 400; the request is malformed.</p>
+      <aside class="nested"><p>Inner aside text that must not survive.</p></aside>
+      <p>Still inside the outer aside.</p>
+    </aside>
+    <h2>Backoff</h2>
+    <p>Start at 500 ms and double, capped at 30 seconds.</p>
+    <footer class="page-foot"><p>Edited by the docs team.</p></footer>
+  </main>
+</body>
+</html>
