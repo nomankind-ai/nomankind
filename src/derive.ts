@@ -13,6 +13,11 @@
 
 import { CORE_KEYS, type Core } from "./core.js";
 import {
+  evidenceGate,
+  type EvidenceTier,
+  type TestVerdict,
+} from "./evidence.js";
+import {
   APPROVALS_TO_VERIFY_LARGE_POOL,
   APPROVALS_TO_VERIFY_SMALL_POOL,
   REJECTIONS_TO_REJECT,
@@ -70,8 +75,21 @@ export interface Sidecar {
    * this only says one is owed.
    */
   readonly needs_replacement: boolean;
-  /** The derived effective tier. M5's; always null here. */
-  readonly effective_tier: null;
+  /**
+   * Two tiers of evidence: the tier the entry actually verified at, which is
+   * not always the tier its core claims. An observed entry whose test a
+   * majority rejected verifies as a document, and its effective tier falls to
+   * stated. Null while the entry is draft or rejected; once it has verified the
+   * value is the one the gate gave at that decision's position and it stays
+   * there, superseded and overturned included.
+   */
+  readonly effective_tier: EvidenceTier | null;
+  /**
+   * What the validators decided about the proposed test itself, at the
+   * verifying decision's position. Null for a stated entry, which has no test
+   * to judge, and null while the entry is draft or rejected.
+   */
+  readonly test_verdict: TestVerdict | null;
   /** Size of the trusted pool at the promoting decision's position. */
   readonly trusted_count_at_decision: number | null;
 }
@@ -168,6 +186,8 @@ interface Consensus {
   readonly status: "draft" | "rejected" | "verified";
   readonly verifiedAt: string | null;
   readonly trustedCountAtDecision: number | null;
+  readonly effectiveTier: EvidenceTier | null;
+  readonly testVerdict: TestVerdict | null;
   readonly needsReplacement: boolean;
   readonly approvers: readonly ApproverRecord[];
 }
@@ -189,27 +209,44 @@ interface Consensus {
  * decision being folded, never at the end of the log (retrospective M8), so a
  * decision taken under one pool keeps its verdict when the pool later moves,
  * and a later decision is judged afresh at its own position.
+ *
+ * The count is not the only condition. Two tiers of evidence: an entry also has
+ * to have the evidence its tier asks for, which is src/evidence.ts's rule and
+ * is asked there, never restated here. The gate is consulted at exactly the
+ * moment the count would promote, over exactly the decisions counted so far, so
+ * an entry the gate turns away does not verify and is asked again at the next
+ * counted decision. It stays draft only while the rejections are short of the
+ * threshold: the rejection rule is unconditional, and a gate refusal never
+ * shields an entry from it.
  */
 function consensusFor(
   events: readonly Event[],
   entryId: string,
   authorOperator: string | null,
+  core: Core,
 ): Consensus {
   const approvers: ApproverRecord[] = [];
   const approvingOperators = new Set<string>();
   const rejectingOperators = new Set<string>();
+  // The counted decisions themselves, one per distinct eligible operator and in
+  // seq order: the same records the counts above are built from, kept so the
+  // evidence gate reads exactly what consensus counted.
+  const countedRecords: ApproverRecord[] = [];
+  const countedOperators = new Set<string>();
   let hasRandomApproval = false;
   let status: "draft" | "rejected" | "verified" = "draft";
   let verifiedAt: string | null = null;
   let trustedCountAtDecision: number | null = null;
+  let effectiveTier: EvidenceTier | null = null;
+  let testVerdictAtDecision: TestVerdict | null = null;
   let needsReplacement = false;
 
   for (const event of inSeqOrder(events)) {
     if (!isType(event, "validation")) continue;
     if (event.entry_id !== entryId) continue;
 
-    const record = event.payload.record;
-    approvers.push(stripSignature(record));
+    const record = stripSignature(event.payload.record);
+    approvers.push(record);
 
     // Once verified or rejected the verdict stands: later decisions still land
     // in approvers[], but change nothing.
@@ -229,6 +266,13 @@ function consensusFor(
     // other rule here.
     if (!mayValidate(events, position, authorOperator, decision.operator)) {
       continue;
+    }
+
+    // The first record from an operator is the one that counts, here as in the
+    // distinct-operator sets below.
+    if (!countedOperators.has(decision.operator)) {
+      countedOperators.add(decision.operator);
+      countedRecords.push(record);
     }
 
     if (decision.decision === "approve") {
@@ -253,10 +297,24 @@ function consensusFor(
       // approvals. The paper says exactly one; "at least one" is what the
       // replacement-draw path can satisfy (retrospective GAPS M9).
       const randomSatisfied = largePool ? hasRandomApproval : true;
-      if (approvals >= approvalsToVerify && randomSatisfied) {
+      // Two tiers of evidence: the count says the validators agree, the gate
+      // says whether what they brought is enough, and at which tier. The gate is
+      // asked only where the count would promote, over exactly the decisions
+      // counted so far.
+      const countMet = approvals >= approvalsToVerify && randomSatisfied;
+      const gate = countMet ? evidenceGate(core, countedRecords) : null;
+      // A gate refusal is never itself a rejection: it only means the approvals
+      // do not promote at this position, so this decision is judged as any
+      // unpromoted one is. Lifecycle of an entry: two rejections mark the entry
+      // rejected, unconditionally — an entry the gate keeps turning away is
+      // still rejected once the rejections arrive, and is otherwise asked again
+      // at the next counted decision.
+      if (countMet && gate !== null && gate.verifiable) {
         status = "verified";
         verifiedAt = decision.signed_at;
         trustedCountAtDecision = trustedCount;
+        effectiveTier = gate.effective_tier;
+        testVerdictAtDecision = gate.test_verdict;
       } else if (rejections >= REJECTIONS_TO_REJECT) {
         status = "rejected";
         trustedCountAtDecision = trustedCount;
@@ -279,6 +337,8 @@ function consensusFor(
     status,
     verifiedAt,
     trustedCountAtDecision,
+    effectiveTier,
+    testVerdict: testVerdictAtDecision,
     needsReplacement,
     approvers,
   };
@@ -445,6 +505,7 @@ function supersededBy(events: readonly Event[], entryId: string): string | null 
       events,
       candidateId,
       (core["author_operator"] as string | null) ?? null,
+      core,
     );
     if (candidate.status === "verified") return candidateId;
   }
@@ -493,7 +554,7 @@ export function deriveEntry(
   const core = submission.core;
   const authorOperator = (core["author_operator"] as string | null) ?? null;
 
-  const consensus = consensusFor(events, entryId, authorOperator);
+  const consensus = consensusFor(events, entryId, authorOperator, core);
   const freshness = freshnessOf(events, entryId, core, clock);
   const overturned = overturnedBy(events, entryId);
   const superseded =
@@ -519,7 +580,8 @@ export function deriveEntry(
 
   const sidecar: Sidecar = {
     needs_replacement: consensus.needsReplacement,
-    effective_tier: null,
+    effective_tier: consensus.effectiveTier,
+    test_verdict: consensus.testVerdict,
     trusted_count_at_decision: consensus.trustedCountAtDecision,
   };
 

@@ -6,6 +6,7 @@ export * from "./core.js";
 export * from "./derive.js";
 export * from "./encoding.js";
 export * from "./events.js";
+export * from "./evidence.js";
 export * from "./hash.js";
 export * from "./identity.js";
 export * from "./policy.js";
