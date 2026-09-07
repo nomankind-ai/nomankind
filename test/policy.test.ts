@@ -8,8 +8,10 @@ import {
   CONTRIBUTOR_SHARE_PERCENT,
   FAILURE_REPORT_THRESHOLD,
   HOLDBACK_DAYS,
+  NONCE_RETENTION_SECONDS,
   NORM_VERSION,
   POLICY,
+  REQUEST_CLOCK_SKEW_SECONDS,
   READ_SHARE_SPLIT,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
@@ -53,6 +55,8 @@ const EXPECTED_POLICY_KEYS = [
   "SEED_FEE_RATE",
   "SEED_FEE_CAP",
   "NORM_VERSION",
+  "REQUEST_CLOCK_SKEW_SECONDS",
+  "NONCE_RETENTION_SECONDS",
 ];
 
 describe("policy numbers", () => {
@@ -109,6 +113,12 @@ describe("policy numbers", () => {
     );
   });
 
+  it("holds the request authentication windows", () => {
+    expect(REQUEST_CLOCK_SKEW_SECONDS).toBe(300);
+    expect(NONCE_RETENTION_SECONDS).toBe(600);
+    expect(NONCE_RETENTION_SECONDS).toBe(2 * REQUEST_CLOCK_SKEW_SECONDS);
+  });
+
   it("collects every constant in a frozen POLICY object", () => {
     expect(Object.isFrozen(POLICY)).toBe(true);
     expect(Object.keys(POLICY).sort()).toEqual([...EXPECTED_POLICY_KEYS].sort());
@@ -144,5 +154,7 @@ describe("policy numbers", () => {
     expect(POLICY.SEED_FEE_RATE).toBe(SEED_FEE_RATE);
     expect(POLICY.SEED_FEE_CAP).toBe(SEED_FEE_CAP);
     expect(POLICY.NORM_VERSION).toBe(NORM_VERSION);
+    expect(POLICY.REQUEST_CLOCK_SKEW_SECONDS).toBe(REQUEST_CLOCK_SKEW_SECONDS);
+    expect(POLICY.NONCE_RETENTION_SECONDS).toBe(NONCE_RETENTION_SECONDS);
   });
 });
