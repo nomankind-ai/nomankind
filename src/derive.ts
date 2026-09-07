@@ -21,12 +21,14 @@ import {
   APPROVALS_TO_VERIFY_LARGE_POOL,
   APPROVALS_TO_VERIFY_SMALL_POOL,
   REJECTIONS_TO_REJECT,
+  SLOT_COUNT,
   STALENESS_WINDOW_DAYS,
   TRUSTED_POOL_SWITCH,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
   type Category,
 } from "./policy.js";
 import type { Entry } from "./schema.js";
+import { checkSupersedes } from "./supersede.js";
 import type {
   ApproverRecord,
   Event,
@@ -65,6 +67,19 @@ export interface DerivedFields {
 }
 
 /**
+ * One of the entry's read-share slots: who holds it, and the position of the
+ * event that seated them. Incentives / Money: the read share is split among the
+ * submitter and three current slot holders, so a slot is a claim on future
+ * revenue and the seq is what makes "the oldest slot" a fact of the log rather
+ * than a matter of opinion.
+ */
+export interface ReadShareSlot {
+  readonly operator: string;
+  /** seq of the event that seated the holder. */
+  readonly seq: number;
+}
+
+/**
  * State the application keeps beside the entry, never in the signed record and
  * never in the schema.
  */
@@ -92,6 +107,18 @@ export interface Sidecar {
   readonly test_verdict: TestVerdict | null;
   /** Size of the trusted pool at the promoting decision's position. */
   readonly trusted_count_at_decision: number | null;
+  /**
+   * Incentives / Money: "Reconfirming a stale entry ... rotates the reconfirmer
+   * into one of the three validator read-share slots ... replacing the holder
+   * of the oldest slot rather than adding to the pool. A reconfirmation by an
+   * operator already holding a slot refreshes the entry but rotates nothing."
+   *
+   * Null until the entry verifies: there is no read share to split before
+   * then. The slots are seeded by the approvals that promoted it and then
+   * rotated by every later reconfirmation, and once seeded they are never reset
+   * to null, superseded and overturned included — the entry still earns.
+   */
+  readonly read_share_slots: readonly ReadShareSlot[] | null;
 }
 
 /** An entry, its derived fields, and the sidecar the schema cannot hold. */
@@ -190,6 +217,10 @@ interface Consensus {
   readonly testVerdict: TestVerdict | null;
   readonly needsReplacement: boolean;
   readonly approvers: readonly ApproverRecord[];
+  /** seq of the decision that promoted the entry; null unless it verified. */
+  readonly promotingSeq: number | null;
+  /** The slots the promoting approvals seated; null unless it verified. */
+  readonly seededSlots: readonly ReadShareSlot[] | null;
 }
 
 /**
@@ -232,6 +263,9 @@ function consensusFor(
   // seq order: the same records the counts above are built from, kept so the
   // evidence gate reads exactly what consensus counted.
   const countedRecords: ApproverRecord[] = [];
+  // The seq each counted record arrived at, parallel to countedRecords: a
+  // read-share slot is identified by the position that seated it.
+  const countedSeqs: number[] = [];
   const countedOperators = new Set<string>();
   let hasRandomApproval = false;
   let status: "draft" | "rejected" | "verified" = "draft";
@@ -240,6 +274,8 @@ function consensusFor(
   let effectiveTier: EvidenceTier | null = null;
   let testVerdictAtDecision: TestVerdict | null = null;
   let needsReplacement = false;
+  let promotingSeq: number | null = null;
+  let seededSlots: readonly ReadShareSlot[] | null = null;
 
   for (const event of inSeqOrder(events)) {
     if (!isType(event, "validation")) continue;
@@ -273,6 +309,7 @@ function consensusFor(
     if (!countedOperators.has(decision.operator)) {
       countedOperators.add(decision.operator);
       countedRecords.push(record);
+      countedSeqs.push(position);
     }
 
     if (decision.decision === "approve") {
@@ -315,6 +352,8 @@ function consensusFor(
         trustedCountAtDecision = trustedCount;
         effectiveTier = gate.effective_tier;
         testVerdictAtDecision = gate.test_verdict;
+        promotingSeq = position;
+        seededSlots = seatsFrom(countedRecords, countedSeqs);
       } else if (rejections >= REJECTIONS_TO_REJECT) {
         status = "rejected";
         trustedCountAtDecision = trustedCount;
@@ -341,7 +380,80 @@ function consensusFor(
     testVerdict: testVerdictAtDecision,
     needsReplacement,
     approvers,
+    promotingSeq,
+    seededSlots,
   };
+}
+
+/**
+ * The slots the promoting approvals seat.
+ *
+ * Incentives / Money: the read share goes to "the submitter and the three
+ * validators", so the seats are the approvals consensus counted — approve
+ * decisions only, one per eligible operator, the same set the evidence gate
+ * read — each at the position of its own validation event, earliest first.
+ * Never more than SLOT_COUNT: the split is over exactly that many slots, and a
+ * rejection buys no share of an entry it argued against.
+ */
+function seatsFrom(
+  countedRecords: readonly ApproverRecord[],
+  countedSeqs: readonly number[],
+): readonly ReadShareSlot[] {
+  const seats: ReadShareSlot[] = [];
+  for (let index = 0; index < countedRecords.length; index += 1) {
+    const decision = countedRecords[index] as unknown as DecisionFields;
+    if (decision.decision !== "approve") continue;
+    seats.push({ operator: decision.operator, seq: countedSeqs[index]! });
+  }
+  seats.sort((left, right) => left.seq - right.seq);
+  return seats.slice(0, SLOT_COUNT);
+}
+
+/**
+ * Fold the reconfirmations after the promoting decision into the read-share
+ * slots.
+ *
+ * Incentives / Money: "Reconfirming a stale entry ... rotates the reconfirmer
+ * into one of the three validator read-share slots ... replacing the holder of
+ * the oldest slot rather than adding to the pool. A reconfirmation by an
+ * operator already holding a slot refreshes the entry but rotates nothing."
+ *
+ * So: a holder rotates nothing; an outsider takes an empty slot while the entry
+ * holds fewer than SLOT_COUNT (a small pool verifies on two approvals and seats
+ * two, and filling the third adds to the pool only until it is full); otherwise
+ * the outsider replaces the oldest holder. The slots keep folding whatever the
+ * entry's later status: refusing a reconfirmation on a non-verified entry is the
+ * door's job (M6's reconfirmation check), and derivation trusts the sealed log
+ * here exactly as it does for validations.
+ */
+function readShareSlotsFor(
+  events: readonly Event[],
+  entryId: string,
+  consensus: Consensus,
+): readonly ReadShareSlot[] | null {
+  if (consensus.promotingSeq === null || consensus.seededSlots === null) {
+    return null;
+  }
+  const slots: ReadShareSlot[] = [...consensus.seededSlots];
+  for (const event of inSeqOrder(events)) {
+    if (!isType(event, "reconfirmation")) continue;
+    if (event.entry_id !== entryId) continue;
+    // Approvals arriving after verification take no slot, and neither does a
+    // reconfirmation sealed at or before the decision that seated the slots.
+    if (event.seq <= consensus.promotingSeq) continue;
+
+    const { operator } = event.payload.record;
+    if (slots.some((slot) => slot.operator === operator)) continue;
+
+    if (slots.length < SLOT_COUNT) {
+      slots.push({ operator, seq: event.seq });
+    } else {
+      // Sorted ascending, so the oldest slot is the first one.
+      slots.splice(0, 1, { operator, seq: event.seq });
+    }
+    slots.sort((left, right) => left.seq - right.seq);
+  }
+  return slots;
 }
 
 /**
@@ -493,14 +605,26 @@ function freshnessOf(
  * pointer is derived from it". The approvals are the check, so a superseding
  * entry that never verified changes nothing. Earliest such entry by position
  * wins.
+ *
+ * And: "A superseding entry must share its target's subject and category".
+ * That rule lives in src/supersede.ts and is asked there, never restated here:
+ * a candidate the link check refuses is not a superseder at all, however its own
+ * validators voted. The lookup answers for this entry alone, because this entry
+ * is the only target in question.
  */
-function supersededBy(events: readonly Event[], entryId: string): string | null {
+function supersededBy(
+  events: readonly Event[],
+  entryId: string,
+  target: Core,
+): string | null {
+  const lookup = (id: string): Core | null => (id === entryId ? target : null);
   for (const event of inSeqOrder(events)) {
     if (!isType(event, "entry_submitted")) continue;
     const core = event.payload.core;
     if (core["supersedes"] !== entryId) continue;
     const candidateId = core["id"] as string;
     if (candidateId === entryId) continue;
+    if (!checkSupersedes(core, lookup).ok) continue;
     const candidate = consensusFor(
       events,
       candidateId,
@@ -558,7 +682,9 @@ export function deriveEntry(
   const freshness = freshnessOf(events, entryId, core, clock);
   const overturned = overturnedBy(events, entryId);
   const superseded =
-    consensus.status === "verified" ? supersededBy(events, entryId) : null;
+    consensus.status === "verified"
+      ? supersededBy(events, entryId, core)
+      : null;
 
   let status: EntryStatus = consensus.status;
   if (superseded !== null) status = "superseded";
@@ -583,6 +709,7 @@ export function deriveEntry(
     effective_tier: consensus.effectiveTier,
     test_verdict: consensus.testVerdict,
     trusted_count_at_decision: consensus.trustedCountAtDecision,
+    read_share_slots: readShareSlotsFor(events, entryId, consensus),
   };
 
   const entry: Record<string, unknown> = {};
