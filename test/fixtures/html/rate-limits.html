@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Rate limits</title></head>
+<body>
+  <main>
+    <h1>Rate limits</h1>
+    <p>Limits are applied per organization &amp; per model. A request over the
+      limit returns <code>429</code> with a <code>Retry-After</code> header.</p>
+    <table>
+      <caption>Requests per minute</caption>
+      <thead>
+        <tr><th>Tier</th><th>Requests&nbsp;/&nbsp;min</th><th>Tokens&nbsp;/&nbsp;min</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Free</td><td>5</td><td>20,000</td></tr>
+        <tr><td>Build</td><td>50</td><td>400,000</td></tr>
+        <tr><td>Scale</td><td>1,000</td><td>10,000,000</td></tr>
+      </tbody>
+    </table>
+    <p>Headroom is measured over a sliding 60&nbsp;second window &mdash; bursts
+      above the ceiling are rejected rather than queued.</p>
+    <p>Escalation: write to support&#64;example.com with your org id.</p>
+  </main>
+</body>
+</html>
