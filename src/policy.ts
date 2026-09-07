@@ -107,6 +107,27 @@ export const SEED_FEE_CAP: number | null = null;
  */
 export const NORM_VERSION = "norm-v1.1";
 
+/**
+ * Request authentication (decision D-014). A signed write request carries a
+ * timestamp; a request whose timestamp is more than this far from the
+ * verifier's clock, in either direction, is rejected.
+ *
+ * Not a whitepaper number. The paper fixes the signing scheme, not the
+ * operational window; this is the orchestrator's choice, recorded in the Notion
+ * Decisions database.
+ */
+export const REQUEST_CLOCK_SKEW_SECONDS = 300;
+
+/**
+ * Request authentication (decision D-014). A verifier remembers a spent nonce
+ * at least this long. Twice the skew window, so no request that the clock-skew
+ * rule still accepts can be replayed after its nonce has been forgotten.
+ *
+ * Not a whitepaper number. The orchestrator's operational choice, recorded in
+ * the Notion Decisions database.
+ */
+export const NONCE_RETENTION_SECONDS = 600;
+
 /** Every policy number, collected and frozen. */
 export const POLICY = Object.freeze({
   TRUSTED_POOL_SWITCH,
@@ -123,4 +144,6 @@ export const POLICY = Object.freeze({
   SEED_FEE_RATE,
   SEED_FEE_CAP,
   NORM_VERSION,
+  REQUEST_CLOCK_SKEW_SECONDS,
+  NONCE_RETENTION_SECONDS,
 });
