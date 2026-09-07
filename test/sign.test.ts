@@ -139,8 +139,10 @@ describe("signCore and verifyEntrySignature", () => {
     await expect(verifyEntrySignature([])).resolves.toBe(false);
     await expect(verifyEntrySignature({})).resolves.toBe(false);
 
-    // The fixture's placeholder author carries no key at all.
-    await expect(verifyEntrySignature(exampleEntry())).resolves.toBe(false);
+    // An author handle that carries no key at all (the pre-D-027 placeholder).
+    const keylessAuthor = exampleEntry();
+    keylessAuthor["author"] = "1F916:agent-atlas";
+    await expect(verifyEntrySignature(keylessAuthor)).resolves.toBe(false);
 
     // A signature that is not base64.
     const noSignature = await signedEntry();

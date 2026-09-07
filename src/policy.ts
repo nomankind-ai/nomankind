@@ -1,8 +1,10 @@
 /**
  * Every policy number in the whitepaper lives here and nowhere else.
  * Each constant names the whitepaper section it comes from.
- * Numbers marked [NEEDS DATA] in the paper are still numbers here; the paper's
- * unpublished amounts are exported as explicit null placeholders, never guessed.
+ * A few numbers are not in the paper at all: the paper names the rule and
+ * leaves the amount to published policy. Those are the maintainer's own
+ * choices, each said to be so in its comment and each carrying the decision
+ * that set it, and they move only by a later decision.
  */
 
 /**
@@ -86,20 +88,42 @@ export const CONTRIBUTOR_SHARE_PERCENT = 30;
 export const SEAL_INTERVAL_MINUTES = 5;
 
 /**
- * The log (failure reports). The paper says a published threshold of reports
- * from distinct verified operators auto-opens a revalidation, with no number
- * given. Placeholder, not yet published.
+ * The log (failure reports). Reports from this many distinct verified
+ * operators auto-open a revalidation. The paper says the threshold is
+ * published policy but states no number, so three is the maintainer's own
+ * choice: low enough that a real regression reopens quickly, and it rises by
+ * decision if floods appear.
+ *
+ * Not a whitepaper number. The maintainer's published policy (decision D-032,
+ * 2026-09-07), recorded in the Notion Decisions database; it moves only by a
+ * later decision.
  */
-export const FAILURE_REPORT_THRESHOLD: number | null = null;
+export const FAILURE_REPORT_THRESHOLD = 3;
 
 /**
- * Incentives / Money. The maintainer pays a flat seed fee per completed
- * validation at a published rate and under a published cap, neither of which
- * the paper states. Placeholder, not yet published.
+ * Incentives / Money. The maintainer's flat seed fee per accepted validation,
+ * in whole cents: paid once per entry per operator, for an approve or a
+ * reject alike, so the fee buys the work of validating rather than the
+ * verdict.
+ *
+ * Not a whitepaper number. The paper says the maintainer seeds fees at a
+ * published rate under a published cap but states neither. This is the
+ * maintainer's published policy (decision D-032, 2026-09-07), recorded in the
+ * Notion Decisions database; it moves only by a later decision.
+ *
+ * Integer cents, never a float: money is counted, not approximated.
  */
-export const SEED_FEE_RATE: number | null = null;
-/** Placeholder, not yet published. See SEED_FEE_RATE. */
-export const SEED_FEE_CAP: number | null = null;
+export const SEED_FEE_RATE_CENTS = 100;
+
+/**
+ * Incentives / Money. The ceiling on seed fees one operator can accrue in a
+ * calendar month, in whole cents. Caps the maintainer's exposure and blunts
+ * the incentive to farm validations.
+ *
+ * Not a whitepaper number. The maintainer's published policy (decision D-032,
+ * 2026-09-07). See SEED_FEE_RATE_CENTS.
+ */
+export const SEED_FEE_CAP_CENTS = 10000;
 
 /**
  * Hash versioning. The normalization rule version in force at submission; every
@@ -141,8 +165,8 @@ export const POLICY = Object.freeze({
   CONTRIBUTOR_SHARE_PERCENT,
   SEAL_INTERVAL_MINUTES,
   FAILURE_REPORT_THRESHOLD,
-  SEED_FEE_RATE,
-  SEED_FEE_CAP,
+  SEED_FEE_RATE_CENTS,
+  SEED_FEE_CAP_CENTS,
   NORM_VERSION,
   REQUEST_CLOCK_SKEW_SECONDS,
   NONCE_RETENTION_SECONDS,
