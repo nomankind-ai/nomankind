@@ -28,6 +28,7 @@ import {
   type Category,
 } from "./policy.js";
 import type { Entry } from "./schema.js";
+import type { EntrySeal } from "./seal.js";
 import { checkSupersedes } from "./supersede.js";
 import type {
   ApproverRecord,
@@ -670,6 +671,7 @@ export function deriveEntry(
   events: readonly Event[],
   entryId: string,
   clock: Clock,
+  entrySeals: ReadonlyMap<string, EntrySeal> = new Map(),
 ): DerivedEntry {
   const submission = submissionOf(events, entryId);
   if (submission === null) {
@@ -719,7 +721,7 @@ export function deriveEntry(
   entry["reconfirmations"] = freshness.reconfirmations;
   entry["disputes"] = [];
   entry["failure_reports"] = [];
-  entry["seal"] = null;
+  entry["seal"] = entrySeals.get(entryId) ?? null;
   entry["staleness_window_days"] = derived.staleness_window_days;
   entry["verified_at"] = derived.verified_at;
   entry["last_confirmed"] = derived.last_confirmed;
@@ -737,10 +739,11 @@ export function deriveEntry(
 export function deriveAll(
   events: readonly Event[],
   clock: Clock,
+  entrySeals: ReadonlyMap<string, EntrySeal> = new Map(),
 ): Map<string, DerivedEntry> {
   const derived = new Map<string, DerivedEntry>();
   for (const entryId of submittedEntryIds(events)) {
-    derived.set(entryId, deriveEntry(events, entryId, clock));
+    derived.set(entryId, deriveEntry(events, entryId, clock, entrySeals));
   }
   return derived;
 }
