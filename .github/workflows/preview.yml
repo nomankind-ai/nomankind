@@ -1,0 +1,125 @@
+name: Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: preview-${{ github.event.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    # Pull requests from forks get no secrets, so there is nothing to upload.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Check preview prerequisites
+        id: probe
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+          no_subdomain="the account has no workers.dev subdomain; register one in the Cloudflare dashboard"
+          missing=""
+          # Three outcomes, never two: a present subdomain, a genuinely absent
+          # one, and an API error. Only the middle one is allowed to pass green.
+          code=$(curl -sS -o subdomain.json -w '%{http_code}' -H "$auth" "$api/workers/subdomain" || true)
+          code=${code:-000}
+          if [ "$code" = "200" ] && jq -e '.success == true' subdomain.json >/dev/null; then
+            if ! jq -e '(.result.subdomain // "") != ""' subdomain.json >/dev/null; then
+              missing="$no_subdomain"
+            fi
+          elif [ "$code" = "404" ] && jq -e '
+                 ([.errors[]?.code] | index(10007)) != null
+                 or ([.errors[]?.message // ""] | join(" ") | ascii_downcase
+                     | contains("subdomain not found"))
+               ' subdomain.json >/dev/null 2>&1; then
+            missing="$no_subdomain"
+          else
+            echo "unexpected response $code from the workers.dev subdomain API"
+            jq -r '.errors[]? | "  error \(.code): \(.message)"' subdomain.json 2>/dev/null || cat subdomain.json
+            echo
+            exit 1
+          fi
+          if [ -z "$missing" ]; then
+            code=$(curl -sS -o service.json -w '%{http_code}' -H "$auth" "$api/workers/services/nomankind-demo" || true)
+            code=${code:-000}
+            if [ "$code" = "404" ]; then
+              missing="the demo Worker has not been deployed yet; previews start after the first merge to main"
+            elif [ "$code" != "200" ]; then
+              echo "unexpected response $code from the Workers service API"
+              jq -r '.errors[]? | "  error \(.code): \(.message)"' service.json 2>/dev/null || cat service.json
+              echo
+              exit 1
+            fi
+          fi
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Upload preview version
+        id: upload
+        if: steps.probe.outputs.missing == ''
+        run: |
+          set -euo pipefail
+          npx wrangler versions upload --env demo --preview-alias "pr-$PR_NUMBER" --message "PR #$PR_NUMBER $HEAD_SHA" 2>&1 | tee upload.log
+          preview_url=$(grep 'Version Preview URL:' upload.log | grep -o 'https://[^[:space:]]*' | head -n 1 || true)
+          alias_url=$(grep 'Version Preview Alias URL:' upload.log | grep -o 'https://[^[:space:]]*' | head -n 1 || true)
+          if [ -z "$preview_url" ]; then
+            echo "wrangler printed no version preview URL"
+            exit 1
+          fi
+          echo "preview_url=$preview_url" >> "$GITHUB_OUTPUT"
+          echo "alias_url=$alias_url" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PR_NUMBER: ${{ github.event.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: Comment on the pull request
+        run: |
+          set -euo pipefail
+          marker='<!-- nomankind-preview -->'
+          short_sha=$(printf '%s' "$HEAD_SHA" | cut -c1-7)
+          if [ -n "$MISSING" ]; then
+            printf '%s\n\nNo preview for this pull request: %s.\n' "$marker" "$MISSING" > comment.md
+          else
+            {
+              printf '%s\n\n' "$marker"
+              printf 'Demo preview for `%s`:\n\n' "$short_sha"
+              printf -- '- Version preview: %s\n' "$PREVIEW_URL"
+              printf -- '- Alias preview: %s\n\n' "$ALIAS_URL"
+              printf 'The preview shares the demo D1 database and its migrations state.\n'
+            } > comment.md
+          fi
+          jq -Rs '{body: .}' comment.md > comment.json
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+            --jq 'map(select(.body | contains("nomankind-preview"))) | .[0].id // empty')
+          # --paginate emits one id per page; keep the first without a pipe,
+          # which under pipefail would turn a SIGPIPE from head into a failure.
+          existing=${existing%%$'\n'*}
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" --input comment.json >/dev/null
+            echo "updated comment $existing"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --input comment.json >/dev/null
+            echo "created a comment"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MISSING: ${{ steps.probe.outputs.missing }}
+          PREVIEW_URL: ${{ steps.upload.outputs.preview_url }}
+          ALIAS_URL: ${{ steps.upload.outputs.alias_url }}
