@@ -20,19 +20,21 @@ import {
   utcDay,
   verifyChain,
   type Anchor,
+  type ApproverRecord,
   type Attestation,
   type Core,
   type Event,
   type OpenAssignment,
   type Seal,
 } from "../src/index.js";
-import { applyMigrations } from "../src/storage/migrate.js";
+import { applyMigrations, splitStatements } from "../src/storage/migrate.js";
 import {
   EventAppendError,
   agentsForOperator,
   appendEvents,
   captureForHash,
   capturesForEntry,
+  dueAssignments,
   eventBySeq,
   eventsAfter,
   eventsForEntry,
@@ -46,6 +48,7 @@ import {
   latestSeal,
   listEntries,
   listOperators,
+  markAssignmentAnswered,
   markAssignmentMissed,
   MissingSubmissionError,
   openAssignment,
@@ -57,6 +60,10 @@ import {
   putEntry,
   putOperator,
   putSeal,
+  recordAssignment,
+  recordAssignmentMissed,
+  recordPoolSnapshot,
+  recordValidation,
   registerOperator,
   sealCovering,
   sealsBetween,
@@ -66,6 +73,7 @@ import {
   type CaptureRecord,
   type OperatorRecord,
 } from "../src/storage/repository.js";
+import type { D1Like, D1LikeStatement } from "../src/storage/d1.js";
 import {
   archiveCapture,
   readCapture,
@@ -378,6 +386,75 @@ describe("assignments", () => {
     expect(await openAssignment(test.db, VERIFIED_ENTRY_ID)).toEqual(replacement);
     expect(await openAssignment(test.db, DRAFT_ENTRY_ID)).toBeNull();
   });
+
+  it("is closed by the validator's answer as well as by the miss", async () => {
+    const answered: OpenAssignment = {
+      seq: 1004,
+      agent: "nmk_agent_answered",
+      operator: OUTSIDE_OPERATORS[2]!,
+      beacon_round: 44,
+      deadline: "2026-09-15T00:00:00.000Z",
+      replacement: false,
+    };
+    await putAssignment(test.db, DRAFT_ENTRY_ID, answered);
+    expect(await openAssignment(test.db, DRAFT_ENTRY_ID)).toEqual(answered);
+
+    await markAssignmentAnswered(test.db, DRAFT_ENTRY_ID, answered.seq, 1005);
+    expect(await openAssignment(test.db, DRAFT_ENTRY_ID)).toBeNull();
+  });
+
+  it("sweeps the assignments past their deadline, oldest first", async () => {
+    const overdue: OpenAssignment[] = [
+      "2026-09-12T00:00:00.000Z",
+      "2026-09-10T00:00:00.000Z",
+      "2026-09-11T00:00:00.000Z",
+    ].map((deadline, index) => ({
+      seq: 1100 + index,
+      agent: `nmk_agent_due_${index}`,
+      operator: OUTSIDE_OPERATORS[index % OUTSIDE_OPERATORS.length]!,
+      beacon_round: 50 + index,
+      deadline,
+      replacement: false,
+    }));
+    for (const assignment of overdue) {
+      await putAssignment(test.db, DRAFT_ENTRY_ID, assignment);
+    }
+
+    const swept = await dueAssignments(test.db, "2026-09-13T00:00:00.000Z", 10);
+    expect(swept.map((row) => row.assignment.deadline)).toEqual([
+      "2026-09-10T00:00:00.000Z",
+      "2026-09-11T00:00:00.000Z",
+      "2026-09-12T00:00:00.000Z",
+    ]);
+    expect(swept.every((row) => row.entryId === DRAFT_ENTRY_ID)).toBe(true);
+    expect(swept[0]!.assignment).toEqual(
+      overdue.find((one) => one.deadline === "2026-09-10T00:00:00.000Z"),
+    );
+
+    // Strictly before: the deadline instant itself is still inside the window.
+    const onTheInstant = await dueAssignments(
+      test.db,
+      "2026-09-10T00:00:00.000Z",
+      10,
+    );
+    expect(onTheInstant).toEqual([]);
+
+    // The caller's own limit, and nothing beyond it.
+    const capped = await dueAssignments(test.db, "2026-09-13T00:00:00.000Z", 2);
+    expect(capped.map((row) => row.assignment.deadline)).toEqual([
+      "2026-09-10T00:00:00.000Z",
+      "2026-09-11T00:00:00.000Z",
+    ]);
+
+    // A missed row and an answered row have both closed, so neither comes back.
+    await markAssignmentMissed(test.db, DRAFT_ENTRY_ID, 1100, 1200);
+    await markAssignmentAnswered(test.db, DRAFT_ENTRY_ID, 1101, 1201);
+    expect(
+      (await dueAssignments(test.db, "2026-09-13T00:00:00.000Z", 10)).map(
+        (row) => row.assignment.seq,
+      ),
+    ).toEqual([1102]);
+  });
 });
 
 describe("seals", () => {
@@ -491,6 +568,44 @@ describe("migrations", () => {
     expect(await applyMigrations(test.db, loadMigrations())).toEqual([]);
   });
 
+  it("applies 0004 after 0003, adding to the assignments table and nothing else", async () => {
+    const names = loadMigrations().map((migration) => migration.name);
+    expect(names).toEqual([
+      "0001_init.sql",
+      "0002_registry.sql",
+      "0003_captures.sql",
+      "0004_assignments.sql",
+    ]);
+
+    // Forward-only (D-022): 0004 adds a column and an index and reshapes
+    // nothing, so a live database takes it without rewriting a table. The
+    // database under test was migrated 0001 through 0004 in this order, which
+    // is what "applies on top of 0003" means.
+    const statements = splitStatements(
+      loadMigrations().find((one) => one.name === "0004_assignments.sql")!.sql,
+    );
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toContain("ALTER TABLE assignments ADD COLUMN answered_seq");
+    expect(statements[1]).toContain("CREATE INDEX assignments_due");
+    for (const statement of statements) {
+      expect(statement).not.toMatch(/\bDROP\b|\bCREATE TABLE\b/);
+    }
+
+    // The column it adds is on the live table and starts null, so a row
+    // written by putAssignment is open until something closes it.
+    await putAssignment(test.db, "nmk_migrated", {
+      seq: 7,
+      agent: "nmk_agent_migrated",
+      operator: "op_migrated",
+      beacon_round: 1,
+      deadline: "2026-09-20T00:00:00.000Z",
+      replacement: false,
+    });
+    expect(await openAssignment(test.db, "nmk_migrated")).not.toBeNull();
+    await markAssignmentAnswered(test.db, "nmk_migrated", 7, 8);
+    expect(await openAssignment(test.db, "nmk_migrated")).toBeNull();
+  });
+
   it("records the migration under the name wrangler would use", async () => {
     const applied = await test.db
       .prepare(`SELECT name FROM "d1_migrations" ORDER BY id`)
@@ -499,6 +614,7 @@ describe("migrations", () => {
       "0001_init.sql",
       "0002_registry.sql",
       "0003_captures.sql",
+      "0004_assignments.sql",
     ]);
   });
 });
@@ -947,5 +1063,273 @@ describe("submission writes", () => {
     const stored = await getEntry(store.db, id);
     expect(rederived.entry).toEqual(stored!.entry);
     expect(rederived.sidecar).toEqual(stored!.sidecar);
+  });
+});
+
+/**
+ * The validation writes, in their own database.
+ *
+ * Lifecycle of an entry, Validate: the draw, the seventy-two-hour window and the
+ * miss are all events, and every row beside them is an index into one. So the
+ * question these ask is the one the registry writes ask: can the row and the
+ * event ever disagree. Each writer seals its event onto the stored head itself,
+ * so a caller cannot hand in an event that does not continue the log, and each
+ * writes its row in the same batch, so neither half can land alone.
+ *
+ * Its own database, because these move the head of the log and the world above
+ * is asserted against its own head.
+ */
+/**
+ * The same database, answering the head query with a row the log has already
+ * moved past. A writer that seals its own event onto the head cannot be handed a
+ * broken run by its caller, so this is the one way left to give it one: the
+ * event it computes is one the log already holds.
+ */
+function staleHead(db: D1Like, seq: number): D1Like {
+  return {
+    prepare(sql: string): D1LikeStatement {
+      if (sql.includes("FROM events ORDER BY seq DESC")) {
+        return db.prepare(
+          sql.replace("ORDER BY seq DESC", `WHERE seq = ${seq}`),
+        );
+      }
+      return db.prepare(sql);
+    },
+    batch: (statements) => db.batch(statements),
+    exec: (statement) => db.exec(statement),
+  };
+}
+
+describe("validation writes", () => {
+  const AUTHOR = "1F916:6PmY_Rl-vJoqcBTdMBoMbLZLc0nUqYHpXK0dK7hM8kQ";
+  const AT = "2026-09-08T12:00:00.000Z";
+  const SNAPSHOT_HASH = `sha256:${"3c".repeat(32)}`;
+  const ASSIGNED = "op_assigned.example";
+
+  let store: TestDatabase;
+  let entryId: string;
+
+  function record(operator: string): ApproverRecord {
+    return {
+      agent: `1F916:agent-${operator}`,
+      operator,
+      decision: "approve",
+      reason: null,
+      snapshot_hash: SNAPSHOT_HASH,
+      assigned_random: true,
+      test_accepted: null,
+      reproduction: null,
+      observation: null,
+      signed_at: AT,
+    };
+  }
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+    const core = await buildSubmittedCore(
+      {
+        subject: "kestrel/kestrel-3",
+        category: "pricing",
+        claim: "Kestrel-3 seat pricing rose to $30 per seat per month",
+        before: "$25 per seat per month",
+        after: "$30 per seat per month",
+        effective_at: "2026-09-01",
+        citation: "https://kestrel.example/pricing-3",
+        snapshot_hash: SNAPSHOT_HASH,
+        author: AUTHOR,
+      },
+      { now: AT },
+    );
+    entryId = core["id"] as string;
+    const submission = await appendEvent([], {
+      at: AT,
+      type: "entry_submitted",
+      entry_id: entryId,
+      payload: { core, signature: "c2lnbmF0dXJl" },
+    });
+    const derived = deriveEntry(submission, entryId, { now: AT });
+    await submitEntry(store.db, {
+      events: submission,
+      entry: derived.entry,
+      sidecar: derived.sidecar,
+      derivedThroughSeq: 0,
+      captures: [],
+    });
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  it("seals a pool snapshot onto the head of the stored log", async () => {
+    const event = await recordPoolSnapshot(store.db, {
+      at: AT,
+      type: "pool_snapshot",
+      entry_id: null,
+      payload: { operators: [ASSIGNED, "op_other.example"] },
+    });
+
+    expect(event.seq).toBe(1);
+    expect(await headSeq(store.db)).toBe(1);
+    expect(await eventBySeq(store.db, 1)).toEqual(event);
+    expect(await verifyChain(await eventsInRange(store.db, 0, 1))).toEqual({
+      ok: true,
+      length: 2,
+    });
+  });
+
+  it("appends the assignment and opens its row in one write", async () => {
+    const event = await recordAssignment(store.db, {
+      at: AT,
+      type: "assignment",
+      entry_id: entryId,
+      payload: {
+        agent: `1F916:agent-${ASSIGNED}`,
+        operator: ASSIGNED,
+        beacon_round: 4_100_100,
+        deadline: "2026-09-11T12:00:00.000Z",
+        replacement: false,
+      },
+    });
+
+    expect(event.seq).toBe(2);
+    expect(await eventBySeq(store.db, 2)).toEqual(event);
+    // The row is read out of the event, so its seq is the event's own position.
+    expect(await openAssignment(store.db, entryId)).toEqual({
+      seq: 2,
+      agent: `1F916:agent-${ASSIGNED}`,
+      operator: ASSIGNED,
+      beacon_round: 4_100_100,
+      deadline: "2026-09-11T12:00:00.000Z",
+      replacement: false,
+    });
+    expect(
+      await dueAssignments(store.db, "2026-09-12T00:00:00.000Z", 10),
+    ).toHaveLength(1);
+  });
+
+  it("appends the validation, stores the entry, and closes the assignment", async () => {
+    // The entry has to be derived from a log that already holds this event, and
+    // the event does not exist until it is sealed onto the head — which is why
+    // the writer hands the sealed event back rather than taking an entry.
+    const before = await eventsForEntry(store.db, entryId);
+    let derived: ReturnType<typeof deriveEntry> | null = null;
+
+    const event = await recordValidation(store.db, {
+      event: {
+        at: AT,
+        type: "validation",
+        entry_id: entryId,
+        payload: { record: record(ASSIGNED), signature: "c2lnbmF0dXJl" },
+      },
+      stored: (validation) => {
+        derived = deriveEntry([...before, validation], entryId, { now: AT });
+        return {
+          entry: derived.entry,
+          sidecar: derived.sidecar,
+          derivedThroughSeq: validation.seq,
+        };
+      },
+      answeredAssignmentSeq: 2,
+    });
+
+    expect(event.seq).toBe(3);
+    expect(await eventBySeq(store.db, 3)).toEqual(event);
+    expect(await verifyChain(await eventsInRange(store.db, 0, 3))).toEqual({
+      ok: true,
+      length: 4,
+    });
+
+    const stored = await getEntry(store.db, entryId);
+    expect(stored!.derivedThroughSeq).toBe(3);
+    expect(stored!.entry).toEqual(derived!.entry);
+    expect(stored!.sidecar).toEqual(derived!.sidecar);
+    // Derivation saw the validation, and one approval does not verify an entry.
+    expect(stored!.entry["status"]).toBe("draft");
+    // Answered, not missed: the sweep must never seal a miss against a
+    // validator who responded inside the window.
+    expect(await openAssignment(store.db, entryId)).toBeNull();
+    expect(
+      await dueAssignments(store.db, "2026-09-12T00:00:00.000Z", 10),
+    ).toEqual([]);
+  });
+
+  it("appends the miss and closes the row it closes", async () => {
+    const drawn = await recordAssignment(store.db, {
+      at: AT,
+      type: "assignment",
+      entry_id: entryId,
+      payload: {
+        agent: "1F916:agent-op_replacement.example",
+        operator: "op_replacement.example",
+        beacon_round: 4_100_200,
+        deadline: "2026-09-11T12:00:00.000Z",
+        replacement: true,
+      },
+    });
+    expect(await openAssignment(store.db, entryId)).not.toBeNull();
+
+    const missed = await recordAssignmentMissed(
+      store.db,
+      {
+        at: AT,
+        type: "assignment_missed",
+        entry_id: entryId,
+        payload: {
+          agent: "1F916:agent-op_replacement.example",
+          operator: "op_replacement.example",
+        },
+      },
+      drawn.seq,
+    );
+
+    expect(missed.seq).toBe(drawn.seq + 1);
+    expect(await eventBySeq(store.db, missed.seq)).toEqual(missed);
+    expect(await openAssignment(store.db, entryId)).toBeNull();
+    expect(
+      await dueAssignments(store.db, "2026-09-12T00:00:00.000Z", 10),
+    ).toEqual([]);
+  });
+
+  it("refuses a validation for an entry with no submission behind it, and writes nothing", async () => {
+    const before = await headSeq(store.db);
+    await expect(
+      recordValidation(store.db, {
+        event: {
+          at: AT,
+          type: "validation",
+          entry_id: "nmk_never_submitted",
+          payload: { record: record(ASSIGNED), signature: "c2lnbmF0dXJl" },
+        },
+        // Never called: the submission is looked for before anything is
+        // derived, so a refusal costs the caller no derivation at all.
+        stored: () => {
+          throw new Error("stored must not be called");
+        },
+        answeredAssignmentSeq: null,
+      }),
+    ).rejects.toBeInstanceOf(MissingSubmissionError);
+
+    expect(await headSeq(store.db)).toBe(before);
+  });
+
+  it("refuses a write computed over a head the log has already left behind", async () => {
+    const before = await headSeq(store.db);
+    // A stale head is the one way a writer that seals its own event can still
+    // produce a run that does not continue the log. The batch is atomic, so the
+    // refusal leaves the log exactly as it was.
+    await expect(
+      recordPoolSnapshot(staleHead(store.db, 0), {
+        at: AT,
+        type: "pool_snapshot",
+        entry_id: null,
+        payload: { operators: [ASSIGNED] },
+      }),
+    ).rejects.toBeTruthy();
+
+    expect(await headSeq(store.db)).toBe(before);
+    expect(await verifyChain(await eventsInRange(store.db, 0, before!))).toEqual(
+      { ok: true, length: before! + 1 },
+    );
   });
 });

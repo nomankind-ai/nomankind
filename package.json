@@ -8,12 +8,15 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "checkpoint": "npm run build --silent && node dist/cli/checkpoint.js",
     "dev": "wrangler dev",
+    "export": "npm run build --silent && node dist/cli/export.js",
     "gen:validator": "npm run build --silent && node dist/cli/gen-validator.js",
     "keygen": "npm run build --silent && node dist/cli/keygen.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "validate": "npm run build --silent && node dist/cli/validator.js",
     "verify": "npm run build --silent && node dist/cli/verify.js"
   },
   "devDependencies": {

@@ -16,6 +16,21 @@
   // serving the same Worker.
   "workers_dev": false,
   "preview_urls": false,
+  // The sweep (src/worker/sweep.ts): commit the pool snapshot when it has
+  // moved, close the assignments whose seventy-two hours have run out, and draw
+  // for the entries owed a draw. Every five minutes.
+  //
+  // This cadence is deployment configuration and NOT a policy number: it says
+  // how often the Worker looks, never how long a validator has (that is
+  // ASSIGNMENT_WINDOW_HOURS in src/policy.ts) or when a draw is legitimate
+  // (src/assign.ts). Moving it changes only how promptly the log catches up.
+  //
+  // `triggers` is an inheritable key, so demo and production run the same
+  // schedule from this one block; `wrangler deploy --dry-run --env demo` and
+  // `--env production` both report the trigger.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   // The local (default) environment: the database miniflare creates for tests
   // and `wrangler dev`. Nothing here reaches Cloudflare.
   "d1_databases": [

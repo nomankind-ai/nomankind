@@ -7,8 +7,11 @@
  * answers; M12 mounts the registry routes beside it (src/worker/registry.ts),
  * which are Section 11's joining door and the genesis naming, and M13 mounts
  * the submit routes (src/worker/submit.ts), which are Section 6's door for
- * entries and the reads that show a capture. Later milestones mount the rest —
- * validation, reconfirmation, the public pages — on the same router.
+ * entries and the reads that show a capture. M14 mounts the validate door
+ * (src/worker/validate.ts) and the log's own page (src/worker/events.ts), and
+ * adds the scheduled sweep (src/worker/sweep.ts) beside the request handler.
+ * Later milestones mount the rest — reconfirmation, the public pages — on the
+ * same router.
  *
  * This file is the one place in the system that reads a wall clock, and it
  * reads it once per request. Everything below it takes the instant as an
@@ -27,12 +30,16 @@
  * here either: `ENVIRONMENT` is read from the binding and echoed back.
  */
 
+import { DrandReader } from "../adapters/beacon.js";
 import { DohResolver, type DnsResolver } from "../adapters/dns.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import type { Env } from "./env.js";
+import { handleEvents } from "./events.js";
 import { handleRegistry, json } from "./registry.js";
 import { handleSubmit } from "./submit.js";
+import { runSweep } from "./sweep.js";
+import { handleValidate } from "./validate.js";
 
 /**
  * Ask D1 the cheapest question there is.
@@ -110,15 +117,55 @@ export async function handleRequest(
   });
   if (submitted !== null) return submitted;
 
+  const validated = await handleValidate(request, env, { now });
+  if (validated !== null) return validated;
+
+  const events = await handleEvents(request, env);
+  if (events !== null) return events;
+
   return json({ ok: false, error: "not_found" }, 404);
+}
+
+/**
+ * What the platform hands a scheduled invocation. Typed structurally rather than
+ * imported from a generated Worker types package: the kernel stays buildable
+ * with the approved dependency baseline (decision D-011), exactly as `Env` types
+ * its bindings structurally.
+ */
+export interface ScheduledController {
+  /** The instant this run was scheduled for, in milliseconds since the epoch. */
+  readonly scheduledTime: number;
+  readonly cron: string;
+}
+
+/** The execution context. Unused here: the sweep is awaited, not deferred. */
+export interface ScheduledContext {
+  waitUntil(promise: Promise<unknown>): void;
 }
 
 /**
  * The deployed entry point. It passes no deps, so the Worker always runs on the
  * real clock and the real adapters: there is no argument a request could carry
  * that swaps either out.
+ *
+ * `scheduled` is the cron trigger's door (wrangler.jsonc names the cadence). It
+ * reads the instant off the controller, which is the platform's own clock for
+ * this run and is read exactly once, and constructs the real drand reader: the
+ * fixture beacon in src/adapters/beacon.ts is for tests and is never reachable
+ * from here (decision D-013 as amended). The sweep is awaited rather than passed
+ * to `waitUntil`, so a run that fails is a failed run the platform can see.
  */
 export default {
   fetch: (request: Request, env: Env): Promise<Response> =>
     handleRequest(request, env),
+  scheduled: async (
+    controller: ScheduledController,
+    env: Env,
+    _ctx: ScheduledContext,
+  ): Promise<void> => {
+    await runSweep(env, {
+      now: new Date(controller.scheduledTime),
+      beacon: new DrandReader(),
+    });
+  },
 };

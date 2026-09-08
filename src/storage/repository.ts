@@ -21,7 +21,7 @@
 import type { Anchor } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
 import type { Sidecar } from "../derive.js";
-import type { Event, EventType } from "../events.js";
+import { appendEvent, type Event, type EventInput, type EventType } from "../events.js";
 import type { Entry } from "../schema.js";
 import type { Seal, WitnessSignature } from "../seal.js";
 import {
@@ -105,6 +105,20 @@ async function head(db: D1Like): Promise<{ seq: number; hash: string } | null> {
     .first<Row>();
   if (row === null) return null;
   return { seq: readInteger(row, "seq"), hash: readText(row, "hash") };
+}
+
+/**
+ * The head event itself, or null on an empty log.
+ *
+ * The writers below seal their event onto this one rather than onto a seq and a
+ * hash read apart from it, so the event they append is computed from exactly the
+ * row the chain check is then made against.
+ */
+async function headEvent(db: D1Like): Promise<Event | null> {
+  const row = await db
+    .prepare(`SELECT ${EVENT_COLUMNS} FROM events ORDER BY seq DESC ${ONE_ROW}`)
+    .first<Row>();
+  return row === null ? null : toEvent(row);
 }
 
 /** The last event's seq, or null when the log is empty. */
@@ -838,15 +852,18 @@ export async function trustOperator(
 // ---------------------------------------------------------------------------
 
 /**
- * Store one assignment. `missed_seq` starts null: an assignment is open when it
- * is made, and only an `assignment_missed` event closes it.
+ * The upsert that stores one assignment row. `missed_seq` and `answered_seq`
+ * start null: an assignment is open when it is made, and only an
+ * `assignment_missed` or a `validation` closes it. Taken as a statement rather
+ * than run on the spot so a draw can append its event and open its row in one
+ * atomic batch (`recordAssignment` below), and so both paths write the same row.
  */
-export async function putAssignment(
+function assignmentStatement(
   db: D1Like,
   entryId: string,
   assignment: OpenAssignment,
-): Promise<void> {
-  await db
+): D1LikeStatement {
+  return db
     .prepare(
       `INSERT INTO assignments (entry_id, seq, operator_id, deadline, missed_seq, assignment_json)
        VALUES (?, ?, ?, ?, NULL, ?)
@@ -862,14 +879,28 @@ export async function putAssignment(
       assignment.operator,
       assignment.deadline,
       writeJson(assignment),
-    )
-    .run();
+    );
+}
+
+/** Store one assignment, replacing whatever was there. */
+export async function putAssignment(
+  db: D1Like,
+  entryId: string,
+  assignment: OpenAssignment,
+): Promise<void> {
+  await assignmentStatement(db, entryId, assignment).run();
 }
 
 /**
- * The entry's open assignment: the newest one with no `missed_seq`, or null.
+ * The entry's open assignment: the newest one that is neither missed nor
+ * answered, or null.
  *
  * The newest assignment is the one in force, so an earlier one never reopens.
+ * An assignment closes two ways — the window runs out, or the validator answers
+ * — and both are a position in the log, so both are read here. Leaving the
+ * answered ones open would have the sweep seal an `assignment_missed` against a
+ * validator who responded inside their seventy-two hours.
+ *
  * Served by the (entry_id, seq) index.
  */
 export async function openAssignment(
@@ -879,7 +910,7 @@ export async function openAssignment(
   const row = await db
     .prepare(
       `SELECT assignment_json FROM assignments
-       WHERE entry_id = ? AND missed_seq IS NULL
+       WHERE entry_id = ? AND missed_seq IS NULL AND answered_seq IS NULL
        ORDER BY seq DESC ${ONE_ROW}`,
     )
     .bind(entryId)
@@ -904,6 +935,230 @@ export async function markAssignmentMissed(
     )
     .bind(missedSeq, entryId, seq)
     .run();
+}
+
+/**
+ * Close an assignment by naming the `validation` event that answered it.
+ *
+ * The mirror of `markAssignmentMissed`: the answer is a position in the log, not
+ * a flag, and the event stays the record. An assignment carrying either column
+ * is closed, and `openAssignment` reads both.
+ */
+export async function markAssignmentAnswered(
+  db: D1Like,
+  entryId: string,
+  seq: number,
+  validationSeq: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE assignments SET answered_seq = ? WHERE entry_id = ? AND seq = ?`,
+    )
+    .bind(validationSeq, entryId, seq)
+    .run();
+}
+
+/**
+ * The assignments whose window has run out: still open, and past `before`.
+ *
+ * Lifecycle of an entry, Validate: "An assigned validator has seventy-two hours
+ * to respond. A miss costs standing, and the next beacon round draws a
+ * replacement." This is the sweep's one read, and the only query in the system
+ * that starts from a deadline rather than from an entry.
+ *
+ * Strictly before, because the deadline instant itself is still inside the
+ * seventy-two hours (src/assign.ts holds that rule and this matches it). Oldest
+ * deadline first, so a sweep that can only get through so many in one run gets
+ * through the longest-overdue ones. The limit is the caller's own and there is
+ * no default: this module holds no page size. Served by the partial
+ * `assignments_due` index (migrations/0004_assignments.sql).
+ */
+export async function dueAssignments(
+  db: D1Like,
+  before: string,
+  limit: number,
+): Promise<Array<{ entryId: string; assignment: OpenAssignment }>> {
+  const rows = await db
+    .prepare(
+      `SELECT entry_id, assignment_json FROM assignments
+       WHERE deadline < ? AND missed_seq IS NULL AND answered_seq IS NULL
+       ORDER BY deadline LIMIT ?`,
+    )
+    .bind(before, limit)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    entryId: readText(row, "entry_id"),
+    assignment: readJson<OpenAssignment>(row, "assignment_json"),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Validation writes
+// ---------------------------------------------------------------------------
+
+/**
+ * An event sealed onto the stored head, and the statements that write it.
+ *
+ * The writers below take an `EventInput` rather than a sealed `Event` because
+ * the log's head is here and not in the caller: a caller that sealed its own
+ * event would have to read the head first, and two reads around one write is the
+ * race this avoids. `appendEvent` does the sealing, exactly as every other path
+ * does, and `eventStatements` then checks the result against the same head, so
+ * these writes cannot drift into a weaker chain rule than a plain append.
+ */
+async function sealOntoHead(
+  db: D1Like,
+  input: EventInput,
+): Promise<{ event: Event; statements: D1LikeStatement[] }> {
+  const previous = await headEvent(db);
+  const sealed = await appendEvent(previous === null ? [] : [previous], input);
+  const event = sealed[sealed.length - 1]!;
+  const at = previous === null ? null : { seq: previous.seq, hash: previous.hash };
+  return { event, statements: eventStatements(db, [event], at) };
+}
+
+/**
+ * The entry_id of an entry-scoped event. `appendEvent` refuses an entry-scoped
+ * event with a null entry_id, so this only ever narrows the type.
+ */
+function scopedEntryId(event: Event): string {
+  if (event.entry_id === null) {
+    throw new TypeError(`${event.type}: expected an entry_id`);
+  }
+  return event.entry_id;
+}
+
+/**
+ * Seal the trusted pool as it stands.
+ *
+ * Lifecycle of an entry, Validate: "The pool snapshot is committed to the sealed
+ * log before the beacon round it uses", so this write is what a later draw is
+ * recomputed against. One event and nothing beside it: the snapshot is the
+ * record, and the pool it names is rebuilt from the registry events whenever
+ * anyone asks.
+ */
+export async function recordPoolSnapshot(
+  db: D1Like,
+  input: EventInput<"pool_snapshot">,
+): Promise<Event<"pool_snapshot">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  await db.batch(statements);
+  return event as Event<"pool_snapshot">;
+}
+
+/**
+ * Record a draw: append the `assignment` event and open its row, atomically.
+ *
+ * The event is the record and the row is the index into it, so an assignments
+ * row without its event would be an assignment nobody can verify offline, and an
+ * event without its row would be an assignment the sweep cannot see when its
+ * deadline passes. One `batch` makes both impossible.
+ *
+ * The row is read out of the event and nothing is computed here: the deadline
+ * was set by `buildAssignment` from the policy window, and the row's seq is the
+ * event's own position, which is what ties the two together.
+ */
+export async function recordAssignment(
+  db: D1Like,
+  input: EventInput<"assignment">,
+): Promise<Event<"assignment">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  const assignment = event as Event<"assignment">;
+  const entryId = scopedEntryId(assignment);
+  statements.push(
+    assignmentStatement(db, entryId, {
+      seq: assignment.seq,
+      agent: assignment.payload.agent,
+      operator: assignment.payload.operator,
+      beacon_round: assignment.payload.beacon_round,
+      deadline: assignment.payload.deadline,
+      replacement: assignment.payload.replacement,
+    }),
+  );
+  await db.batch(statements);
+  return assignment;
+}
+
+/**
+ * Record a miss: append the `assignment_missed` event and close the row it
+ * closes, atomically. `assignmentSeq` names the assignment being closed, which
+ * is the position of its own event in the log.
+ */
+export async function recordAssignmentMissed(
+  db: D1Like,
+  input: EventInput<"assignment_missed">,
+  assignmentSeq: number,
+): Promise<Event<"assignment_missed">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  const missed = event as Event<"assignment_missed">;
+  statements.push(
+    db
+      .prepare(
+        `UPDATE assignments SET missed_seq = ? WHERE entry_id = ? AND seq = ?`,
+      )
+      .bind(missed.seq, scopedEntryId(missed), assignmentSeq),
+  );
+  await db.batch(statements);
+  return missed;
+}
+
+/** What a writer stores for an entry: exactly what `putEntry` writes. */
+export interface StoredEntryInput {
+  readonly entry: Entry;
+  readonly sidecar: Sidecar;
+  readonly derivedThroughSeq: number;
+}
+
+/**
+ * Record a validation: append the event, store the entry derived including it,
+ * and close the assignment it answered, atomically.
+ *
+ * A validation is the one write that changes an entry's status, and status is
+ * derived: the entry row has to be recomputed from a log that already holds this
+ * event, and the event does not exist until it is sealed onto the head. So the
+ * caller hands in a callback rather than an entry — it is given the sealed event
+ * and returns what derivation made of it — and nothing here derives a field.
+ *
+ * `answeredAssignmentSeq` is the assignment this validation answers, or null
+ * when the validator volunteered. Identity and operators: the operator is the
+ * unit, so any agent under the assigned operator answers the assignment; which
+ * assignment that is belongs to the caller's rules (src/assign.ts), not to
+ * storage.
+ */
+export async function recordValidation(
+  db: D1Like,
+  input: {
+    readonly event: EventInput<"validation">;
+    readonly stored: (event: Event<"validation">) => StoredEntryInput;
+    readonly answeredAssignmentSeq: number | null;
+  },
+): Promise<Event<"validation">> {
+  const { event, statements } = await sealOntoHead(db, input.event);
+  const validation = event as Event<"validation">;
+  const entryId = scopedEntryId(validation);
+  const submittedSeq = await submittedSeqOf(db, entryId);
+
+  const stored = input.stored(validation);
+  statements.push(
+    entryStatement(
+      db,
+      stored.entry,
+      stored.sidecar,
+      submittedSeq,
+      stored.derivedThroughSeq,
+    ),
+  );
+  if (input.answeredAssignmentSeq !== null) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE assignments SET answered_seq = ? WHERE entry_id = ? AND seq = ?`,
+        )
+        .bind(validation.seq, entryId, input.answeredAssignmentSeq),
+    );
+  }
+  await db.batch(statements);
+  return validation;
 }
 
 // ---------------------------------------------------------------------------

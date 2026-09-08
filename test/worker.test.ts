@@ -99,6 +99,12 @@ describe("worker against a real D1 binding", () => {
     expect(await response.json()).toEqual({ ok: false, error: "not_found" });
   });
 
+  it("exports a scheduled handler, which is the cron trigger's door", () => {
+    // wrangler.jsonc names the cadence; this is the entry point it calls, and
+    // it exists on the deployed default export rather than only in a test.
+    expect(typeof handler.scheduled).toBe("function");
+  });
+
   it("exports a fetch that routes the way handleRequest does", async () => {
     // Not the same function object any more: the deployed entry point passes no
     // deps, so no argument a request carries can swap the clock or an adapter.
@@ -177,6 +183,30 @@ describe("registry routes when storage is unreachable", () => {
       new Request("https://nomankind.ai/operators", {
         method: "POST",
         body: JSON.stringify({}),
+      }),
+    );
+  });
+
+  it("answers GET /events the same way", async () => {
+    await expectUnreachable(new Request("https://nomankind.ai/events"));
+  });
+
+  it("answers a validation the same way", async () => {
+    // Well formed and unsigned: the entry lookup and the nonce store are both
+    // D1, so the storage failure is what this request meets first.
+    await expectUnreachable(
+      new Request("https://nomankind.ai/entries/nmk_01ABC/validate", {
+        method: "POST",
+        body: JSON.stringify({
+          record: {
+            agent: "1F916:x",
+            operator: "example.org",
+            decision: "approve",
+            assigned_random: false,
+            signed_at: "2026-09-08T12:00:00.000Z",
+          },
+          signature: "x",
+        }),
       }),
     );
   });

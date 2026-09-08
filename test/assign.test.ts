@@ -12,6 +12,8 @@ import { describe, expect, it } from "vitest";
 import {
   assignmentDeadline,
   buildAssignment,
+  drawDue,
+  poolSnapshotDue,
   buildAssignmentMissed,
   drawValidator,
   exclusionsFor,
@@ -19,6 +21,7 @@ import {
   latestPoolSnapshot,
   openAssignment,
   type Beacon,
+  type DrawDueVerdict,
   type PoolSnapshot,
 } from "../src/assign.js";
 import { CORE_KEYS, type Core } from "../src/core.js";
@@ -789,5 +792,273 @@ describe("the replacement draw on a 2-1 split", () => {
     const derived = deriveEntry(events, ENTRY_ID, CLOCK);
     expect(derived.derived.status).toBe("rejected");
     expect(derived.sidecar.needs_replacement).toBe(false);
+  });
+});
+
+/**
+ * The sweep rules: what the log owes before a draw can be made, and whether a
+ * draw is owed at all. Both are pure functions of the events, so the same log
+ * always gives the same verdict, and both take the registry events beside the
+ * entry's own because the pool lives in the registry.
+ */
+describe("poolSnapshotDue", () => {
+  /** A log holding `trusted` trusted operators and nothing else. */
+  function trustedLog(operators: readonly string[]): Log {
+    const log = new Log();
+    for (const operator of operators) {
+      log.add("operator_trusted", null, { operator });
+    }
+    return log;
+  }
+
+  it("owes the whole pool when the log holds no snapshot yet", () => {
+    const log = trustedLog(["op_v2", "op_v1"]);
+    expect(poolSnapshotDue(log.events)).toEqual(["op_v1", "op_v2"]);
+  });
+
+  it("owes nothing once the sealed snapshot says what the pool says", () => {
+    const log = trustedLog(["op_v2", "op_v1"]);
+    log.add("pool_snapshot", null, { operators: ["op_v1", "op_v2"] });
+    expect(poolSnapshotDue(log.events)).toBeNull();
+  });
+
+  it("owes nothing when the sealed snapshot differs only in order or repeats", () => {
+    const log = trustedLog(["op_v1", "op_v2"]);
+    log.add("pool_snapshot", null, {
+      operators: ["op_v2", "op_v1", "op_v1"],
+    });
+    expect(poolSnapshotDue(log.events)).toBeNull();
+  });
+
+  it("owes a new snapshot when an operator joins the pool", () => {
+    const log = trustedLog(["op_v1", "op_v2"]);
+    log.add("pool_snapshot", null, { operators: ["op_v1", "op_v2"] });
+    log.add("operator_trusted", null, { operator: "op_v3" });
+    expect(poolSnapshotDue(log.events)).toEqual(["op_v1", "op_v2", "op_v3"]);
+  });
+
+  it("owes a new snapshot when an operator leaves the pool", () => {
+    const log = trustedLog(["op_v1", "op_v2"]);
+    log.add("pool_snapshot", null, { operators: ["op_v1", "op_v2"] });
+    log.add("operator_untrusted", null, { operator: "op_v2" });
+    expect(poolSnapshotDue(log.events)).toEqual(["op_v1"]);
+  });
+
+  it("owes an empty snapshot when the last operator leaves", () => {
+    const log = trustedLog(["op_v1"]);
+    log.add("pool_snapshot", null, { operators: ["op_v1"] });
+    log.add("operator_untrusted", null, { operator: "op_v1" });
+    // Empty, not null: an operator leaving is as much a change as one joining,
+    // and a log still naming them would let a draw pick an untrusted operator.
+    expect(poolSnapshotDue(log.events)).toEqual([]);
+  });
+
+  it("reads the newest snapshot, not the first", () => {
+    const log = trustedLog(["op_v1", "op_v2"]);
+    log.add("pool_snapshot", null, { operators: ["op_v1"] });
+    log.add("pool_snapshot", null, { operators: ["op_v1", "op_v2"] });
+    expect(poolSnapshotDue(log.events)).toBeNull();
+  });
+
+  it("gives the same answer whatever order the events arrive in", () => {
+    const log = trustedLog(["op_v1", "op_v2"]);
+    log.add("pool_snapshot", null, { operators: ["op_v1"] });
+    log.add("operator_trusted", null, { operator: "op_v3" });
+    const forwards = poolSnapshotDue(log.events);
+    const backwards = poolSnapshotDue([...log.events].reverse());
+    expect(forwards).toEqual(["op_v1", "op_v2", "op_v3"]);
+    expect(backwards).toEqual(forwards);
+  });
+
+  it("owes an empty snapshot on an empty log, and never throws", () => {
+    expect(poolSnapshotDue([])).toEqual([]);
+  });
+});
+
+describe("drawDue", () => {
+  const ASSIGNED = VALIDATORS[0] as string;
+
+  /**
+   * A log with `trusted` trusted operators, a snapshot of them, and the entry
+   * submitted. The draw only runs at or above the switch, so `trusted` is what
+   * every case below moves to reach or miss it.
+   */
+  function poolLog(trusted: number): Log {
+    const pool = VALIDATORS.slice(0, trusted);
+    const log = new Log();
+    for (const operator of pool) {
+      log.add("operator_trusted", null, { operator });
+    }
+    log.add("pool_snapshot", null, { operators: [...pool].sort() });
+    log.add("entry_submitted", ENTRY_ID, {
+      core: coreFrom({ id: ENTRY_ID }),
+      signature: SIGNATURE,
+    });
+    return log;
+  }
+
+  function assign(log: Log, operator: string, replacement = false): number {
+    return log.add("assignment", ENTRY_ID, {
+      agent: `1F916:agent-${operator}`,
+      operator,
+      beacon_round: 4_100_100,
+      deadline: "2026-09-04T00:00:00.000Z",
+      replacement,
+    });
+  }
+
+  function due(
+    log: Log,
+    overrides: { status?: string; needsReplacement?: boolean } = {},
+  ): DrawDueVerdict {
+    return drawDue({
+      events: log.events,
+      entryId: ENTRY_ID,
+      status: (overrides.status ?? "draft") as "draft",
+      needsReplacement: overrides.needsReplacement ?? false,
+    });
+  }
+
+  it("is not due once the entry has left draft", () => {
+    const log = poolLog(TRUSTED_POOL_SWITCH);
+    for (const status of ["verified", "rejected", "superseded", "overturned"]) {
+      expect(due(log, { status })).toEqual({ due: false, reason: "not_draft" });
+    }
+  });
+
+  it("is not due under the switch, and is due at it", () => {
+    // Nine trusted operators: "Until the pool holds ten operators, two
+    // approvals verify ... and there is no replacement draw".
+    expect(due(poolLog(TRUSTED_POOL_SWITCH - 1))).toEqual({
+      due: false,
+      reason: "pool_below_switch",
+    });
+    expect(due(poolLog(TRUSTED_POOL_SWITCH))).toEqual({
+      due: true,
+      replacement: false,
+    });
+  });
+
+  it("is the first draw when nothing was ever assigned", () => {
+    expect(due(poolLog(TRUSTED_POOL_SWITCH))).toEqual({
+      due: true,
+      replacement: false,
+    });
+  });
+
+  it("is not due while an assignment stands", () => {
+    const log = poolLog(TRUSTED_POOL_SWITCH);
+    assign(log, ASSIGNED);
+    expect(due(log)).toEqual({ due: false, reason: "assignment_open" });
+  });
+
+  it("is a replacement once the assignment was missed", () => {
+    // "A miss costs standing, and the next beacon round draws a replacement."
+    const log = poolLog(TRUSTED_POOL_SWITCH);
+    assign(log, ASSIGNED);
+    log.add("assignment_missed", ENTRY_ID, {
+      agent: `1F916:agent-${ASSIGNED}`,
+      operator: ASSIGNED,
+    });
+    expect(due(log)).toEqual({ due: true, replacement: true });
+  });
+
+  it("is a replacement when the split calls for one after the assigned validator answered", () => {
+    // "two approvals against one rejection draw one replacement validator by
+    // the same public randomness".
+    const log = poolLog(TRUSTED_POOL_SWITCH);
+    assign(log, ASSIGNED);
+    log.add("validation", ENTRY_ID, {
+      record: reject(ASSIGNED, 1, true),
+      signature: SIGNATURE,
+    });
+    expect(due(log, { needsReplacement: true })).toEqual({
+      due: true,
+      replacement: true,
+    });
+  });
+
+  it("is not due when the answered assignment left no split to resolve", () => {
+    const log = poolLog(TRUSTED_POOL_SWITCH);
+    assign(log, ASSIGNED);
+    log.add("validation", ENTRY_ID, {
+      record: approve(ASSIGNED, 1, true),
+      signature: SIGNATURE,
+    });
+    expect(due(log, { needsReplacement: false })).toEqual({
+      due: false,
+      reason: "awaiting_volunteers",
+    });
+  });
+
+  it("is not due again once the replacement was drawn", () => {
+    const log = poolLog(TRUSTED_POOL_SWITCH);
+    assign(log, ASSIGNED);
+    log.add("validation", ENTRY_ID, {
+      record: reject(ASSIGNED, 1, true),
+      signature: SIGNATURE,
+    });
+    assign(log, VALIDATORS[1] as string, true);
+    expect(due(log, { needsReplacement: true })).toEqual({
+      due: false,
+      reason: "assignment_open",
+    });
+  });
+
+  it("ignores an assignment on another entry", () => {
+    const log = poolLog(TRUSTED_POOL_SWITCH);
+    log.add("assignment", OTHER_ENTRY_ID, {
+      agent: `1F916:agent-${ASSIGNED}`,
+      operator: ASSIGNED,
+      beacon_round: 4_100_100,
+      deadline: "2026-09-04T00:00:00.000Z",
+      replacement: false,
+    });
+    expect(due(log)).toEqual({ due: true, replacement: false });
+  });
+
+  it("gives the same verdict whatever order the events arrive in", () => {
+    const log = poolLog(TRUSTED_POOL_SWITCH);
+    assign(log, ASSIGNED);
+    log.add("assignment_missed", ENTRY_ID, {
+      agent: `1F916:agent-${ASSIGNED}`,
+      operator: ASSIGNED,
+    });
+    const forwards = drawDue({
+      events: log.events,
+      entryId: ENTRY_ID,
+      status: "draft",
+      needsReplacement: false,
+    });
+    const backwards = drawDue({
+      events: [...log.events].reverse(),
+      entryId: ENTRY_ID,
+      status: "draft",
+      needsReplacement: false,
+    });
+    expect(forwards).toEqual({ due: true, replacement: true });
+    expect(backwards).toEqual(forwards);
+  });
+
+  it("never throws on an empty log", () => {
+    expect(
+      drawDue({
+        events: [],
+        entryId: ENTRY_ID,
+        status: "draft",
+        needsReplacement: false,
+      }),
+    ).toEqual({ due: false, reason: "pool_below_switch" });
+  });
+});
+
+describe("the kernel barrel", () => {
+  it("re-exports the sweep rules", async () => {
+    const kernel = (await import("../src/index.js")) as Record<string, unknown>;
+    expect(typeof kernel["poolSnapshotDue"]).toBe("function");
+    expect(typeof kernel["drawDue"]).toBe("function");
+    // Storage and the adapters stay out of the kernel barrel.
+    expect(kernel["DrandReader"]).toBeUndefined();
+    expect(kernel["dueAssignments"]).toBeUndefined();
   });
 });
