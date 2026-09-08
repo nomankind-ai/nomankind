@@ -13,4 +13,15 @@ import type { D1Like } from "../storage/d1.js";
 export type Env = {
   DB: D1Like;
   ENVIRONMENT: string;
+  /**
+   * The maintainer's own agent id (decision D-016), a var rather than a secret:
+   * it is a public key, and Section 11's genesis naming is a power the public
+   * has to be able to check the holder of.
+   *
+   * The empty string means no maintainer is configured, and that is a refusal
+   * rather than a default: an unconfigured maintainer must not hand the naming
+   * power to whoever asks first, so src/registry.ts reads it as null and
+   * refuses genesis naming outright.
+   */
+  MAINTAINER_AGENT_ID: string;
 };

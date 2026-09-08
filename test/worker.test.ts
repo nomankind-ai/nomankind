@@ -51,6 +51,12 @@ describe("worker against a real D1 binding", () => {
     expect(env.ENVIRONMENT).toBe("local");
   });
 
+  it("reads the maintainer agent id from wrangler.jsonc too", () => {
+    // A var, not a secret: it is a public key, and the naming power it carries
+    // is one the public has to be able to check the holder of (D-016).
+    expect(env.MAINTAINER_AGENT_ID).toMatch(/^1F916:[A-Za-z0-9_-]+$/);
+  });
+
   it("answers GET /health with 200 and a healthy body", async () => {
     const response = await handleRequest(
       new Request("https://nomankind.ai/health"),
@@ -92,8 +98,74 @@ describe("worker against a real D1 binding", () => {
     expect(await response.json()).toEqual({ ok: false, error: "not_found" });
   });
 
-  it("exports the same function as default.fetch and handleRequest", () => {
-    expect(handler.fetch).toBe(handleRequest);
+  it("exports a fetch that routes the way handleRequest does", async () => {
+    // Not the same function object any more: the deployed entry point passes no
+    // deps, so no argument a request carries can swap the clock or an adapter.
+    const response = await handler.fetch(
+      new Request("https://nomankind.ai/health"),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      environment: "local",
+      storage: "ok",
+    });
+  });
+});
+
+/** A D1Like where every call into the database fails, however it is reached. */
+function unreachableDatabase(): D1Like {
+  const fail = (): Promise<never> =>
+    Promise.reject(new Error("D1_ERROR: no such table: operators"));
+  const statement = {
+    bind: () => statement,
+    first: fail,
+    all: fail,
+    run: fail,
+  } as unknown as D1LikeStatement;
+  return {
+    prepare: () => statement,
+    batch: fail,
+    exec: fail,
+  } as unknown as D1Like;
+}
+
+describe("registry routes when storage is unreachable", () => {
+  const env: Env = {
+    DB: unreachableDatabase(),
+    ENVIRONMENT: "local",
+    MAINTAINER_AGENT_ID: "",
+  };
+
+  /** Every registry route answers the way the health probe does. */
+  async function expectUnreachable(request: Request): Promise<void> {
+    const response = await handleRequest(request, env);
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ error: "storage_unreachable" });
+  }
+
+  it("answers GET /operators with 503 rather than a raw 500", async () => {
+    await expectUnreachable(new Request("https://nomankind.ai/operators"));
+  });
+
+  it("answers GET /agents/{id} the same way", async () => {
+    await expectUnreachable(new Request("https://nomankind.ai/agents/x"));
+  });
+
+  it("answers a write the same way, before it can even check the nonce", async () => {
+    // Unsigned, so this would be a 401 on a database that answered: the nonce
+    // store is D1, so the storage failure is what this request meets first.
+    await expectUnreachable(
+      new Request("https://nomankind.ai/operators", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
   });
 });
 
@@ -102,6 +174,7 @@ describe("worker when storage is unreachable", () => {
     const env: Env = {
       DB: stubDatabase(() => Promise.reject(new Error("D1_ERROR: no such database"))),
       ENVIRONMENT: "local",
+      MAINTAINER_AGENT_ID: "",
     };
 
     const response = await handleRequest(
@@ -122,6 +195,7 @@ describe("worker when storage is unreachable", () => {
     const env: Env = {
       DB: stubDatabase(() => Promise.resolve(null)),
       ENVIRONMENT: "local",
+      MAINTAINER_AGENT_ID: "",
     };
 
     const response = await handleRequest(

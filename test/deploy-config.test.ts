@@ -119,6 +119,32 @@ describe("wrangler.jsonc routes and hostnames", () => {
     expect(config.env.demo.vars.ENVIRONMENT).toBe("demo");
     expect(config.env.production.vars.ENVIRONMENT).toBe("production");
   });
+
+  /**
+   * The maintainer's agent id is a var and not a secret: it is a public key,
+   * and Section 11's genesis naming is a power the public has to be able to
+   * check the holder of. Pinned here because which key holds it in which
+   * environment is a deploy fact (D-016).
+   */
+  it("gives local and demo their own throwaway maintainer keys", () => {
+    expect(config.vars.MAINTAINER_AGENT_ID).toBe(
+      "1F916:t2clwNKCX9MD246hQJgDKVoqhC7Q-ybl4x7xvRGWt40",
+    );
+    expect(config.env.demo.vars.MAINTAINER_AGENT_ID).toBe(
+      "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+    );
+    // Two environments, two keys: one shared with a laptop is one anyone can
+    // claim to be.
+    expect(config.env.demo.vars.MAINTAINER_AGENT_ID).not.toBe(
+      config.vars.MAINTAINER_AGENT_ID,
+    );
+  });
+
+  it("leaves production's maintainer unset until M25", () => {
+    // Empty means no maintainer is configured, and the Worker refuses genesis
+    // naming outright rather than granting it to whoever asks first.
+    expect(config.env.production.vars.MAINTAINER_AGENT_ID).toBe("");
+  });
 });
 
 describe("workflow triggers", () => {

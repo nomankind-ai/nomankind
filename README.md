@@ -40,6 +40,8 @@ That guarantee reaches well past the AI ecosystem. The mechanism generalizes to 
 - [`schema/nomankind-entry-example.json`](schema/nomankind-entry-example.json): a worked example entry.
 - [`schema/nomankind-snapshot-normalization-v1.md`](schema/nomankind-snapshot-normalization-v1.md): the norm-v1.2 hashing rule.
 
+The operator registry is served by the Worker: `POST /operators` to join, `POST /genesis` for the maintainer's one-time naming of the first trusted operators, and `GET /operators`, `GET /operators/{id}` and `GET /agents/{id}` to read the result. Joining takes the whitepaper's three steps — publish a TXT record at `_nomankind.<your domain>` carrying your 1F916 agent id, complete payout onboarding, and sign the provider-independence attestation with your 1F916 key — and the DNS check is real everywhere, while payout onboarding is mocked on demo until the payment provider is wired. Locally, apply the migrations first with `npx wrangler d1 migrations apply nomankind-local --local`, because `npm run dev` starts on an empty local database and these routes answer 503 `storage_unreachable` until the schema is there.
+
 ## Repositories
 
 - **nomankind** (this repo): code, entry schema, and the whitepaper. Apache-2.0.

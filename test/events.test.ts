@@ -93,11 +93,12 @@ function clone(log: readonly Event[]): Event[] {
 }
 
 describe("event types", () => {
-  it("names exactly the ten event types", () => {
+  it("names exactly the eleven event types", () => {
     expect(EVENT_TYPES).toEqual([
       "operator_registered",
       "operator_trusted",
       "operator_untrusted",
+      "agent_bound",
       "pool_snapshot",
       "entry_submitted",
       "assignment",
@@ -106,7 +107,7 @@ describe("event types", () => {
       "reconfirmation",
       "dispute_upheld",
     ]);
-    expect(new Set(EVENT_TYPES).size).toBe(10);
+    expect(new Set(EVENT_TYPES).size).toBe(11);
   });
 
   it("scopes six of them to an entry", () => {
@@ -121,6 +122,54 @@ describe("event types", () => {
     for (const type of ENTRY_SCOPED_TYPES) {
       expect(EVENT_TYPES).toContain(type);
     }
+  });
+
+  it("leaves the operator events, agent_bound included, unscoped", () => {
+    for (const type of [
+      "operator_registered",
+      "operator_trusted",
+      "operator_untrusted",
+      "agent_bound",
+      "pool_snapshot",
+    ] as const) {
+      expect(ENTRY_SCOPED_TYPES).not.toContain(type);
+    }
+  });
+});
+
+describe("agent_bound", () => {
+  const attestation = {
+    version: "nomankind-independence-v1",
+    signed_at: "2026-09-07T00:00:00Z",
+    signature: "c2ln",
+  };
+
+  it("appends with a null entry_id and carries the attestation verbatim", async () => {
+    const log = await appendEvent([], {
+      at: "2026-09-07T00:00:00Z",
+      type: "agent_bound",
+      entry_id: null,
+      payload: { operator: "example.com", agent: "1F916:abc", attestation },
+    });
+    expect(log).toHaveLength(1);
+    expect(log[0]!.entry_id).toBeNull();
+    expect(log[0]!.payload).toEqual({
+      operator: "example.com",
+      agent: "1F916:abc",
+      attestation,
+    });
+    await expect(verifyChain(log)).resolves.toEqual({ ok: true, length: 1 });
+  });
+
+  it("refuses a non-null entry_id", async () => {
+    await expect(
+      appendEvent([], {
+        at: "2026-09-07T00:00:00Z",
+        type: "agent_bound",
+        entry_id: ENTRY_ID,
+        payload: { operator: "example.com", agent: "1F916:abc", attestation },
+      }),
+    ).rejects.toThrow(/null entry_id/);
   });
 });
 

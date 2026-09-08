@@ -127,13 +127,25 @@ export async function headSeq(db: D1Like): Promise<number | null> {
  * `appendEvent`, and re-deriving a hash on the way in would let a storage bug
  * pass for a valid log.
  */
-export async function appendEvents(
+const EVENT_INSERT = `INSERT INTO events (${EVENT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+
+/**
+ * Check that a run of events continues the log from `at`, and build the
+ * statements that write it.
+ *
+ * The one place the chain rule is enforced. Every write that appends events
+ * goes through this, so the atomic registry writes below cannot drift into a
+ * weaker check than a plain append does: the first event's seq must be head + 1
+ * (or 0 on an empty log), its prev_hash must be the head's hash (or null), and
+ * each later event must link to the one before it. Nothing here hashes
+ * anything — the events arrive already sealed by `appendEvent`, and re-deriving
+ * a hash on the way in would let a storage bug pass for a valid log.
+ */
+function eventStatements(
   db: D1Like,
   events: readonly Event[],
-): Promise<void> {
-  if (events.length === 0) return;
-
-  const at = await head(db);
+  at: { seq: number; hash: string } | null,
+): D1LikeStatement[] {
   let expectedSeq = at === null ? 0 : at.seq + 1;
   let expectedPrev: string | null = at === null ? null : at.hash;
 
@@ -156,10 +168,9 @@ export async function appendEvents(
     expectedPrev = event.hash;
   }
 
-  const insert = `INSERT INTO events (${EVENT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)`;
-  const statements: D1LikeStatement[] = events.map((event) =>
+  return events.map((event) =>
     db
-      .prepare(insert)
+      .prepare(EVENT_INSERT)
       .bind(
         event.seq,
         event.at,
@@ -170,7 +181,14 @@ export async function appendEvents(
         event.hash,
       ),
   );
-  await db.batch(statements);
+}
+
+export async function appendEvents(
+  db: D1Like,
+  events: readonly Event[],
+): Promise<void> {
+  if (events.length === 0) return;
+  await db.batch(eventStatements(db, events, await head(db)));
 }
 
 /** One event by its position in the log. */
@@ -446,12 +464,12 @@ function toOperator(row: Row): OperatorRecord {
 
 const OPERATOR_COLUMNS = `id, maintainer, provider, registered_seq, operator_json`;
 
-/** Store one operator, replacing whatever was there. */
-export async function putOperator(
+/** The upsert that stores one operator row. */
+function operatorStatement(
   db: D1Like,
   operator: OperatorRecord,
-): Promise<void> {
-  await db
+): D1LikeStatement {
+  return db
     .prepare(
       `INSERT INTO operators (${OPERATOR_COLUMNS}) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
@@ -466,8 +484,15 @@ export async function putOperator(
       writeBoolean(operator.provider),
       operator.registeredSeq,
       writeJson(operator.details),
-    )
-    .run();
+    );
+}
+
+/** Store one operator, replacing whatever was there. */
+export async function putOperator(
+  db: D1Like,
+  operator: OperatorRecord,
+): Promise<void> {
+  await operatorStatement(db, operator).run();
 }
 
 /** One operator by id, or null. */
@@ -509,17 +534,55 @@ export interface AgentRecord {
   readonly registeredSeq: number;
 }
 
-/** Store one agent, replacing whatever was there. */
-export async function putAgent(db: D1Like, agent: AgentRecord): Promise<void> {
-  await db
+const AGENT_COLUMNS = `agent_id, operator_id, registered_seq`;
+
+function toAgent(row: Row): AgentRecord {
+  return {
+    agentId: readText(row, "agent_id"),
+    operatorId: readText(row, "operator_id"),
+    registeredSeq: readInteger(row, "registered_seq"),
+  };
+}
+
+/** The upsert that stores one agent row. */
+function agentStatement(db: D1Like, agent: AgentRecord): D1LikeStatement {
+  return db
     .prepare(
-      `INSERT INTO agents (agent_id, operator_id, registered_seq) VALUES (?, ?, ?)
+      `INSERT INTO agents (${AGENT_COLUMNS}) VALUES (?, ?, ?)
        ON CONFLICT (agent_id) DO UPDATE SET
          operator_id = excluded.operator_id,
          registered_seq = excluded.registered_seq`,
     )
-    .bind(agent.agentId, agent.operatorId, agent.registeredSeq)
-    .run();
+    .bind(agent.agentId, agent.operatorId, agent.registeredSeq);
+}
+
+/** Store one agent, replacing whatever was there. */
+export async function putAgent(db: D1Like, agent: AgentRecord): Promise<void> {
+  await agentStatement(db, agent).run();
+}
+
+/**
+ * The agents bound to one operator, oldest binding first.
+ *
+ * Section 5: "Every agent under an operator counts as one for validation", so
+ * this is the read behind every rule that resolves an operator's agents. The
+ * caller's limit is explicit and there is no default: this module holds no page
+ * size (src/policy.ts holds LIST_PAGE_LIMIT). Served by the
+ * (operator_id, registered_seq) index.
+ */
+export async function agentsForOperator(
+  db: D1Like,
+  operatorId: string,
+  limit: number,
+): Promise<AgentRecord[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${AGENT_COLUMNS} FROM agents
+       WHERE operator_id = ? ORDER BY registered_seq LIMIT ?`,
+    )
+    .bind(operatorId, limit)
+    .all<Row>();
+  return rows.results.map(toAgent);
 }
 
 /**
@@ -537,6 +600,56 @@ export async function operatorForAgent(
     .bind(agentId)
     .first<Row>();
   return row === null ? null : readText(row, "operator_id");
+}
+
+// ---------------------------------------------------------------------------
+// Registry writes
+// ---------------------------------------------------------------------------
+
+/**
+ * Register an operator: append its events and write its rows, atomically.
+ *
+ * Section 5, Identity and operators, and Section 11's joining steps: the
+ * binding is sealed into the log, and only then can the agent validate. The
+ * events are the record and the rows are the index into it, so a row without
+ * its event would be a registration nobody can verify offline, and an event
+ * without its row would be a registration the Worker cannot see. One `batch`
+ * makes both impossible: D1 applies it whole or not at all.
+ *
+ * The caller passes events already sealed by `appendEvent` — the
+ * `operator_registered` and the `agent_bound`, in that order — and they are
+ * checked against the log's head by exactly the rule a plain append uses, so a
+ * run that does not continue the chain is refused before anything is written.
+ */
+export async function registerOperator(
+  db: D1Like,
+  input: {
+    readonly events: readonly Event[];
+    readonly operator: OperatorRecord;
+    readonly agent: AgentRecord;
+  },
+): Promise<void> {
+  const statements = eventStatements(db, input.events, await head(db));
+  statements.push(operatorStatement(db, input.operator));
+  statements.push(agentStatement(db, input.agent));
+  await db.batch(statements);
+}
+
+/**
+ * Trust an operator: append the `operator_trusted` event and replace its row,
+ * atomically, for the same reason `registerOperator` is atomic.
+ *
+ * Section 11: trusted status is granted once at genesis and otherwise earned,
+ * and either way the event is what grants it. The row here carries whatever the
+ * caller recomputed alongside it; nothing about trust is derived in storage.
+ */
+export async function trustOperator(
+  db: D1Like,
+  input: { readonly event: Event; readonly operator: OperatorRecord },
+): Promise<void> {
+  const statements = eventStatements(db, [input.event], await head(db));
+  statements.push(operatorStatement(db, input.operator));
+  await db.batch(statements);
 }
 
 // ---------------------------------------------------------------------------
