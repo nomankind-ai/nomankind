@@ -228,6 +228,37 @@ export const MODEL_PROVIDER_DOMAINS: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * Lifecycle of an entry, Validate: "The draw is a deterministic function of a
+ * public randomness beacon's output (a beacon like drand [5]), the entry id,
+ * and a published snapshot of the eligible pool."
+ *
+ * The paper names drand and stops there, so which drand chain the draw reads is
+ * the maintainer's published choice, exactly as MODEL_PROVIDER_DOMAINS is: it
+ * moves only by a later decision, and it is pinned here rather than in the
+ * adapter so an offline reader can recompute a draw years later from the same
+ * chain the draw used. `chain_hash` is quicknet's, `genesis_time` its first
+ * round's UNIX second and `period_seconds` its round interval, which together
+ * give every round its time without asking the network.
+ *
+ * Not a whitepaper number. The maintainer's published policy; it moves only by
+ * a later decision.
+ */
+export const BEACON: Readonly<{
+  endpoint: string;
+  beacon_id: string;
+  chain_hash: string;
+  genesis_time: number;
+  period_seconds: number;
+}> = Object.freeze({
+  endpoint: "https://api.drand.sh",
+  beacon_id: "quicknet",
+  chain_hash:
+    "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+  genesis_time: 1692803367,
+  period_seconds: 3,
+});
+
+/**
  * The most records one list request returns. The first page-size number in the
  * system, so it lives here with every other published amount rather than
  * beside the query that uses it; src/storage/repository.ts holds no default
@@ -265,4 +296,5 @@ export const POLICY = Object.freeze({
   NONCE_RETENTION_SECONDS,
   MODEL_PROVIDER_DOMAINS,
   LIST_PAGE_LIMIT,
+  BEACON,
 });

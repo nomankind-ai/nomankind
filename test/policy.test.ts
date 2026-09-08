@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ASSIGNMENT_WINDOW_HOURS,
+  BEACON,
   CAPTURE_MAX_BYTES,
   CONTRIBUTOR_SHARE_PERCENT,
   FAILURE_REPORT_THRESHOLD,
@@ -71,6 +72,7 @@ const EXPECTED_POLICY_KEYS = [
   "NONCE_RETENTION_SECONDS",
   "MODEL_PROVIDER_DOMAINS",
   "LIST_PAGE_LIMIT",
+  "BEACON",
 ];
 
 describe("policy numbers", () => {
@@ -201,6 +203,26 @@ describe("policy numbers", () => {
     expect(LIST_PAGE_LIMIT).toBeGreaterThan(0);
   });
 
+  it("pins the drand chain the draw reads", () => {
+    expect(Object.isFrozen(BEACON)).toBe(true);
+    expect(BEACON.endpoint).toBe("https://api.drand.sh");
+    expect(BEACON.beacon_id).toBe("quicknet");
+    expect(BEACON.chain_hash).toBe(
+      "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
+    );
+    // The chain hash is a SHA-256, written the way every hash in this system is.
+    expect(BEACON.chain_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(BEACON.genesis_time).toBe(1692803367);
+    expect(BEACON.period_seconds).toBe(3);
+    for (const value of [BEACON.genesis_time, BEACON.period_seconds]) {
+      expect(Number.isInteger(value)).toBe(true);
+      expect(value).toBeGreaterThan(0);
+    }
+    // The endpoint is an origin and nothing else: the reader appends the chain
+    // path to it, so a trailing slash or a path here would build a bad URL.
+    expect(new URL(BEACON.endpoint).origin).toBe(BEACON.endpoint);
+  });
+
   it("collects every constant in a frozen POLICY object", () => {
     expect(Object.isFrozen(POLICY)).toBe(true);
     expect(Object.keys(POLICY).sort()).toEqual([...EXPECTED_POLICY_KEYS].sort());
@@ -243,5 +265,6 @@ describe("policy numbers", () => {
     expect(POLICY.NONCE_RETENTION_SECONDS).toBe(NONCE_RETENTION_SECONDS);
     expect(POLICY.MODEL_PROVIDER_DOMAINS).toBe(MODEL_PROVIDER_DOMAINS);
     expect(POLICY.LIST_PAGE_LIMIT).toBe(LIST_PAGE_LIMIT);
+    expect(POLICY.BEACON).toBe(BEACON);
   });
 });

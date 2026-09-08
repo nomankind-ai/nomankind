@@ -173,6 +173,27 @@ describe("wrangler.jsonc routes and hostnames", () => {
   });
 });
 
+describe("wrangler.jsonc scheduled sweep", () => {
+  /**
+   * The sweep (src/worker/sweep.ts) is the one thing this system does on a
+   * clock rather than on a request, so how often it runs is a deploy fact and is
+   * pinned here for the same reason the routes are. The cadence is NOT a policy
+   * number: it says how often the Worker looks, never how long an assigned
+   * validator has (ASSIGNMENT_WINDOW_HOURS, src/policy.ts).
+   */
+  it("runs every five minutes", () => {
+    expect(config.triggers).toEqual({ crons: ["*/5 * * * *"] });
+  });
+
+  it("states the schedule once, because triggers are inherited", () => {
+    // Verified against wrangler's own config reader: `unstable_readConfig` with
+    // --env demo and --env production both resolve this one block, so a second
+    // copy per environment would be a second place for it to drift.
+    expect(config.env.demo.triggers).toBeUndefined();
+    expect(config.env.production.triggers).toBeUndefined();
+  });
+});
+
 describe("workflow triggers", () => {
   it("deploys demo on merge to main and nothing else", () => {
     expect(demoYml).toMatch(/on:\n {2}push:\n {4}branches: \[main\]\n/);
