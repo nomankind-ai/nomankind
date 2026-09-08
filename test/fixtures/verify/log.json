@@ -1,0 +1,268 @@
+{
+  "as_of": "2026-09-10T00:00:00Z",
+  "events": [
+    {
+      "seq": 0,
+      "at": "2026-09-08T00:00:00.000Z",
+      "type": "operator_registered",
+      "entry_id": null,
+      "payload": {
+        "operator": "nomankind",
+        "maintainer": true
+      },
+      "prev_hash": null,
+      "hash": "sha256:5020929990b18a085667e63215f489e226201c52f292f2e329b61a42734b02cc"
+    },
+    {
+      "seq": 1,
+      "at": "2026-09-08T00:01:00.000Z",
+      "type": "operator_registered",
+      "entry_id": null,
+      "payload": {
+        "operator": "op_lattice",
+        "maintainer": false
+      },
+      "prev_hash": "sha256:5020929990b18a085667e63215f489e226201c52f292f2e329b61a42734b02cc",
+      "hash": "sha256:42a4470f26a18abe5fa3f30ca65b51db42295030fd5aac3354c9142a61fbbd85"
+    },
+    {
+      "seq": 2,
+      "at": "2026-09-08T00:02:00.000Z",
+      "type": "operator_registered",
+      "entry_id": null,
+      "payload": {
+        "operator": "op_outside1",
+        "maintainer": false
+      },
+      "prev_hash": "sha256:42a4470f26a18abe5fa3f30ca65b51db42295030fd5aac3354c9142a61fbbd85",
+      "hash": "sha256:b912ccee561dfb98023974c528ee90807334be5d230f306338d51234d396222d"
+    },
+    {
+      "seq": 3,
+      "at": "2026-09-08T00:03:00.000Z",
+      "type": "operator_registered",
+      "entry_id": null,
+      "payload": {
+        "operator": "op_outside2",
+        "maintainer": false
+      },
+      "prev_hash": "sha256:b912ccee561dfb98023974c528ee90807334be5d230f306338d51234d396222d",
+      "hash": "sha256:85b10d54526fcea438b28906ed9b57766923efb5a0d74165a259461c0cdda5c7"
+    },
+    {
+      "seq": 4,
+      "at": "2026-09-08T00:04:00.000Z",
+      "type": "operator_registered",
+      "entry_id": null,
+      "payload": {
+        "operator": "op_outside3",
+        "maintainer": false
+      },
+      "prev_hash": "sha256:85b10d54526fcea438b28906ed9b57766923efb5a0d74165a259461c0cdda5c7",
+      "hash": "sha256:9c6288c68524fff3a473de5e834ec9bc643ae80e7915db979da47173eb3a8493"
+    },
+    {
+      "seq": 5,
+      "at": "2026-09-08T00:05:00.000Z",
+      "type": "operator_trusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "op_outside1"
+      },
+      "prev_hash": "sha256:9c6288c68524fff3a473de5e834ec9bc643ae80e7915db979da47173eb3a8493",
+      "hash": "sha256:cbaef2360dbdadafc33ce768959859d7837d7b3fa32561ecb2f90f3463839fad"
+    },
+    {
+      "seq": 6,
+      "at": "2026-09-08T00:06:00.000Z",
+      "type": "operator_trusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "op_outside2"
+      },
+      "prev_hash": "sha256:cbaef2360dbdadafc33ce768959859d7837d7b3fa32561ecb2f90f3463839fad",
+      "hash": "sha256:3b67f73226b7bc3ebbbcb3339c685e74afe18ce5e9f47354f00ca44361e571ae"
+    },
+    {
+      "seq": 7,
+      "at": "2026-09-08T00:07:00.000Z",
+      "type": "operator_trusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "op_outside3"
+      },
+      "prev_hash": "sha256:3b67f73226b7bc3ebbbcb3339c685e74afe18ce5e9f47354f00ca44361e571ae",
+      "hash": "sha256:cc8e85b9d91a71f87776ff26eb90ba8cd1f72918792c1c9524e18b713dcded3b"
+    },
+    {
+      "seq": 8,
+      "at": "2026-09-08T00:08:00.000Z",
+      "type": "pool_snapshot",
+      "entry_id": null,
+      "payload": {
+        "operators": [
+          "op_outside1",
+          "op_outside2",
+          "op_outside3"
+        ]
+      },
+      "prev_hash": "sha256:cc8e85b9d91a71f87776ff26eb90ba8cd1f72918792c1c9524e18b713dcded3b",
+      "hash": "sha256:c392beffc8e158ece6c48e96ba9bf731a82fbdbe990d930810d8edf13c7566ff"
+    },
+    {
+      "seq": 9,
+      "at": "2026-09-08T00:09:00.000Z",
+      "type": "entry_submitted",
+      "entry_id": "nmk_01M9VERIFIED",
+      "payload": {
+        "core": {
+          "id": "nmk_01M9VERIFIED",
+          "subject": "openai/gpt-5",
+          "category": "pricing",
+          "claim": "gpt-5 input price is $2.50 per million tokens",
+          "before": "$3.00 per million input tokens",
+          "after": "$2.50 per million input tokens",
+          "effective_at": "2026-09-01",
+          "evidence_tier": "stated",
+          "evidence": null,
+          "observation": null,
+          "citation": "https://platform.openai.com/docs/pricing",
+          "snapshot_hash": "sha256:ed7da6bd834358f107147c766ead53b643930e282f2d77e80e73ae3cac384076",
+          "norm_version": "norm-v1.2",
+          "supersedes": null,
+          "author": "1F916:O3CT_eVhQoE3a2GygHGXDqTiVzhgwN_n9kQHlFfYjCY",
+          "author_operator": "op_lattice",
+          "submitted_at": "2026-09-08T00:09:00.000Z"
+        },
+        "signature": "tVoZDDSqlartWmWrftY79WACYv6ImK5El30/QKyEvV3LIHZXrdI++c37wNbWi/s7V6YiV1qjdKksIskR+EB1DA=="
+      },
+      "prev_hash": "sha256:c392beffc8e158ece6c48e96ba9bf731a82fbdbe990d930810d8edf13c7566ff",
+      "hash": "sha256:3a06f78904acc6964f2cfb1dd83407f725b4d39bb143d1e600b5f4f6ce792c72"
+    },
+    {
+      "seq": 10,
+      "at": "2026-09-08T00:10:00.000Z",
+      "type": "validation",
+      "entry_id": "nmk_01M9VERIFIED",
+      "payload": {
+        "record": {
+          "agent": "1F916:pXl78oJ6WgzN7kOzeIEMy_FaVukGxwVNApP0QocNEJw",
+          "operator": "op_outside1",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:ed7da6bd834358f107147c766ead53b643930e282f2d77e80e73ae3cac384076",
+          "assigned_random": false,
+          "test_accepted": null,
+          "reproduction": null,
+          "observation": null,
+          "signed_at": "2026-09-08T00:10:00.000Z"
+        },
+        "signature": "06vQyEiUhz1x2TzmDu5HDwC7bLHRbBU_gF5e0TyP2_VMlc9aU7QTUY0QDSKRKL7g-CPNeVPRGPSCI8-UW9wPAg"
+      },
+      "prev_hash": "sha256:3a06f78904acc6964f2cfb1dd83407f725b4d39bb143d1e600b5f4f6ce792c72",
+      "hash": "sha256:28662ef41076c65d92c47ba8e75cd1106c28959a67cd12b16ad709fca4c2913c"
+    },
+    {
+      "seq": 11,
+      "at": "2026-09-08T00:11:00.000Z",
+      "type": "validation",
+      "entry_id": "nmk_01M9VERIFIED",
+      "payload": {
+        "record": {
+          "agent": "1F916:akdWxnqrmtwXbsVoogvb6-ZZva94BHTQsEnY5aj7vNc",
+          "operator": "op_outside2",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:ed7da6bd834358f107147c766ead53b643930e282f2d77e80e73ae3cac384076",
+          "assigned_random": false,
+          "test_accepted": null,
+          "reproduction": null,
+          "observation": null,
+          "signed_at": "2026-09-08T00:11:00.000Z"
+        },
+        "signature": "9zP05oeeL3rJiZ9Rj1W0jjJrAdUXR8_ARvoicVVU_QL985OGOUUlUfhACjdD8y-T5dI-nNpZJIdsuXvIJO6LAQ"
+      },
+      "prev_hash": "sha256:28662ef41076c65d92c47ba8e75cd1106c28959a67cd12b16ad709fca4c2913c",
+      "hash": "sha256:8e95c3aff5baeebce36ab276fcf7fb059eb5dc7fad21ce691fcef021570a8376"
+    },
+    {
+      "seq": 12,
+      "at": "2026-09-08T00:12:00.000Z",
+      "type": "entry_submitted",
+      "entry_id": "nmk_01M9DRAFT",
+      "payload": {
+        "core": {
+          "id": "nmk_01M9DRAFT",
+          "subject": "anthropic/claude-4",
+          "category": "pricing",
+          "claim": "claude-4 input price is $3.00 per million tokens",
+          "before": "$4.00 per million input tokens",
+          "after": "$3.00 per million input tokens",
+          "effective_at": "2026-09-01",
+          "evidence_tier": "stated",
+          "evidence": null,
+          "observation": null,
+          "citation": "https://platform.openai.com/docs/pricing",
+          "snapshot_hash": "sha256:ed7da6bd834358f107147c766ead53b643930e282f2d77e80e73ae3cac384076",
+          "norm_version": "norm-v1.2",
+          "supersedes": null,
+          "author": "1F916:O3CT_eVhQoE3a2GygHGXDqTiVzhgwN_n9kQHlFfYjCY",
+          "author_operator": "op_lattice",
+          "submitted_at": "2026-09-08T00:12:00.000Z"
+        },
+        "signature": "VDavtaPLI6sBuqUs4LqL7DCFDcBke2Eic0Zn1K/d8oqz1a/idQS1pfnZNzFA4ONrR3T3XQyJRNQQlB5JU8KrDg=="
+      },
+      "prev_hash": "sha256:8e95c3aff5baeebce36ab276fcf7fb059eb5dc7fad21ce691fcef021570a8376",
+      "hash": "sha256:bfe54a638c4bc0d57122fbd9ff0294c42b5b66216eca6d40860e3e816c93baf0"
+    }
+  ],
+  "registry": {
+    "agents": {
+      "1F916:O3CT_eVhQoE3a2GygHGXDqTiVzhgwN_n9kQHlFfYjCY": "op_lattice",
+      "1F916:pXl78oJ6WgzN7kOzeIEMy_FaVukGxwVNApP0QocNEJw": "op_outside1",
+      "1F916:akdWxnqrmtwXbsVoogvb6-ZZva94BHTQsEnY5aj7vNc": "op_outside2",
+      "1F916:MJHi8_b0KUi2MhwhH6pcJGgX-Gf6tomK-Qea_LA0sQk": "op_outside3"
+    },
+    "operators": {
+      "nomankind": {
+        "maintainer": true,
+        "provider": false
+      },
+      "op_lattice": {
+        "maintainer": false,
+        "provider": false
+      },
+      "op_outside1": {
+        "maintainer": false,
+        "provider": false
+      },
+      "op_outside2": {
+        "maintainer": false,
+        "provider": false
+      },
+      "op_outside3": {
+        "maintainer": false,
+        "provider": false
+      }
+    }
+  },
+  "seals": [
+    {
+      "seq": 0,
+      "first_seq": 0,
+      "last_seq": 11,
+      "size": 12,
+      "root": "sha256:eae4ceb3391d305f829b62b94770ad1bf58c33c90a5db4928720648d8eab8ebd",
+      "sealed_at": "2026-09-08T00:12:00.000Z",
+      "prev_hash": null,
+      "hash": "sha256:b78b718079b38e17935bbd8bb477bdce9dc29a1c06315e606822a305f42e8ce5",
+      "witnesses": []
+    }
+  ],
+  "captures": {
+    "sha256:ed7da6bd834358f107147c766ead53b643930e282f2d77e80e73ae3cac384076": {
+      "content_type": "text/html; charset=utf-8",
+      "body_base64": "PCFkb2N0eXBlIGh0bWw+CjxodG1sPgogIDxoZWFkPjx0aXRsZT5ncHQtNSBwcmljaW5nPC90aXRsZT48L2hlYWQ+CiAgPGJvZHk+CiAgICA8bmF2PjxhIGhyZWY9Ii9kb2NzIj5Eb2NzPC9hPiA8YSBocmVmPSIvcHJpY2luZyI+UHJpY2luZzwvYT48L25hdj4KICAgIDxtYWluPgogICAgICA8aDE+UHJpY2luZzwvaDE+CiAgICAgIDxwPmdwdC01IGlucHV0OiAkMi41MCBwZXIgbWlsbGlvbiB0b2tlbnM8L3A+CiAgICA8L21haW4+CiAgPC9ib2R5Pgo8L2h0bWw+"
+    }
+  }
+}

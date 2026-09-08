@@ -17,7 +17,7 @@
  * document governs and this module gets fixed (D-012).
  */
 
-import entrySchema from "../schema/nomankind-entry-schema.json";
+import entrySchema from "../schema/nomankind-entry-schema.json" with { type: "json" };
 
 import { canonicalize, sha256Hex } from "./hash.js";
 

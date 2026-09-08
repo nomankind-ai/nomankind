@@ -10,7 +10,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import type { ErrorObject, ValidateFunction } from "ajv";
 import addFormats from "ajv-formats";
 
-import entrySchema from "../schema/nomankind-entry-schema.json";
+import entrySchema from "../schema/nomankind-entry-schema.json" with { type: "json" };
 
 /**
  * A log entry, as defined by the entry schema.
