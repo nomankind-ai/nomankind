@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "dev": "wrangler dev",
     "keygen": "npm run build --silent && node dist/cli/keygen.js",
     "test": "vitest run",
     "test:watch": "vitest",

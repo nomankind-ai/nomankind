@@ -1,0 +1,60 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nomankind",
+  // Written by another builder in M10; its absence does not affect the
+  // bindings-only proxy the storage tests open through getPlatformProxy.
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-09-07",
+  // No nodejs_compat: the kernel runs on WebCrypto only, and nothing under
+  // src/ imports a node: module. Keeping the flag off makes that a build error
+  // rather than a surprise in production.
+  "observability": {
+    "enabled": true
+  },
+  // The local (default) environment: the database miniflare creates for tests
+  // and `wrangler dev`. Nothing here reaches Cloudflare.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nomankind-local",
+      // PLACEHOLDER: local D1 never reads this id. M11 leaves it as is.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "local"
+  },
+  "env": {
+    "demo": {
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "nomankind-demo",
+          // PLACEHOLDER FOR M11: replace with the real demo D1 id from
+          // `wrangler d1 create nomankind-demo` before the first deploy.
+          "database_id": "REPLACE_IN_M11_DEMO_DATABASE_ID",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "vars": {
+        "ENVIRONMENT": "demo"
+      }
+    },
+    "production": {
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "nomankind-production",
+          // PLACEHOLDER FOR M11: replace with the real production D1 id from
+          // `wrangler d1 create nomankind-production` before the first deploy.
+          "database_id": "REPLACE_IN_M11_PRODUCTION_DATABASE_ID",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "vars": {
+        "ENVIRONMENT": "production"
+      }
+    }
+  }
+}
