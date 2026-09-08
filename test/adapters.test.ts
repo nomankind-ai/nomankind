@@ -145,6 +145,33 @@ describe("DohResolver", () => {
     expect(calls[0].init?.headers).toEqual({ accept: "application/dns-json" });
   });
 
+  it("never calls fetch with the resolver itself as the receiver", async () => {
+    // workerd's own fetch throws exactly this when it is called on anything but
+    // the global object, and Node's does not — which is why a green suite said
+    // nothing until a real registration answered dns_unavailable under
+    // wrangler for a TXT record that resolves fine (the M13 lesson).
+    const platformFetch = function (this: unknown): Promise<Response> {
+      if (this !== undefined && this !== globalThis) {
+        throw new TypeError("Illegal invocation");
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            Status: DNS_RCODE_NOERROR,
+            Answer: [{ type: DNS_TYPE_TXT, data: `"${AGENT}"` }],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+    } as unknown as typeof fetch;
+
+    // The record, not a swallowed unavailable: the call went through as written.
+    expect(await new DohResolver(platformFetch).txt("_nomankind.example.org")).toEqual({
+      ok: true,
+      values: [AGENT],
+    });
+  });
+
   it("asks the endpoint it was given", async () => {
     const { fetch, calls } = cannedFetch({ Status: DNS_RCODE_NXDOMAIN });
     await new DohResolver(fetch, "https://dns.example/query").txt("_nomankind.x.example");
