@@ -10,6 +10,7 @@
 
 import type { D1Like } from "../storage/d1.js";
 import type { R2Like } from "../storage/r2.js";
+import type { SweeperNamespace } from "./sweeper.js";
 
 export type Env = {
   DB: D1Like;
@@ -31,4 +32,15 @@ export type Env = {
    * refuses genesis naming outright.
    */
   MAINTAINER_AGENT_ID: string;
+  /**
+   * The sweep's timer (src/worker/sweeper.ts): the Durable Object namespace
+   * holding the single `sweeper` instance, whose alarm runs the sweep every
+   * SWEEP_INTERVAL_MINUTES.
+   *
+   * Optional, and read as "no timer to arm" when it is absent: the tests and
+   * the bindings-only platform proxy hold an env without it, and a Worker that
+   * refused to serve a request because a timer was not bound would be trading a
+   * working door for a missing doorbell.
+   */
+  SWEEPER?: SweeperNamespace;
 };

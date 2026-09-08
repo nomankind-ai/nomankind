@@ -194,6 +194,50 @@ describe("wrangler.jsonc scheduled sweep", () => {
   });
 });
 
+describe("wrangler.jsonc sweeper durable object", () => {
+  /**
+   * The sweep's own timer (src/worker/sweeper.ts). The cron above never fired
+   * on the demo Worker across an hour and six deploys, so the cadence moved
+   * onto a Durable Object alarm, which is a timer this project controls. Pinned
+   * per environment because a binding that exists only on local is a timer that
+   * exists only on a laptop.
+   */
+  const binding = { name: "SWEEPER", class_name: "Sweeper" };
+
+  for (const [name, section] of [
+    ["local", () => config],
+    ["demo", () => config.env.demo],
+    ["production", () => config.env.production],
+  ] as const) {
+    it(`binds SWEEPER to the Sweeper class in ${name}`, () => {
+      expect(section().durable_objects).toEqual({ bindings: [binding] });
+    });
+  }
+
+  it("repeats the binding per environment, because it is not inherited", () => {
+    // The config schema says so in as many words: durable_objects "is not
+    // automatically inherited from the top level environment, and so must be
+    // specified in every named environment". Verified against wrangler's own
+    // `unstable_readConfig` for --env demo and --env production.
+    expect(config.durable_objects).toBeDefined();
+    expect(config.env.demo.durable_objects).toBeDefined();
+    expect(config.env.production.durable_objects).toBeDefined();
+  });
+
+  it("creates the class once, on the SQLite backend the free plan allows", () => {
+    expect(config.migrations).toEqual([
+      { tag: "v1", new_sqlite_classes: ["Sweeper"] },
+    ]);
+  });
+
+  it("states the migration once, because migrations are inherited", () => {
+    // Verified the same way the trigger inheritance above was: --env demo and
+    // --env production both resolve this one block.
+    expect(config.env.demo.migrations).toBeUndefined();
+    expect(config.env.production.migrations).toBeUndefined();
+  });
+});
+
 describe("workflow triggers", () => {
   it("deploys demo on merge to main and nothing else", () => {
     expect(demoYml).toMatch(/on:\n {2}push:\n {4}branches: \[main\]\n/);

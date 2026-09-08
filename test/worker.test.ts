@@ -111,6 +111,7 @@ describe("worker against a real D1 binding", () => {
     const response = await handler.fetch(
       new Request("https://nomankind.ai/health"),
       env,
+      noopContext(),
     );
 
     expect(response.status).toBe(200);
@@ -120,7 +121,38 @@ describe("worker against a real D1 binding", () => {
       storage: "ok",
     });
   });
+
+  it("arms the sweep's timer on the way through", async () => {
+    // Every request arms the Durable Object alarm if nothing is armed, which is
+    // what makes the timer self-healing after the cron never fired. The env the
+    // platform proxy hands back has no SWEEPER binding, so one is added here.
+    const urls: string[] = [];
+    const stub = {
+      fetch: (input: string | Request): Promise<Response> => {
+        urls.push(typeof input === "string" ? input : input.url);
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      },
+    };
+    const promises: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (promise: Promise<unknown>) => promises.push(promise) };
+
+    const response = await handler.fetch(
+      new Request("https://nomankind.ai/health"),
+      { ...env, SWEEPER: { idFromName: (name: string) => name, get: () => stub } },
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(promises).toHaveLength(1);
+    await promises[0];
+    expect(urls).toEqual(["https://sweeper/ensure"]);
+  });
 });
+
+/** An execution context that keeps nothing: the deferred work is not the point. */
+function noopContext(): { waitUntil: (promise: Promise<unknown>) => void } {
+  return { waitUntil: () => undefined };
+}
 
 /** A D1Like where every call into the database fails, however it is reached. */
 function unreachableDatabase(): D1Like {

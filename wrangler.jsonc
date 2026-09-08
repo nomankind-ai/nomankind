@@ -31,6 +31,38 @@
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
+  // The sweep's own timer (src/worker/sweeper.ts), and the reason it exists:
+  // the cron trigger above was registered on the demo Worker and watched for an
+  // hour across six deploys and a re-add by hand without firing once — no
+  // scheduled invocation and no error. A Durable Object alarm is a real timer
+  // on the free plan and it is ours: the object arms it, the platform delivers
+  // it, and the object arms the next one before it returns. Any request to the
+  // Worker arms it if it is not armed.
+  //
+  // The cron stays as a second, harmless timer: the sweep is idempotent, so two
+  // of them are two chances to catch up rather than a race.
+  //
+  // The cadence is SWEEP_INTERVAL_MINUTES in src/policy.ts, which the class
+  // reads; it is operational and not a rule of the paper.
+  //
+  // `migrations` is inheritable, so the one block below covers every
+  // environment; `durable_objects` is NOT (the config schema says so in as many
+  // words), so the binding is repeated in env.demo and env.production.
+  "migrations": [
+    {
+      "tag": "v1",
+      // SQLite-backed, which is the storage class the free plan allows.
+      "new_sqlite_classes": ["Sweeper"]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SWEEPER",
+        "class_name": "Sweeper"
+      }
+    ]
+  },
   // The local (default) environment: the database miniflare creates for tests
   // and `wrangler dev`. Nothing here reaches Cloudflare.
   "d1_databases": [
@@ -70,6 +102,15 @@
           "migrations_dir": "migrations"
         }
       ],
+      // Repeated because durable_objects is not inherited from the top level.
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "SWEEPER",
+            "class_name": "Sweeper"
+          }
+        ]
+      },
       // The demo archive; the bucket exists, created 2026-09-08 in region ENAM.
       "r2_buckets": [
         {
@@ -107,6 +148,15 @@
           "migrations_dir": "migrations"
         }
       ],
+      // Repeated because durable_objects is not inherited from the top level.
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "SWEEPER",
+            "class_name": "Sweeper"
+          }
+        ]
+      },
       // The production archive; the bucket exists, created 2026-09-08 in ENAM.
       "r2_buckets": [
         {

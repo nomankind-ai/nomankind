@@ -39,7 +39,14 @@ import { handleEvents } from "./events.js";
 import { handleRegistry, json } from "./registry.js";
 import { handleSubmit } from "./submit.js";
 import { runSweep } from "./sweep.js";
+import { ensureSweeper, type ExecutionContextLike } from "./sweeper.js";
 import { handleValidate } from "./validate.js";
+
+/**
+ * The sweep's timer, re-exported from the entry point because that is where
+ * wrangler looks for a Durable Object class named in wrangler.jsonc.
+ */
+export { Sweeper } from "./sweeper.js";
 
 /**
  * Ask D1 the cheapest question there is.
@@ -148,6 +155,12 @@ export interface ScheduledContext {
  * real clock and the real adapters: there is no argument a request could carry
  * that swaps either out.
  *
+ * Every request arms the sweep's timer before it is served. `ensureSweeper` is
+ * a `waitUntil` into the Sweeper Durable Object, which sets an alarm only when
+ * none is set, so the cost is one cheap call and the benefit is that a timer
+ * whose chain of alarms was ever broken is repaired by the next visitor. It
+ * never throws and the response never waits on it.
+ *
  * `scheduled` is the cron trigger's door (wrangler.jsonc names the cadence). It
  * reads the instant off the controller, which is the platform's own clock for
  * this run and is read exactly once, and constructs the real drand reader: the
@@ -156,8 +169,14 @@ export interface ScheduledContext {
  * to `waitUntil`, so a run that fails is a failed run the platform can see.
  */
 export default {
-  fetch: (request: Request, env: Env): Promise<Response> =>
-    handleRequest(request, env),
+  fetch: (
+    request: Request,
+    env: Env,
+    ctx: ExecutionContextLike,
+  ): Promise<Response> => {
+    ensureSweeper(env, ctx);
+    return handleRequest(request, env);
+  },
   scheduled: async (
     controller: ScheduledController,
     env: Env,

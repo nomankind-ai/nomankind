@@ -18,7 +18,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,7 +51,20 @@ function bundle(entry?: string): string {
 
   const args = [WRANGLER, "deploy"];
   if (entry !== undefined) {
-    args.push(entry);
+    // The barrel is not a Worker: it has no default export, so wrangler builds
+    // it in service-worker format, and a service-worker script may not carry a
+    // Durable Object binding (the sweep's timer, wrangler.jsonc). The bindings
+    // are beside the point here — this bundle exists to read the emitted module
+    // graph — so it is built against a config that declares none.
+    // The name and date are wrangler's two required fields and nothing more:
+    // neither reaches the emitted JavaScript this test reads, so neither has to
+    // track wrangler.jsonc's own.
+    const configPath = join(outDir, "wrangler.jsonc");
+    writeFileSync(
+      configPath,
+      JSON.stringify({ name: "nomankind-kernel", compatibility_date: "2026-09-07" }),
+    );
+    args.push(join(ROOT, entry), "--config", configPath);
   }
   args.push("--dry-run", "--outdir", outDir);
 
