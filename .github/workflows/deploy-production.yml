@@ -22,7 +22,11 @@ jobs:
       - name: Guard the tag
         run: |
           set -euo pipefail
-          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" != "tag" ]; then
+          # checkout recreates the tag ref pointing straight at the commit, so
+          # the workspace copy is always lightweight: fetch the real ref from
+          # origin before asking what kind of object it is.
+          git fetch --force origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          if [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" != "tag" ]; then
             echo "refusing to deploy: $GITHUB_REF_NAME is not an annotated tag"
             exit 1
           fi

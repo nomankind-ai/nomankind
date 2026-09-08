@@ -228,6 +228,24 @@ describe("workflow commands", () => {
     });
   }
 
+  /**
+   * actions/checkout recreates the tag ref pointing at the commit, so the
+   * workspace copy of an annotated tag is lightweight and `git cat-file -t`
+   * against it can never say "tag". The guard has to fetch the real ref from
+   * origin first; pinned so a future edit cannot quietly drop the fetch and
+   * turn the annotated-tag rule back into an unpassable one.
+   */
+  it("fetches the tag from origin before testing it", () => {
+    const fetch = productionYml.indexOf(
+      'git fetch --force origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"',
+    );
+    const test = productionYml.indexOf(
+      '[ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" != "tag" ]',
+    );
+    expect(fetch).toBeGreaterThan(-1);
+    expect(test).toBeGreaterThan(fetch);
+  });
+
   it("uploads a demo version for previews", () => {
     expect(previewYml).toContain("versions upload --env demo");
     expect(previewYml).toContain(
