@@ -130,6 +130,7 @@ beforeAll(async () => {
 
   env = {
     DB: store.db,
+    CAPTURES: store.captures,
     ENVIRONMENT: "local",
     MAINTAINER_AGENT_ID: maintainer.agentId,
   };
@@ -474,6 +475,7 @@ describe("with no maintainer configured", () => {
     unconfigured = await openTestDatabase();
     unconfiguredEnv = {
       DB: unconfigured.db,
+      CAPTURES: unconfigured.captures,
       ENVIRONMENT: "local",
       MAINTAINER_AGENT_ID: "",
     };

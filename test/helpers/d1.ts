@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getPlatformProxy } from "wrangler";
 import type { D1Like } from "../../src/storage/d1.js";
+import type { R2Like } from "../../src/storage/r2.js";
 import {
   applyMigrations,
   migrationsInOrder,
@@ -39,9 +40,16 @@ export function loadMigrations(directory: string = MIGRATIONS_DIR): Migration[] 
   return migrationsInOrder(files);
 }
 
-/** An open database and the handle that shuts its child process down. */
+/** The bindings a test opens, and the handle that shuts the process down. */
 export interface TestDatabase {
   readonly db: D1Like;
+  /**
+   * The snapshot archive. `getPlatformProxy` hands back every binding
+   * wrangler.jsonc declares, so this is miniflare's own R2 behind the same
+   * `persist: false` as the database: fresh per call, in memory, and gone with
+   * `dispose`.
+   */
+  readonly captures: R2Like;
   readonly dispose: () => Promise<void>;
 }
 
@@ -52,10 +60,14 @@ export interface TestDatabase {
  * and vitest will hold the run open until it is stopped.
  */
 export async function openTestDatabase(): Promise<TestDatabase> {
-  const platform = await getPlatformProxy<{ DB: D1Like }>({
+  const platform = await getPlatformProxy<{ DB: D1Like; CAPTURES: R2Like }>({
     configPath: CONFIG_PATH,
     persist: false,
   });
   await applyMigrations(platform.env.DB, loadMigrations());
-  return { db: platform.env.DB, dispose: () => platform.dispose() };
+  return {
+    db: platform.env.DB,
+    captures: platform.env.CAPTURES,
+    dispose: () => platform.dispose(),
+  };
 }

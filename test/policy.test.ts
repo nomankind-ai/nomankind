@@ -5,8 +5,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   ASSIGNMENT_WINDOW_HOURS,
+  CAPTURE_MAX_BYTES,
   CONTRIBUTOR_SHARE_PERCENT,
   FAILURE_REPORT_THRESHOLD,
+  FETCH_MAX_REDIRECTS,
+  FETCH_TIMEOUT_MS,
   HOLDBACK_DAYS,
   LIST_PAGE_LIMIT,
   MODEL_PROVIDER_DOMAINS,
@@ -61,6 +64,9 @@ const EXPECTED_POLICY_KEYS = [
   "SEED_FEE_RATE_CENTS",
   "SEED_FEE_CAP_CENTS",
   "NORM_VERSION",
+  "FETCH_MAX_REDIRECTS",
+  "FETCH_TIMEOUT_MS",
+  "CAPTURE_MAX_BYTES",
   "REQUEST_CLOCK_SKEW_SECONDS",
   "NONCE_RETENTION_SECONDS",
   "MODEL_PROVIDER_DOMAINS",
@@ -150,6 +156,23 @@ describe("policy numbers", () => {
     expect(example.norm_version).toMatch(pattern);
   });
 
+  it("holds the snapshot fetch and archive limits", () => {
+    // Step 1 of the norm rule: "Follow up to five redirects" and "Timeout
+    // thirty seconds", stated in milliseconds because that is the unit a timer
+    // takes.
+    expect(FETCH_MAX_REDIRECTS).toBe(5);
+    expect(FETCH_TIMEOUT_MS).toBe(30000);
+    expect(FETCH_TIMEOUT_MS).toBe(30 * 1000);
+    // The maintainer's own ceiling on what the Worker will archive: ten
+    // mebibytes, not ten million bytes.
+    expect(CAPTURE_MAX_BYTES).toBe(10485760);
+    expect(CAPTURE_MAX_BYTES).toBe(10 * 1024 * 1024);
+    for (const value of [FETCH_MAX_REDIRECTS, FETCH_TIMEOUT_MS, CAPTURE_MAX_BYTES]) {
+      expect(Number.isInteger(value)).toBe(true);
+      expect(value).toBeGreaterThan(0);
+    }
+  });
+
   it("holds the request authentication windows", () => {
     expect(REQUEST_CLOCK_SKEW_SECONDS).toBe(300);
     expect(NONCE_RETENTION_SECONDS).toBe(600);
@@ -213,6 +236,9 @@ describe("policy numbers", () => {
     expect(POLICY.SEED_FEE_RATE_CENTS).toBe(SEED_FEE_RATE_CENTS);
     expect(POLICY.SEED_FEE_CAP_CENTS).toBe(SEED_FEE_CAP_CENTS);
     expect(POLICY.NORM_VERSION).toBe(NORM_VERSION);
+    expect(POLICY.FETCH_MAX_REDIRECTS).toBe(FETCH_MAX_REDIRECTS);
+    expect(POLICY.FETCH_TIMEOUT_MS).toBe(FETCH_TIMEOUT_MS);
+    expect(POLICY.CAPTURE_MAX_BYTES).toBe(CAPTURE_MAX_BYTES);
     expect(POLICY.REQUEST_CLOCK_SKEW_SECONDS).toBe(REQUEST_CLOCK_SKEW_SECONDS);
     expect(POLICY.NONCE_RETENTION_SECONDS).toBe(NONCE_RETENTION_SECONDS);
     expect(POLICY.MODEL_PROVIDER_DOMAINS).toBe(MODEL_PROVIDER_DOMAINS);

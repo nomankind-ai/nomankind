@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "wrangler dev",
+    "gen:validator": "npm run build --silent && node dist/cli/gen-validator.js",
     "keygen": "npm run build --silent && node dist/cli/keygen.js",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -146,6 +146,30 @@ export const SEED_FEE_CAP_CENTS = 10000;
 export const NORM_VERSION = "norm-v1.2";
 
 /**
+ * Snapshot normalization, step 1 (Fetch). One HTTP GET follows at most five
+ * redirects; a chain longer than that is not pinned, it is chased.
+ */
+export const FETCH_MAX_REDIRECTS = 5;
+
+/**
+ * Snapshot normalization, step 1 (Fetch). The capture times out after thirty
+ * seconds, stated there as "Timeout thirty seconds" and held here in
+ * milliseconds because that is the unit every timer takes.
+ */
+export const FETCH_TIMEOUT_MS = 30000;
+
+/**
+ * Snapshot normalization, step 2 (Archive). The largest response body the
+ * Worker will archive, in bytes: ten mebibytes. A citation is a document, and a
+ * body past this size is a download, not a page to pin.
+ *
+ * Not a whitepaper number, and not in the norm rule either: the rule says the
+ * raw body is archived and leaves the ceiling to published policy. This is the
+ * maintainer's own choice and it moves only by a later decision.
+ */
+export const CAPTURE_MAX_BYTES = 10485760;
+
+/**
  * Request authentication (decision D-014). A signed write request carries a
  * timestamp; a request whose timestamp is more than this far from the
  * verifier's clock, in either direction, is rejected.
@@ -234,6 +258,9 @@ export const POLICY = Object.freeze({
   SEED_FEE_RATE_CENTS,
   SEED_FEE_CAP_CENTS,
   NORM_VERSION,
+  FETCH_MAX_REDIRECTS,
+  FETCH_TIMEOUT_MS,
+  CAPTURE_MAX_BYTES,
   REQUEST_CLOCK_SKEW_SECONDS,
   NONCE_RETENTION_SECONDS,
   MODEL_PROVIDER_DOMAINS,

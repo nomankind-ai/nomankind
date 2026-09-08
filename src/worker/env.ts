@@ -9,9 +9,16 @@
  */
 
 import type { D1Like } from "../storage/d1.js";
+import type { R2Like } from "../storage/r2.js";
 
 export type Env = {
   DB: D1Like;
+  /**
+   * The snapshot archive (norm-v1.2 step 2): the raw captures and their
+   * sidecars, content addressed. Typed as the structural `R2Like` for the same
+   * reason `DB` is typed as `D1Like`.
+   */
+  CAPTURES: R2Like;
   ENVIRONMENT: string;
   /**
    * The maintainer's own agent id (decision D-016), a var rather than a secret:

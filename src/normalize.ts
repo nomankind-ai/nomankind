@@ -31,10 +31,10 @@ export type SnapshotResult =
       hash: string;
       extracted: string | null;
     }
-  | { ok: false; reason: "invalid_json" };
+  | { ok: false; reason: "invalid_json" | "needs_javascript" };
 
 /** Every refusal snapshotHash can return. */
-export const SNAPSHOT_REFUSALS = ["invalid_json"] as const;
+export const SNAPSHOT_REFUSALS = ["invalid_json", "needs_javascript"] as const;
 
 /**
  * Step 4 of norm-v1.2, in order: NFC; CRLF and lone CR to LF; drop U+200B,
@@ -202,6 +202,16 @@ export async function snapshotHash(
 
   if (kind === "html") {
     const extracted = normalizeText(extractHtml(decodeUtf8(bytes)));
+    // Step 1 of the norm rule: a page that needs JavaScript to show its content
+    // is a source this rule cannot pin. Mechanically that is a page whose
+    // extracted and normalized content is empty — the scripts are removed at E3
+    // and nothing readable is left — so it is refused rather than pinned to the
+    // hash of an empty string, which every such page would share. Other kinds
+    // are unaffected: an empty text/plain body is a page that says nothing, not
+    // a page that hid what it says.
+    if (extracted.length === 0) {
+      return { ok: false, reason: "needs_javascript" };
+    }
     return { ok: true, kind, hash: await hashText(extracted), extracted };
   }
 

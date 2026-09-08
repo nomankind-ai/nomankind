@@ -90,6 +90,43 @@ describe("the immutable core", () => {
     expect(injected).toEqual(clean);
   });
 
+  /**
+   * The M1 reviewer note (decision D-041): a shallow copy left the nested core
+   * values aliasing the caller's entry, so an edit after extraction changed a
+   * core that had already been hashed or signed.
+   */
+  it("copies nested core values deeply, so a later edit cannot reach them", () => {
+    const entry = exampleEntry();
+    entry.evidence = {
+      model: "openai/gpt-5",
+      prompt: "one",
+      parameters: { temperature: 0 },
+      output: "first",
+      predicate: "the answer is first",
+      observed_at: "2026-09-01",
+      provider_statement: null,
+    };
+
+    const core = extractCore(entry);
+    const evidence = entry.evidence as Record<string, unknown>;
+    evidence.output = "second";
+    (evidence.parameters as Record<string, unknown>).temperature = 1;
+    (entry.observation as Record<string, unknown>).notes = "edited";
+
+    expect((core.evidence as Record<string, unknown>).output).toBe("first");
+    expect(
+      ((core.evidence as Record<string, unknown>).parameters as Record<
+        string,
+        unknown
+      >).temperature,
+    ).toBe(0);
+    expect((core.observation as Record<string, unknown>).notes).toBe(
+      "Single call returned 404 model_deprecated.",
+    );
+    expect(core.evidence).not.toBe(entry.evidence);
+    expect(core.observation).not.toBe(entry.observation);
+  });
+
   it("does not mutate its input", () => {
     const entry = exampleEntry();
     const before = JSON.stringify(entry);

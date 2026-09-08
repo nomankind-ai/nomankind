@@ -334,9 +334,24 @@ export async function putEntry(
   sidecar: Sidecar,
   derivedThroughSeq: number,
 ): Promise<void> {
-  const id = entryField(entry, "id");
-  const submittedSeq = await submittedSeqOf(db, id);
-  await db
+  const submittedSeq = await submittedSeqOf(db, entryField(entry, "id"));
+  await entryStatement(db, entry, sidecar, submittedSeq, derivedThroughSeq).run();
+}
+
+/**
+ * The upsert that stores one derived entry row. Taken as a statement rather
+ * than run on the spot so a submission can write the entry, its events and its
+ * captures in one atomic batch (`submitEntry` below), and so both paths write
+ * exactly the same row.
+ */
+function entryStatement(
+  db: D1Like,
+  entry: Entry,
+  sidecar: Sidecar,
+  submittedSeq: number,
+  derivedThroughSeq: number,
+): D1LikeStatement {
+  return db
     .prepare(
       `INSERT INTO entries (
          id, subject, category, status, submitted_at, submitted_seq, author,
@@ -354,7 +369,7 @@ export async function putEntry(
          derived_through_seq = excluded.derived_through_seq`,
     )
     .bind(
-      id,
+      entryField(entry, "id"),
       entryField(entry, "subject"),
       entryField(entry, "category"),
       entryField(entry, "status"),
@@ -364,8 +379,7 @@ export async function putEntry(
       writeJson(entry),
       writeJson(sidecar),
       derivedThroughSeq,
-    )
-    .run();
+    );
 }
 
 /** One entry by id, with its sidecar, or null. */
@@ -431,6 +445,173 @@ export async function listEntries(
     .bind(...bindings)
     .all<Row>();
   return rows.results.map(toStoredEntry);
+}
+
+// ---------------------------------------------------------------------------
+// Captures
+// ---------------------------------------------------------------------------
+
+/**
+ * The index into the snapshot archive (migrations/0003_captures.sql).
+ *
+ * `contentHash` is the hash the entry carries — computed under the norm rule,
+ * over the extracted content and never over the raw bytes — and `archiveHash`
+ * is the R2 key, which is the hash of the raw bytes. The two are the same value
+ * only where the rule hashes the bytes themselves. Nothing here holds the bytes:
+ * the archive does, and this is the pointer to them.
+ */
+export interface CaptureRecord {
+  readonly entryId: string;
+  /** "snapshot" for the entry's snapshot_hash, "receipt" for its receipt_hash. */
+  readonly role: "snapshot" | "receipt";
+  readonly contentHash: string;
+  readonly archiveHash: string;
+  readonly normVersion: string;
+  /** html, json, pdf, text, binary, transcript, receipt. */
+  readonly kind: string;
+  readonly mediaType: string;
+  readonly size: number;
+  readonly fetchedAt: string;
+}
+
+const CAPTURE_COLUMNS = `entry_id, role, content_hash, archive_hash, norm_version, kind, media_type, size, fetched_at`;
+
+function toCapture(row: Row): CaptureRecord {
+  return {
+    entryId: readText(row, "entry_id"),
+    role: readText(row, "role") as CaptureRecord["role"],
+    contentHash: readText(row, "content_hash"),
+    archiveHash: readText(row, "archive_hash"),
+    normVersion: readText(row, "norm_version"),
+    kind: readText(row, "kind"),
+    mediaType: readText(row, "media_type"),
+    size: readInteger(row, "size"),
+    fetchedAt: readText(row, "fetched_at"),
+  };
+}
+
+/** The upsert that stores one capture row. */
+function captureStatement(
+  db: D1Like,
+  capture: CaptureRecord,
+): D1LikeStatement {
+  return db
+    .prepare(
+      `INSERT INTO captures (${CAPTURE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (entry_id, role) DO UPDATE SET
+         content_hash = excluded.content_hash,
+         archive_hash = excluded.archive_hash,
+         norm_version = excluded.norm_version,
+         kind = excluded.kind,
+         media_type = excluded.media_type,
+         size = excluded.size,
+         fetched_at = excluded.fetched_at`,
+    )
+    .bind(
+      capture.entryId,
+      capture.role,
+      capture.contentHash,
+      capture.archiveHash,
+      capture.normVersion,
+      capture.kind,
+      capture.mediaType,
+      capture.size,
+      capture.fetchedAt,
+    );
+}
+
+/** Store one capture, replacing whatever was there. */
+export async function putCapture(
+  db: D1Like,
+  capture: CaptureRecord,
+): Promise<void> {
+  await captureStatement(db, capture).run();
+}
+
+/**
+ * The capture a hash names, or null.
+ *
+ * This is the read behind the public capture route: a reader holding an entry's
+ * snapshot_hash asks what was captured under it. Two entries may cite the same
+ * page and carry the same hash, so the answer is the earliest capture of it,
+ * and the entry id breaks a tie between two captures taken at the same instant:
+ * the same question always gets the same answer. Served by the
+ * (content_hash, fetched_at, entry_id) index.
+ */
+export async function captureForHash(
+  db: D1Like,
+  contentHash: string,
+): Promise<CaptureRecord | null> {
+  const row = await db
+    .prepare(
+      `SELECT ${CAPTURE_COLUMNS} FROM captures
+       WHERE content_hash = ? ORDER BY fetched_at, entry_id ${ONE_ROW}`,
+    )
+    .bind(contentHash)
+    .first<Row>();
+  return row === null ? null : toCapture(row);
+}
+
+/** Every capture one entry rests on, in role order. Bounded by the entry. */
+export async function capturesForEntry(
+  db: D1Like,
+  entryId: string,
+): Promise<CaptureRecord[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${CAPTURE_COLUMNS} FROM captures WHERE entry_id = ? ORDER BY role`,
+    )
+    .bind(entryId)
+    .all<Row>();
+  return rows.results.map(toCapture);
+}
+
+/**
+ * Submit an entry: append its `entry_submitted` event and write the derived
+ * entry and its capture rows, atomically.
+ *
+ * Whitepaper Section 6, "Submit": the entry appears immediately, marked draft,
+ * and the source is snapshotted at that moment. The event is the record and
+ * everything beside it is an index into the event, so an entries row without its
+ * event would be an entry nobody can verify offline, and a capture row without
+ * it would point at evidence for a submission that never happened. One `batch`
+ * makes both impossible: D1 applies it whole or not at all.
+ *
+ * The events arrive already sealed by `appendEvent` and are checked against the
+ * log's head by exactly the rule a plain append uses, so a run that does not
+ * continue the chain is refused before anything is written. Nothing here derives
+ * a field: `entry` is what `deriveEntry` returned, written verbatim.
+ */
+export async function submitEntry(
+  db: D1Like,
+  input: {
+    readonly events: readonly Event[];
+    readonly entry: Entry;
+    readonly sidecar: Sidecar;
+    readonly derivedThroughSeq: number;
+    readonly captures: readonly CaptureRecord[];
+  },
+): Promise<void> {
+  const id = entryField(input.entry, "id");
+  const submission = input.events.find(
+    (event) => event.type === "entry_submitted" && event.entry_id === id,
+  );
+  if (submission === undefined) throw new MissingSubmissionError(id);
+
+  const statements = eventStatements(db, input.events, await head(db));
+  statements.push(
+    entryStatement(
+      db,
+      input.entry,
+      input.sidecar,
+      submission.seq,
+      input.derivedThroughSeq,
+    ),
+  );
+  for (const capture of input.captures) {
+    statements.push(captureStatement(db, capture));
+  }
+  await db.batch(statements);
 }
 
 // ---------------------------------------------------------------------------

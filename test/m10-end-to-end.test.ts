@@ -71,7 +71,12 @@ beforeAll(async () => {
   // environment name wrangler.jsonc gives the local environment.
   // M12 added MAINTAINER_AGENT_ID to the bindings; nothing in this file uses
   // it, and an empty value is what an environment with no maintainer has.
-  env = { DB: test.db, ENVIRONMENT: "local", MAINTAINER_AGENT_ID: "" };
+  env = {
+    DB: test.db,
+    CAPTURES: test.captures,
+    ENVIRONMENT: "local",
+    MAINTAINER_AGENT_ID: "",
+  };
 });
 
 // getPlatformProxy runs a child process; vitest would hold the run open
