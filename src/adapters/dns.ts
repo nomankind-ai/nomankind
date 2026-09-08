@@ -69,6 +69,14 @@ export class DohResolver implements DnsResolver {
   readonly #fetch: typeof fetch;
   readonly #endpoint: string;
 
+  /**
+   * The default is the platform's own fetch, and the call below reads it out of
+   * the field first so it goes out with no receiver: workerd throws "Illegal
+   * invocation" when a platform fetch is called on anything but the global
+   * object, and Node's does not, which is why a green suite said nothing until
+   * a real registration answered dns_unavailable under wrangler (the M13
+   * lesson, in a third place).
+   */
   constructor(
     fetchFn: typeof fetch = globalThis.fetch,
     endpoint = DOH_ENDPOINT,
@@ -78,10 +86,11 @@ export class DohResolver implements DnsResolver {
   }
 
   async txt(name: string): Promise<TxtLookup> {
+    const call = this.#fetch;
     const url = `${this.#endpoint}?name=${encodeURIComponent(name)}&type=TXT`;
     let payload: unknown;
     try {
-      const response = await this.#fetch(url, {
+      const response = await call(url, {
         headers: { accept: "application/dns-json" },
       });
       if (!response.ok) return UNAVAILABLE;
