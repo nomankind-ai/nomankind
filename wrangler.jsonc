@@ -11,6 +11,11 @@
   "observability": {
     "enabled": true
   },
+  // No workers.dev route exists for either environment: both are reached only
+  // through their custom domains, so there is no second public hostname
+  // serving the same Worker.
+  "workers_dev": false,
+  "preview_urls": false,
   // The local (default) environment: the database miniflare creates for tests
   // and `wrangler dev`. Nothing here reaches Cloudflare.
   "d1_databases": [
@@ -31,12 +36,23 @@
         {
           "binding": "DB",
           "database_name": "nomankind-demo",
-          // PLACEHOLDER FOR M11: replace with the real demo D1 id from
-          // `wrangler d1 create nomankind-demo` before the first deploy.
-          "database_id": "REPLACE_IN_M11_DEMO_DATABASE_ID",
+          // The demo database exists; created 2026-09-07 under D-015.
+          "database_id": "1e2ef41a-a126-48f5-a24d-96831c339d80",
           "migrations_dir": "migrations"
         }
       ],
+      // A custom domain: Cloudflare creates the DNS record and issues the
+      // certificate on deploy, so nothing has to be wired by hand.
+      "routes": [
+        {
+          "pattern": "demo.nomankind.ai",
+          "custom_domain": true
+        }
+      ],
+      "workers_dev": false,
+      // Pull-request versions are uploaded, not deployed, and are reached
+      // through their workers.dev preview URLs.
+      "preview_urls": true,
       "vars": {
         "ENVIRONMENT": "demo"
       }
@@ -46,12 +62,25 @@
         {
           "binding": "DB",
           "database_name": "nomankind-production",
-          // PLACEHOLDER FOR M11: replace with the real production D1 id from
-          // `wrangler d1 create nomankind-production` before the first deploy.
-          "database_id": "REPLACE_IN_M11_PRODUCTION_DATABASE_ID",
+          // The production database exists; created 2026-09-07 under D-015.
+          "database_id": "19510637-03c0-4fc9-8c94-149d8f95ef05",
           "migrations_dir": "migrations"
         }
       ],
+      // Both custom domains: Cloudflare creates the DNS records and issues the
+      // certificates on deploy. The apex serves nothing new in this milestone.
+      "routes": [
+        {
+          "pattern": "app.nomankind.ai",
+          "custom_domain": true
+        },
+        {
+          "pattern": "nomankind.ai",
+          "custom_domain": true
+        }
+      ],
+      "workers_dev": false,
+      "preview_urls": false,
       "vars": {
         "ENVIRONMENT": "production"
       }
