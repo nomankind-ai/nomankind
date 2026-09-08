@@ -88,6 +88,32 @@ describe("wrangler.jsonc databases", () => {
   });
 });
 
+describe("wrangler.jsonc snapshot archive", () => {
+  /**
+   * The archive is where the raw captures live (norm-v1.2 step 2), so which
+   * bucket each environment writes to is a deploy fact and is pinned here for
+   * the same reason the databases are. One binding name everywhere, because
+   * src/ names the binding and never the environment.
+   */
+  const buckets: string[] = [];
+  for (const [name, section, bucket] of [
+    ["local", () => config, "nomankind-local-captures"],
+    ["demo", () => config.env.demo, "nomankind-demo-captures"],
+    ["production", () => config.env.production, "nomankind-production-captures"],
+  ] as const) {
+    it(`binds ${name} to its own captures bucket`, () => {
+      expect(section().r2_buckets).toEqual([
+        { binding: "CAPTURES", bucket_name: bucket },
+      ]);
+      buckets.push(bucket);
+    });
+  }
+
+  it("gives the three environments three different buckets", () => {
+    expect(new Set(buckets).size).toBe(3);
+  });
+});
+
 describe("wrangler.jsonc routes and hostnames", () => {
   it("serves demo from demo.nomankind.ai only", () => {
     expect(config.env.demo.routes).toEqual([

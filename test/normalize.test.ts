@@ -94,7 +94,10 @@ describe("hashText and archiveAddress, step 5", () => {
   });
 
   it("names every refusal snapshotHash can return", () => {
-    expect([...SNAPSHOT_REFUSALS]).toEqual(["invalid_json"]);
+    expect([...SNAPSHOT_REFUSALS]).toEqual([
+      "invalid_json",
+      "needs_javascript",
+    ]);
   });
 });
 
@@ -184,6 +187,54 @@ describe("snapshotHash over HTML", () => {
     expect(result.extracted).not.toContain("nonce");
     expect(result.extracted).not.toContain("Page generated");
     expect(result.hash).toBe(await hashText(result.extracted!));
+  });
+});
+
+/**
+ * Step 1 of the norm rule: "A page that needs JavaScript to show its content is
+ * a source this rule cannot pin." Mechanically, an HTML capture whose extracted
+ * and normalized content is empty.
+ */
+describe("snapshotHash and a page that needs JavaScript", () => {
+  const spa = [
+    "<!doctype html>",
+    "<html><head><title>Pricing</title></head>",
+    '<body><div id="root"></div>',
+    '<script src="/app.js"></script>',
+    "<script>window.__DATA__ = {price: 2000};</script>",
+    "<noscript>This page requires JavaScript.</noscript>",
+    "</body></html>",
+  ].join("\n");
+
+  it("refuses a page that is only scripts and a noscript notice", async () => {
+    const result = await snapshotHash(encoder.encode(spa), HTML_TYPE);
+
+    expect(result).toEqual({ ok: false, reason: "needs_javascript" });
+  });
+
+  it("hashes the same page once it carries a paragraph of text", async () => {
+    const served = spa.replace(
+      '<div id="root"></div>',
+      "<p>Kestrel-2 is $20 per seat per month.</p>",
+    );
+
+    const result = await snapshotHash(encoder.encode(served), HTML_TYPE);
+    if (!result.ok) {
+      throw new Error(`unexpected refusal: ${result.reason}`);
+    }
+    expect(result.kind).toBe("html");
+    expect(result.extracted).toBe("Kestrel-2 is $20 per seat per month.");
+    expect(result.hash).toMatch(HASH_PATTERN);
+  });
+
+  it("leaves an empty text/plain body hashing as it always did", async () => {
+    const result = await snapshotHash(new Uint8Array(0), "text/plain");
+    if (!result.ok) {
+      throw new Error(`unexpected refusal: ${result.reason}`);
+    }
+    expect(result.kind).toBe("text");
+    expect(result.extracted).toBe("");
+    expect(result.hash).toBe(await hashText(""));
   });
 });
 

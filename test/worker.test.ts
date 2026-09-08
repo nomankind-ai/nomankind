@@ -12,6 +12,7 @@ import { getPlatformProxy } from "wrangler";
 import handler, { handleRequest } from "../src/worker/index.js";
 import type { Env } from "../src/worker/env.js";
 import type { D1Like, D1LikeStatement } from "../src/storage/d1.js";
+import type { R2Like } from "../src/storage/r2.js";
 import { CONFIG_PATH } from "./helpers/d1.js";
 
 /** A D1Like whose `first()` behaves however the test needs it to. */
@@ -132,9 +133,21 @@ function unreachableDatabase(): D1Like {
   } as unknown as D1Like;
 }
 
+/**
+ * The archive binding, for the envs below. Nothing in this file reaches it: the
+ * routes under test answer before any capture is read, and a stub that throws
+ * says so rather than quietly standing in for a bucket.
+ */
+function unusedArchive(): R2Like {
+  const fail = (): Promise<never> =>
+    Promise.reject(new Error("the archive is not used here"));
+  return { put: fail, get: fail, head: fail } as unknown as R2Like;
+}
+
 describe("registry routes when storage is unreachable", () => {
   const env: Env = {
     DB: unreachableDatabase(),
+    CAPTURES: unusedArchive(),
     ENVIRONMENT: "local",
     MAINTAINER_AGENT_ID: "",
   };
@@ -173,6 +186,7 @@ describe("worker when storage is unreachable", () => {
   it("reports 503 when the probe throws", async () => {
     const env: Env = {
       DB: stubDatabase(() => Promise.reject(new Error("D1_ERROR: no such database"))),
+      CAPTURES: unusedArchive(),
       ENVIRONMENT: "local",
       MAINTAINER_AGENT_ID: "",
     };
@@ -194,6 +208,7 @@ describe("worker when storage is unreachable", () => {
   it("reports 503 when the probe returns no row", async () => {
     const env: Env = {
       DB: stubDatabase(() => Promise.resolve(null)),
+      CAPTURES: unusedArchive(),
       ENVIRONMENT: "local",
       MAINTAINER_AGENT_ID: "",
     };

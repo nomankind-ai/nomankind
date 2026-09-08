@@ -14,12 +14,14 @@ import {
   appendEvent,
   buildAnchor,
   buildSeal,
+  buildSubmittedCore,
   deriveEntry,
   sealsForEntries,
   utcDay,
   verifyChain,
   type Anchor,
   type Attestation,
+  type Core,
   type Event,
   type OpenAssignment,
   type Seal,
@@ -29,6 +31,8 @@ import {
   EventAppendError,
   agentsForOperator,
   appendEvents,
+  captureForHash,
+  capturesForEntry,
   eventBySeq,
   eventsAfter,
   eventsForEntry,
@@ -43,21 +47,31 @@ import {
   listEntries,
   listOperators,
   markAssignmentMissed,
+  MissingSubmissionError,
   openAssignment,
   operatorForAgent,
   putAgent,
   putAnchor,
   putAssignment,
+  putCapture,
   putEntry,
   putOperator,
   putSeal,
   registerOperator,
   sealCovering,
   sealsBetween,
+  submitEntry,
   trustOperator,
   type AgentRecord,
+  type CaptureRecord,
   type OperatorRecord,
 } from "../src/storage/repository.js";
+import {
+  archiveCapture,
+  readCapture,
+  readSidecar,
+  type Sidecar,
+} from "../src/storage/r2.js";
 import { loadMigrations, openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
   DRAFT_ENTRY_ID,
@@ -484,6 +498,7 @@ describe("migrations", () => {
     expect(applied.results.map((row) => row.name)).toEqual([
       "0001_init.sql",
       "0002_registry.sql",
+      "0003_captures.sql",
     ]);
   });
 });
@@ -671,5 +686,266 @@ describe("registry writes", () => {
       }),
     ]);
     expect(await agentsForOperator(registry.db, "nobody.example", 10)).toEqual([]);
+  });
+});
+
+/**
+ * The index into the snapshot archive.
+ *
+ * The bytes live in R2 and nothing here holds them: a row says which capture
+ * backs which hash, and the two questions it has to answer are "what did this
+ * entry rest on" and "what is this hash". The second is the public one, and it
+ * has to give the same answer every time even when two entries cite the same
+ * page, so the earliest capture wins and the entry id breaks a tie.
+ */
+describe("captures", () => {
+  const PAGE_HASH = `sha256:${"ab".repeat(32)}`;
+  const ARCHIVE_HASH = `sha256:${"cd".repeat(32)}`;
+  const RECEIPT_HASH = `sha256:${"ef".repeat(32)}`;
+
+  function capture(overrides: Partial<CaptureRecord> = {}): CaptureRecord {
+    return {
+      entryId: "nmk_0000000000000000000000000000cap1",
+      role: "snapshot",
+      contentHash: PAGE_HASH,
+      archiveHash: ARCHIVE_HASH,
+      normVersion: "norm-v1.2",
+      kind: "html",
+      mediaType: "text/html",
+      size: 1234,
+      fetchedAt: "2026-09-08T12:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  beforeAll(async () => {
+    await putCapture(test.db, capture());
+    await putCapture(
+      test.db,
+      capture({ role: "receipt", contentHash: RECEIPT_HASH, kind: "receipt" }),
+    );
+    // A second entry citing the same page, captured a day later.
+    await putCapture(
+      test.db,
+      capture({
+        entryId: "nmk_0000000000000000000000000000cap2",
+        fetchedAt: "2026-09-09T12:00:00.000Z",
+      }),
+    );
+  });
+
+  it("round-trips a capture row", async () => {
+    expect(await captureForHash(test.db, PAGE_HASH)).toEqual(capture());
+  });
+
+  it("answers a hash with the earliest capture of it", async () => {
+    const found = await captureForHash(test.db, PAGE_HASH);
+    expect(found!.entryId).toBe("nmk_0000000000000000000000000000cap1");
+    expect(found!.fetchedAt).toBe("2026-09-08T12:00:00.000Z");
+  });
+
+  it("finds the receipt by its own hash", async () => {
+    const found = await captureForHash(test.db, RECEIPT_HASH);
+    expect(found!.role).toBe("receipt");
+    expect(found!.kind).toBe("receipt");
+  });
+
+  it("returns null for a hash nothing was captured under", async () => {
+    expect(await captureForHash(test.db, `sha256:${"11".repeat(32)}`)).toBeNull();
+  });
+
+  it("gives every capture one entry rests on", async () => {
+    const found = await capturesForEntry(
+      test.db,
+      "nmk_0000000000000000000000000000cap1",
+    );
+    expect(found.map((row) => row.role)).toEqual(["receipt", "snapshot"]);
+  });
+
+  it("gives nothing for an entry with no captures", async () => {
+    expect(await capturesForEntry(test.db, "nmk_01NOTHERE")).toEqual([]);
+  });
+});
+
+/**
+ * The archive itself, against miniflare's own R2.
+ *
+ * The one property the archive has that D1 does not: a capture is written once.
+ * Two entries can cite the same page a day apart, and the second capture must
+ * not overwrite the first — the bytes are the same by construction, but the
+ * sidecar is not, and the provenance worth keeping is the earliest one.
+ */
+describe("the snapshot archive", () => {
+  const ARCHIVE_HASH = `sha256:${"3c".repeat(32)}`;
+  const FETCHER = "1F916:6PmY_Rl-vJoqcBTdMBoMbLZLc0nUqYHpXK0dK7hM8kQ";
+  const encoder = new TextEncoder();
+
+  const FIRST_BYTES = encoder.encode(
+    "<!doctype html><html><body><p>$25 per seat</p></body></html>",
+  );
+  const SECOND_BYTES = encoder.encode("<!doctype html><html><body></body></html>");
+
+  function sidecarAt(fetchedAt: string): Sidecar {
+    return {
+      final_url: "https://kestrel.example/pricing",
+      status: 200,
+      headers: { "content-type": "text/html" },
+      fetched_at: fetchedAt,
+      fetcher: FETCHER,
+    };
+  }
+
+  const FIRST_AT = "2026-09-08T12:00:00.000Z";
+  const SECOND_AT = "2026-09-09T12:00:00.000Z";
+
+  beforeAll(async () => {
+    await archiveCapture(test.captures, {
+      archiveHash: ARCHIVE_HASH,
+      bytes: FIRST_BYTES,
+      mediaType: "text/html",
+      sidecar: sidecarAt(FIRST_AT),
+    });
+    // The same address, captured again a day later with different everything.
+    await archiveCapture(test.captures, {
+      archiveHash: ARCHIVE_HASH,
+      bytes: SECOND_BYTES,
+      mediaType: "application/json",
+      sidecar: sidecarAt(SECOND_AT),
+    });
+  });
+
+  it("keeps the first capture's bytes and media type", async () => {
+    const stored = await readCapture(test.captures, ARCHIVE_HASH);
+
+    expect(stored!.bytes).toEqual(FIRST_BYTES);
+    expect(stored!.mediaType).toBe("text/html");
+  });
+
+  it("keeps the first capture's sidecar", async () => {
+    expect(await readSidecar(test.captures, ARCHIVE_HASH)).toEqual(
+      sidecarAt(FIRST_AT),
+    );
+  });
+});
+
+/**
+ * A submission is one write or none.
+ *
+ * Same lesson as the registry writes above: the event is the record and the
+ * entries and captures rows are only indexes into it, so the question is
+ * whether the three can ever disagree. Its own database, because these tests
+ * write at seq 0.
+ */
+describe("submission writes", () => {
+  const AUTHOR = "1F916:6PmY_Rl-vJoqcBTdMBoMbLZLc0nUqYHpXK0dK7hM8kQ";
+  const AT = "2026-09-08T12:00:00.000Z";
+  const SNAPSHOT_HASH = `sha256:${"9a".repeat(32)}`;
+
+  let store: TestDatabase;
+  let core: Core;
+  let submission: Event[];
+  let derived: ReturnType<typeof deriveEntry>;
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+    core = await buildSubmittedCore(
+      {
+        subject: "kestrel/kestrel-2",
+        category: "pricing",
+        claim: "Kestrel-2 seat pricing rose to $25 per seat per month",
+        before: "$20 per seat per month",
+        after: "$25 per seat per month",
+        effective_at: "2026-09-01",
+        citation: "https://kestrel.example/pricing",
+        snapshot_hash: SNAPSHOT_HASH,
+        author: AUTHOR,
+      },
+      { now: AT },
+    );
+    submission = await appendEvent([], {
+      at: AT,
+      type: "entry_submitted",
+      entry_id: core["id"] as string,
+      payload: { core, signature: "c2lnbmF0dXJl" },
+    });
+    derived = deriveEntry(submission, core["id"] as string, { now: AT });
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  function captureRow(): CaptureRecord {
+    return {
+      entryId: core["id"] as string,
+      role: "snapshot",
+      contentHash: SNAPSHOT_HASH,
+      archiveHash: `sha256:${"7b".repeat(32)}`,
+      normVersion: core["norm_version"] as string,
+      kind: "html",
+      mediaType: "text/html",
+      size: 99,
+      fetchedAt: AT,
+    };
+  }
+
+  it("refuses a run that does not continue the log, and writes no row", async () => {
+    const moved = submission.map((event) => ({ ...event, seq: event.seq + 3 }));
+    await expect(
+      submitEntry(store.db, {
+        events: moved,
+        entry: derived.entry,
+        sidecar: derived.sidecar,
+        derivedThroughSeq: moved[0]!.seq,
+        captures: [captureRow()],
+      }),
+    ).rejects.toMatchObject({ name: "EventAppendError", reason: "bad_seq" });
+
+    expect(await headSeq(store.db)).toBeNull();
+    expect(await getEntry(store.db, core["id"] as string)).toBeNull();
+    expect(await capturesForEntry(store.db, core["id"] as string)).toEqual([]);
+  });
+
+  it("refuses an entry with no submission event behind it", async () => {
+    await expect(
+      submitEntry(store.db, {
+        events: [],
+        entry: derived.entry,
+        sidecar: derived.sidecar,
+        derivedThroughSeq: 0,
+        captures: [],
+      }),
+    ).rejects.toBeInstanceOf(MissingSubmissionError);
+
+    expect(await headSeq(store.db)).toBeNull();
+  });
+
+  it("appends the event and writes the entry and its captures in one write", async () => {
+    await submitEntry(store.db, {
+      events: submission,
+      entry: derived.entry,
+      sidecar: derived.sidecar,
+      derivedThroughSeq: submission[0]!.seq,
+      captures: [captureRow()],
+    });
+
+    const id = core["id"] as string;
+    expect(await headSeq(store.db)).toBe(0);
+    expect(await eventsForEntry(store.db, id)).toEqual(submission);
+    const stored = await getEntry(store.db, id);
+    expect(stored!.entry).toEqual(derived.entry);
+    expect(stored!.entry["status"]).toBe("draft");
+    expect(stored!.submittedSeq).toBe(0);
+    expect(await capturesForEntry(store.db, id)).toEqual([captureRow()]);
+    expect(await captureForHash(store.db, SNAPSHOT_HASH)).toEqual(captureRow());
+  });
+
+  it("derives the same entry again from the event read back from D1", async () => {
+    const id = core["id"] as string;
+    const events = await eventsForEntry(store.db, id);
+    const rederived = deriveEntry(events, id, { now: AT });
+    const stored = await getEntry(store.db, id);
+    expect(rederived.entry).toEqual(stored!.entry);
+    expect(rederived.sidecar).toEqual(stored!.sidecar);
   });
 });

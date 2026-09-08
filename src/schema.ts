@@ -2,15 +2,24 @@
  * Entry schema validation.
  *
  * The schema in `schema/` is the single source of truth; it is imported, never
- * copied into TypeScript. One Ajv 2020 instance is built and the schema is
- * compiled once, at module load.
+ * copied into TypeScript. It is compiled ahead of time rather than at module
+ * load: Cloudflare Workers forbid the `Function` constructor, which is how Ajv
+ * builds a validator at run time, so `npm run gen:validator` compiles the schema
+ * into src/schema-validator.generated.ts and this module imports the result
+ * (decision D-041). Ajv's compiler never enters the Worker's module graph; the
+ * generator lives under src/cli, and test/worker-bundle.test.ts fails if it ever
+ * gets pulled back in.
+ *
+ * The generated validator is built with the same Ajv options this module used
+ * before — strict mode, all errors, ajv-formats — pinned in test/schema.test.ts
+ * against the real instance, and the committed file is compared byte for byte
+ * against a fresh generation so it can never drift from the schema.
  */
 
-import Ajv2020 from "ajv/dist/2020.js";
 import type { ErrorObject, ValidateFunction } from "ajv";
-import addFormats from "ajv-formats";
 
 import entrySchema from "../schema/nomankind-entry-schema.json" with { type: "json" };
+import { validate as generatedValidate } from "./schema-validator.generated.js";
 
 /**
  * A log entry, as defined by the entry schema.
@@ -38,10 +47,11 @@ export type ValidationResult =
 /** `$id` of the schema this module validates against. */
 export const SCHEMA_ID: string = entrySchema.$id;
 
-const ajv = new Ajv2020({ strict: true, allErrors: true });
-addFormats(ajv);
-
-const validate: ValidateFunction = ajv.compile(entrySchema);
+/**
+ * The generated module is exempt from type checking, so its export arrives
+ * untyped; it is Ajv's own validate function and is named as one here.
+ */
+const validate = generatedValidate as unknown as ValidateFunction;
 
 /**
  * Ajv reports a missing property against its parent object, with the property

@@ -5,9 +5,10 @@
  * this Worker to demo and production through a public build action. The health
  * probe below says whether the Worker booted and whether its D1 binding
  * answers; M12 mounts the registry routes beside it (src/worker/registry.ts),
- * which are Section 11's joining door and the genesis naming. Later milestones
- * mount the rest — submission, entries, verification, the public pages — on the
- * same router.
+ * which are Section 11's joining door and the genesis naming, and M13 mounts
+ * the submit routes (src/worker/submit.ts), which are Section 6's door for
+ * entries and the reads that show a capture. Later milestones mount the rest —
+ * validation, reconfirmation, the public pages — on the same router.
  *
  * This file is the one place in the system that reads a wall clock, and it
  * reads it once per request. Everything below it takes the instant as an
@@ -27,9 +28,11 @@
  */
 
 import { DohResolver, type DnsResolver } from "../adapters/dns.js";
+import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import type { Env } from "./env.js";
 import { handleRegistry, json } from "./registry.js";
+import { handleSubmit } from "./submit.js";
 
 /**
  * Ask D1 the cheapest question there is.
@@ -63,14 +66,16 @@ async function health(env: Env): Promise<Response> {
 
 /**
  * What a caller may supply in place of the real world: the instant, the
- * resolver, the payment provider. A test passes all three; the deployed Worker
- * passes none and gets the wall clock, real DNS-over-HTTPS, and whichever
- * payout adapter this environment runs (decision D-013 as amended).
+ * resolver, the payment provider, the fetcher that takes a capture. A test
+ * passes all four; the deployed Worker passes none and gets the wall clock,
+ * real DNS-over-HTTPS, whichever payout adapter this environment runs (decision
+ * D-013 as amended), and the norm rule's own fetch over the real network.
  */
 export interface RequestDeps {
   readonly now?: Date;
   readonly dns?: DnsResolver;
   readonly payout?: PayoutAdapter;
+  readonly fetcher?: SnapshotFetcher;
 }
 
 /** The router. Exported by name so tests can call it without a fetch stack. */
@@ -88,14 +93,22 @@ export async function handleRequest(
     return health(env);
   }
 
+  // Read once, here, and passed down: two checks in one request must not be
+  // able to disagree about what time it is.
+  const now = deps?.now ?? new Date();
+
   const registry = await handleRegistry(request, env, {
-    // Read once, here, and passed down: two checks in one request must not be
-    // able to disagree about what time it is.
-    now: deps?.now ?? new Date(),
+    now,
     dns: deps?.dns ?? new DohResolver(),
     payout: deps?.payout ?? payoutAdapterFor(env.ENVIRONMENT),
   });
   if (registry !== null) return registry;
+
+  const submitted = await handleSubmit(request, env, {
+    now,
+    fetcher: deps?.fetcher ?? new WebFetcher(),
+  });
+  if (submitted !== null) return submitted;
 
   return json({ ok: false, error: "not_found" }, 404);
 }

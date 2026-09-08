@@ -93,11 +93,11 @@ export function json(
 }
 
 /** A refusal: the status, and the reason in the same word the kernel used. */
-function refuse(status: number, reason: string): Response {
+export function refuse(status: number, reason: string): Response {
   return json({ error: reason }, status);
 }
 
-function methodNotAllowed(allow: string): Response {
+export function methodNotAllowed(allow: string): Response {
   return json({ error: "method_not_allowed" }, 405, { allow });
 }
 
@@ -148,7 +148,7 @@ const GENESIS_STATUS: Record<GenesisRefusal, number> = {
  * TypeError from our own row reading, thrown after D1 answered, stays a
  * programming error and still reaches the platform as a 500.
  */
-class StorageUnreachable extends Error {
+export class StorageUnreachable extends Error {
   constructor(reason: unknown) {
     super(reason instanceof Error ? reason.message : String(reason));
     this.name = "StorageUnreachable";
@@ -199,11 +199,12 @@ function guardStatement(statement: D1LikeStatement): D1LikeStatement {
 }
 
 /**
- * The database handle the registry routes actually use: the binding, with every
- * way it can fail marked as a storage failure rather than left to escape as an
- * unhandled exception.
+ * The database handle the routes actually use: the binding, with every way it
+ * can fail marked as a storage failure rather than left to escape as an
+ * unhandled exception. Exported because the routes M13 mounts beside these owe
+ * a caller the same 503 and must not grow a weaker boundary of their own.
  */
-function guardDatabase(db: D1Like): D1Like {
+export function guardDatabase(db: D1Like): D1Like {
   return {
     prepare(sql: string): D1LikeStatement {
       return guardStatement(throughSync(() => db.prepare(sql)));
@@ -226,7 +227,7 @@ function guardDatabase(db: D1Like): D1Like {
 // Reading and authenticating a write
 // ---------------------------------------------------------------------------
 
-type Authenticated =
+export type Authenticated =
   | { ok: true; agent: string; body: unknown }
   | { ok: false; response: Response };
 
@@ -254,10 +255,10 @@ function headerMap(request: Request): Record<string, string> {
  * agent_mismatch — the same answer the verifier itself gives — and a header
  * that is absent is left to the verifier, which reports missing_header.
  */
-async function authenticate(
+export async function authenticate(
   request: Request,
   env: Env,
-  deps: RegistryDeps,
+  deps: { readonly now: Date },
   path: string,
 ): Promise<Authenticated> {
   let body: unknown;

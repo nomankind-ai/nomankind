@@ -51,6 +51,12 @@ const NULLABLE_CORE_KEYS: readonly CoreKey[] = [
  * Returns a fresh object holding exactly CORE_KEYS, in that order. Any other
  * key on the input (signature, status, approvers, a derived field, anything
  * unknown) is dropped rather than carried through. The input is never mutated.
+ *
+ * The copy is deep (M1 reviewer note, decision D-041). A shallow copy left the
+ * nested core values — the evidence and observation objects — aliasing the
+ * caller's entry, so a later edit to the entry silently changed a core that had
+ * already been extracted, hashed, or signed. structuredClone is available on
+ * Node 22 and on Workers alike, so the kernel keeps running unchanged.
  */
 export function extractCore(entry: unknown): Core {
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
@@ -69,5 +75,5 @@ export function extractCore(entry: unknown): Core {
     }
     core[key] = value;
   }
-  return core as Core;
+  return structuredClone(core) as Core;
 }
