@@ -47,11 +47,32 @@ export type ReconfirmationRecord = {
   signed_at: string;
 };
 
+/**
+ * The provider-independence attestation an operator signs to register.
+ *
+ * Whitepaper Section 10, Governance and legal posture: "registration requires a
+ * signed attestation that no model provider holds control or a beneficial
+ * stake". Section 11 names signing it as the third joining step. The text and
+ * the signing bytes are src/registry.ts's; the event carries only what was
+ * signed, so an offline reader can recheck it years later.
+ */
+export type Attestation = {
+  version: string;
+  signed_at: string;
+  signature: string;
+};
+
 /** The payload shape carried by each event type. */
 export type EventPayloads = {
   operator_registered: { operator: string; maintainer: boolean };
   operator_trusted: { operator: string };
   operator_untrusted: { operator: string };
+  /**
+   * An agent key bound to the operator that answers for it. Section 5: "Every
+   * agent belongs to an operator", and Section 11: "The binding is then sealed
+   * into nomankind's log and you can validate."
+   */
+  agent_bound: { operator: string; agent: string; attestation: Attestation };
   /** Sorted trusted pool at this position in the log (M4 draws assignments from it). */
   pool_snapshot: { operators: string[] };
   /** The sealed submission: the immutable core and the author's signature over it. */
@@ -81,6 +102,7 @@ export const EVENT_TYPES: readonly EventType[] = [
   "operator_registered",
   "operator_trusted",
   "operator_untrusted",
+  "agent_bound",
   "pool_snapshot",
   "entry_submitted",
   "assignment",

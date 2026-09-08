@@ -69,7 +69,9 @@ beforeAll(async () => {
   test = await openTestDatabase();
   // The shape the Worker is handed at request time: the binding, and the
   // environment name wrangler.jsonc gives the local environment.
-  env = { DB: test.db, ENVIRONMENT: "local" };
+  // M12 added MAINTAINER_AGENT_ID to the bindings; nothing in this file uses
+  // it, and an empty value is what an environment with no maintainer has.
+  env = { DB: test.db, ENVIRONMENT: "local", MAINTAINER_AGENT_ID: "" };
 });
 
 // getPlatformProxy runs a child process; vitest would hold the run open

@@ -8,6 +8,8 @@ import {
   CONTRIBUTOR_SHARE_PERCENT,
   FAILURE_REPORT_THRESHOLD,
   HOLDBACK_DAYS,
+  LIST_PAGE_LIMIT,
+  MODEL_PROVIDER_DOMAINS,
   NONCE_RETENTION_SECONDS,
   NORM_VERSION,
   POLICY,
@@ -61,6 +63,8 @@ const EXPECTED_POLICY_KEYS = [
   "NORM_VERSION",
   "REQUEST_CLOCK_SKEW_SECONDS",
   "NONCE_RETENTION_SECONDS",
+  "MODEL_PROVIDER_DOMAINS",
+  "LIST_PAGE_LIMIT",
 ];
 
 describe("policy numbers", () => {
@@ -152,6 +156,28 @@ describe("policy numbers", () => {
     expect(NONCE_RETENTION_SECONDS).toBe(2 * REQUEST_CLOCK_SKEW_SECONDS);
   });
 
+  it("holds the maintainer's published model provider list (Section 10)", () => {
+    expect(Object.isFrozen(MODEL_PROVIDER_DOMAINS)).toBe(true);
+    expect(MODEL_PROVIDER_DOMAINS).toContain("openai.com");
+    expect(MODEL_PROVIDER_DOMAINS).toContain("anthropic.com");
+    expect(MODEL_PROVIDER_DOMAINS).toContain("google.com");
+    expect(MODEL_PROVIDER_DOMAINS.length).toBe(
+      new Set(MODEL_PROVIDER_DOMAINS).size,
+    );
+    // Every entry is a registrable domain, lowercase, with no scheme, no path
+    // and no leading dot: the suffix check in src/registry.ts depends on it.
+    for (const domain of MODEL_PROVIDER_DOMAINS) {
+      expect(domain).toBe(domain.toLowerCase());
+      expect(domain).toMatch(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/);
+    }
+  });
+
+  it("holds the one page-size number", () => {
+    expect(LIST_PAGE_LIMIT).toBe(100);
+    expect(Number.isInteger(LIST_PAGE_LIMIT)).toBe(true);
+    expect(LIST_PAGE_LIMIT).toBeGreaterThan(0);
+  });
+
   it("collects every constant in a frozen POLICY object", () => {
     expect(Object.isFrozen(POLICY)).toBe(true);
     expect(Object.keys(POLICY).sort()).toEqual([...EXPECTED_POLICY_KEYS].sort());
@@ -189,5 +215,7 @@ describe("policy numbers", () => {
     expect(POLICY.NORM_VERSION).toBe(NORM_VERSION);
     expect(POLICY.REQUEST_CLOCK_SKEW_SECONDS).toBe(REQUEST_CLOCK_SKEW_SECONDS);
     expect(POLICY.NONCE_RETENTION_SECONDS).toBe(NONCE_RETENTION_SECONDS);
+    expect(POLICY.MODEL_PROVIDER_DOMAINS).toBe(MODEL_PROVIDER_DOMAINS);
+    expect(POLICY.LIST_PAGE_LIMIT).toBe(LIST_PAGE_LIMIT);
   });
 });

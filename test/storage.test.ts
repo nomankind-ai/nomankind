@@ -11,6 +11,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  appendEvent,
   buildAnchor,
   buildSeal,
   deriveEntry,
@@ -18,6 +19,7 @@ import {
   utcDay,
   verifyChain,
   type Anchor,
+  type Attestation,
   type Event,
   type OpenAssignment,
   type Seal,
@@ -25,6 +27,7 @@ import {
 import { applyMigrations } from "../src/storage/migrate.js";
 import {
   EventAppendError,
+  agentsForOperator,
   appendEvents,
   eventBySeq,
   eventsAfter,
@@ -48,8 +51,12 @@ import {
   putEntry,
   putOperator,
   putSeal,
+  registerOperator,
   sealCovering,
   sealsBetween,
+  trustOperator,
+  type AgentRecord,
+  type OperatorRecord,
 } from "../src/storage/repository.js";
 import { loadMigrations, openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
@@ -474,6 +481,195 @@ describe("migrations", () => {
     const applied = await test.db
       .prepare(`SELECT name FROM "d1_migrations" ORDER BY id`)
       .all<{ name: string }>();
-    expect(applied.results.map((row) => row.name)).toEqual(["0001_init.sql"]);
+    expect(applied.results.map((row) => row.name)).toEqual([
+      "0001_init.sql",
+      "0002_registry.sql",
+    ]);
+  });
+});
+
+/**
+ * The registry's atomic writes, in their own database.
+ *
+ * Section 5 and Section 11: the binding is sealed into the log, and the rows
+ * are only an index into it. So the question is not whether the columns
+ * survive but whether the two can ever disagree — a row with no event behind
+ * it, or an event with no row in front of it. Its own database, because these
+ * tests move the head of the log and the world above is asserted against its
+ * own head.
+ */
+describe("registry writes", () => {
+  const OPERATOR = "lattice.example";
+  const AGENT = "1F916:6PmY_Rl-vJoqcBTdMBoMbLZLc0nUqYHpXK0dK7hM8kQ";
+
+  const attestation: Attestation = {
+    version: "nomankind-independence-v1",
+    signed_at: "2026-09-07T12:00:00Z",
+    signature: "c2lnbmF0dXJl",
+  };
+
+  let registry: TestDatabase;
+  let registration: Event[];
+
+  function operatorRecord(overrides: Partial<OperatorRecord> = {}): OperatorRecord {
+    return {
+      id: OPERATOR,
+      maintainer: false,
+      provider: false,
+      registeredSeq: 0,
+      details: { payout: { reference: "acct_123" } },
+      ...overrides,
+    };
+  }
+
+  function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
+    return { agentId: AGENT, operatorId: OPERATOR, registeredSeq: 1, ...overrides };
+  }
+
+  beforeAll(async () => {
+    registry = await openTestDatabase();
+    let log: Event[] = [];
+    log = await appendEvent(log, {
+      at: "2026-09-07T12:00:00Z",
+      type: "operator_registered",
+      entry_id: null,
+      payload: { operator: OPERATOR, maintainer: false },
+    });
+    log = await appendEvent(log, {
+      at: "2026-09-07T12:00:01Z",
+      type: "agent_bound",
+      entry_id: null,
+      payload: { operator: OPERATOR, agent: AGENT, attestation },
+    });
+    registration = log;
+  });
+
+  afterAll(async () => {
+    await registry?.dispose();
+  });
+
+  it("refuses a run that does not continue the log, and writes no row", async () => {
+    const badSeq = registration.map((event) => ({ ...event, seq: event.seq + 5 }));
+    await expect(
+      registerOperator(registry.db, {
+        events: badSeq,
+        operator: operatorRecord(),
+        agent: agentRecord(),
+      }),
+    ).rejects.toMatchObject({ name: "EventAppendError", reason: "bad_seq" });
+
+    const badPrev = [
+      { ...registration[0]!, prev_hash: "sha256:" + "0".repeat(64) },
+      registration[1]!,
+    ];
+    await expect(
+      registerOperator(registry.db, {
+        events: badPrev,
+        operator: operatorRecord(),
+        agent: agentRecord(),
+      }),
+    ).rejects.toBeInstanceOf(EventAppendError);
+
+    expect(await headSeq(registry.db)).toBeNull();
+    expect(await getOperator(registry.db, OPERATOR)).toBeNull();
+    expect(await operatorForAgent(registry.db, AGENT)).toBeNull();
+  });
+
+  it("appends the events and writes both rows in one write", async () => {
+    await registerOperator(registry.db, {
+      events: registration,
+      operator: operatorRecord(),
+      agent: agentRecord(),
+    });
+
+    expect(await headSeq(registry.db)).toBe(1);
+    expect(await eventsInRange(registry.db, 0, 1)).toEqual(registration);
+    expect(await verifyChain(await eventsInRange(registry.db, 0, 1))).toEqual({
+      ok: true,
+      length: 2,
+    });
+    expect(await getOperator(registry.db, OPERATOR)).toEqual(operatorRecord());
+    expect(await operatorForAgent(registry.db, AGENT)).toBe(OPERATOR);
+  });
+
+  it("refuses a trust event that does not continue the log, and leaves the row alone", async () => {
+    const trusted = await appendEvent(registration, {
+      at: "2026-09-07T12:00:02Z",
+      type: "operator_trusted",
+      entry_id: null,
+      payload: { operator: OPERATOR },
+    });
+    const event = trusted[trusted.length - 1]!;
+
+    await expect(
+      trustOperator(registry.db, {
+        event: { ...event, seq: event.seq + 3 },
+        operator: operatorRecord({ details: { trusted: true } }),
+      }),
+    ).rejects.toMatchObject({ reason: "bad_seq" });
+    await expect(
+      trustOperator(registry.db, {
+        event: { ...event, prev_hash: "sha256:" + "0".repeat(64) },
+        operator: operatorRecord({ details: { trusted: true } }),
+      }),
+    ).rejects.toMatchObject({ reason: "bad_prev_hash" });
+
+    expect(await headSeq(registry.db)).toBe(1);
+    expect(await getOperator(registry.db, OPERATOR)).toEqual(operatorRecord());
+  });
+
+  it("appends the trust event and replaces the row in one write", async () => {
+    const trusted = await appendEvent(registration, {
+      at: "2026-09-07T12:00:02Z",
+      type: "operator_trusted",
+      entry_id: null,
+      payload: { operator: OPERATOR },
+    });
+    const event = trusted[trusted.length - 1]!;
+    const replaced = operatorRecord({
+      details: { payout: { reference: "acct_123" }, trusted: true },
+    });
+
+    await trustOperator(registry.db, { event, operator: replaced });
+
+    expect(await headSeq(registry.db)).toBe(2);
+    expect(await eventBySeq(registry.db, 2)).toEqual(event);
+    expect(await getOperator(registry.db, OPERATOR)).toEqual(replaced);
+  });
+
+  it("lists an operator's agents in binding order, up to the caller's limit", async () => {
+    const agents: AgentRecord[] = [
+      agentRecord({ agentId: `${AGENT}_b`, registeredSeq: 5 }),
+      agentRecord({ agentId: `${AGENT}_c`, registeredSeq: 9 }),
+    ];
+    for (const agent of agents) await putAgent(registry.db, agent);
+    await putOperator(registry.db, operatorRecord({ id: "beacon.example" }));
+    await putAgent(
+      registry.db,
+      agentRecord({
+        agentId: `${AGENT}_other`,
+        operatorId: "beacon.example",
+        registeredSeq: 7,
+      }),
+    );
+
+    const all = await agentsForOperator(registry.db, OPERATOR, 10);
+    expect(all.map((agent) => agent.agentId)).toEqual([
+      AGENT,
+      `${AGENT}_b`,
+      `${AGENT}_c`,
+    ]);
+    expect(all[0]).toEqual(agentRecord());
+
+    const capped = await agentsForOperator(registry.db, OPERATOR, 2);
+    expect(capped.map((agent) => agent.agentId)).toEqual([AGENT, `${AGENT}_b`]);
+    expect(await agentsForOperator(registry.db, "beacon.example", 10)).toEqual([
+      agentRecord({
+        agentId: `${AGENT}_other`,
+        operatorId: "beacon.example",
+        registeredSeq: 7,
+      }),
+    ]);
+    expect(await agentsForOperator(registry.db, "nobody.example", 10)).toEqual([]);
   });
 });

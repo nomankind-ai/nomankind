@@ -166,6 +166,54 @@ export const REQUEST_CLOCK_SKEW_SECONDS = 300;
  */
 export const NONCE_RETENTION_SECONDS = 600;
 
+/**
+ * Governance and legal posture. "No lab or model provider may be a maintainer,
+ * funder, or trusted operator": this is the maintainer's published list of
+ * model providers' registrable domains, and a registration on one of them, or
+ * on any subdomain of one, is refused at the door.
+ *
+ * Not a whitepaper list. The paper names the exclusion and says it is enforced
+ * honestly rather than airtightly, so the list is the maintainer's published
+ * policy and moves only by a later decision. It is the cheap first check and
+ * never the whole enforcement: the signed independence attestation and the
+ * public record behind it are what actually bind.
+ */
+export const MODEL_PROVIDER_DOMAINS: readonly string[] = Object.freeze([
+  "openai.com",
+  "anthropic.com",
+  "google.com",
+  "deepmind.google",
+  "meta.com",
+  "microsoft.com",
+  "x.ai",
+  "mistral.ai",
+  "cohere.com",
+  "amazon.com",
+  "deepseek.com",
+  "alibaba.com",
+  "alibabacloud.com",
+  "moonshot.cn",
+  "01.ai",
+  "ai21.com",
+  "nvidia.com",
+  "ibm.com",
+  "baidu.com",
+  "tencent.com",
+  "bytedance.com",
+  "zhipuai.cn",
+]);
+
+/**
+ * The most records one list request returns. The first page-size number in the
+ * system, so it lives here with every other published amount rather than
+ * beside the query that uses it; src/storage/repository.ts holds no default
+ * page size and every listing there takes the caller's explicit limit.
+ *
+ * Not a whitepaper number. The maintainer's published policy; it moves only by
+ * a later decision.
+ */
+export const LIST_PAGE_LIMIT = 100;
+
 /** Every policy number, collected and frozen. */
 export const POLICY = Object.freeze({
   TRUSTED_POOL_SWITCH,
@@ -188,4 +236,6 @@ export const POLICY = Object.freeze({
   NORM_VERSION,
   REQUEST_CLOCK_SKEW_SECONDS,
   NONCE_RETENTION_SECONDS,
+  MODEL_PROVIDER_DOMAINS,
+  LIST_PAGE_LIMIT,
 });

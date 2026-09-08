@@ -145,7 +145,10 @@ describe("wrangler d1 migrations apply", () => {
       const oursApplied = await ours.db
         .prepare(`SELECT name FROM "${MIGRATIONS_TABLE}" ORDER BY id`)
         .all<{ name: string }>();
-      expect(applied.results.map((row) => row.name)).toEqual(["0001_init.sql"]);
+      expect(applied.results.map((row) => row.name)).toEqual([
+        "0001_init.sql",
+        "0002_registry.sql",
+      ]);
       expect(oursApplied.results.map((row) => row.name)).toEqual(
         applied.results.map((row) => row.name),
       );

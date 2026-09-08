@@ -2,11 +2,18 @@
  * The Worker entry point.
  *
  * Whitepaper Section 11, Deployment and status: every merge to main deploys
- * this Worker to demo and production through a public build action. This
- * milestone mounts one route, `GET /health`, whose only job is to say whether
- * the Worker booted and whether its D1 binding answers. Later milestones
- * (M12 to M19) mount the real routes — submission, entries, verification,
- * the public pages — on the same router.
+ * this Worker to demo and production through a public build action. The health
+ * probe below says whether the Worker booted and whether its D1 binding
+ * answers; M12 mounts the registry routes beside it (src/worker/registry.ts),
+ * which are Section 11's joining door and the genesis naming. Later milestones
+ * mount the rest — submission, entries, verification, the public pages — on the
+ * same router.
+ *
+ * This file is the one place in the system that reads a wall clock, and it
+ * reads it once per request. Everything below it takes the instant as an
+ * argument, which is what lets a test drive the real router at a fixed time.
+ * The network and the payment provider enter the same way, as injected
+ * adapters, so a test never reaches either.
  *
  * The health probe fails loud. If D1 does not answer, the endpoint reports 503
  * and `storage: "unreachable"`; it never reports `ok` on a database it could
@@ -19,15 +26,10 @@
  * here either: `ENVIRONMENT` is read from the binding and echoed back.
  */
 
+import { DohResolver, type DnsResolver } from "../adapters/dns.js";
+import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import type { Env } from "./env.js";
-
-/** Every response this Worker writes is JSON that must not be cached. */
-function json(body: unknown, status: number, extraHeaders?: HeadersInit): Response {
-  const headers = new Headers(extraHeaders);
-  headers.set("content-type", "application/json");
-  headers.set("cache-control", "no-store");
-  return new Response(JSON.stringify(body), { status, headers });
-}
+import { handleRegistry, json } from "./registry.js";
 
 /**
  * Ask D1 the cheapest question there is.
@@ -59,8 +61,24 @@ async function health(env: Env): Promise<Response> {
   return json({ ok: true, environment: env.ENVIRONMENT, storage: "ok" }, 200);
 }
 
+/**
+ * What a caller may supply in place of the real world: the instant, the
+ * resolver, the payment provider. A test passes all three; the deployed Worker
+ * passes none and gets the wall clock, real DNS-over-HTTPS, and whichever
+ * payout adapter this environment runs (decision D-013 as amended).
+ */
+export interface RequestDeps {
+  readonly now?: Date;
+  readonly dns?: DnsResolver;
+  readonly payout?: PayoutAdapter;
+}
+
 /** The router. Exported by name so tests can call it without a fetch stack. */
-export async function handleRequest(request: Request, env: Env): Promise<Response> {
+export async function handleRequest(
+  request: Request,
+  env: Env,
+  deps?: RequestDeps,
+): Promise<Response> {
   const { pathname } = new URL(request.url);
 
   if (pathname === "/health") {
@@ -70,7 +88,24 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     return health(env);
   }
 
+  const registry = await handleRegistry(request, env, {
+    // Read once, here, and passed down: two checks in one request must not be
+    // able to disagree about what time it is.
+    now: deps?.now ?? new Date(),
+    dns: deps?.dns ?? new DohResolver(),
+    payout: deps?.payout ?? payoutAdapterFor(env.ENVIRONMENT),
+  });
+  if (registry !== null) return registry;
+
   return json({ ok: false, error: "not_found" }, 404);
 }
 
-export default { fetch: handleRequest };
+/**
+ * The deployed entry point. It passes no deps, so the Worker always runs on the
+ * real clock and the real adapters: there is no argument a request could carry
+ * that swaps either out.
+ */
+export default {
+  fetch: (request: Request, env: Env): Promise<Response> =>
+    handleRequest(request, env),
+};

@@ -209,6 +209,29 @@ export function trustedOperatorsAt(
   return trusted;
 }
 
+/**
+ * Which operator answers for each agent, as of `position`.
+ *
+ * Whitepaper Section 5: "Every agent belongs to an operator, the human or
+ * company that runs it", and every rule that says "a distinct operator"
+ * resolves an agent through this. Only events with seq <= position are folded,
+ * so a binding sealed later can never change what a past decision saw
+ * (retrospective M8), and a later binding of the same agent replaces the
+ * earlier one because the fold runs in seq order.
+ */
+export function agentOperatorsAt(
+  events: readonly Event[],
+  position: number,
+): Map<string, string> {
+  const operators = new Map<string, string>();
+  for (const event of inSeqOrder(events)) {
+    if (event.seq > position) break;
+    if (!isType(event, "agent_bound")) continue;
+    operators.set(event.payload.agent, event.payload.operator);
+  }
+  return operators;
+}
+
 /** The outcome of folding an entry's validation events, and nothing else. */
 interface Consensus {
   readonly status: "draft" | "rejected" | "verified";
