@@ -11,7 +11,8 @@
     "keygen": "npm run build --silent && node dist/cli/keygen.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run build --silent && node dist/cli/verify.js"
   },
   "devDependencies": {
     "@types/node": "26.4.1",
