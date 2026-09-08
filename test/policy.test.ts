@@ -26,6 +26,7 @@ import {
   SEED_FEE_RATE_CENTS,
   SLOT_COUNT,
   STALENESS_WINDOW_DAYS,
+  SWEEP_INTERVAL_MINUTES,
   TRUSTED_POOL_SWITCH,
 } from "../src/policy.js";
 
@@ -61,6 +62,7 @@ const EXPECTED_POLICY_KEYS = [
   "SLOT_COUNT",
   "CONTRIBUTOR_SHARE_PERCENT",
   "SEAL_INTERVAL_MINUTES",
+  "SWEEP_INTERVAL_MINUTES",
   "FAILURE_REPORT_THRESHOLD",
   "SEED_FEE_RATE_CENTS",
   "SEED_FEE_CAP_CENTS",
@@ -119,6 +121,18 @@ describe("policy numbers", () => {
     expect(FAILURE_REPORT_THRESHOLD).toBe(3);
     expect(SEED_FEE_RATE_CENTS).toBe(100);
     expect(SEED_FEE_CAP_CENTS).toBe(10000);
+  });
+
+  it("carries the sweep's own cadence, which is operational and not a rule", () => {
+    // Five minutes, the same cadence wrangler.jsonc's cron names; the Sweeper
+    // Durable Object sets its alarm from this and nowhere else. It says how
+    // often the Worker looks, never how long a validator has.
+    expect(SWEEP_INTERVAL_MINUTES).toBe(5);
+    expect(Number.isInteger(SWEEP_INTERVAL_MINUTES)).toBe(true);
+    expect(SWEEP_INTERVAL_MINUTES).toBeGreaterThan(0);
+    // Far inside the window it helps enforce: a sweep that ran less often than
+    // the deadline it closes would close deadlines late.
+    expect(SWEEP_INTERVAL_MINUTES).toBeLessThan(ASSIGNMENT_WINDOW_HOURS * 60);
   });
 
   it("states the D-032 amounts as positive integers", () => {
@@ -254,6 +268,7 @@ describe("policy numbers", () => {
     expect(POLICY.SLOT_COUNT).toBe(SLOT_COUNT);
     expect(POLICY.CONTRIBUTOR_SHARE_PERCENT).toBe(CONTRIBUTOR_SHARE_PERCENT);
     expect(POLICY.SEAL_INTERVAL_MINUTES).toBe(SEAL_INTERVAL_MINUTES);
+    expect(POLICY.SWEEP_INTERVAL_MINUTES).toBe(SWEEP_INTERVAL_MINUTES);
     expect(POLICY.FAILURE_REPORT_THRESHOLD).toBe(FAILURE_REPORT_THRESHOLD);
     expect(POLICY.SEED_FEE_RATE_CENTS).toBe(SEED_FEE_RATE_CENTS);
     expect(POLICY.SEED_FEE_CAP_CENTS).toBe(SEED_FEE_CAP_CENTS);

@@ -100,6 +100,19 @@ export const CONTRIBUTOR_SHARE_PERCENT = 30;
 export const SEAL_INTERVAL_MINUTES = 5;
 
 /**
+ * The sweep's own cadence: how often src/worker/sweep.ts runs, in minutes. The
+ * same five minutes the cron trigger in wrangler.jsonc names, held here because
+ * the Sweeper Durable Object (src/worker/sweeper.ts) sets its alarm from it and
+ * a timer whose interval was written down twice is a timer that drifts.
+ *
+ * Not a whitepaper number, and not a rule of any kind: it is operational. It
+ * says how often the Worker looks, never how long an assigned validator has
+ * (ASSIGNMENT_WINDOW_HOURS) or when a draw is legitimate (src/assign.ts).
+ * Moving it changes only how promptly the log catches up.
+ */
+export const SWEEP_INTERVAL_MINUTES = 5;
+
+/**
  * The log (failure reports). Reports from this many distinct verified
  * operators auto-open a revalidation. The paper says the threshold is
  * published policy but states no number, so three is the maintainer's own
@@ -285,6 +298,7 @@ export const POLICY = Object.freeze({
   SLOT_COUNT,
   CONTRIBUTOR_SHARE_PERCENT,
   SEAL_INTERVAL_MINUTES,
+  SWEEP_INTERVAL_MINUTES,
   FAILURE_REPORT_THRESHOLD,
   SEED_FEE_RATE_CENTS,
   SEED_FEE_CAP_CENTS,
