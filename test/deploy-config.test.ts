@@ -179,6 +179,22 @@ describe("wrangler.jsonc routes and hostnames", () => {
     expect(config.env.demo.vars.SEALING_AGENT_HANDLE).toBeUndefined();
   });
 
+  /**
+   * The apex hostname (D-021): which host serves the landing page rather than
+   * the app's home. Production routes two hostnames and is the only environment
+   * that has an apex at all, so this pins that the other two carry none — an
+   * APEX_HOST on demo would turn demo's only door into a front door.
+   */
+  it("names the apex on production only", () => {
+    expect(config.env.production.vars.APEX_HOST).toBe("nomankind.ai");
+    expect(config.vars.APEX_HOST).toBeUndefined();
+    expect(config.env.demo.vars.APEX_HOST).toBeUndefined();
+    // The apex is routed there, so the var and the route agree.
+    expect(config.env.production.routes).toEqual(
+      expect.arrayContaining([{ pattern: "nomankind.ai", custom_domain: true }]),
+    );
+  });
+
   it("keeps every sealing secret out of the repository", () => {
     const raw = readFileSync(join(ROOT, "wrangler.jsonc"), "utf8");
     // Named in a comment as things `wrangler secret put` sets, and nowhere as

@@ -2343,3 +2343,228 @@ export async function latestEventOfType(
     .first<Row>();
   return row === null ? null : toEvent(row);
 }
+
+// ---------------------------------------------------------------------------
+// What the browsing UI asks (M19)
+// ---------------------------------------------------------------------------
+
+/**
+ * How many entries there are, optionally narrowed by status or staleness.
+ *
+ * The home counters and the listing's "n of m" line, and the only reads in this
+ * module that return a number instead of rows. Both are index-only: status is a
+ * column with its own index (0001_init) and `stale` is the column 0005 added
+ * beside the JSON, so neither has to parse an entry to count it. Nothing here
+ * computes staleness — derivation did, and this counts what it stored.
+ */
+export async function countEntries(
+  db: D1Like,
+  query: { readonly status?: string; readonly stale?: boolean },
+): Promise<number> {
+  const conditions: string[] = [];
+  const bindings: unknown[] = [];
+  if (query.status !== undefined) {
+    conditions.push("status = ?");
+    bindings.push(query.status);
+  }
+  if (query.stale !== undefined) {
+    conditions.push("stale = ?");
+    bindings.push(writeBoolean(query.stale));
+  }
+  const where =
+    conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")} `;
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM entries ${where}`)
+    .bind(...bindings)
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "n");
+}
+
+/** What the browsing listing may narrow by, and where it resumes. */
+export interface ListEntriesPageQuery {
+  readonly category?: string;
+  readonly status?: string;
+  /** The sidecar's `effective_tier`, which is the tier a reader is shown. */
+  readonly tier?: string;
+  readonly stale?: boolean;
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+  /** Resume strictly before this submitted_seq; omit for the first page. */
+  readonly beforeSubmittedSeq?: number;
+}
+
+/**
+ * A page of entries, newest sealed position first.
+ *
+ * `listEntries` above pages forward for the API; a browser reads backward,
+ * newest first, so this is its own query rather than a flag on that one. Keyset
+ * again, not offset: the caller passes back the lowest position it saw.
+ *
+ * The tier filter reads `effective_tier` out of the sidecar rather than
+ * `evidence_tier` off the entry, because they are not the same thing — an
+ * observed entry whose test a majority rejected verifies as a document, and the
+ * tier a reader is shown is the one it actually verified at (src/derive.ts).
+ * There is no column for it, so it is a JSON extraction, which is why it is the
+ * one filter here that does not ride an index.
+ */
+export async function listEntriesPage(
+  db: D1Like,
+  query: ListEntriesPageQuery,
+): Promise<StoredEntry[]> {
+  const conditions: string[] = [];
+  const bindings: unknown[] = [];
+  if (query.category !== undefined) {
+    conditions.push("category = ?");
+    bindings.push(query.category);
+  }
+  if (query.status !== undefined) {
+    conditions.push("status = ?");
+    bindings.push(query.status);
+  }
+  if (query.tier !== undefined) {
+    conditions.push("json_extract(sidecar_json, '$.effective_tier') = ?");
+    bindings.push(query.tier);
+  }
+  if (query.stale !== undefined) {
+    conditions.push("stale = ?");
+    bindings.push(writeBoolean(query.stale));
+  }
+  if (query.beforeSubmittedSeq !== undefined) {
+    conditions.push("submitted_seq < ?");
+    bindings.push(query.beforeSubmittedSeq);
+  }
+  bindings.push(query.limit);
+
+  const where =
+    conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")} `;
+  const rows = await db
+    .prepare(
+      `SELECT ${ENTRY_COLUMNS} FROM entries ${where}ORDER BY submitted_seq DESC LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map(toStoredEntry);
+}
+
+/**
+ * How many operators are in the trusted pool.
+ *
+ * Trust is granted by an `operator_trusted` event and recorded on the row by
+ * whoever recomputed it (src/worker/registry.ts writes `trusted` into
+ * `operator_json`), so this counts what the registry stored and derives nothing.
+ * The condition is the JSON value's own truth rather than `= 1`, exactly as
+ * 0005_freshness.sql reads a JSON boolean: a stored `true` extracts as truthy, a
+ * stored `false` as false, and an operator whose row never carried the field at
+ * all extracts as null and is not counted.
+ */
+export async function countTrustedOperators(db: D1Like): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM operators
+       WHERE json_extract(operator_json, '$.trusted')`,
+    )
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "n");
+}
+
+/** How many seals the log has committed. */
+export async function countSeals(db: D1Like): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM seals`)
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "n");
+}
+
+/**
+ * How many agents each operator has bound, ordered by operator.
+ *
+ * Section 5: "Every agent under an operator counts as one for validation", so
+ * the directory shows the count an operator answers for. One grouped query over
+ * the agents table rather than one query per operator: a directory of a hundred
+ * operators is one read here and a hundred reads if the caller loops, and the
+ * count is the only thing the row needs. An operator with no agent bound has no
+ * row in the agents table and so no row here — the caller reads a missing
+ * operator as zero, which is what it is.
+ *
+ * Served by the (operator_id, registered_seq) index from migration 0001. Limited
+ * by the caller, because this module holds no page size (src/policy.ts holds
+ * LIST_PAGE_LIMIT).
+ */
+export async function agentCountsByOperator(
+  db: D1Like,
+  limit: number,
+): Promise<Array<{ operator: string; count: number }>> {
+  const rows = await db
+    .prepare(
+      `SELECT operator_id AS operator, COUNT(*) AS n FROM agents
+       GROUP BY operator_id ORDER BY operator_id LIMIT ?`,
+    )
+    .bind(limit)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    operator: readText(row, "operator"),
+    count: readInteger(row, "n"),
+  }));
+}
+
+/**
+ * How many decisions each operator has signed, and when it last signed one.
+ *
+ * Section 5: the operator is the unit of accountability, so a validation is
+ * counted against the operator the record names and not against the agent key
+ * that signed it. Grouped straight out of the log — the `validation` events are
+ * the record, and a count kept anywhere else would be a second source of truth
+ * that could disagree with them. Ordered by operator so the page is stable
+ * between reads, and limited by the caller, because this module holds no page
+ * size.
+ */
+export async function validationCountsByOperator(
+  db: D1Like,
+  limit: number,
+): Promise<Array<{ operator: string; count: number; lastSignedAt: string | null }>> {
+  const rows = await db
+    .prepare(
+      `SELECT json_extract(payload, '$.record.operator') AS operator,
+              COUNT(*) AS n,
+              MAX(json_extract(payload, '$.record.signed_at')) AS last_signed_at
+       FROM events WHERE type = 'validation'
+       GROUP BY operator ORDER BY operator LIMIT ?`,
+    )
+    .bind(limit)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    operator: readText(row, "operator"),
+    count: readInteger(row, "n"),
+    lastSignedAt: readNullableText(row, "last_signed_at"),
+  }));
+}
+
+/**
+ * One operator's decisions, newest first: which entry, which way, and when.
+ *
+ * The operator page's own read. Served by the (type, seq) index from 0001 and
+ * narrowed by the JSON path, so it walks the validations and nothing else.
+ */
+export async function validationsByOperator(
+  db: D1Like,
+  operator: string,
+  limit: number,
+): Promise<Array<{ entryId: string; decision: string; seq: number; signed_at: string }>> {
+  const rows = await db
+    .prepare(
+      `SELECT seq, entry_id,
+              json_extract(payload, '$.record.decision') AS decision,
+              json_extract(payload, '$.record.signed_at') AS signed_at
+       FROM events
+       WHERE type = 'validation' AND json_extract(payload, '$.record.operator') = ?
+       ORDER BY seq DESC LIMIT ?`,
+    )
+    .bind(operator, limit)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    entryId: readText(row, "entry_id"),
+    decision: readText(row, "decision"),
+    seq: readInteger(row, "seq"),
+    signed_at: readText(row, "signed_at"),
+  }));
+}

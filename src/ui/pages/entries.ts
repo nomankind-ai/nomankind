@@ -1,0 +1,184 @@
+/**
+ * The entries listing: the filters, the dense table, the keyset pager.
+ *
+ * The filter panel is one GET form and nothing else. There is no script on this
+ * page and the content-security-policy forbids one, so a chip is a `<label>`
+ * around a hidden radio and "Apply" is a submit button: the browser builds the
+ * query string, and the URL a reader ends up at is the whole state of the view.
+ * That is what makes a filtered listing something they can bookmark and send to
+ * somebody else.
+ *
+ * The one thing that is not a radio is each group's "all" chip, and the reason
+ * is the parser's: `?category=` is a refusal, not an absence (src/ui/query.ts),
+ * because a reader who asked for a category and named none made a mistake. A
+ * checked radio always submits something, so "all" cannot be one — it is a link
+ * that carries the other three filters and drops this one, which is exactly what
+ * "no category filter" means as a URL.
+ *
+ * Pure: the rows, the total and the cursor were all decided by the route.
+ */
+
+import {
+  ENTRY_CATEGORIES,
+  ENTRY_STATUSES,
+  ENTRY_TIERS,
+  FRESHNESS_VALUES,
+} from "../query.js";
+import {
+  badge,
+  fmtDate,
+  html,
+  layout,
+  raw,
+  statusClass,
+  type Safe,
+} from "../html.js";
+import type {
+  EntriesData,
+  EntriesFilter,
+  EntryRow,
+  PageContext,
+} from "../types.js";
+
+/** The four filter parameters, and which field of the filter each reads. */
+const GROUPS: readonly {
+  readonly name: keyof EntriesFilter;
+  readonly values: readonly string[];
+}[] = [
+  { name: "category", values: ENTRY_CATEGORIES },
+  { name: "status", values: ENTRY_STATUSES },
+  { name: "tier", values: ENTRY_TIERS },
+  { name: "fresh", values: FRESHNESS_VALUES },
+];
+
+/** A query string, or the empty string when nothing is asked. */
+function search(pairs: readonly (readonly [string, string])[]): string {
+  if (pairs.length === 0) return "";
+  const parts = pairs.map(
+    ([name, value]) => `${name}=${encodeURIComponent(value)}`,
+  );
+  return `?${parts.join("&")}`;
+}
+
+/** The filter as query pairs, optionally with one group left out. */
+function filterPairs(
+  filter: EntriesFilter,
+  without?: keyof EntriesFilter,
+): (readonly [string, string])[] {
+  const pairs: (readonly [string, string])[] = [];
+  for (const group of GROUPS) {
+    if (group.name === without) continue;
+    const value = filter[group.name];
+    if (value !== null) pairs.push([group.name, value]);
+  }
+  return pairs;
+}
+
+/** One group of chips: the "all" link, then one label-wrapped radio per value. */
+function group(
+  filter: EntriesFilter,
+  name: keyof EntriesFilter,
+  values: readonly string[],
+): Safe {
+  const current = filter[name];
+  const allClass = current === null ? "chip chip-on" : "chip";
+  return html`<div class="filter-row">
+    <span class="filter-name">${name}</span>
+    <a class="${allClass}" href="/entries${search(filterPairs(filter, name))}"
+      >all</a
+    >
+    ${values.map((value) => {
+      const chipClass = current === value ? "chip chip-on" : "chip";
+      const checked = current === value ? raw(` checked`) : raw("");
+      return html`<label class="${chipClass}"
+        ><input type="radio" name="${name}" value="${value}"${checked} />${value}</label
+      >`;
+    })}
+  </div>`;
+}
+
+/** The whole panel: four groups and the button that applies them. */
+function filters(filter: EntriesFilter): Safe {
+  return html`<form class="filters" method="get" action="/entries">
+    ${GROUPS.map((each) => group(filter, each.name, each.values))}
+    <div class="filter-row">
+      <span class="filter-name"></span>
+      <button class="btn btn-accent" type="submit">Apply</button>
+    </div>
+  </form>`;
+}
+
+function row(entry: EntryRow): Safe {
+  const expiresClass = entry.stale ? "warn" : "dim";
+  return html`<tr class="row">
+    <td class="dim">
+      <a href="/entries/${entry.id}">${entry.position}</a>${entry.sealed
+        ? raw("")
+        : html` <span class="warn">unsealed</span>`}
+    </td>
+    <td>${badge(statusClass(entry.status), entry.status)}</td>
+    <td>${entry.subject}</td>
+    <td class="muted">${entry.category}</td>
+    <td class="prose"><a href="/entries/${entry.id}">${entry.claim}</a></td>
+    <td class="muted">${entry.tier ?? "—"}</td>
+    <td class="dim">${fmtDate(entry.last_confirmed)}</td>
+    <td class="${expiresClass}">${fmtDate(entry.expires_at)}</td>
+  </tr>`;
+}
+
+function table(rows: EntryRow[]): Safe {
+  if (rows.length === 0) {
+    return html`<div class="panel-empty">No entries match these filters.</div>`;
+  }
+  return html`<div class="table-wrap">
+    <table class="dense">
+      <thead>
+        <tr>
+          <th>pos</th>
+          <th>status</th>
+          <th>subject</th>
+          <th>category</th>
+          <th>claim</th>
+          <th>tier</th>
+          <th>confirmed</th>
+          <th>expires</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(row)}
+      </tbody>
+    </table>
+  </div>`;
+}
+
+export function renderEntries(ctx: PageContext, data: EntriesData): string {
+  const nextHref =
+    data.nextBefore === null
+      ? null
+      : `/entries${search([
+          ...filterPairs(data.filter),
+          ["before", String(data.nextBefore)] as const,
+        ])}`;
+  return layout(ctx, {
+    title: "Entries",
+    description: "Every entry in the log, newest sealed position first.",
+    body: html`
+      <div class="page-head">
+        <h1>Entries</h1>
+        <span
+          class="mono note"
+          title="The total counts every entry with this status; the category, tier and freshness filters narrow the page, not the total."
+          >${data.rows.length} of ${data.total} · ordered by sealed
+          position</span
+        >
+      </div>
+      ${filters(data.filter)}
+      <section class="panel">${table(data.rows)}</section>
+      ${nextHref === null
+        ? raw("")
+        : html`<div class="pager">
+            <a class="btn" href="${nextHref}">Next page</a>
+          </div>`}
+    `,
+  });
+}

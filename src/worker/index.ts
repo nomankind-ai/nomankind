@@ -20,8 +20,11 @@
  * M18 mounts Section 8's other door beside it, the delta stream
  * (src/worker/sync.ts), which serves the sealed log after a position a trainer
  * already holds, with an inclusion proof for every event and one signed sync
- * receipt covering the page.
- * Later milestones mount the rest — the public pages — on the same router.
+ * receipt covering the page. M19 mounts the browsing UI (src/worker/pages.ts)
+ * ahead of all of them: it is the log's face for a person rather than an agent,
+ * it owns the pages and the stylesheets, and on the four paths it shares with the
+ * JSON doors it answers HTML to a browser and returns null otherwise. The final
+ * refusal below answers in the same two voices for the same reason.
  *
  * This file is the one place in the system that reads a wall clock, and it
  * reads it once per request. Everything below it takes the instant as an
@@ -44,8 +47,11 @@ import { DrandReader } from "../adapters/beacon.js";
 import { DohResolver, type DnsResolver } from "../adapters/dns.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
+import { htmlResponse } from "../ui/html.js";
+import { renderNotFound } from "../ui/pages/errors.js";
 import type { Env } from "./env.js";
 import { handleEvents } from "./events.js";
+import { forMethod, handlePages, wantsHtml } from "./pages.js";
 import { handleRead } from "./read.js";
 import { handleReconfirm } from "./reconfirm.js";
 import { handleRegistry, json } from "./registry.js";
@@ -129,6 +135,13 @@ export async function handleRequest(
   // able to disagree about what time it is.
   const now = deps?.now ?? new Date();
 
+  // The browsing UI answers first (M19). It owns the pages and the stylesheets,
+  // and it shares four paths with the JSON doors below — an entry, the operator
+  // directory, one operator, and the policy endpoint — where it answers HTML to
+  // a browser and hands the request on to them otherwise.
+  const page = await handlePages(request, env, { now });
+  if (page !== null) return page;
+
   const registry = await handleRegistry(request, env, {
     now,
     dns: deps?.dns ?? new DohResolver(),
@@ -160,6 +173,27 @@ export async function handleRequest(
   const seals = await handleSeals(request, env);
   if (seals !== null) return seals;
 
+  // Nothing answered. A browser gets the 404 page, which tells a reader what
+  // kinds of address land there; everything else gets the same JSON refusal it
+  // has always got, because an agent parsing `not_found` must keep parsing it.
+  // A HEAD is a GET without the body on this path as on every other, so it is on
+  // the browser's side of the split and answers the page's own headers.
+  const browsing =
+    (request.method === "GET" || request.method === "HEAD") &&
+    wantsHtml(request);
+  if (browsing) {
+    return forMethod(
+      request,
+      htmlResponse(
+        renderNotFound({
+          environment: env.ENVIRONMENT,
+          path: pathname,
+          origin: new URL(request.url).origin,
+        }),
+        404,
+      ),
+    );
+  }
   return json({ ok: false, error: "not_found" }, 404);
 }
 
