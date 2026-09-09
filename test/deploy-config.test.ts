@@ -125,6 +125,9 @@ describe("wrangler.jsonc routes and hostnames", () => {
     expect(config.env.production.routes).toEqual([
       { pattern: "app.nomankind.ai", custom_domain: true },
       { pattern: "nomankind.ai", custom_domain: true },
+      // The www host is routed here only to be redirected to the apex
+      // (src/worker/pages.ts); nothing is served on it.
+      { pattern: "www.nomankind.ai", custom_domain: true },
     ]);
   });
 

@@ -638,6 +638,73 @@ describe("the documentation pages and the front door", () => {
     expect(body).toContain("VERIFIED");
   }, 60_000);
 
+  /**
+   * The www host is a fourth custom domain of the production Worker and serves
+   * nothing: it exists to send a reader to the apex, so the landing page has one
+   * canonical host. The redirect is permanent, keeps the path and the query, and
+   * is above the method check — nothing on www is anybody's door.
+   */
+  describe("the www host", () => {
+    /** The production world: the only one that sets APEX_HOST. */
+    const apex = (): Env => ({ ...env, APEX_HOST: "nomankind.ai" });
+
+    it("redirects a page request to the apex, path and query kept", async () => {
+      const response = await send(
+        new Request("https://www.nomankind.ai/entries?status=verified", {
+          headers: HTML,
+        }),
+        apex(),
+      );
+      expect(response.status).toBe(301);
+      expect(response.headers.get("location")).toBe(
+        "https://nomankind.ai/entries?status=verified",
+      );
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    }, 60_000);
+
+    it("redirects the front door itself", async () => {
+      const response = await send(
+        new Request("https://www.nomankind.ai/", { headers: HTML }),
+        apex(),
+      );
+      expect(response.status).toBe(301);
+      expect(response.headers.get("location")).toBe("https://nomankind.ai/");
+    }, 60_000);
+
+    it("redirects a POST too, because no door lives on www", async () => {
+      const response = await send(
+        new Request("https://www.nomankind.ai/entries", { method: "POST" }),
+        apex(),
+      );
+      expect(response.status).toBe(301);
+      expect(response.headers.get("location")).toBe(
+        "https://nomankind.ai/entries",
+      );
+    }, 60_000);
+
+    it("leaves the apex itself answering the landing", async () => {
+      const response = await send(
+        new Request("https://nomankind.ai/", { headers: HTML }),
+        apex(),
+      );
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain(`<body class="landing">`);
+    }, 60_000);
+
+    it("redirects nothing when no apex is configured", async () => {
+      // Local and demo set no APEX_HOST, so a www hostname is just a hostname
+      // and the app answers on it as it answers anywhere.
+      const response = await send(
+        new Request("https://www.nomankind.ai/", { headers: HTML }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).not.toContain(`<body class="landing">`);
+      expect(body).toContain("VERIFIED");
+    }, 60_000);
+  });
+
   it("serves the stylesheet as CSS, cacheable, to any reader", async () => {
     const response = await send(new Request(`${TEST_ORIGIN}/static/app.css`));
     expect(response.status).toBe(200);
