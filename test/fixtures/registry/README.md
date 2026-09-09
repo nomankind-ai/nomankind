@@ -38,4 +38,10 @@ normally later than it and the bridge runs forward):
   (`a44ac4e2…`). The endpoint requires `0 <= from <= to`, so the reverse question
   (`from=9971&to=9874`) has no answer to capture.
 
+Observed on 2026-09-09 22:10 UTC, and the reason a witness file smaller than the tail is read
+whole: `raw.githubusercontent.com` answers `Range: bytes=-262144` with 416 Range Not Satisfiable
+when the file is shorter than the range, not with the file. The three pinned files that day were
+510,221 bytes (commonwealth, id 6 — a real 206), 227,928 (head-of-experiments, id 7 — 416) and
+141,875 (liveness, id 8 — 416). Nothing captured: the 416 carries no body.
+
 Registry public key (Ed25519, base64url): mpQPa0FjyynqoSg2Z9j91hRhb8WckxIpRGod43CQqLw

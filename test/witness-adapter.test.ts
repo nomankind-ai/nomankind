@@ -40,7 +40,7 @@ import {
   signBytes,
   verifyBytes,
 } from "../src/identity.js";
-import { REGISTRY, WITNESS_PIN } from "../src/policy.js";
+import { REGISTRY, WITNESS_FILE_TAIL_BYTES, WITNESS_PIN } from "../src/policy.js";
 import {
   registryCheckpointPayload,
   registryLeafHash,
@@ -405,6 +405,29 @@ function sealWithSealRowId(): Seal {
     event_hash: null,
   };
   return seal;
+}
+
+/**
+ * A fetch that answers one witness file itself, so a test can answer a ranged
+ * read the way a real server does; everything else goes to the fake registry.
+ */
+function fileServer(
+  inner: typeof fetch,
+  url: string,
+  serve: (range: string | undefined) => Response,
+): { fetch: typeof fetch; ranges: (string | undefined)[] } {
+  const ranges: (string | undefined)[] = [];
+  const fetchFn = async function (
+    this: unknown,
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> {
+    if (String(input) !== url) return inner(input, init);
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    ranges.push(headers["range"]);
+    return serve(headers["range"]);
+  } as unknown as typeof fetch;
+  return { fetch: fetchFn, ranges };
 }
 
 function adapterWith(fetchFn: typeof fetch, tailBytes?: number) {
@@ -940,6 +963,146 @@ describe("RegistryWitnessAdapter.collect", () => {
     expect(request.headers["range"]).toBe(`bytes=-${tailBytes}`);
     expect(signatures).toHaveLength(2);
     expect(signatures[0]!.head!.tree_size).toBe(6);
+  });
+
+  it("reads the whole file when the tail is more than there is to read", async () => {
+    // A file smaller than the tail: raw.githubusercontent.com answers 416
+    // rather than sending what it has (two of the three pinned files were under
+    // the tail on 2026-09-09), and the retry without a range is the whole file,
+    // so its first line is whole and counts.
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([
+      // The only usable line is the first one: drop it and alpha has nothing.
+      await countersignatureLine(alpha, 6),
+      await countersignatureLine(alpha, SIZE, { consistency: "first observation" }),
+    ]);
+    const whole = files[pinAlpha.url]!;
+
+    const inner = await fakeRegistry({ files });
+    const { fetch, ranges } = fileServer(inner.fetch, pinAlpha.url, (range) =>
+      range === undefined
+        ? new Response(whole, { status: 200 })
+        : new Response("", { status: 416 }),
+    );
+
+    const signatures = await adapterWith(fetch).collect(sealedSeal(), NOW);
+
+    // Asked for the tail first, then for the file, and read every line of it.
+    expect(ranges).toEqual([`bytes=-${WITNESS_FILE_TAIL_BYTES}`, undefined]);
+    expect(signatures.map((entry) => entry.agent)).toEqual([
+      AGENT_ID_PREFIX + alpha.publicKey,
+      AGENT_ID_PREFIX + beta.publicKey,
+    ]);
+    expect(signatures[0]!.head!.tree_size).toBe(6);
+
+    const check = await checkWitnesses(SEAL_HASH, signatures, testContext());
+    expect(check.ok).toBe(true);
+  });
+
+  it("drops the first line of a real tail, however usable it looks", async () => {
+    // The same file over a 206: the first line is a fragment of whatever record
+    // the byte offset fell inside, so it is dropped unparsed and alpha, whose
+    // only usable line that is, contributes nothing.
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([
+      await countersignatureLine(alpha, 6),
+      await countersignatureLine(alpha, SIZE, { consistency: "first observation" }),
+    ]);
+
+    const { fetch } = await fakeRegistry({ files });
+    const signatures = await adapterWith(
+      fetch,
+      files[pinAlpha.url]!.length - 5,
+    ).collect(sealedSeal(), NOW);
+
+    expect(signatures.map((entry) => entry.agent)).toEqual([
+      AGENT_ID_PREFIX + beta.publicKey,
+    ]);
+  });
+
+  it("reads a ranged read answered 200 as the whole file", async () => {
+    // A server may ignore the range and send everything; then nothing is
+    // partial and the first line counts.
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([
+      await countersignatureLine(alpha, 6),
+      await countersignatureLine(alpha, SIZE, { consistency: "first observation" }),
+    ]);
+    const whole = files[pinAlpha.url]!;
+
+    const inner = await fakeRegistry({ files });
+    const { fetch, ranges } = fileServer(
+      inner.fetch,
+      pinAlpha.url,
+      () => new Response(whole, { status: 200 }),
+    );
+
+    const signatures = await adapterWith(fetch).collect(sealedSeal(), NOW);
+
+    expect(ranges).toEqual([`bytes=-${WITNESS_FILE_TAIL_BYTES}`]);
+    expect(signatures[0]!.head!.tree_size).toBe(6);
+  });
+
+  it("refuses a from head whose root differs, path or no path", async () => {
+    // The endpoint answers the right question with the real path, and names a
+    // `from` head whose root is not the one our inclusion proof folds to. The
+    // path folds, so the only thing that can refuse this is the check of the
+    // endpoint's own head against the root already held.
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([await countersignatureLine(alpha, LATER_SIZE)]);
+
+    const { fetch } = await fakeRegistry({
+      files,
+      consistency: async (from, to) => ({
+        log: LOG,
+        from: { ...(await checkpointAt(from)), root: "a".repeat(64) },
+        to: await checkpointAt(to),
+        proof: await consistencyOf(leaves.slice(0, to), from),
+      }),
+    });
+    expect(
+      (await adapterWith(fetch).collect(sealedSeal(), NOW)).map(
+        (entry) => entry.agent,
+      ),
+    ).toEqual([AGENT_ID_PREFIX + beta.publicKey]);
+
+    // The control: the same body with that head named honestly is accepted, so
+    // the path the refusal threw away was one that folds.
+    const honest = await fakeRegistry({ files });
+    expect(
+      (await adapterWith(honest.fetch).collect(sealedSeal(), NOW)).map(
+        (entry) => entry.agent,
+      ),
+    ).toEqual([AGENT_ID_PREFIX + alpha.publicKey, AGENT_ID_PREFIX + beta.publicKey]);
+  });
+
+  it("refuses a to head whose root differs, path or no path", async () => {
+    // The other half of the same check: the `to` head the endpoint names is not
+    // the countersigned head, and the path that came with it folds.
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([await countersignatureLine(alpha, LATER_SIZE)]);
+
+    const { fetch } = await fakeRegistry({
+      files,
+      consistency: async (from, to) => ({
+        log: LOG,
+        from: await checkpointAt(from),
+        to: { ...(await checkpointAt(to)), root: "b".repeat(64) },
+        proof: await consistencyOf(leaves.slice(0, to), from),
+      }),
+    });
+    expect(
+      (await adapterWith(fetch).collect(sealedSeal(), NOW)).map(
+        (entry) => entry.agent,
+      ),
+    ).toEqual([AGENT_ID_PREFIX + beta.publicKey]);
+
+    const honest = await fakeRegistry({ files });
+    expect(
+      (await adapterWith(honest.fetch).collect(sealedSeal(), NOW)).map(
+        (entry) => entry.agent,
+      ),
+    ).toEqual([AGENT_ID_PREFIX + alpha.publicKey, AGENT_ID_PREFIX + beta.publicKey]);
   });
 
   it("answers nothing when the seal was never submitted", async () => {

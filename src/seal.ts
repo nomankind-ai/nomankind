@@ -63,14 +63,20 @@ export interface WitnessEvidence {
   event_hash: string;
   /** Inclusion path from the leaf to `proved_at.root`. */
   proof: string[];
-  /** The head the inclusion proof was fetched against (equal to `head` or later). */
+  /**
+   * The head the inclusion proof was fetched against, which may be the same
+   * tree as `head`, an earlier one, or a later one.
+   */
   proved_at: {
     tree_size: number;
     root: string;
     created_at: number;
     registry_sig: string;
   };
-  /** Consistency path from `head` to `proved_at`; empty when they are the same head. */
+  /**
+   * Consistency path between `head` and `proved_at`, running from whichever of
+   * them is the smaller tree into the larger; empty when they are the same head.
+   */
   consistency_proof: string[];
 }
 

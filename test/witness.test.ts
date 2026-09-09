@@ -481,6 +481,27 @@ describe("checkWitnesses, the registry form", () => {
     ).toEqual({ ok: false, reason: "bad_signature", agent: alpha.agent });
   });
 
+  it("refuses a bridge between what is one and the same head", async () => {
+    // The countersigned head *is* the head the inclusion proof was fetched
+    // against, so there is nothing to bridge. A path presented anyway proves
+    // some other pair of heads, and an unchecked one is a place to hide it: the
+    // rule asks for the path to be empty exactly when the heads are equal.
+    const alpha = await makeParty("alpha");
+    const bridged = registryFixture<{ proof: string[] }>(
+      "consistency-identity_events-89-9128.json",
+    ).proof;
+    const entry = await countersignHead(alpha, CAPTURED_HEAD, {
+      ...CAPTURED_EVIDENCE,
+      consistency_proof: bridged,
+    });
+
+    expect(
+      await checkWitnesses(SEAL_HASH, [entry], context(pin(alpha), ["nomankind"], {
+        registry: PINNED_REGISTRY,
+      })),
+    ).toEqual({ ok: false, reason: "bad_evidence", agent: alpha.agent });
+  });
+
   it("refuses a registry-form signature carrying no evidence", async () => {
     const alpha = await makeParty("alpha");
     const entry = await countersignHead(alpha, CAPTURED_HEAD, CAPTURED_EVIDENCE);

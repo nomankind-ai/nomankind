@@ -223,6 +223,14 @@ const CONFLICT = 409;
 /** The status a ranged read answers when it really returned a tail. */
 const PARTIAL_CONTENT = 206;
 
+/**
+ * The status a suffix range answers when the file is smaller than the range.
+ * raw.githubusercontent.com does this rather than sending the whole file: on
+ * 2026-09-09 two of the three pinned files were under the tail (227,928 and
+ * 141,875 bytes against a 262,144-byte tail) and answered 416.
+ */
+const RANGE_NOT_SATISFIABLE = 416;
+
 /** The consistency field a witness line carries when it really checked one. */
 const VERIFIED_FROM = "verified from";
 
@@ -824,23 +832,37 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
    *
    * The files are append-only and already hundreds of kilobytes, so only the
    * tail is read; on a 206 the first line is whatever the range landed inside
-   * of and is dropped unparsed. Lines for other logs, and lines that refuse
-   * (any status but "countersigned", or a first observation rather than a
-   * verified consistency) are exactly the lines this must not return: a first
-   * observation attests nothing about what came before it, which is the whole
-   * guarantee being borrowed.
+   * of and is dropped unparsed. A file smaller than the tail is not a tail at
+   * all: raw.githubusercontent.com answers 416 rather than sending what it has,
+   * so that file is read again without a range and every line of it is whole.
+   * Lines for other logs, and lines that refuse (any status but
+   * "countersigned", or a first observation rather than a verified consistency)
+   * are exactly the lines this must not return: a first observation attests
+   * nothing about what came before it, which is the whole guarantee being
+   * borrowed.
    */
   async #newestLine(
     witness: WitnessPin,
     proof: CheckedProof,
   ): Promise<CheckedLine | null> {
-    const response = await this.#call(witness.url, {
+    const ranged = await this.#call(witness.url, {
       method: "GET",
       headers: {
         "user-agent": USER_AGENT,
         range: `bytes=-${this.#tailBytes}`,
       },
     });
+    if (ranged === null) return null;
+
+    // A 416 means the file is shorter than the tail asked for, so ask for the
+    // file itself; anything else it answers is the answer.
+    const response =
+      ranged.status === RANGE_NOT_SATISFIABLE
+        ? await this.#call(witness.url, {
+            method: "GET",
+            headers: { "user-agent": USER_AGENT },
+          })
+        : ranged;
     if (response === null || !response.ok) return null;
 
     let text: string;
