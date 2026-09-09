@@ -68,9 +68,9 @@ const PIPELINE = html`<svg
             <text class="node-name" x="232" y="116" text-anchor="middle" font-size="18" font-weight="600" fill="#ece9e2">Snapshot</text>
             <text class="node-note" x="232" y="138" text-anchor="middle" font-size="9" fill="#7f8794">hashed at capture</text>
 
-            <rect x="352" y="26" width="112" height="48" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
+            <rect x="352" y="26" width="112" height="48" stroke="#7fd1c4" stroke-width="1.5" fill="#0b0d10"></rect>
             <text class="node-name" x="408" y="56" text-anchor="middle" font-size="16" font-weight="600" fill="#ece9e2">Operator A</text>
-            <rect x="352" y="96" width="112" height="48" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
+            <rect x="352" y="96" width="112" height="48" stroke="#7fd1c4" stroke-width="1.5" fill="#0b0d10"></rect>
             <text class="node-name" x="408" y="126" text-anchor="middle" font-size="16" font-weight="600" fill="#ece9e2">Operator B</text>
             <rect x="352" y="166" width="112" height="48" stroke="#7fd1c4" stroke-width="1.5" fill="#0b0d10"></rect>
             <text class="node-name" x="408" y="196" text-anchor="middle" font-size="16" font-weight="600" fill="#ece9e2">Operator C</text>
