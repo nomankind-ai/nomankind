@@ -28,9 +28,14 @@ import {
 } from "../src/registry.js";
 import { renderApi } from "../src/ui/pages/api.js";
 import { renderGenesis } from "../src/ui/pages/genesis.js";
+import { shortHash } from "../src/ui/html.js";
 import { LANDING_CSS, renderLanding } from "../src/ui/pages/landing.js";
 import { renderPolicy } from "../src/ui/pages/policy.js";
-import type { GenesisData, PageContext } from "../src/ui/types.js";
+import type {
+  GenesisData,
+  LandingData,
+  PageContext,
+} from "../src/ui/types.js";
 
 const ctx: PageContext = {
   environment: "demo",
@@ -289,7 +294,40 @@ describe("renderGenesis", () => {
 });
 
 describe("renderLanding", () => {
-  const page = renderLanding(ctx);
+  /**
+   * A hand-made reading, not a fixture off the store: the page's job is to print
+   * what it was handed, so the data says what every assertion below expects to
+   * see, down to a hash that is markup if nothing escapes it.
+   */
+  const data: LandingData = {
+    seals: [
+      {
+        seq: 0,
+        hash: "sha256:a61ae671cdb6f0e4b7dd6a3e6a1d7d4f0d1c2b3a49586776655443322110099a",
+        sealedAt: "2026-09-09T17:47:27.000Z",
+        witnessed: true,
+        events: 4,
+      },
+      {
+        seq: 1,
+        hash: "sha256:3eb4ad8a83b512c9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071",
+        sealedAt: "2026-09-09T17:52:31.000Z",
+        witnessed: true,
+        events: 2,
+      },
+      {
+        seq: 2,
+        hash: "sha256:92fe03dab291<b>0f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778",
+        sealedAt: "2026-09-09T17:57:30.000Z",
+        witnessed: false,
+        events: 1,
+      },
+    ],
+    sealCount: 288,
+    verified: 41,
+    witnesses: 3,
+  };
+  const page = renderLanding(ctx, data);
 
   it("is a whole document of its own with the landing stylesheet", () => {
     expect(page.startsWith("<!doctype html>")).toBe(true);
@@ -299,8 +337,16 @@ describe("renderLanding", () => {
     expect(page).toContain("fonts.googleapis.com");
   });
 
-  it("leads with the hero line", () => {
-    expect(page).toContain("Proof first. Use second.");
+  it("leads with the hero line and the primary use case", () => {
+    expect(page).toContain("Proof first.");
+    expect(page).toContain("Use second.");
+    expect(page).toContain("THE SEALED FEED FOR MODELS THAT KEEP LEARNING");
+  });
+
+  it("names the three cards", () => {
+    expect(page).toContain("PRIMARY USE · CONTINUAL LEARNING");
+    expect(page).toContain("PROVENANCE, PROVEN");
+    expect(page).toContain("TRUTH, WHERE A TEST CAN REACH");
   });
 
   it("holds the five values", () => {
@@ -322,11 +368,56 @@ describe("renderLanding", () => {
     expect(page).toContain(
       "https://github.com/nomankind-ai/nomankind/blob/main/paper/WHITEPAPER.md",
     );
+    expect(page).toContain(`href="https://github.com/nomankind-ai/nomankind"`);
     expect(page).toContain(`href="https://github.com/nomankind-ai/log"`);
     expect(page).toContain(`href="https://1f916.org"`);
   });
 
-  it("closes on the two tiers and the licence line only", () => {
+  it("draws the proof pipeline inline, from the source to the learner", () => {
+    expect(page).toContain("<svg");
+    const svg = page.slice(page.indexOf("<svg"), page.indexOf("</svg>"));
+    expect(svg).toContain("Source");
+    expect(svg).toContain("Snapshot");
+    expect(svg).toContain("Seal");
+    expect(svg).toContain("Learner");
+  });
+
+  it("shows the seal chain it was handed, witnessed or pending", () => {
+    for (const seal of data.seals) {
+      expect(page).toContain(shortHash(seal.hash));
+      expect(page).toContain(`#${seal.seq}`);
+    }
+    expect(page).toContain("witnessed");
+    expect(page).toContain("pending");
+    expect(page).toContain("SEAL CHAIN · LIVE");
+  });
+
+  it("prints the three numerals off the log, and nothing of its own", () => {
+    expect(page).toContain(">288<");
+    expect(page).toContain(">3<");
+    expect(page).toContain(">41<");
+    expect(page).toContain("SEALS");
+    expect(page).toContain("INDEPENDENT WITNESSES");
+    expect(page).toContain("VERIFIED FACTS");
+    expect(page).toContain("one every five minutes, each countersigned");
+    expect(page).toContain("none under a model provider");
+    expect(page).toContain("in the sealed log");
+  });
+
+  it("says so in words when nothing is sealed yet", () => {
+    const fresh = renderLanding(ctx, {
+      seals: [],
+      sealCount: 0,
+      verified: 0,
+      witnesses: 3,
+    });
+    expect(fresh).toContain("no seal yet");
+    expect(fresh).toContain("band-still");
+    expect(fresh).not.toContain("band-witnessed");
+    expect(fresh).not.toContain("band-pending");
+  });
+
+  it("closes on the two tiers and the licence line", () => {
     expect(page).toContain("Provenance is the floor.");
     expect(page).toContain("CODE APACHE-2.0 · DATA CC0");
   });
@@ -334,6 +425,12 @@ describe("renderLanding", () => {
   it("survives the content-security-policy: no script, no inline style", () => {
     expect(page).not.toContain("<script");
     expect(page).not.toContain("style=");
+    expect(page).not.toContain("javascript:");
+  });
+
+  it("escapes a seal hash that is markup", () => {
+    expect(page).not.toContain("<b>");
+    expect(page).toContain("&lt;b&gt;");
   });
 });
 
@@ -349,11 +446,7 @@ describe("LANDING_CSS", () => {
     expect(LANDING_CSS).toContain("prefers-reduced-motion");
   });
 
-  it("reveals on scroll only where the browser has a view timeline", () => {
-    expect(LANDING_CSS).toContain("@supports (animation-timeline: view())");
-  });
-
-  it("answers under 700 px", () => {
-    expect(LANDING_CSS).toContain("@media (max-width: 700px)");
+  it("stacks the grids on a narrow viewport", () => {
+    expect(LANDING_CSS).toContain("@media (max-width: 900px)");
   });
 });

@@ -185,3 +185,31 @@ export interface GenesisData {
   /** Whether this environment has a maintainer configured at all (D-016). */
   maintainerConfigured: boolean;
 }
+
+/**
+ * What the apex landing page is handed (D-062, direction D).
+ *
+ * The front door shows the log moving, so it reads the log: the newest seals for
+ * the live band, and the three numerals under it. Every field is a reading —
+ * `seals` is what the seals table holds, `sealCount` and `verified` are counts,
+ * and `witnesses` is how many distinct operators the policy's WITNESS_PIN names.
+ * Nothing here is computed by the page; `events` is the size the kernel sealed
+ * (last_seq - first_seq + 1) and `witnessed` is whether that seal has at least
+ * one countersignature.
+ *
+ * `seals` is in seq order, newest last, because the band reads left to right and
+ * a strip that had to be reversed in the view would be a derivation in the view.
+ * Empty before anything is sealed, which the band says in words.
+ */
+export interface LandingData {
+  seals: Array<{
+    seq: number;
+    hash: string;
+    sealedAt: string;
+    witnessed: boolean;
+    events: number;
+  }>;
+  sealCount: number;
+  verified: number;
+  witnesses: number;
+}

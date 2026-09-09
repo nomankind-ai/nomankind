@@ -22,8 +22,8 @@
  * derived field an entry shows was derived when the entry was written.
  *
  * No policy number lives here: the bare integers are HTTP status codes, and the
- * page sizes are LIST_PAGE_LIMIT and HOME_LATEST_ENTRIES from src/policy.ts.
- * No wall clock either — `deps.now` is the instant the router read once.
+ * page sizes are LIST_PAGE_LIMIT, HOME_LATEST_ENTRIES and LANDING_BAND_SEALS
+ * from src/policy.ts. No wall clock either — `deps.now` is the instant the router read once.
  */
 
 import type { Event } from "../events.js";
@@ -32,7 +32,13 @@ import {
   ATTESTATION_VERSION,
   TXT_RECORD_PREFIX,
 } from "../registry.js";
-import { HOME_LATEST_ENTRIES, LIST_PAGE_LIMIT, POLICY } from "../policy.js";
+import {
+  HOME_LATEST_ENTRIES,
+  LANDING_BAND_SEALS,
+  LIST_PAGE_LIMIT,
+  POLICY,
+  WITNESS_PIN,
+} from "../policy.js";
 import type { D1Like } from "../storage/d1.js";
 import {
   agentCountsByOperator,
@@ -47,6 +53,7 @@ import {
   listEntriesPage,
   listOperators,
   sealCovering,
+  sealsAfter,
   supersedersOf,
   validationCountsByOperator,
   validationsByOperator,
@@ -75,6 +82,7 @@ import type {
   EntriesFilter,
   EntryRow,
   GenesisRow,
+  LandingData,
   OperatorRow,
   PageContext,
 } from "../ui/types.js";
@@ -184,6 +192,48 @@ class TrustedOperators {
 // ---------------------------------------------------------------------------
 // The pages
 // ---------------------------------------------------------------------------
+
+/**
+ * The apex front door (D-021, D-062 direction D).
+ *
+ * The one page outside the instrument panel, and it reads the log too: the band
+ * shows the newest seals and the numerals show the totals, because a front door
+ * for a log has to be able to show that the log is moving and a hard-coded
+ * number would be a claim rather than a reading. Four reads, all of them counts
+ * or one keyset page, and nothing derived on the way — `events` is the size the
+ * kernel sealed and `witnessed` is whether a countersignature is attached.
+ *
+ * The witnesses number is the distinct operators pinned in WITNESS_PIN, read
+ * from the policy module: the independent witnesses the maintainer published, not
+ * a number written into a page.
+ */
+async function landing(db: D1Like, ctx: PageContext): Promise<Response> {
+  const head = await latestSeal(db);
+  // Newest last, in seq order, because the band reads left to right. The chain
+  // is contiguous, so "the last twelve" is one keyset read after head - 12
+  // rather than a scan; a negative bound is harmless, seqs start at 0.
+  const newest =
+    head === null
+      ? []
+      : await sealsAfter(db, head.seq - LANDING_BAND_SEALS, LANDING_BAND_SEALS);
+  const sealCount = await countSeals(db);
+  const verified = await countEntries(db, { status: "verified" });
+
+  const data: LandingData = {
+    seals: newest.map((seal) => ({
+      seq: seal.seq,
+      hash: seal.hash,
+      sealedAt: seal.sealed_at,
+      witnessed: seal.witnesses.length >= 1,
+      events: seal.size,
+    })),
+    sealCount,
+    verified,
+    witnesses: new Set(WITNESS_PIN.map((witness) => witness.operator)).size,
+  };
+
+  return htmlResponse(renderLanding(ctx, data));
+}
 
 async function home(db: D1Like, ctx: PageContext): Promise<Response> {
   const verified = await countEntries(db, { status: "verified" });
@@ -474,11 +524,11 @@ async function route(
   if (path === "/") {
     const apex = env.APEX_HOST;
     return apex !== undefined && apex !== "" && apex === url.hostname
-      ? htmlResponse(renderLanding(ctx))
+      ? landing(db, ctx)
       : home(db, ctx);
   }
 
-  if (path === "/landing") return htmlResponse(renderLanding(ctx));
+  if (path === "/landing") return landing(db, ctx);
 
   // The listing has no JSON twin, so it answers whatever the Accept header says.
   if (path === "/entries") return entries(db, ctx, url);
