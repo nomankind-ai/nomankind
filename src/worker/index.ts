@@ -10,8 +10,9 @@
  * entries and the reads that show a capture. M14 mounts the validate door
  * (src/worker/validate.ts) and the log's own page (src/worker/events.ts), and
  * adds the scheduled sweep (src/worker/sweep.ts) beside the request handler.
- * Later milestones mount the rest — reconfirmation, the public pages — on the
- * same router.
+ * M15 mounts the reconfirmation door (src/worker/reconfirm.ts) beside the
+ * validate one and gives the sweep its staleness step. Later milestones mount
+ * the rest — the public pages — on the same router.
  *
  * This file is the one place in the system that reads a wall clock, and it
  * reads it once per request. Everything below it takes the instant as an
@@ -36,6 +37,7 @@ import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import type { Env } from "./env.js";
 import { handleEvents } from "./events.js";
+import { handleReconfirm } from "./reconfirm.js";
 import { handleRegistry, json } from "./registry.js";
 import { handleSubmit } from "./submit.js";
 import { runSweep } from "./sweep.js";
@@ -126,6 +128,9 @@ export async function handleRequest(
 
   const validated = await handleValidate(request, env, { now });
   if (validated !== null) return validated;
+
+  const reconfirmed = await handleReconfirm(request, env, { now });
+  if (reconfirmed !== null) return reconfirmed;
 
   const events = await handleEvents(request, env);
   if (events !== null) return events;

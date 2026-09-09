@@ -4,6 +4,7 @@ export const NAME = "nomankind";
 export * from "./anchor.js";
 export * from "./artifact.js";
 export * from "./assign.js";
+export * from "./bounty.js";
 export * from "./core.js";
 export * from "./derive.js";
 export * from "./encoding.js";
