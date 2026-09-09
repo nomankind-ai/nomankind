@@ -40,55 +40,53 @@ const DEMO_URL = "https://demo.nomankind.ai";
 /**
  * The proof pipeline, drawn. Source, snapshot, three operators, the teal seal
  * with its witnesses, the learner that syncs last. The boxes are laid out on
- * 0…760 and the viewBox is opened a little wider than that on both sides,
- * because the captions under the first and last box are centred on their box and
- * a few characters of them fall outside it; an svg clips at its viewBox, so
- * without the margin the first and last caption would lose a letter. Scaled by
- * the stylesheet, so the drawing is the same shape at every width.
+ * 0…760 and the viewBox is exactly that, because every box is now wide enough
+ * for its label in Space Grotesk and the captions sit inside their own box.
+ * Scaled by the stylesheet, so the drawing is the same shape at every width.
  */
 const PIPELINE = html`<svg
             class="pipeline"
-            viewBox="-20 0 802 300"
+            viewBox="0 0 760 300"
             fill="none"
             role="img"
             aria-label="A cited source is snapshotted and hashed, checked and signed by three independent operators, sealed every five minutes and countersigned by independent witnesses, and only then read by a learner that syncs from its last sealed position."
           >
-            <line x1="96" y1="120" x2="190" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
-            <line x1="286" y1="120" x2="380" y2="50" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
-            <line x1="286" y1="120" x2="380" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
-            <line x1="286" y1="120" x2="380" y2="190" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
-            <line x1="476" y1="50" x2="570" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
-            <line x1="476" y1="120" x2="570" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
-            <line x1="476" y1="190" x2="570" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
-            <line x1="666" y1="120" x2="700" y2="120" stroke="#e0b458" stroke-width="2" class="flow"></line>
+            <line x1="112" y1="120" x2="176" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
+            <line x1="288" y1="120" x2="352" y2="50" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
+            <line x1="288" y1="120" x2="352" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
+            <line x1="288" y1="120" x2="352" y2="190" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
+            <line x1="464" y1="50" x2="528" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
+            <line x1="464" y1="120" x2="528" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
+            <line x1="464" y1="190" x2="528" y2="120" stroke="#7fd1c4" stroke-width="2" class="flow"></line>
+            <line x1="640" y1="120" x2="664" y2="120" stroke="#e0b458" stroke-width="2" class="flow"></line>
 
-            <rect x="0" y="86" width="96" height="68" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
-            <text class="node-name" x="48" y="116" text-anchor="middle" font-size="22" fill="#ece9e2">Source</text>
-            <text class="node-note" x="48" y="138" text-anchor="middle" font-size="10" fill="#7f8794">the page that said it</text>
+            <rect x="0" y="86" width="112" height="68" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
+            <text class="node-name" x="56" y="116" text-anchor="middle" font-size="18" font-weight="600" fill="#ece9e2">Source</text>
+            <text class="node-note" x="56" y="138" text-anchor="middle" font-size="9" fill="#7f8794">the page that said it</text>
 
-            <rect x="190" y="86" width="96" height="68" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
-            <text class="node-name" x="238" y="116" text-anchor="middle" font-size="22" fill="#ece9e2">Snapshot</text>
-            <text class="node-note" x="238" y="138" text-anchor="middle" font-size="10" fill="#7f8794">hashed at capture</text>
+            <rect x="176" y="86" width="112" height="68" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
+            <text class="node-name" x="232" y="116" text-anchor="middle" font-size="18" font-weight="600" fill="#ece9e2">Snapshot</text>
+            <text class="node-note" x="232" y="138" text-anchor="middle" font-size="9" fill="#7f8794">hashed at capture</text>
 
-            <rect x="380" y="26" width="96" height="48" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
-            <text class="node-name" x="428" y="56" text-anchor="middle" font-size="19" fill="#ece9e2">Operator A</text>
-            <rect x="380" y="96" width="96" height="48" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
-            <text class="node-name" x="428" y="126" text-anchor="middle" font-size="19" fill="#ece9e2">Operator B</text>
-            <rect x="380" y="166" width="96" height="48" stroke="#7fd1c4" stroke-width="1.5" fill="#0b0d10"></rect>
-            <text class="node-name" x="428" y="196" text-anchor="middle" font-size="19" fill="#ece9e2">Operator C</text>
-            <text class="node-note" x="428" y="246" text-anchor="middle" font-size="10" fill="#7f8794">independent · fetch it, test it, sign</text>
+            <rect x="352" y="26" width="112" height="48" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
+            <text class="node-name" x="408" y="56" text-anchor="middle" font-size="16" font-weight="600" fill="#ece9e2">Operator A</text>
+            <rect x="352" y="96" width="112" height="48" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
+            <text class="node-name" x="408" y="126" text-anchor="middle" font-size="16" font-weight="600" fill="#ece9e2">Operator B</text>
+            <rect x="352" y="166" width="112" height="48" stroke="#7fd1c4" stroke-width="1.5" fill="#0b0d10"></rect>
+            <text class="node-name" x="408" y="196" text-anchor="middle" font-size="16" font-weight="600" fill="#ece9e2">Operator C</text>
+            <text class="node-note" x="408" y="246" text-anchor="middle" font-size="9" fill="#7f8794">independent · fetch it, test it, sign</text>
 
-            <rect x="570" y="86" width="96" height="68" stroke="#7fd1c4" stroke-width="1.5" fill="#7fd1c4"></rect>
-            <text class="node-name" x="618" y="116" text-anchor="middle" font-size="22" fill="#0b0d10">Seal</text>
-            <text class="node-note" x="618" y="138" text-anchor="middle" font-size="10" fill="#0b0d10">every 5 min</text>
-            <circle cx="598" cy="190" r="5" fill="#e0b458" class="pulse"></circle>
-            <circle cx="618" cy="190" r="5" fill="#e0b458" class="pulse"></circle>
-            <circle cx="638" cy="190" r="5" fill="#e0b458" class="pulse"></circle>
-            <text class="node-note" x="618" y="266" text-anchor="middle" font-size="10" fill="#7f8794">witnesses countersign</text>
+            <rect x="528" y="86" width="112" height="68" stroke="#7fd1c4" stroke-width="1.5" fill="#7fd1c4"></rect>
+            <text class="node-name" x="584" y="116" text-anchor="middle" font-size="18" font-weight="600" fill="#0b0d10">Seal</text>
+            <text class="node-note" x="584" y="138" text-anchor="middle" font-size="9" fill="#0b0d10">every 5 min</text>
+            <circle cx="564" cy="190" r="5" fill="#e0b458" class="pulse"></circle>
+            <circle cx="584" cy="190" r="5" fill="#e0b458" class="pulse"></circle>
+            <circle cx="604" cy="190" r="5" fill="#e0b458" class="pulse"></circle>
+            <text class="node-note" x="584" y="266" text-anchor="middle" font-size="9" fill="#7f8794">witnesses countersign</text>
 
-            <rect x="700" y="86" width="60" height="68" stroke="#e0b458" stroke-width="2" fill="#0b0d10"></rect>
-            <text class="node-name" x="730" y="116" text-anchor="middle" font-size="20" fill="#ece9e2">Learner</text>
-            <text class="node-note" x="730" y="138" text-anchor="middle" font-size="10" fill="#7f8794">syncs, learns</text>
+            <rect x="664" y="86" width="96" height="68" stroke="#e0b458" stroke-width="2" fill="#0b0d10"></rect>
+            <text class="node-name" x="712" y="116" text-anchor="middle" font-size="18" font-weight="600" fill="#ece9e2">Learner</text>
+            <text class="node-note" x="712" y="138" text-anchor="middle" font-size="9" fill="#7f8794">syncs, learns</text>
           </svg>`;
 
 /**
