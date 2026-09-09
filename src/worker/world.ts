@@ -25,10 +25,13 @@
 import { deriveEntry, type DerivedEntry } from "../derive.js";
 import type { Event, EventType } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
+import { entrySeal, type EntrySeal } from "../seal.js";
 import type { D1Like } from "../storage/d1.js";
 import {
   eventsForEntry,
+  eventsInRange,
   eventsOfType,
+  sealCovering,
   supersedersOf,
 } from "../storage/repository.js";
 
@@ -84,6 +87,44 @@ export interface EntryWorld {
   readonly entryEvents: readonly Event[];
   /** The events of every entry declaring it supersedes this one, in seq order. */
   readonly superseders: readonly Event[];
+  /**
+   * The entry's own seal object, or null when nothing covers its submission
+   * yet.
+   *
+   * It is part of the world because it is part of the entry: `deriveEntry`
+   * writes `seal` from what it is handed, so an entry re-derived without it
+   * comes back with `seal: null` and the next write erases a seal that was
+   * really made. A validation, a reconfirmation and the staleness step all
+   * re-derive sealed entries, so this is not a corner case.
+   */
+  readonly seal: EntrySeal | null;
+}
+
+/**
+ * The seal object for one entry, read from the store.
+ *
+ * Two reads, because an inclusion proof needs the whole batch: the seal covering
+ * the submission event, and then the events of that seal's range, which are the
+ * leaves the proof is computed over. Bounded by the seal, so no page size is
+ * involved. Null when nothing covers the submission, and null when the entry has
+ * no submission event in its own log — which the caller's own derivation is
+ * about to throw over anyway.
+ */
+async function sealOf(
+  db: D1Like,
+  entryId: string,
+  entryEvents: readonly Event[],
+): Promise<EntrySeal | null> {
+  const submission = entryEvents.find(
+    (event) => event.type === "entry_submitted" && event.entry_id === entryId,
+  );
+  if (submission === undefined) return null;
+
+  const covering = await sealCovering(db, submission.seq);
+  if (covering === null) return null;
+
+  const batch = await eventsInRange(db, covering.first_seq, covering.last_seq);
+  return entrySeal(batch, [covering], entryId);
 }
 
 /**
@@ -105,7 +146,8 @@ export async function entryWorld(
     if (candidateId === entryId) continue;
     superseders.push(...(await eventsForEntry(db, candidateId)));
   }
-  return { registry, entryEvents, superseders };
+  const seal = await sealOf(db, entryId, entryEvents);
+  return { registry, entryEvents, superseders, seal };
 }
 
 /**
@@ -139,14 +181,29 @@ export function eventsOf(
  * The clock is the injected `now` and nothing else, spelled exactly as the
  * validate door has always spelled it, so a row written by the sweep and a row
  * written by a door disagree about nothing but the instant they were written at.
+ *
+ * The world's seal is handed to derivation, so re-deriving a sealed entry keeps
+ * its seal instead of erasing it. `entrySeals` overrides that for the one caller
+ * whose seal is not readable yet: `recordSeal` writes the seal and the entries
+ * it covers in a single batch, so inside that batch the seal exists only as the
+ * argument it was passed.
  */
 export function rederive(
   world: EntryWorld,
   entryId: string,
   now: Date,
   extra: readonly Event[] = [],
+  entrySeals?: ReadonlyMap<string, EntrySeal>,
 ): DerivedEntry {
-  return deriveEntry(eventsOf(world, extra), entryId, {
-    now: now.toISOString(),
-  });
+  const seals =
+    entrySeals ??
+    (world.seal === null
+      ? undefined
+      : new Map<string, EntrySeal>([[entryId, world.seal]]));
+  return deriveEntry(
+    eventsOf(world, extra),
+    entryId,
+    { now: now.toISOString() },
+    seals,
+  );
 }

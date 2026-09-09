@@ -24,11 +24,18 @@
 import { resolve } from "node:path";
 
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
+import type { Event } from "../events.js";
+import { SEAL_INTERVAL_MINUTES } from "../policy.js";
 import { signAttestation } from "../registry.js";
 import { signCore } from "../sign.js";
 import { buildSubmittedCore } from "../submit.js";
 import { verifyOffline, type LogBundle, type VerifyReport } from "../verify.js";
-import { buildExport, writeExport, type ExportResult } from "./export.js";
+import {
+  buildExport,
+  readEvents,
+  writeExport,
+  type ExportResult,
+} from "./export.js";
 import {
   errorOf,
   fetchAndHash,
@@ -44,7 +51,24 @@ import {
 } from "./validator.js";
 
 const USAGE =
-  "usage: checkpoint <base-url> <maintainer-key.json> <fixture-a.json> <fixture-b.json> <fixture-c.json> <out-dir>";
+  "usage: checkpoint [--wait-seal] <base-url> <maintainer-key.json> <fixture-a.json> <fixture-b.json> <fixture-c.json> <out-dir>";
+
+/** The flag that waits for the sweep to seal the entry before exporting. */
+const WAIT_SEAL_FLAG = "--wait-seal";
+
+/**
+ * How often the wait asks, in seconds. Not a policy number and not a rule: the
+ * budget it spends is SEAL_INTERVAL_MINUTES, which is the published cadence, and
+ * this only says how often to look while that interval runs out.
+ */
+const POLL_SECONDS = 15;
+
+/** Unit constants: seconds in milliseconds, and minutes in seconds. */
+const MILLISECONDS_PER_SECOND = 1000;
+const SECONDS_PER_MINUTE = 60;
+
+/** The grace beyond one seal interval, in minutes: a run is allowed one late tick. */
+const GRACE_MINUTES = 1;
 
 /** The three fixture operators, in the order they join. */
 export const CHECKPOINT_DOMAINS: readonly string[] = Object.freeze([
@@ -89,6 +113,17 @@ export interface CheckpointDeps {
   readonly io: ValidatorIo;
   /** Where the two exported files go, or null to build them without writing. */
   readonly outDir?: string | null;
+  /**
+   * Wait for the sweep to seal the entry before exporting.
+   *
+   * Off by default, because the walk itself proves the rules and a seal arrives
+   * on the sweep's own cadence rather than on a request. On, the export waits
+   * until a seal covers the entry's newest event, so the two files carry the
+   * inclusion proof a stranger can check offline.
+   */
+  readonly waitSeal?: boolean;
+  /** How the wait waits. Injected, so a test never really sleeps. */
+  readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
 /** The four keys the walk acts with. */
@@ -123,6 +158,69 @@ async function post(
     parsed = null;
   }
   return { status: response.status, body: parsed };
+}
+
+/** The newest seq the log holds for one entry, or null when it holds none. */
+function newestEventSeq(events: readonly Event[], entryId: string): number | null {
+  let newest: number | null = null;
+  for (const event of events) {
+    if (event.entry_id !== entryId) continue;
+    if (newest === null || event.seq > newest) newest = event.seq;
+  }
+  return newest;
+}
+
+/**
+ * Wait until a seal covers the entry's newest event.
+ *
+ * The seal is made by the sweep, on the published five-minute cadence, so the
+ * budget is that interval plus a minute of grace: one late tick is waiting, and
+ * two is something to report. The head seal's own `last_seq` is what is asked —
+ * `GET /seals` gives the head's seq, and `GET /seals/{seq}` gives the seal — so
+ * the answer is about the log's position rather than about how many seals
+ * happen to exist.
+ *
+ * Answers the position it waited for and whether it arrived; never throws, so a
+ * Worker that stopped sealing is a step that failed rather than a crash.
+ */
+async function waitForSeal(
+  deps: CheckpointDeps,
+  baseUrl: string,
+  entryId: string,
+): Promise<{ ok: boolean; detail: string }> {
+  const events = await readEvents(deps.http, baseUrl);
+  const target = newestEventSeq(events, entryId);
+  if (target === null) return { ok: false, detail: "no events for the entry" };
+
+  const sleep =
+    deps.sleep ??
+    ((milliseconds: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const budgetSeconds =
+    (SEAL_INTERVAL_MINUTES + GRACE_MINUTES) * SECONDS_PER_MINUTE;
+
+  for (let waited = 0; ; waited += POLL_SECONDS) {
+    const listed = await getJson(deps.http, baseUrl, "/seals?limit=1");
+    const head =
+      listed.status === 200 &&
+      typeof listed.body === "object" &&
+      listed.body !== null
+        ? (listed.body as Record<string, unknown>)["head"]
+        : null;
+    if (typeof head === "number") {
+      const seal = await getJson(deps.http, baseUrl, `/seals/${head}`);
+      if (seal.status === 200 && typeof seal.body === "object" && seal.body !== null) {
+        const lastSeq = (seal.body as Record<string, unknown>)["last_seq"];
+        if (typeof lastSeq === "number" && lastSeq >= target) {
+          return { ok: true, detail: `seal ${head} covers seq ${target}` };
+        }
+      }
+    }
+    if (waited >= budgetSeconds) {
+      return { ok: false, detail: `no seal covering seq ${target} in ${waited}s` };
+    }
+    await sleep(POLL_SECONDS * MILLISECONDS_PER_SECOND);
+  }
 }
 
 /**
@@ -307,6 +405,14 @@ export async function runCheckpoint(input: {
     return stop();
   }
 
+  // Step five and a half, only when asked: wait for the sweep to seal the
+  // entry, so the exported files carry the inclusion proof rather than a null
+  // seal that is merely not made yet.
+  if (deps.waitSeal === true) {
+    const waited = await waitForSeal(deps, baseUrl, entryId);
+    if (!step("seal", waited.ok, waited.detail)) return stop();
+  }
+
   // Step six: the two files. What is written is JSON of exactly these two
   // objects, so verifying them is verifying the files.
   let exported: ExportResult;
@@ -359,7 +465,10 @@ if (
   import.meta.filename === resolve(process.argv[1])
 ) {
   const args = process.argv.slice(2);
-  const [baseUrl, maintainerPath, aPath, bPath, cPath, outDir] = args;
+  const waitSeal = args.includes(WAIT_SEAL_FLAG);
+  const [baseUrl, maintainerPath, aPath, bPath, cPath, outDir] = args.filter(
+    (argument) => argument !== WAIT_SEAL_FLAG,
+  );
   if (
     baseUrl === undefined ||
     maintainerPath === undefined ||
@@ -394,6 +503,7 @@ if (
         now: new Date(),
         io,
         outDir,
+        waitSeal,
       },
     });
     code = result.ok ? 0 : 1;

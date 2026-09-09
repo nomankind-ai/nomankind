@@ -26,12 +26,20 @@ import {
   SWEEPER_INSTANCE,
   Sweeper,
   ensureSweeper,
+  type SweeperDeps,
   type SweeperNamespace,
   type SweeperState,
   type SweeperStorage,
 } from "../src/worker/sweeper.js";
 import type { SweepReport } from "../src/worker/sweep.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
+import {
+  FakeAnchorAdapter,
+  FakeWitnessAdapter,
+  makeWitness,
+  pinnedSet,
+  type FakeWitness,
+} from "./helpers/witness.js";
 
 /** A unit constant: the alarm is set in milliseconds. */
 const MINUTE_MS = 60_000;
@@ -70,6 +78,24 @@ async function fixtureBeacon(): Promise<FixtureBeacon> {
   return beacon;
 }
 
+/**
+ * The deps the object is built with: the fake clock, a fixture beacon, and the
+ * sealing adapters faked, so no run of the timer reaches a registry, a witness
+ * or a timestamping calendar.
+ */
+async function sweeperDeps(
+  witness: FakeWitness,
+): Promise<SweeperDeps & { readonly anchor: FakeAnchorAdapter }> {
+  return {
+    nowMs: () => NOW,
+    beacon: await fixtureBeacon(),
+    witness: new FakeWitnessAdapter({ signers: [witness] }),
+    pinned: pinnedSet([witness]),
+    ineligibleAgents: new Set<string>(),
+    anchor: new FakeAnchorAdapter(null),
+  };
+}
+
 /** The databases a test opened, disposed after it however it ended. */
 const opened: TestDatabase[] = [];
 
@@ -105,10 +131,11 @@ function throwingEnv(): Env {
 describe("the sweeper's alarm, armed by a request", () => {
   it("arms the alarm one interval out when nothing is armed", async () => {
     const state = fakeState();
-    const sweeper = new Sweeper(state, envFor(await database()), {
-      nowMs: () => NOW,
-      beacon: await fixtureBeacon(),
-    });
+    const sweeper = new Sweeper(
+      state,
+      envFor(await database()),
+      await sweeperDeps(await makeWitness("sweeper-witness.example")),
+    );
 
     const response = await sweeper.fetch(new Request("https://sweeper/ensure"));
 
@@ -119,10 +146,11 @@ describe("the sweeper's alarm, armed by a request", () => {
 
   it("arms nothing the second time, so a busy Worker sets one alarm", async () => {
     const state = fakeState();
-    const sweeper = new Sweeper(state, envFor(await database()), {
-      nowMs: () => NOW,
-      beacon: await fixtureBeacon(),
-    });
+    const sweeper = new Sweeper(
+      state,
+      envFor(await database()),
+      await sweeperDeps(await makeWitness("sweeper-witness.example")),
+    );
 
     await sweeper.fetch(new Request("https://sweeper/ensure"));
     const again = await sweeper.fetch(new Request("https://sweeper/ensure"));
@@ -134,10 +162,11 @@ describe("the sweeper's alarm, armed by a request", () => {
   });
 
   it("answers an unknown path with 404", async () => {
-    const sweeper = new Sweeper(fakeState(), envFor(await database()), {
-      nowMs: () => NOW,
-      beacon: await fixtureBeacon(),
-    });
+    const sweeper = new Sweeper(
+      fakeState(),
+      envFor(await database()),
+      await sweeperDeps(await makeWitness("sweeper-witness.example")),
+    );
 
     const response = await sweeper.fetch(new Request("https://sweeper/nope"));
 
@@ -149,10 +178,12 @@ describe("the sweeper's alarm, armed by a request", () => {
 describe("running the sweep through the object", () => {
   it("answers the report and commits the pool snapshot on a fresh log", async () => {
     const store = await database();
-    const sweeper = new Sweeper(fakeState(), envFor(store), {
-      nowMs: () => NOW,
-      beacon: await fixtureBeacon(),
-    });
+    const witness = await makeWitness("sweeper-witness.example");
+    const sweeper = new Sweeper(
+      fakeState(),
+      envFor(store),
+      await sweeperDeps(witness),
+    );
 
     const response = await sweeper.fetch(new Request("https://sweeper/run"));
 
@@ -170,15 +201,33 @@ describe("running the sweep through the object", () => {
     const event = await eventBySeq(store.db, report.snapshot?.seq as number);
     expect(event?.type).toBe("pool_snapshot");
     expect(event?.at).toBe(new Date(NOW).toISOString());
+
+    // The same run seals what it appended and gathers the countersignature the
+    // fake witness offers: everything gets sealed, and a seal is countersigned
+    // as soon as it exists.
+    expect(report.sealed).toEqual({
+      seq: 0,
+      first_seq: 0,
+      last_seq: event!.seq,
+      size: event!.seq + 1,
+      entries: [],
+    });
+    expect(report.witnessed).toEqual([
+      { seq: 0, operators: [witness.witness.operator] },
+    ]);
+    // Yesterday holds no seals at all on a fresh log, so nothing is anchored.
+    expect(report.anchored).toBeNull();
+    expect(report.skipped["no_seals_to_anchor"]).toBe(1);
   });
 
   it("sweeps and re-arms exactly one interval later on the alarm", async () => {
     const store = await database();
     const state = fakeState();
-    const sweeper = new Sweeper(state, envFor(store), {
-      nowMs: () => NOW,
-      beacon: await fixtureBeacon(),
-    });
+    const sweeper = new Sweeper(
+      state,
+      envFor(store),
+      await sweeperDeps(await makeWitness("sweeper-witness.example")),
+    );
 
     expect(await headSeq(store.db)).toBeNull();
     await sweeper.alarm();
@@ -195,10 +244,11 @@ describe("running the sweep through the object", () => {
 
   it("re-arms even when the sweep throws, so the timer never stops", async () => {
     const state = fakeState();
-    const sweeper = new Sweeper(state, throwingEnv(), {
-      nowMs: () => NOW,
-      beacon: await fixtureBeacon(),
-    });
+    const sweeper = new Sweeper(
+      state,
+      throwingEnv(),
+      await sweeperDeps(await makeWitness("sweeper-witness.example")),
+    );
 
     // A storage failure is a lost run and nothing more: the alarm still returns
     // normally, and the next one is set.

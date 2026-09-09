@@ -18,13 +18,13 @@
  * table but `events` and the rest can be rebuilt; that is the point.
  */
 
-import type { Anchor } from "../anchor.js";
+import type { Anchor, AnchorExternal } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
 import type { BountyAccrual } from "../bounty.js";
 import type { Sidecar } from "../derive.js";
 import { appendEvent, type Event, type EventInput, type EventType } from "../events.js";
 import type { Entry } from "../schema.js";
-import type { Seal, WitnessSignature } from "../seal.js";
+import type { RegistrySeal, Seal, WitnessSignature } from "../seal.js";
 import {
   readBoolean,
   readInteger,
@@ -66,6 +66,24 @@ export class EventAppendError extends Error {
   constructor(reason: "bad_seq" | "bad_prev_hash", seq: number, detail: string) {
     super(`appendEvents: ${reason} at seq ${seq}: ${detail}`);
     this.reason = reason;
+    this.seq = seq;
+  }
+}
+
+/**
+ * A seal written where one already stands.
+ *
+ * Two timers racing to seal the same range must not both succeed: the second
+ * would either overwrite a seal the first already chained to, or chain a second
+ * seal over the same events. The insert is plain, the unique key refuses the
+ * second, and the caller reports it rather than repairing it.
+ */
+export class SealConflictError extends Error {
+  override readonly name = "SealConflictError";
+  readonly seq: number;
+
+  constructor(seq: number, options?: { cause?: unknown }) {
+    super(`recordSeal: a seal already stands at seq ${seq}`, options);
     this.seq = seq;
   }
 }
@@ -1409,9 +1427,10 @@ export async function bountiesForEntry(
 // Seals
 // ---------------------------------------------------------------------------
 
-const SEAL_COLUMNS = `seq, first_seq, last_seq, size, root, sealed_at, prev_hash, hash, witnesses_json`;
+const SEAL_COLUMNS = `seq, first_seq, last_seq, size, root, sealed_at, prev_hash, hash, witnesses_json, registry_json`;
 
 function toSeal(row: Row): Seal {
+  const registry = readNullableText(row, "registry_json");
   return {
     seq: readInteger(row, "seq"),
     first_seq: readInteger(row, "first_seq"),
@@ -1422,14 +1441,33 @@ function toSeal(row: Row): Seal {
     prev_hash: readNullableText(row, "prev_hash"),
     hash: readText(row, "hash"),
     witnesses: readJson<WitnessSignature[]>(row, "witnesses_json"),
+    // Null until the registry accepted the fingerprint, and null forever where
+    // there is no registry to accept it (0006_sealing.sql).
+    registry: registry === null ? null : (JSON.parse(registry) as RegistrySeal),
   };
+}
+
+/** The bound values of a seal row, in SEAL_COLUMNS order. */
+function sealValues(seal: Seal): unknown[] {
+  return [
+    seal.seq,
+    seal.first_seq,
+    seal.last_seq,
+    seal.size,
+    seal.root,
+    seal.sealed_at,
+    seal.prev_hash,
+    seal.hash,
+    writeJson(seal.witnesses),
+    seal.registry === null ? null : writeJson(seal.registry),
+  ];
 }
 
 /** Store one seal, replacing whatever was there. */
 export async function putSeal(db: D1Like, seal: Seal): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO seals (${SEAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO seals (${SEAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (seq) DO UPDATE SET
          first_seq = excluded.first_seq,
          last_seq = excluded.last_seq,
@@ -1438,19 +1476,10 @@ export async function putSeal(db: D1Like, seal: Seal): Promise<void> {
          sealed_at = excluded.sealed_at,
          prev_hash = excluded.prev_hash,
          hash = excluded.hash,
-         witnesses_json = excluded.witnesses_json`,
+         witnesses_json = excluded.witnesses_json,
+         registry_json = excluded.registry_json`,
     )
-    .bind(
-      seal.seq,
-      seal.first_seq,
-      seal.last_seq,
-      seal.size,
-      seal.root,
-      seal.sealed_at,
-      seal.prev_hash,
-      seal.hash,
-      writeJson(seal.witnesses),
-    )
+    .bind(...sealValues(seal))
     .run();
 }
 
@@ -1458,6 +1487,15 @@ export async function putSeal(db: D1Like, seal: Seal): Promise<void> {
 export async function latestSeal(db: D1Like): Promise<Seal | null> {
   const row = await db
     .prepare(`SELECT ${SEAL_COLUMNS} FROM seals ORDER BY seq DESC ${ONE_ROW}`)
+    .first<Row>();
+  return row === null ? null : toSeal(row);
+}
+
+/** One seal by its sequence number, or null. */
+export async function sealBySeq(db: D1Like, seq: number): Promise<Seal | null> {
+  const row = await db
+    .prepare(`SELECT ${SEAL_COLUMNS} FROM seals WHERE seq = ? ${ONE_ROW}`)
+    .bind(seq)
     .first<Row>();
   return row === null ? null : toSeal(row);
 }
@@ -1503,6 +1541,216 @@ export async function sealsBetween(
   return rows.results.map(toSeal);
 }
 
+/**
+ * The next page of seals after a known one, in seq order. The seal chain's
+ * delta read: the caller keeps the last seq it saw and asks for what came
+ * after. The limit is the caller's own; this module holds no page size.
+ */
+export async function sealsAfter(
+  db: D1Like,
+  afterSeq: number,
+  limit: number,
+): Promise<Seal[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${SEAL_COLUMNS} FROM seals WHERE seq > ? ORDER BY seq LIMIT ?`,
+    )
+    .bind(afterSeq, limit)
+    .all<Row>();
+  return rows.results.map(toSeal);
+}
+
+/**
+ * Every seal sealed on one UTC calendar day, in seq order: the anchor step's
+ * read, and the only question about seals that starts from a date.
+ *
+ * `sealed_at` is the injected clock's ISO instant, always UTC and always
+ * "<day>T...", so the day is the half-open text range from "<day>T" to "<day>U"
+ * — 'U' is the character after 'T', so the range is exactly the strings with
+ * that day's prefix. A range, not `substr(...) = ?`, because a range seeks the
+ * (sealed_at) index and a function call over every row does not.
+ */
+export async function sealsSealedOn(db: D1Like, date: string): Promise<Seal[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${SEAL_COLUMNS} FROM seals
+       WHERE sealed_at >= ? AND sealed_at < ?
+       ORDER BY seq`,
+    )
+    .bind(`${date}T`, `${date}U`)
+    .all<Row>();
+  return rows.results.map(toSeal);
+}
+
+/**
+ * The seals still waiting on the outside world, oldest first: no
+ * countersignature has been attached yet, or the registry has not accepted the
+ * fingerprint. This is the sweep's work queue, and a seal leaves it by being
+ * finished rather than by being marked.
+ */
+export async function unwitnessedSeals(
+  db: D1Like,
+  limit: number,
+): Promise<Seal[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${SEAL_COLUMNS} FROM seals
+       WHERE witnesses_json = '[]' OR registry_json IS NULL
+       ORDER BY seq LIMIT ?`,
+    )
+    .bind(limit)
+    .all<Row>();
+  return rows.results.map(toSeal);
+}
+
+/**
+ * Record what the registry returned for a seal's fingerprint.
+ *
+ * No entry row moves: an entry's `seal` object carries the inclusion proof and
+ * the countersignatures, and the registry receipt is neither. It is evidence
+ * about the seal, kept with the seal.
+ */
+export async function setSealRegistry(
+  db: D1Like,
+  seq: number,
+  registry: RegistrySeal | null,
+): Promise<void> {
+  await db
+    .prepare(`UPDATE seals SET registry_json = ? WHERE seq = ?`)
+    .bind(registry === null ? null : writeJson(registry), seq)
+    .run();
+}
+
+/**
+ * How the caller turns one covered entry into the row to store.
+ *
+ * Storage never derives a field, and it never reads the Worker's world module:
+ * the caller is handed an entry id and the seal that now covers it, and gives
+ * back what derivation made of them. The seal is passed rather than read back
+ * because inside its own batch it is not readable yet.
+ */
+export type SealRederive = (
+  entryId: string,
+  seal: Seal,
+  now: Date,
+) => Promise<StoredEntryInput>;
+
+/** The entries whose submission event falls inside a seal's range, in log order. */
+async function entriesSubmittedIn(
+  db: D1Like,
+  firstSeq: number,
+  lastSeq: number,
+): Promise<Array<{ id: string; submittedSeq: number }>> {
+  const rows = await db
+    .prepare(
+      `SELECT id, submitted_seq FROM entries
+       WHERE submitted_seq >= ? AND submitted_seq <= ? ORDER BY submitted_seq`,
+    )
+    .bind(firstSeq, lastSeq)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    id: readText(row, "id"),
+    submittedSeq: readInteger(row, "submitted_seq"),
+  }));
+}
+
+/**
+ * Write a seal and rewrite every entry it seals, atomically.
+ *
+ * Section 6, "Seal": the entry hash is sealed as a fingerprint at submission, so
+ * the moment a batch closes, every entry submitted inside it acquires a `seal`
+ * object — an inclusion proof of its own submission event. That is a derived
+ * field like any other, so it is recomputed by the caller and stored here, and
+ * it lands in the same batch as the seal: a seal without the entries would leave
+ * entries denying they were sealed, and the entries without the seal would have
+ * them claiming a seal nobody can find.
+ *
+ * A plain INSERT, with no ON CONFLICT: unlike `putSeal`, which exists so a test
+ * or a rebuild can restate a seal, this is the live path, and a second timer
+ * arriving at the same range is a race to refuse rather than a row to overwrite.
+ *
+ * The range is bounded by the seal, so the entries read needs no page size: a
+ * batch covers the events since the last seal and nothing more.
+ */
+export async function recordSeal(
+  db: D1Like,
+  seal: Seal,
+  now: Date,
+  rederive: SealRederive,
+): Promise<string[]> {
+  const covered = await entriesSubmittedIn(db, seal.first_seq, seal.last_seq);
+  const statements = [
+    db
+      .prepare(`INSERT INTO seals (${SEAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(...sealValues(seal)),
+  ];
+  for (const { id, submittedSeq } of covered) {
+    const stored = await rederive(id, seal, now);
+    statements.push(
+      entryStatement(
+        db,
+        stored.entry,
+        stored.sidecar,
+        submittedSeq,
+        stored.derivedThroughSeq,
+      ),
+    );
+  }
+
+  try {
+    await db.batch(statements);
+  } catch (cause) {
+    // Ask the table rather than read the driver's message: a seal now standing
+    // at this seq is what "conflict" means, and any other failure is not ours
+    // to rename.
+    if ((await sealBySeq(db, seal.seq)) !== null) {
+      throw new SealConflictError(seal.seq, { cause });
+    }
+    throw cause;
+  }
+  return covered.map((entry) => entry.id);
+}
+
+/**
+ * Attach countersignatures to a seal and rewrite every entry it covers, in one
+ * batch.
+ *
+ * The entries have to move: `EntrySeal.witnesses` is the covering seal's
+ * signature strings (src/seal.ts), and src/verify.ts compares an entry's
+ * `seal.witnesses` against the seal's own. Written apart, a reader between the
+ * two writes would see a countersigned seal and entries that deny it, and the
+ * verifier would call the entries wrong.
+ */
+export async function setSealWitnesses(
+  db: D1Like,
+  seal: Seal,
+  witnesses: readonly WitnessSignature[],
+  now: Date,
+  rederive: SealRederive,
+): Promise<string[]> {
+  const witnessed: Seal = { ...seal, witnesses: [...witnesses] };
+  const statements = [
+    db
+      .prepare(`UPDATE seals SET witnesses_json = ? WHERE seq = ?`)
+      .bind(writeJson(witnessed.witnesses), witnessed.seq),
+  ];
+  const covered = await entriesSubmittedIn(db, seal.first_seq, seal.last_seq);
+  for (const { id, submittedSeq } of covered) {
+    const stored = await rederive(id, witnessed, now);
+    statements.push(
+      entryStatement(
+        db,
+        stored.entry,
+        stored.sidecar,
+        submittedSeq,
+        stored.derivedThroughSeq,
+      ),
+    );
+  }
+  await db.batch(statements);
+  return covered.map((entry) => entry.id);
+}
+
 // ---------------------------------------------------------------------------
 // Anchors
 // ---------------------------------------------------------------------------
@@ -1510,17 +1758,16 @@ export async function sealsBetween(
 const ANCHOR_COLUMNS = `"date", first_seal_seq, last_seal_seq, roots_json, hash, external`;
 
 function toAnchor(row: Row): Anchor {
+  // The column held nothing but null until M16; now it holds the external
+  // timestamp receipt as JSON, and reading one back is no longer an error.
   const external = readNullableText(row, "external");
-  if (external !== null) {
-    throw new TypeError("anchors.external: reserved, must be null");
-  }
   return {
     date: readText(row, "date"),
     first_seal_seq: readNullableInteger(row, "first_seal_seq"),
     last_seal_seq: readNullableInteger(row, "last_seal_seq"),
     roots: readJson<string[]>(row, "roots_json"),
     hash: readText(row, "hash"),
-    external: null,
+    external: external === null ? null : (JSON.parse(external) as AnchorExternal),
   };
 }
 
@@ -1542,7 +1789,7 @@ export async function putAnchor(db: D1Like, anchor: Anchor): Promise<void> {
       anchor.last_seal_seq,
       writeJson(anchor.roots),
       anchor.hash,
-      anchor.external,
+      anchor.external === null ? null : writeJson(anchor.external),
     )
     .run();
 }
@@ -1570,4 +1817,41 @@ export async function latestAnchor(db: D1Like): Promise<Anchor | null> {
     )
     .first<Row>();
   return row === null ? null : toAnchor(row);
+}
+
+/**
+ * The next page of anchors after a known day, in day order. Days are
+ * "YYYY-MM-DD" in UTC, so lexical order is chronological order and the primary
+ * key is the keyset. The limit is the caller's own.
+ */
+export async function anchorsAfter(
+  db: D1Like,
+  afterDate: string,
+  limit: number,
+): Promise<Anchor[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${ANCHOR_COLUMNS} FROM anchors WHERE "date" > ? ORDER BY "date" LIMIT ?`,
+    )
+    .bind(afterDate, limit)
+    .all<Row>();
+  return rows.results.map(toAnchor);
+}
+
+/**
+ * Record the external timestamp receipt for one day.
+ *
+ * Only the receipt moves. The anchor hash covers the date and the roots and
+ * nothing else (D-037, item 5), so the day that was posted and the day that
+ * comes back verifying are the same day.
+ */
+export async function setAnchorExternal(
+  db: D1Like,
+  date: string,
+  external: AnchorExternal,
+): Promise<void> {
+  await db
+    .prepare(`UPDATE anchors SET external = ? WHERE "date" = ?`)
+    .bind(external === null ? null : writeJson(external), date)
+    .run();
 }

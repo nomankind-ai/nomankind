@@ -245,6 +245,10 @@ function witnessContext(witnesses: readonly Witness[]): WitnessContext {
   return {
     witnesses,
     maintainerOperators: new Set([MAINTAINER_OPERATOR]),
+    // M8's set signs the seal hash directly: no nomankind agent is offered, and
+    // there is no registry head to check.
+    ineligibleAgents: new Set<string>(),
+    registry: null,
   };
 }
 

@@ -166,6 +166,31 @@ describe("wrangler.jsonc routes and hostnames", () => {
     );
   });
 
+  /**
+   * The sealing agent's handle at the founding registry (D-054). A handle is
+   * public, so it is a var; the two secrets that go with it are never in this
+   * file, and this pins that they are not.
+   */
+  it("leaves production's sealing handle empty until the citizen is registered", () => {
+    expect(config.env.production.vars.SEALING_AGENT_HANDLE).toBe("");
+    // Local and demo run the mock witness set and have no registry track, so
+    // they carry no handle at all.
+    expect(config.vars.SEALING_AGENT_HANDLE).toBeUndefined();
+    expect(config.env.demo.vars.SEALING_AGENT_HANDLE).toBeUndefined();
+  });
+
+  it("keeps every sealing secret out of the repository", () => {
+    const raw = readFileSync(join(ROOT, "wrangler.jsonc"), "utf8");
+    // Named in a comment as things `wrangler secret put` sets, and nowhere as
+    // a key: a secret in this file is a secret in the git history.
+    for (const section of [config.vars, config.env.demo.vars, config.env.production.vars]) {
+      expect(section.SEALING_AGENT_KEY).toBeUndefined();
+      expect(section.REGISTRY_CREDENTIAL).toBeUndefined();
+    }
+    expect(raw).not.toMatch(/"SEALING_AGENT_KEY"\s*:/);
+    expect(raw).not.toMatch(/"REGISTRY_CREDENTIAL"\s*:/);
+  });
+
   it("leaves production's maintainer unset until M25", () => {
     // Empty means no maintainer is configured, and the Worker refuses genesis
     // naming outright rather than granting it to whoever asks first.

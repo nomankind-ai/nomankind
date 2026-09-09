@@ -18,6 +18,7 @@ export * from "./normalize.js";
 export * from "./policy.js";
 export * from "./reconfirm.js";
 export * from "./records.js";
+export * from "./registry-proof.js";
 export * from "./registry.js";
 export * from "./request.js";
 export * from "./seal.js";

@@ -99,6 +99,36 @@ describe("worker against a real D1 binding", () => {
     expect(await response.json()).toEqual({ ok: false, error: "not_found" });
   });
 
+  it("mounts the seal, proof and anchor routes", async () => {
+    // The database here has had no migrations applied, so these assertions are
+    // about the router and the checks that come before any read: a path that
+    // was not mounted would answer the Worker's own 404 instead.
+    const posted = await handleRequest(
+      new Request("https://nomankind.ai/seals", { method: "POST" }),
+      env,
+    );
+    expect(posted.status).toBe(405);
+    expect(posted.headers.get("allow")).toBe("GET");
+
+    for (const [path, status, error] of [
+      ["/seals?limit=0", 400, "bad_query"],
+      ["/seals/nope", 400, "bad_id"],
+      ["/events/nope/proof", 400, "bad_id"],
+      ["/anchors?after=nope", 400, "bad_query"],
+      ["/anchors/nope", 400, "bad_id"],
+    ] as const) {
+      const response = await handleRequest(
+        new Request(`https://nomankind.ai${path}`),
+        env,
+      );
+      expect([path, response.status, await response.json()]).toEqual([
+        path,
+        status,
+        { error },
+      ]);
+    }
+  });
+
   it("exports a scheduled handler, which is the cron trigger's door", () => {
     // wrangler.jsonc names the cadence; this is the entry point it calls, and
     // it exists on the deployed default export rather than only in a test.
@@ -221,6 +251,16 @@ describe("registry routes when storage is unreachable", () => {
 
   it("answers GET /events the same way", async () => {
     await expectUnreachable(new Request("https://nomankind.ai/events"));
+  });
+
+  it("answers GET /seals and the proof and anchor reads the same way", async () => {
+    await expectUnreachable(new Request("https://nomankind.ai/seals"));
+    await expectUnreachable(new Request("https://nomankind.ai/seals/0"));
+    await expectUnreachable(new Request("https://nomankind.ai/events/0/proof"));
+    await expectUnreachable(new Request("https://nomankind.ai/anchors"));
+    await expectUnreachable(
+      new Request("https://nomankind.ai/anchors/2026-09-08"),
+    );
   });
 
   it("answers a validation the same way", async () => {

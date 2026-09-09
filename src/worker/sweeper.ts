@@ -26,19 +26,28 @@
  * buildable on the approved dependency baseline (decision D-011).
  *
  * No wall clock and no network of its own that a test cannot replace: the
- * clock and the beacon both arrive through the constructor, defaulting to
- * `Date.now` and the real `DrandReader`, which is decision D-013 as amended —
- * the deployed object builds the real reader, and nothing here can be handed a
- * fixture by a request.
+ * clock, the beacon and the sealing adapters all arrive through the
+ * constructor, defaulting to `Date.now`, the real `DrandReader` and whichever
+ * witness and anchor adapters this environment runs, which is decision D-013 as
+ * amended — the deployed object builds the real ones, and nothing here can be
+ * handed a fixture by a request.
  *
  * The only number here is SWEEP_INTERVAL_MINUTES from src/policy.ts.
  */
 
 import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
+import { anchorAdapterFor } from "../adapters/anchor.js";
+import {
+  pinnedWitnessesFor,
+  sealingAgentIdFor,
+  witnessAdapterFor,
+  type EnvironmentWitnessAdapter,
+} from "../adapters/witness.js";
+import type { AnchorAdapter } from "../anchor.js";
 import { SWEEP_INTERVAL_MINUTES } from "../policy.js";
 import type { Env } from "./env.js";
 import { json } from "./registry.js";
-import { runSweep } from "./sweep.js";
+import { runSweep, type PinnedWitnesses, type SweepDeps } from "./sweep.js";
 
 /** A unit constant, not a policy number: minutes are stated in milliseconds. */
 const MILLISECONDS_PER_MINUTE = 60_000;
@@ -79,11 +88,58 @@ export interface ExecutionContextLike {
   waitUntil(promise: Promise<unknown>): void;
 }
 
-/** What a caller may supply in place of the world: the clock, and the beacon. */
+/**
+ * What a caller may supply in place of the world: the clock, the beacon, and the
+ * three sealing adapters beside them.
+ *
+ * Every one of them defaults to the real thing, built from the bindings, so the
+ * deployed object reaches the real drand, the environment's own witness track
+ * and its own timestamping chain, and no request can hand it a fixture
+ * (decision D-013 as amended).
+ */
 export interface SweeperDeps {
   /** Milliseconds since the epoch. Defaults to the platform's own clock. */
   readonly nowMs?: () => number;
   readonly beacon?: BeaconReader;
+  readonly witness?: EnvironmentWitnessAdapter;
+  readonly pinned?: PinnedWitnesses;
+  readonly ineligibleAgents?: ReadonlySet<string>;
+  readonly anchor?: AnchorAdapter;
+}
+
+/**
+ * The whole of what one sweep needs, built from the bindings.
+ *
+ * The one place the sealing adapters are constructed: the scheduled handler, the
+ * alarm and `/run` all come through here, so the three timers into the sweep
+ * cannot disagree about which witness track or which calendar this environment
+ * is on. `ineligibleAgents` is nomankind's own pair — the maintainer agent and
+ * whatever key the sealing agent holds — because the paper makes nomankind
+ * ineligible to witness its own seal, and an unset binding is simply absent
+ * rather than an empty id in the set.
+ */
+export async function sweepDepsFor(
+  env: Env,
+  nowMs: () => number,
+  deps?: SweeperDeps,
+): Promise<SweepDeps> {
+  const ineligible =
+    deps?.ineligibleAgents ??
+    new Set(
+      [env.MAINTAINER_AGENT_ID, await sealingAgentIdFor(env)].filter(
+        (agent): agent is string => typeof agent === "string" && agent !== "",
+      ),
+    );
+  return {
+    now: new Date(nowMs()),
+    beacon: deps?.beacon ?? new DrandReader(),
+    witness: deps?.witness ?? witnessAdapterFor(env),
+    pinned: deps?.pinned ?? pinnedWitnessesFor(env.ENVIRONMENT),
+    ineligibleAgents: ineligible,
+    anchor:
+      deps?.anchor ??
+      anchorAdapterFor(env.ENVIRONMENT, () => new Date(nowMs())),
+  };
 }
 
 /**
@@ -99,13 +155,18 @@ export class Sweeper {
   readonly #state: SweeperState;
   readonly #env: Env;
   readonly #nowMs: () => number;
-  readonly #beacon: BeaconReader;
+  readonly #deps: SweeperDeps | undefined;
 
   constructor(state: SweeperState, env: Env, deps?: SweeperDeps) {
     this.#state = state;
     this.#env = env;
     this.#nowMs = deps?.nowMs ?? (() => Date.now());
-    this.#beacon = deps?.beacon ?? new DrandReader();
+    this.#deps = deps;
+  }
+
+  /** One run's deps, built fresh so every run reads the clock for itself. */
+  #sweepDeps(): Promise<SweepDeps> {
+    return sweepDepsFor(this.#env, this.#nowMs, this.#deps);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -120,10 +181,7 @@ export class Sweeper {
     }
 
     if (pathname === "/run") {
-      const report = await runSweep(this.#env, {
-        now: new Date(this.#nowMs()),
-        beacon: this.#beacon,
-      });
+      const report = await runSweep(this.#env, await this.#sweepDeps());
       return json(report, 200);
     }
 
@@ -141,10 +199,7 @@ export class Sweeper {
    */
   async alarm(): Promise<void> {
     try {
-      await runSweep(this.#env, {
-        now: new Date(this.#nowMs()),
-        beacon: this.#beacon,
-      });
+      await runSweep(this.#env, await this.#sweepDeps());
     } catch (error) {
       console.error(
         `sweeper: sweep failed: ${error instanceof Error ? error.message : String(error)}`,

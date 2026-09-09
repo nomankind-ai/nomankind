@@ -25,7 +25,9 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { MockPayoutAdapter } from "../src/adapters/payout.js";
+import { buildExport, type ExportResult } from "../src/cli/export.js";
 import {
   CHECKPOINT_CITATION,
   CHECKPOINT_DOMAINS,
@@ -52,6 +54,7 @@ import { validateEntry } from "../src/schema.js";
 import { verifyOffline } from "../src/verify.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
+import { runSweep } from "../src/worker/sweep.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
   FixtureResolver,
@@ -67,6 +70,13 @@ import {
   submittedCore,
   type FixturePage,
 } from "./helpers/submit.js";
+import {
+  FakeAnchorAdapter,
+  FakeWitnessAdapter,
+  makeWitness,
+  pinnedSet,
+  type FakeWitness,
+} from "./helpers/witness.js";
 
 const NOW = SUBMIT_NOW;
 const AT = NOW.toISOString();
@@ -286,6 +296,10 @@ describe("the demo checkpoint, end to end", () => {
   let deps: RequestDeps;
   let http: HttpClient;
   let result: CheckpointResult;
+  /** The same two files, re-exported after the sweep sealed the entry. */
+  let sealed: ExportResult;
+  /** The witness the sweep's fake adapter countersigns with. */
+  let witness: FakeWitness;
 
   beforeAll(async () => {
     store = await openTestDatabase();
@@ -321,6 +335,28 @@ describe("the demo checkpoint, end to end", () => {
         io,
         outDir: null,
       },
+    });
+
+    // One sweep, with the outside world faked: the checkpoint walks the rules
+    // and the sweep is what seals what they wrote. The export is taken again
+    // afterwards, because the walk's own bundle was built before any seal
+    // existed.
+    witness = await makeWitness("checkpoint-witness.example");
+    const beacon = new FixtureBeacon("m14-checkpoint");
+    await beacon.advance(AT);
+    await runSweep(env, {
+      now: NOW,
+      beacon,
+      witness: new FakeWitnessAdapter({ signers: [witness] }),
+      pinned: pinnedSet([witness]),
+      ineligibleAgents: new Set([maintainer.agentId]),
+      anchor: new FakeAnchorAdapter(null),
+    });
+    sealed = await buildExport({
+      baseUrl: TEST_ORIGIN,
+      entryId: result.entryId as string,
+      http,
+      now: NOW,
     });
   }, 180_000);
 
@@ -387,8 +423,32 @@ describe("the demo checkpoint, end to end", () => {
     expect(Object.keys(bundle.registry.agents)).toHaveLength(
       CHECKPOINT_DOMAINS.length,
     );
-    expect(bundle.seals).toEqual([]);
     expect(bundle.captures[entry["snapshot_hash"] as string]).toBeDefined();
+  });
+
+  it("carries the seal chain once the sweep has sealed the log", async () => {
+    // The bundle the walk itself built was taken before any seal existed; this
+    // one is the same export, after the sweep.
+    expect(sealed.bundle.seals.length).toBeGreaterThan(0);
+    const first = sealed.bundle.seals[0]!;
+    expect([first.seq, first.first_seq]).toEqual([0, 0]);
+    expect(first.witnesses.map((signature) => signature.agent)).toEqual([
+      witness.witness.agent,
+    ]);
+
+    const entry = sealed.entry as Record<string, unknown>;
+    const seal = entry["seal"] as Record<string, unknown>;
+    expect(seal).not.toBeNull();
+    expect(seal["witnesses"]).toEqual(
+      first.witnesses.map((signature) => signature.signature),
+    );
+  });
+
+  it("still answers ok from the offline verifier once sealed", async () => {
+    const report = await verifyOffline(sealed.entry, sealed.bundle);
+
+    expect(report.diffs).toEqual([]);
+    expect(report.ok).toBe(true);
   });
 
   it("answers ok with zero diffs from the offline verifier", async () => {

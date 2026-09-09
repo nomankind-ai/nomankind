@@ -108,6 +108,28 @@ describe("buildAnchor", () => {
     expect((await anchorFor("2026-09-08")).external).toBeNull();
   });
 
+  it("leaves the anchor hash alone when the receipt arrives", async () => {
+    // D-037, item 5: the hash covers the date and the roots and nothing else,
+    // so posting the hash and getting a receipt back cannot change the thing
+    // that was posted.
+    const anchor = await anchorFor("2026-09-08");
+    const timestamped: Anchor = {
+      ...anchor,
+      external: {
+        kind: "opentimestamps",
+        calendar: "https://alice.btc.calendar.opentimestamps.org",
+        submitted_at: "2026-09-08T23:59:00Z",
+        proof: "AE9wZW5UaW1lc3RhbXBz",
+      },
+    };
+    expect(timestamped.hash).toBe(await anchorHash("2026-09-08", anchor.roots));
+    expect(await verifyAnchor(timestamped, SEALS)).toBe(true);
+    // And a receipt cannot make a false anchor true: the roots still decide.
+    expect(await verifyAnchor({ ...timestamped, roots: [root(5)] }, SEALS)).toBe(
+      false,
+    );
+  });
+
   it("refuses a day with no seals rather than anchoring nothing", async () => {
     expect(await buildAnchor(SEALS, "2026-09-09")).toEqual({
       ok: false,

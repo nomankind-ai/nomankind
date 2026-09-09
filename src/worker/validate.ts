@@ -438,6 +438,9 @@ async function validate(
           registry: supersession.world.registry,
           entryEvents: supersession.world.entryEvents,
           superseders: [...supersession.world.superseders, ...entryEvents],
+          // The target's own seal, carried through: rewriting its row must not
+          // erase a seal it really has.
+          seal: supersession.world.seal,
         };
         const target = rederive(merged, supersession.id, deps.now, [event]);
         const result = validateEntry(target.entry);
