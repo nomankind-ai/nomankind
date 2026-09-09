@@ -342,6 +342,8 @@ describe("renderLanding", () => {
     expect(page).toContain("Proof-of-truth.");
     expect(page).toContain("VERIFIED FACTS FOR MODELS THAT KEEP LEARNING");
     expect(page).toContain("neutral trust substrate");
+    expect(page).not.toContain("where it cannot, the feed says so");
+    expect(page).toContain("Nothing enters the feed until its source is");
   });
 
   it("names the three cards", () => {
