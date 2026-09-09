@@ -25,6 +25,13 @@
  * their own events, because a window closing is a fact about the calendar and
  * the log rather than an event anyone signs.
  *
+ * The fifth is Section 9's, the accounting paragraph of Money: "Read counts are
+ * published to the sealed log daily ... Each day's published count is the number
+ * the seal commits to." So each finished day's count goes in as an ordinary
+ * event, before the seal below covers it in the same run. Yesterday is the
+ * newest day it may publish, because today is not over. A log that has served no
+ * reads publishes nothing at all.
+ *
  * Three more follow, and they are the Seal paragraph's: "Everything gets sealed,
  * including drafts and rejections ... with the registry head countersigned by
  * witnesses nomankind does not control ... at an initial interval of five
@@ -78,12 +85,18 @@ import {
   registeredOperatorsAt,
   type EntryStatus,
 } from "../derive.js";
-import type { Event } from "../events.js";
+import {
+  appendEvent,
+  type Event,
+  type EventPayloads,
+  type ReadCountRow,
+} from "../events.js";
 import {
   LIST_PAGE_LIMIT,
   SEAL_MAX_EVENTS,
   WITNESSES_REQUIRED,
 } from "../policy.js";
+import { buildReadCountPayload } from "../receipt.js";
 import { validateEntry } from "../schema.js";
 import {
   buildSeal,
@@ -94,18 +107,25 @@ import {
 } from "../seal.js";
 import type { D1Like } from "../storage/d1.js";
 import {
+  EventAppendError,
   SealConflictError,
   agentsForOperator,
+  appendEvents,
   dueAssignments,
+  earliestReadReceiptDay,
   eventsAfter,
   eventsForEntry,
   eventsInRange,
   getAnchor,
   getEntry,
+  headSeq,
+  latestEventOfType,
   latestSeal,
   listEntries,
   putAnchor,
   putEntry,
+  readCounterRangeOn,
+  readCountsOn,
   recordAssignment,
   recordAssignmentMissed,
   recordPoolSnapshot,
@@ -207,6 +227,15 @@ export interface SweepReport {
    * Ids only: no event is appended, so there is no position to report.
    */
   readonly staled: readonly string[];
+  /**
+   * The days whose read count this run published, oldest first, and empty when
+   * nothing was owed. One `read_count` event each.
+   */
+  readonly published: readonly {
+    readonly date: string;
+    readonly total: number;
+    readonly seq: number;
+  }[];
   /** The seal this run made, or null when nothing new was there to seal. */
   readonly sealed: {
     readonly seq: number;
@@ -241,12 +270,157 @@ function headPosition(events: readonly Event[]): number {
   return head;
 }
 
-// ---------------------------------------------------------------------------
-// (e), (f), (g): the seal, its witnesses, and the day's anchor
-// ---------------------------------------------------------------------------
-
 /** A unit constant, not a policy number: a day, stated in milliseconds. */
 const MILLISECONDS_PER_DAY = 86_400_000;
+
+// ---------------------------------------------------------------------------
+// (e): the day's read counts
+// ---------------------------------------------------------------------------
+
+/** The UTC day after this one. */
+function dayAfter(date: string): string {
+  return utcDay(
+    new Date(Date.parse(`${date}T00:00:00Z`) + MILLISECONDS_PER_DAY).toISOString(),
+  );
+}
+
+/**
+ * Every row of one day's reads, grouped by entry, however many pages that takes.
+ * A day with more entries than one page still publishes in full: a total that
+ * left a page out would be exactly the under-count Section 9 asks readers to
+ * check for.
+ */
+async function readsOn(db: D1Like, date: string): Promise<ReadCountRow[]> {
+  const rows: ReadCountRow[] = [];
+  let afterEntryId: string | undefined;
+  for (;;) {
+    const page = await readCountsOn(db, date, afterEntryId, LIST_PAGE_LIMIT);
+    if (page.length === 0) break;
+    rows.push(...page);
+    if (page.length < LIST_PAGE_LIMIT) break;
+    afterEntryId = page[page.length - 1]!.entry_id;
+  }
+  return rows;
+}
+
+/**
+ * (e) Publish each finished day's read count into the log.
+ *
+ * Whitepaper Section 9, Money: "Read counts are published to the sealed log
+ * daily ... every paid read also returns a signed receipt naming the entry, the
+ * time, and a running counter ... Each day's published count is the number the
+ * seal commits to." So the count goes in as an ordinary event and the seal step
+ * below covers it in the same run, which is what makes the published number the
+ * one the seal commits to rather than a number beside it.
+ *
+ * Yesterday is the newest day this may publish, because today is not over and a
+ * count published mid-day would be false rather than merely early — the same
+ * reason the anchor step waits a day.
+ *
+ * Where to start is the log's own answer: the day after the last `read_count`
+ * published, or, when none ever was, the day of the oldest receipt. A log that
+ * has served no reads publishes nothing at all, so a deployment with no readers
+ * accrues no events.
+ *
+ * A day inside the range that nobody read publishes a total of zero. The gap is
+ * the point: a reader checking a counter against the published days must find
+ * every day accounted for, and a missing day and a quiet day would look the
+ * same.
+ *
+ * A racing timer is a refusal rather than a repair, exactly as it is for the
+ * seal: the chain rule refuses the loser's event, and the loser counts
+ * `publish_conflict`, stops publishing, and carries on to its later steps.
+ */
+async function publishStep(
+  db: D1Like,
+  now: Date,
+  at: string,
+  skip: Skip,
+): Promise<SweepReport["published"]> {
+  const yesterday = utcDay(
+    new Date(now.getTime() - MILLISECONDS_PER_DAY).toISOString(),
+  );
+
+  const last = await latestEventOfType(db, "read_count");
+  let start: string;
+  if (last === null) {
+    const earliest = await earliestReadReceiptDay(db);
+    if (earliest === null) {
+      // Nothing has ever been read: there is no day to publish, and inventing
+      // one would put a zero in the log for a system that has served nobody.
+      skip("no_receipts");
+      return [];
+    }
+    start = earliest;
+  } else {
+    start = dayAfter((last.payload as EventPayloads["read_count"]).date);
+  }
+
+  // Days are "YYYY-MM-DD", so text order is chronological. Start past yesterday
+  // — today, or later on a log already published through it — means nothing is
+  // owed yet.
+  if (start > yesterday) {
+    skip("read_counts_current");
+    return [];
+  }
+
+  const days: string[] = [];
+  for (let date = start; date <= yesterday; date = dayAfter(date)) {
+    if (days.length === LIST_PAGE_LIMIT) {
+      // Bounded like every other step: the rest is the next run's, and the
+      // report says so once rather than per day left behind.
+      skip("publish_bounded");
+      break;
+    }
+    days.push(date);
+  }
+
+  const published: { date: string; total: number; seq: number }[] = [];
+  for (const date of days) {
+    const rows = await readsOn(db, date);
+    const range = await readCounterRangeOn(db, date);
+    const payload = buildReadCountPayload(
+      date,
+      rows,
+      range.counter_first,
+      range.counter_last,
+    );
+
+    // The chain rule, through the one door that enforces it: the event is built
+    // onto the stored head and `appendEvents` checks that it still links.
+    const head = await headSeq(db);
+    const previous = head === null ? [] : await eventsInRange(db, head, head);
+    const chained = await appendEvent(previous, {
+      at,
+      type: "read_count",
+      entry_id: null,
+      payload,
+    });
+    const event = chained[chained.length - 1]!;
+    try {
+      await appendEvents(db, [event]);
+    } catch (error) {
+      if (error instanceof EventAppendError) {
+        // The other timer appended between this step's read of the head and its
+        // write, so the event no longer links and the door refused it. That
+        // other run holds this day — it is publishing exactly the count this one
+        // was about to — so this run stops publishing and lets its remaining
+        // steps run, the way the seal step stands down on `seal_conflict`.
+        skip("publish_conflict");
+        break;
+      }
+      throw error;
+    }
+
+    published.push({ date, total: payload.total, seq: event.seq });
+  }
+
+  return published;
+}
+
+// ---------------------------------------------------------------------------
+// (f), (g), (h): the seal, its witnesses, and the day's anchor
+// ---------------------------------------------------------------------------
 
 /**
  * The published schema refused an entry the seal was about to rewrite.
@@ -300,7 +474,7 @@ async function rewriteForSeal(
 }
 
 /**
- * (e) Seal every event the last seal did not cover.
+ * (f) Seal every event the last seal did not cover.
  *
  * Whitepaper, Lifecycle of an entry (Seal): "Everything gets sealed, including
  * drafts and rejections ... every later event ... is hashed into the day's batch
@@ -413,7 +587,7 @@ function operatorOf(pinned: PinnedWitnesses, agent: string): string | null {
 }
 
 /**
- * (f) Gather countersignatures for the seals that are still waiting.
+ * (g) Gather countersignatures for the seals that are still waiting.
  *
  * Section 12's rule is src/witness.ts's, and it is asked one signature at a
  * time: `checkWitnesses` refuses a whole set on its first bad member (D-037), so
@@ -517,7 +691,7 @@ async function witnessStep(
 }
 
 /**
- * (g) Anchor yesterday's seals into an external timestamping chain.
+ * (h) Anchor yesterday's seals into an external timestamping chain.
  *
  * Whitepaper, Lifecycle of an entry (Seal): "Anchoring each day's batch hash
  * into an external public timestamping chain ... makes the existence proof
@@ -830,10 +1004,16 @@ export async function runSweep(
     afterId = page[page.length - 1]!.id;
   }
 
-  // (e), (f) and (g). The seal, the countersignatures, and yesterday's anchor,
+  // (e) The day's read counts. Before the seal on purpose: the count this run
+  // publishes is sealed by this same run, which is what Section 9's "each day's
+  // published count is the number the seal commits to" asks for. It needs
+  // nothing but the clock, so it runs on every environment.
+  const published = await publishStep(db, deps.now, at, skip);
+
+  // (f), (g) and (h). The seal, the countersignatures, and yesterday's anchor,
   // in that order: a seal has to exist before anyone can countersign it, and a
   // day's roots have to be fixed before the day is anchored. Every refusal is
-  // counted like the four steps above, and the run carries on.
+  // counted like the five steps above, and the run carries on.
   let sealed: SweepReport["sealed"] = null;
   let witnessed: SweepReport["witnessed"] = [];
   let anchored: SweepReport["anchored"] = null;
@@ -858,6 +1038,7 @@ export async function runSweep(
     missed,
     drawn,
     staled,
+    published,
     sealed,
     witnessed,
     anchored,

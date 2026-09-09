@@ -93,7 +93,7 @@ function clone(log: readonly Event[]): Event[] {
 }
 
 describe("event types", () => {
-  it("names exactly the eleven event types", () => {
+  it("names exactly the twelve event types", () => {
     expect(EVENT_TYPES).toEqual([
       "operator_registered",
       "operator_trusted",
@@ -106,8 +106,9 @@ describe("event types", () => {
       "validation",
       "reconfirmation",
       "dispute_upheld",
+      "read_count",
     ]);
-    expect(new Set(EVENT_TYPES).size).toBe(11);
+    expect(new Set(EVENT_TYPES).size).toBe(12);
   });
 
   it("scopes six of them to an entry", () => {
@@ -124,16 +125,57 @@ describe("event types", () => {
     }
   });
 
-  it("leaves the operator events, agent_bound included, unscoped", () => {
+  it("leaves the operator events, agent_bound and read_count unscoped", () => {
     for (const type of [
       "operator_registered",
       "operator_trusted",
       "operator_untrusted",
       "agent_bound",
       "pool_snapshot",
+      "read_count",
     ] as const) {
       expect(ENTRY_SCOPED_TYPES).not.toContain(type);
     }
+  });
+});
+
+/**
+ * Section 9, Money: "Read counts are published to the sealed log daily." One
+ * event covers every entry read that day, so it belongs to no single entry.
+ */
+describe("read_count", () => {
+  const payload = {
+    date: "2026-09-09",
+    reads: [
+      { entry_id: "nmk_a", count: 2 },
+      { entry_id: "nmk_b", count: 1 },
+    ],
+    total: 3,
+    counter_first: 7,
+    counter_last: 9,
+  };
+
+  it("appends with a null entry_id and carries the day verbatim", async () => {
+    const log = await appendEvent([], {
+      at: "2026-09-10T00:00:00Z",
+      type: "read_count",
+      entry_id: null,
+      payload,
+    });
+    expect(log[0]!.entry_id).toBeNull();
+    expect(log[0]!.payload).toEqual(payload);
+    await expect(verifyChain(log)).resolves.toEqual({ ok: true, length: 1 });
+  });
+
+  it("refuses a non-null entry_id", async () => {
+    await expect(
+      appendEvent([], {
+        at: "2026-09-10T00:00:00Z",
+        type: "read_count",
+        entry_id: ENTRY_ID,
+        payload,
+      }),
+    ).rejects.toThrow(/null entry_id/);
   });
 });
 

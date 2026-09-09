@@ -44,15 +44,22 @@ export type Env = {
    */
   SWEEPER?: SweeperNamespace;
   /**
-   * The sealing agent's Ed25519 private key, PKCS#8 in unpadded base64url — the
-   * `private_key_pkcs8` string a keygen file holds. It signs the seal
-   * fingerprint submitted to the founding registry, and nothing else.
+   * Nomankind's own agent: the Ed25519 private key, PKCS#8 in unpadded
+   * base64url — the `private_key_pkcs8` string a keygen file holds.
    *
-   * A Worker secret the maintainer sets on production only (D-016, D-054 item
-   * 5). Never in this repository, never in wrangler.jsonc, and never logged or
-   * returned: an adapter that put it in an error message would publish it.
-   * Absent means the registry track is unavailable, and the sweep seals
-   * locally without it rather than refusing to seal.
+   * Two jobs. On production it signs the seal fingerprint submitted to the
+   * founding registry; on every environment it signs the read receipts Section 8
+   * hands a reader (src/worker/read.ts). So it is set everywhere now: the real
+   * sealing agent's key on production, a throwaway secret on demo, and a local
+   * one from `.dev.vars` for `npm run dev`.
+   *
+   * A Worker secret (D-016, D-054 item 5). Never in this repository, never in
+   * wrangler.jsonc, and never logged or returned: an adapter that put it in an
+   * error message would publish it. Optional still, and absent means two
+   * different refusals rather than one failure: the registry track is
+   * unavailable and the sweep seals locally without it, and the read routes
+   * answer 503 `receipts_not_configured` rather than issuing an unsigned
+   * receipt.
    */
   SEALING_AGENT_KEY?: string;
   /**

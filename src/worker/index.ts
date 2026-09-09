@@ -14,8 +14,10 @@
  * validate one and gives the sweep its staleness step. M16 mounts the seal's own
  * pages (src/worker/seals.ts) — the seal chain, one seal, an event's inclusion
  * proof, and the daily anchors — and gives the sweep the three steps that make
- * them: seal, witness, anchor. Later milestones mount the rest — the public
- * pages — on the same router.
+ * them: seal, witness, anchor. M17 mounts Section 8's read door
+ * (src/worker/read.ts), which serves one entry with its seal and a signed read
+ * receipt, and gives the sweep the step that publishes each day's read count.
+ * Later milestones mount the rest — the public pages — on the same router.
  *
  * This file is the one place in the system that reads a wall clock, and it
  * reads it once per request. Everything below it takes the instant as an
@@ -40,6 +42,7 @@ import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import type { Env } from "./env.js";
 import { handleEvents } from "./events.js";
+import { handleRead } from "./read.js";
 import { handleReconfirm } from "./reconfirm.js";
 import { handleRegistry, json } from "./registry.js";
 import { handleSeals } from "./seals.js";
@@ -139,6 +142,9 @@ export async function handleRequest(
 
   const reconfirmed = await handleReconfirm(request, env, { now });
   if (reconfirmed !== null) return reconfirmed;
+
+  const readable = await handleRead(request, env, { now });
+  if (readable !== null) return readable;
 
   const events = await handleEvents(request, env);
   if (events !== null) return events;

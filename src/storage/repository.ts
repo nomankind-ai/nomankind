@@ -18,11 +18,18 @@
  * table but `events` and the rest can be rebuilt; that is the point.
  */
 
-import type { Anchor, AnchorExternal } from "../anchor.js";
+import { utcDay, type Anchor, type AnchorExternal } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
 import type { BountyAccrual } from "../bounty.js";
 import type { Sidecar } from "../derive.js";
-import { appendEvent, type Event, type EventInput, type EventType } from "../events.js";
+import {
+  appendEvent,
+  type Event,
+  type EventInput,
+  type EventType,
+  type ReadCountRow,
+} from "../events.js";
+import type { ReadReceipt } from "../receipt.js";
 import type { Entry } from "../schema.js";
 import type { RegistrySeal, Seal, WitnessSignature } from "../seal.js";
 import {
@@ -1854,4 +1861,310 @@ export async function setAnchorExternal(
     .prepare(`UPDATE anchors SET external = ? WHERE "date" = ?`)
     .bind(external === null ? null : writeJson(external), date)
     .run();
+}
+
+// ---------------------------------------------------------------------------
+// Read receipts
+// ---------------------------------------------------------------------------
+
+/**
+ * The `kind` a read receipt is stored under. The `receipts` table was declared
+ * with a kind column in 0001 so more than one kind of receipt could share it;
+ * this names the only one M17 writes.
+ */
+const READ_RECEIPT_KIND = "read";
+
+const RECEIPT_COLUMNS = `id, kind, entry_id, seq, created_at, payload_json`;
+
+/**
+ * The row id for a read receipt: its kind and its counter.
+ *
+ * Deterministic rather than random, so the primary key and the unique index
+ * refuse the same duplicate. A random id would let two isolates racing for the
+ * same counter differ in the id while colliding on (kind, seq), which is a
+ * second way to say the same thing and one more thing to keep in step.
+ */
+export function readReceiptId(counter: number): string {
+  return `rcpt_${counter}`;
+}
+
+/**
+ * A counter that was already taken.
+ *
+ * `nextReadCounter` reads the largest counter issued and adds one, and two
+ * isolates asking at the same instant get the same answer — an isolate cannot
+ * see what another is halfway through inserting. The guard is the unique index
+ * on (kind, seq) in migrations/0007_receipts.sql, not the read: the second
+ * insert fails, and this is what that failure means. The caller re-reads the
+ * counter and signs a fresh receipt for the next number, because the counter is
+ * inside the signed bytes and cannot be edited afterwards.
+ */
+export class ReceiptConflictError extends Error {
+  override readonly name = "ReceiptConflictError";
+  readonly counter: number;
+
+  constructor(counter: number, options?: { cause?: unknown }) {
+    super(`putReadReceipt: counter ${counter} is already issued`, options);
+    this.counter = counter;
+  }
+}
+
+/**
+ * The next running counter: one past the largest issued, and 1 on an empty
+ * table.
+ *
+ * Whitepaper Section 8: the receipt names "a running counter". It runs across
+ * every read, not per entry, so a reader can place their receipt in the whole
+ * stream of reads nomankind served rather than only in one entry's.
+ */
+export async function nextReadCounter(db: D1Like): Promise<number> {
+  const row = await db
+    .prepare(`SELECT MAX(seq) AS last FROM receipts WHERE kind = ?`)
+    .bind(READ_RECEIPT_KIND)
+    .first<Row>();
+  const last = row === null ? null : readNullableInteger(row, "last");
+  return last === null ? 1 : last + 1;
+}
+
+/**
+ * Store one signed read receipt.
+ *
+ * `seq` is the counter inside the receipt, and the whole receipt goes into
+ * `payload_json` verbatim: the signature covers exactly those five fields, so a
+ * reader who lost their copy must get back the same bytes that were signed.
+ * Nothing is recomputed on the way in or out.
+ *
+ * Throws `ReceiptConflictError` when the counter was already issued — a
+ * concurrent reader took the number. The unique index is the guard; see
+ * migrations/0007_receipts.sql.
+ */
+export async function putReadReceipt(
+  db: D1Like,
+  input: {
+    readonly entryId: string;
+    readonly createdAt: string;
+    readonly receipt: ReadReceipt;
+  },
+): Promise<void> {
+  const counter = input.receipt.counter;
+  try {
+    await db
+      .prepare(
+        `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        readReceiptId(counter),
+        READ_RECEIPT_KIND,
+        input.entryId,
+        counter,
+        input.createdAt,
+        writeJson(input.receipt),
+      )
+      .run();
+  } catch (cause) {
+    // Ask the table rather than read the driver's message: a receipt now
+    // standing at this counter is what "conflict" means, and any other failure
+    // is not ours to rename.
+    if ((await readReceiptByCounter(db, counter)) !== null) {
+      throw new ReceiptConflictError(counter, { cause });
+    }
+    throw cause;
+  }
+}
+
+/** One receipt by its counter, or null. */
+export async function readReceiptByCounter(
+  db: D1Like,
+  counter: number,
+): Promise<ReadReceipt | null> {
+  const row = await db
+    .prepare(
+      `SELECT payload_json FROM receipts WHERE kind = ? AND seq = ? ${ONE_ROW}`,
+    )
+    .bind(READ_RECEIPT_KIND, counter)
+    .first<Row>();
+  return row === null ? null : readJson<ReadReceipt>(row, "payload_json");
+}
+
+/**
+ * A page of one entry's read receipts, in counter order. Keyset, not offset:
+ * the caller passes back the last counter it saw. The limit is the caller's
+ * own; this module holds no page size.
+ */
+export async function readReceiptsForEntry(
+  db: D1Like,
+  entryId: string,
+  afterCounter: number,
+  limit: number,
+): Promise<ReadReceipt[]> {
+  const rows = await db
+    .prepare(
+      `SELECT payload_json FROM receipts
+       WHERE kind = ? AND entry_id = ? AND seq > ?
+       ORDER BY seq LIMIT ?`,
+    )
+    .bind(READ_RECEIPT_KIND, entryId, afterCounter, limit)
+    .all<Row>();
+  return rows.results.map((row) => readJson<ReadReceipt>(row, "payload_json"));
+}
+
+/**
+ * One UTC day's reads, grouped by entry and in entry_id order.
+ *
+ * Whitepaper Section 9, Money: "Read counts are published to the sealed log
+ * daily", so "any reader can compare the receipts they hold against the
+ * published counts". This is the read behind that publication.
+ *
+ * `created_at` is the injected clock's ISO instant, always "<day>T...", so the
+ * day is the half-open text range from "<day>T" to "<day>U" — the same trick
+ * `sealsSealedOn` uses, and for the same reason: a range seeks the index and a
+ * function call over every row does not.
+ *
+ * Keyset-paged by entry_id, because a day with more entries than one page can
+ * still be published in full.
+ */
+export async function readCountsOn(
+  db: D1Like,
+  date: string,
+  afterEntryId: string | undefined,
+  limit: number,
+): Promise<ReadCountRow[]> {
+  const bindings: unknown[] = [READ_RECEIPT_KIND, `${date}T`, `${date}U`];
+  let after = "";
+  if (afterEntryId !== undefined) {
+    after = "AND entry_id > ? ";
+    bindings.push(afterEntryId);
+  }
+  bindings.push(limit);
+
+  const rows = await db
+    .prepare(
+      `SELECT entry_id, COUNT(*) AS reads FROM receipts
+       WHERE kind = ? AND created_at >= ? AND created_at < ? ${after}
+       GROUP BY entry_id ORDER BY entry_id LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    entry_id: readText(row, "entry_id"),
+    count: readInteger(row, "reads"),
+  }));
+}
+
+/**
+ * The day's total and the counters that bound it: the smallest and largest
+ * counter issued on that UTC day, both null when the day counted nothing.
+ *
+ * The bounds are what make the published count checkable. A reader holding a
+ * receipt whose counter falls inside the day's range knows their read should be
+ * in that day's total, and a day that published fewer reads than its own
+ * counter range spans has a hole in it.
+ */
+export async function readCounterRangeOn(
+  db: D1Like,
+  date: string,
+): Promise<{
+  total: number;
+  counter_first: number | null;
+  counter_last: number | null;
+}> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS total, MIN(seq) AS first_seq, MAX(seq) AS last_seq
+       FROM receipts
+       WHERE kind = ? AND created_at >= ? AND created_at < ?`,
+    )
+    .bind(READ_RECEIPT_KIND, `${date}T`, `${date}U`)
+    .first<Row>();
+  if (row === null) {
+    return { total: 0, counter_first: null, counter_last: null };
+  }
+  return {
+    total: readInteger(row, "total"),
+    counter_first: readNullableInteger(row, "first_seq"),
+    counter_last: readNullableInteger(row, "last_seq"),
+  };
+}
+
+/**
+ * The UTC day of the oldest read receipt, or null when none was ever issued.
+ *
+ * Where the daily publication starts from: a sweep that has never published
+ * has to know which day is the first one with anything to say.
+ */
+export async function earliestReadReceiptDay(
+  db: D1Like,
+): Promise<string | null> {
+  const row = await db
+    .prepare(`SELECT MIN(created_at) AS earliest FROM receipts WHERE kind = ?`)
+    .bind(READ_RECEIPT_KIND)
+    .first<Row>();
+  const earliest = row === null ? null : readNullableText(row, "earliest");
+  return earliest === null ? null : utcDay(earliest);
+}
+
+/** What the reader's search asks the store for, and where it resumes. */
+export interface ReadCandidatesQuery {
+  readonly subject: string;
+  readonly category: string;
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+  /** Resume strictly before this submitted_seq; omit for the first page. */
+  readonly beforeSubmittedSeq?: number;
+}
+
+/**
+ * The verified entries a read may be answered from, newest submission first.
+ *
+ * Only `status = 'verified'` ever leaves this function: Section 8 promises the
+ * reader an answer the log stands behind, and draft, rejected, superseded and
+ * overturned are exactly the states it does not. Which of the verified ones is
+ * actually served is `chooseReadable`'s answer (src/read.ts) — the tier and age
+ * gates are rules, not SQL, and nothing here derives or filters on a field
+ * derivation owns beyond the status it already wrote.
+ *
+ * Newest first, keyset-paged downward by submitted_seq, and served by the
+ * `entries_subject_category_seq` index from 0001.
+ */
+export async function readCandidates(
+  db: D1Like,
+  query: ReadCandidatesQuery,
+): Promise<StoredEntry[]> {
+  const bindings: unknown[] = [query.subject, query.category];
+  let before = "";
+  if (query.beforeSubmittedSeq !== undefined) {
+    before = "AND submitted_seq < ? ";
+    bindings.push(query.beforeSubmittedSeq);
+  }
+  bindings.push(query.limit);
+
+  const rows = await db
+    .prepare(
+      `SELECT ${ENTRY_COLUMNS} FROM entries
+       WHERE subject = ? AND category = ? ${before}AND status = 'verified'
+       ORDER BY submitted_seq DESC LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map(toStoredEntry);
+}
+
+/**
+ * The newest event of one type, or null when the log holds none.
+ *
+ * What a daily sweep asks to find where it left off: the last `read_count` it
+ * published names the last day it published. One seek on the (type, seq) index
+ * from 0001, never a scan of the log.
+ */
+export async function latestEventOfType(
+  db: D1Like,
+  type: EventType,
+): Promise<Event | null> {
+  const row = await db
+    .prepare(
+      `SELECT ${EVENT_COLUMNS} FROM events WHERE type = ? ORDER BY seq DESC ${ONE_ROW}`,
+    )
+    .bind(type)
+    .first<Row>();
+  return row === null ? null : toEvent(row);
 }
