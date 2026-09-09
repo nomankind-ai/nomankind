@@ -630,6 +630,19 @@ async function witnessStep(
       continue;
     }
 
+    // A record stored before the registry's seal row id and the identity event
+    // id were told apart names the wrong event, and a proof of the wrong event
+    // can never be countersigned. The adapter re-resolves it from the citizen
+    // record; what it hands back is kept before any proof is asked for, so such
+    // a seal heals on a sweep run rather than by a migration.
+    if (deps.witness.kind === "registry" && deps.witness.heal !== undefined) {
+      const healed = await deps.witness.heal(seal);
+      if (healed !== null) {
+        await setSealRegistry(db, seal.seq, healed);
+        seal = { ...seal, registry: healed };
+      }
+    }
+
     // Operators, not signatures: two keys under one operator are one witness
     // (D-033), and the one already stored is the one that counts.
     const used = new Set<string>();

@@ -100,7 +100,12 @@ export interface RegistrySeal {
   registry: string;
   handle: string;
   label: string;
-  event_id: number;
+  /**
+   * The id of the `memory.seal` identity event that anchors the fingerprint —
+   * never the registry's own seal row id — and null while the citizen record has
+   * not listed that event yet, which the witness step resolves on a later run.
+   */
+  event_id: number | null;
   event_hash: string | null;
   receipt: unknown;
   sealed_at: string;

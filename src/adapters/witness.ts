@@ -74,6 +74,16 @@ export type WitnessAdapterKind = "mock" | "registry" | "unavailable";
 /** A witness adapter that says which track it is. */
 export interface EnvironmentWitnessAdapter extends WitnessAdapter {
   readonly kind: WitnessAdapterKind;
+  /**
+   * A corrected registry record for a stored one that does not name the identity
+   * event anchoring the seal, and null when the stored record needs none.
+   *
+   * Optional, because only a track with a registry has a record to correct. The
+   * sweep persists whatever comes back before it asks for a proof, so a seal
+   * stored under an earlier reading heals on a sweep run rather than a
+   * migration.
+   */
+  heal?(seal: Seal): Promise<RegistrySeal | null>;
 }
 
 /**
@@ -219,12 +229,15 @@ const VERIFIED_FROM = "verified from";
 /** The status a witness line carries when it really countersigned. */
 const COUNTERSIGNED = "countersigned";
 
+/** The kind an identity event carries when it anchors a sealed fingerprint. */
+const MEMORY_SEAL = "memory.seal";
+
 /**
- * How many pages of the seals listing are walked while looking for one hash.
- * Not a policy number: it is a loop guard, so a registry that paged forever
- * could not hang the sweep.
+ * How many pages of the citizen record's events are walked while looking for one
+ * seal's identity event. Not a policy number: it is a loop guard, so a registry
+ * that paged forever could not hang the sweep.
  */
-const MAX_SEAL_PAGES = 10;
+const MAX_RECORD_PAGES = 10;
 
 const encoder = new TextEncoder();
 
@@ -259,7 +272,13 @@ function hexPathOf(value: unknown): string[] | null {
 
 /**
  * The identity event id the seal response names, in the order the registry
- * spells it: `event_id`, then `event.id`, then `id`.
+ * spells it: `event_id`, then `event.id`.
+ *
+ * The response's bare `id` is deliberately not read. It is the row id of the
+ * seal in the registry's own seals table, not the identity event that anchors
+ * it, and reading it as an event id is what left production's seals asking for
+ * a proof of an unrelated event. The anchoring event's id lives in the citizen
+ * record, and `#anchoringEvent` is the only thing that resolves it.
  */
 function eventIdOf(receipt: unknown): number | null {
   const body = objectOf(receipt);
@@ -271,13 +290,21 @@ function eventIdOf(receipt: unknown): number | null {
     const nested = integerOf(event["id"]);
     if (nested !== null) return nested;
   }
-  return integerOf(body["id"]);
+  return null;
 }
 
-/** The chain hash the seal response names, or null when it names none. */
+/**
+ * The hash of the identity event the seal response chained, or null when it
+ * names none.
+ *
+ * `chained` is what the registry actually answers with; `event_hash` and
+ * `event.hash` are kept as fallbacks so a response that spells it either of
+ * those older ways is still read.
+ */
 function eventHashOf(receipt: unknown): string | null {
   const body = objectOf(receipt);
   if (body === null) return null;
+  if (isHex64(body["chained"])) return body["chained"];
   if (isHex64(body["event_hash"])) return body["event_hash"];
   const event = objectOf(body["event"]);
   if (event !== null && isHex64(event["hash"])) return event["hash"];
@@ -435,63 +462,84 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
 
     // A 409 means the hash is already sealed under this label, which is a
     // success from where the sweep stands: the fingerprint is in the log. Its
-    // body names the conflict rather than the event, so the id is resolved from
-    // the listing, exactly as it is when a 200 names no event id.
-    const conflicted = response.status === CONFLICT;
-    let eventId = conflicted ? null : eventIdOf(receipt);
-    let eventHash = conflicted ? null : eventHashOf(receipt);
-    if (eventId === null) {
-      eventId = await this.#resolveSealEvent(fingerprint);
-      eventHash = null;
-    }
-    if (eventId === null) return null;
+    // body names the conflict rather than the event, so both readings come back
+    // null and the record resolves the event, exactly as a 200 that named only
+    // the chained hash does.
+    const chained = eventHashOf(receipt);
+    const named = eventIdOf(receipt);
 
+    // The response is trusted only when it named the event both ways. Otherwise
+    // the anchoring event is resolved from the citizen record, which is the only
+    // place the identity log's own id and hash are published together.
+    const anchoring =
+      named !== null && chained !== null
+        ? { id: named, hash: chained }
+        : await this.#anchoringEvent(fingerprint, chained);
+
+    // A record that does not list the event yet keeps the chained hash and no
+    // id: the witness step resolves it on a later run. Storing the seal row id
+    // here is what asked for a proof of an unrelated event.
     return {
       registry: this.#origin,
       handle: this.#handle,
       label: this.#label,
-      event_id: eventId,
-      event_hash: eventHash,
+      event_id: anchoring?.id ?? null,
+      event_hash: anchoring?.hash ?? chained,
       receipt,
       sealed_at: now.toISOString(),
     };
   }
 
   /**
-   * The identity event id of an already-sealed fingerprint, from the citizen's
-   * own seal listing. `latest` is asked first because a seal just made is the
-   * newest one; the pages after it are walked oldest-first with `since_id`.
+   * The `memory.seal` identity event that anchors one fingerprint, from the
+   * citizen's own record: the id the identity log knows it by, and its hash.
+   *
+   * The record is the authority because it is the only response that publishes
+   * both together — the seal response carries the chained hash but no identity
+   * event id, and the seals listing carries a seal row id and no chain hash. The
+   * event is matched by hash when the seal response chained one, and by the
+   * fingerprint its `detail` names when it did not (a 409, whose body names the
+   * conflict and nothing else).
+   *
+   * Paged with the parameter this route publishes, `events_since`, while
+   * `events_has_more` says there is more; a record that stops answering, or that
+   * still has not listed the event, is null rather than a guess.
    */
-  async #resolveSealEvent(fingerprint: string): Promise<number | null> {
-    const base =
-      `${this.#origin}/api/seals` +
-      `?citizen=${encodeURIComponent(this.#handle)}` +
-      `&label=${encodeURIComponent(this.#label)}`;
+  async #anchoringEvent(
+    fingerprint: string,
+    chained: string | null,
+  ): Promise<{ id: number; hash: string } | null> {
+    const base = `${this.#origin}/api/record/${encodeURIComponent(this.#handle)}`;
+    const detail = `sha256=${fingerprint}`;
 
     let since: number | null = null;
-    for (let page = 0; page < MAX_SEAL_PAGES; page += 1) {
-      const url = since === null ? base : `${base}&since_id=${since}`;
+    for (let page = 0; page < MAX_RECORD_PAGES; page += 1) {
+      const url = since === null ? base : `${base}?events_since=${since}`;
       const body = objectOf(await this.#json(url));
       if (body === null) return null;
 
-      const latest = objectOf(body["latest"]);
-      if (latest !== null && latest["hash"] === fingerprint) {
-        const id = integerOf(latest["id"]);
-        if (id !== null) return id;
-      }
-
-      const rows = body["seals"];
-      if (!Array.isArray(rows) || rows.length === 0) return null;
+      const rows = body["events"];
+      if (!Array.isArray(rows)) return null;
 
       let last: number | null = null;
       for (const row of rows) {
-        const seal = objectOf(row);
-        if (seal === null) continue;
-        const id = integerOf(seal["id"]);
+        const event = objectOf(row);
+        if (event === null) continue;
+        const id = integerOf(event["id"]);
         if (id === null) continue;
         last = id;
-        if (seal["hash"] === fingerprint) return id;
+        if (event["kind"] !== MEMORY_SEAL) continue;
+
+        const hash = event["hash"];
+        if (!isHex64(hash)) continue;
+        const matched =
+          chained !== null
+            ? hash === chained
+            : (stringOf(event["detail"]) ?? "").includes(detail);
+        if (matched) return { id, hash };
       }
+
+      if (body["events_has_more"] !== true) return null;
       if (last === null || last === since) return null;
       since = last;
     }
@@ -506,6 +554,76 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
     }
   }
 
+  /**
+   * A registry record corrected to name the identity event that anchors the
+   * seal, or null when the stored one already names it (and null when it cannot
+   * be corrected right now, because a registry that did not answer is a seal
+   * still waiting rather than a record to overwrite).
+   *
+   * This is the healing path for the seals stored before the seal row id and the
+   * identity event id were told apart: nothing is migrated, and the sweep
+   * persists what this returns before it asks for a proof.
+   */
+  async heal(seal: Seal): Promise<RegistrySeal | null> {
+    try {
+      return await this.#heal(seal);
+    } catch {
+      return null;
+    }
+  }
+
+  async #heal(seal: Seal): Promise<RegistrySeal | null> {
+    const stored = seal.registry;
+    if (stored === null) return null;
+
+    const anchored = await this.#anchored(seal, stored);
+    if (anchored === null) return null;
+    if (
+      stored.event_id === anchored.id &&
+      stored.event_hash === anchored.proof.eventHash
+    ) {
+      return null;
+    }
+    return {
+      ...stored,
+      event_id: anchored.id,
+      event_hash: anchored.proof.eventHash,
+    };
+  }
+
+  /**
+   * The proof that places the seal's anchoring identity event in the log.
+   *
+   * The stored record is believed only when it names both an id and a hash and
+   * the proof for that id really is that event. Anything else — no id, no hash,
+   * or a proof for some other event, which is exactly what a stored seal row id
+   * answers — is re-resolved from the citizen record by the seal's own
+   * fingerprint, and the proof is then checked against the hash the record
+   * published rather than against whatever the proof endpoint returned.
+   */
+  async #anchored(
+    seal: Seal,
+    stored: RegistrySeal,
+  ): Promise<{ id: number; proof: CheckedProof } | null> {
+    const storedId = stored.event_id;
+    const storedHash = stored.event_hash;
+    if (storedId !== null && storedHash !== null) {
+      const proof = await this.#provenLeaf(storedId);
+      if (proof !== null && proof.eventHash === storedHash) {
+        return { id: storedId, proof };
+      }
+    }
+
+    const fingerprint = fingerprintOf(seal.hash);
+    if (fingerprint === null) return null;
+    const resolved = await this.#anchoringEvent(fingerprint, storedHash);
+    if (resolved === null) return null;
+
+    const proof = await this.#provenLeaf(resolved.id);
+    if (proof === null || proof.eventHash !== resolved.hash) return null;
+    return { id: resolved.id, proof };
+  }
+
   async #collect(seal: Seal): Promise<WitnessSignature[]> {
     const registrySeal = seal.registry;
     if (registrySeal === null) return [];
@@ -513,8 +631,9 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
     const pin = await this.#stillPinned();
     if (pin.length === 0) return [];
 
-    const proof = await this.#provenLeaf(registrySeal.event_id);
-    if (proof === null) return [];
+    const anchored = await this.#anchored(seal, registrySeal);
+    if (anchored === null) return [];
+    const proof = anchored.proof;
 
     const signatures: WitnessSignature[] = [];
     for (const witness of pin) {
