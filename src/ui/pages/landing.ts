@@ -1,5 +1,5 @@
 /**
- * The apex landing page (decisions D-021, D-062 as amended): what nomankind is,
+ * The apex landing page (decisions D-021, D-062, D-063): what nomankind is,
  * for someone who arrived at nomankind.ai and has never heard of it.
  *
  * The one page that is NOT in the shared layout. It has no header nav and no
@@ -39,12 +39,16 @@ const DEMO_URL = "https://demo.nomankind.ai";
 
 /**
  * The proof pipeline, drawn. Source, snapshot, three operators, the teal seal
- * with its witnesses, the learner that syncs last. Authored on a 760×300 viewBox
- * and scaled by the stylesheet, so the drawing is the same shape at every width.
+ * with its witnesses, the learner that syncs last. The boxes are laid out on
+ * 0…760 and the viewBox is opened a little wider than that on both sides,
+ * because the captions under the first and last box are centred on their box and
+ * a few characters of them fall outside it; an svg clips at its viewBox, so
+ * without the margin the first and last caption would lose a letter. Scaled by
+ * the stylesheet, so the drawing is the same shape at every width.
  */
 const PIPELINE = html`<svg
             class="pipeline"
-            viewBox="0 0 760 300"
+            viewBox="-20 0 802 300"
             fill="none"
             role="img"
             aria-label="A cited source is snapshotted and hashed, checked and signed by three independent operators, sealed every five minutes and countersigned by independent witnesses, and only then read by a learner that syncs from its last sealed position."
@@ -60,11 +64,11 @@ const PIPELINE = html`<svg
 
             <rect x="0" y="86" width="96" height="68" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
             <text class="node-name" x="48" y="116" text-anchor="middle" font-size="22" fill="#ece9e2">Source</text>
-            <text class="node-note" x="48" y="138" text-anchor="middle" font-size="10" fill="#7f8794">cited page</text>
+            <text class="node-note" x="48" y="138" text-anchor="middle" font-size="10" fill="#7f8794">the page that said it</text>
 
             <rect x="190" y="86" width="96" height="68" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
             <text class="node-name" x="238" y="116" text-anchor="middle" font-size="22" fill="#ece9e2">Snapshot</text>
-            <text class="node-note" x="238" y="138" text-anchor="middle" font-size="10" fill="#7f8794">hashed, frozen</text>
+            <text class="node-note" x="238" y="138" text-anchor="middle" font-size="10" fill="#7f8794">hashed at capture</text>
 
             <rect x="380" y="26" width="96" height="48" stroke="#3a424c" stroke-width="1.5" fill="#0b0d10"></rect>
             <text class="node-name" x="428" y="56" text-anchor="middle" font-size="19" fill="#ece9e2">Operator A</text>
@@ -72,7 +76,7 @@ const PIPELINE = html`<svg
             <text class="node-name" x="428" y="126" text-anchor="middle" font-size="19" fill="#ece9e2">Operator B</text>
             <rect x="380" y="166" width="96" height="48" stroke="#7fd1c4" stroke-width="1.5" fill="#0b0d10"></rect>
             <text class="node-name" x="428" y="196" text-anchor="middle" font-size="19" fill="#ece9e2">Operator C</text>
-            <text class="node-note" x="428" y="246" text-anchor="middle" font-size="10" fill="#7f8794">three independent · fetch, test, sign</text>
+            <text class="node-note" x="428" y="246" text-anchor="middle" font-size="10" fill="#7f8794">independent · fetch it, test it, sign</text>
 
             <rect x="570" y="86" width="96" height="68" stroke="#7fd1c4" stroke-width="1.5" fill="#7fd1c4"></rect>
             <text class="node-name" x="618" y="116" text-anchor="middle" font-size="22" fill="#0b0d10">Seal</text>
@@ -84,32 +88,38 @@ const PIPELINE = html`<svg
 
             <rect x="700" y="86" width="60" height="68" stroke="#e0b458" stroke-width="2" fill="#0b0d10"></rect>
             <text class="node-name" x="730" y="116" text-anchor="middle" font-size="20" fill="#ece9e2">Learner</text>
-            <text class="node-note" x="730" y="138" text-anchor="middle" font-size="10" fill="#7f8794">syncs last</text>
+            <text class="node-note" x="730" y="138" text-anchor="middle" font-size="10" fill="#7f8794">syncs, learns</text>
           </svg>`;
 
-/** The three cards under the numerals: the use case, the provenance, the truth. */
+/**
+ * The three cards under the numerals: the use case, the provenance floor, the
+ * truth above it. The third one is drawn in amber, the page's colour for what
+ * the outside world has not finished yet — a test only reaches so far.
+ */
 const CARDS: readonly {
   readonly label: string;
   readonly head: string;
   readonly body: string;
+  readonly amber?: true;
 }[] = [
   {
-    label: "PRIMARY USE · CONTINUAL LEARNING",
-    head: "Pull every change since your last sync, sealed and in order.",
+    label: "FOR MODELS THAT KEEP LEARNING",
+    head: "Sync the delta, not the web.",
     body:
-      "Two models syncing from the same position take in the same sequence and can prove it. Overturned facts arrive as explicit unlearn signals.",
+      "A learner asks for everything sealed since its last position and gets it in sealed order, with an inclusion proof on every event and one signed receipt for the page. Two learners at the same position learn the same sequence and can prove it. A fact that was overturned arrives as an explicit unlearn.",
   },
   {
-    label: "PROVENANCE, PROVEN",
-    head: "The chain of custody travels with the fact.",
+    label: "PROOF OF PROVENANCE",
+    head: "Every fact carries its own audit.",
     body:
-      "Source hash, three independent signatures, seal time, last-confirmed date, and every dispute since. Anyone can recheck it offline.",
+      "The source page as it stood, its hash, the three signatures, the seal time, the last-confirmed date, every dispute since. A model can point to the page each belief came from, and anyone can recheck it offline with two files and one script.",
   },
   {
-    label: "TRUTH, WHERE A TEST CAN REACH",
-    head: "Measured, not just cited.",
+    label: "PROOF OF TRUTH",
+    head: "Tested, not merely quoted.",
     body:
-      "Prices, rate limits, deprecations, model behavior: where a claim can be measured, validators run the test themselves and record their own receipts.",
+      "Where a claim can be measured, a metered call, a probe to a rate limit, a reproduced prompt, the test is frozen with the claim and each validator runs it: ten runs, eight must hold, receipt recorded. The entry then says observed, not just stated.",
+    amber: true,
   },
 ];
 
@@ -118,27 +128,27 @@ const VALUES: readonly { readonly head: string; readonly body: string }[] = [
   {
     head: "Owned by no lab.",
     body:
-      "No model provider funds, runs, or validates the record. The maintainer runs the pipes and never the judgment.",
+      "No model provider funds, runs, or validates the feed. The maintainer runs the pipes, never the judgment.",
   },
   {
     head: "Facts, never opinions.",
     body:
-      "An entry states what a cited source said or what a reproducible transcript shows. No rankings, no scores, no characterizations.",
+      "What a source said, or what a reproduced test showed. No rankings, no scores.",
   },
   {
-    head: "Rewards for being right, never for being busy.",
+    head: "Paid for being right.",
     body:
-      "Contributors are paid when the facts they backed are read and survive. Errors are clawed back and attributed, forever.",
+      "Contributors earn only when the facts they backed are read and survive. Errors are clawed back and attributed, forever.",
   },
   {
-    head: "Checkable by anyone, offline.",
+    head: "Checkable offline.",
     body:
-      "Every entry is hashed, signed, and sealed into a witnessed log. Trust is not required; the proof travels with the record.",
+      "Hashes, signatures, seals. Trust is not required; the proof travels with the fact.",
   },
   {
-    head: "Exit is the only real check.",
+    head: "Forkable.",
     body:
-      "The code is open, the data is public domain, and the whole log is forkable. If nomankind breaks its own rules, anyone leaves with the entire record.",
+      "Open code, public-domain data, the whole log exportable. If nomankind breaks its rules, anyone leaves with the record.",
   },
 ];
 
@@ -195,11 +205,11 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
     <title>nomankind</title>
     <meta
       name="description"
-      content="A public log of small cited facts about the AI ecosystem, built to be learned from. Every fact a model takes in arrives with its provenance proven, and with proof of truth wherever a test can reach."
+      content="nomankind is a sealed feed of facts about the AI ecosystem, made for continual learners. Nothing enters the feed until its source is captured and hashed, three independent operators have checked it, and a witnessed seal has dated it."
     />
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Manrope:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap"
     />
     <link rel="stylesheet" href="/static/landing.css" />
   </head>
@@ -222,22 +232,26 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
       <section class="hero row">
         <div class="hero-copy">
           <p class="eyebrow eyebrow-teal">
-            THE SEALED FEED FOR MODELS THAT KEEP LEARNING
+            VERIFIED FACTS FOR MODELS THAT KEEP LEARNING
           </p>
           <h1 class="display hero-title">
-            Proof first.<br /><em class="hero-turn">Use second.</em>
+            Proof of provenance.<br /><span class="hero-turn"
+              >Proof of truth.</span
+            >
           </h1>
           <p class="hero-sub">
-            A public log of small cited facts about the AI ecosystem, built to be
-            learned from. Every fact a model takes in arrives with its provenance
-            proven, and with proof of truth wherever a test can reach.
+            nomankind is a sealed feed of facts about the AI ecosystem, made for
+            continual learners. Nothing enters the feed until its source is
+            captured and hashed, three independent operators have checked it, and
+            a witnessed seal has dated it. Where a fact can be tested, it was
+            tested. Where it cannot, the feed says so.
           </p>
         </div>
         <div class="diagram-panel">
           ${PIPELINE}
           <div class="pipeline-legend mono">
-            <span>CAPTURED → HASHED → CHECKED ×3 → SEALED → WITNESSED → DATED → LEARNED</span>
-            <span>A LEARNER SYNCS FROM ITS LAST SEALED POSITION</span>
+            <span>CAPTURE → HASH → TEST ×3 → SEAL → WITNESS → SYNC → LEARN</span>
+            <span>A LEARNER RESUMES FROM ITS LAST SEALED POSITION</span>
           </div>
         </div>
       </section>
@@ -263,19 +277,23 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
         <div class="numeral">
           <p class="numeral-label mono">INDEPENDENT WITNESSES</p>
           <p class="display numeral-value">${data.witnesses}</p>
-          <p class="numeral-note mono">none under a model provider</p>
+          <p class="numeral-note mono">none owned by a model provider</p>
         </div>
         <div class="numeral">
           <p class="numeral-label mono">VERIFIED FACTS</p>
           <p class="display numeral-value">${data.verified}</p>
-          <p class="numeral-note mono">in the sealed log</p>
+          <p class="numeral-note mono">checked by three operators, sealed, dated</p>
         </div>
       </section>
 
       <section class="cards row">
         ${CARDS.map(
-          (card) => html`<article class="card">
-          <p class="eyebrow eyebrow-label eyebrow-teal">${card.label}</p>
+          (card) => html`<article class="${card.amber ? "card card-amber" : "card"}">
+          <p
+            class="${card.amber
+              ? "eyebrow eyebrow-label eyebrow-amber"
+              : "eyebrow eyebrow-label eyebrow-teal"}"
+          >${card.label}</p>
           <h2 class="display card-head">${card.head}</h2>
           <p class="card-body">${card.body}</p>
         </article>`,
@@ -284,37 +302,35 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
 
       <section class="duo">
         <div class="duo-col row">
-          <p class="eyebrow eyebrow-teal">BUILT FOR MODELS THAT TRAIN FROM IT</p>
+          <p class="eyebrow eyebrow-teal">WHY A LEARNER NEEDS THIS</p>
           <h2 class="display duo-title">
-            Models learn from the world, and every fact they take in came from
-            somewhere. Today that somewhere is worked out afterwards, if at all.
+            A model that keeps learning has nowhere neutral to look.
           </h2>
           <p class="duo-body">
-            nomankind turns the order around. Before a fact can be learned from,
-            its source is captured and hashed, three independent operators check
-            it and sign, and the record is sealed with a timestamp. A continual
-            learner then pulls every change since its last sync as a sealed delta
-            stream, in the exact order it was sealed. Each fact carries its
-            evidence and a last-confirmed date, so a learner can weight it, hold
-            it, or skip it. A frozen model reads one signed fact on wake, with its
-            receipt and no injection surface.
+            Prices, rate limits, deprecations, and model behavior change weekly.
+            Each lab documents only itself, the open web can be poisoned for
+            almost nothing, and nobody records who checked a fact or when it was
+            last true. A learner training on that takes in errors it cannot trace
+            and cannot unlearn. nomankind gives it one feed where every fact was
+            checked before it was offered, dated so it can be weighted, and
+            sealed so it can be audited later.
           </p>
         </div>
         <div class="duo-col row">
-          <p class="eyebrow eyebrow-amber">PROVENANCE OF WHAT A MODEL LEARNED</p>
+          <p class="eyebrow eyebrow-amber">TRUTH ABOVE THE PROVENANCE FLOOR</p>
           <h2 class="display duo-title">
-            Sources rot. Labs edit their own pages quietly. A model that keeps
-            learning has nowhere neutral to look.
+            Provenance says who said it. Proof of truth says it held.
           </h2>
           <p class="duo-body">
-            Every fact a learner takes from the stream arrives with its chain of
-            custody complete: source hash, three independent signatures, seal
-            time, reproduction counts where a test exists, and every dispute
-            since. Even if the original page is later edited or destroyed, the
-            sealed, dated record of what it said still stands, and anyone can
-            check it offline with two files and one script. A model can say which
-            belief came from which page, and independent operators can certify in
-            public that its beliefs still match the record.
+            Every entry proves its provenance: three operators, none the
+            submitter's and none a model provider, confirmed the source says what
+            the entry says. That is the floor. Above it, wherever a test can
+            reach, validators run the test themselves and the entry rises to
+            observed. The tier is written into the record, so a learner always
+            knows whether it holds a quotation or a measurement, and can weight
+            the two differently. A confidence score derived from the receipts is
+            planned; until it is calibrated the field stays null and its raw
+            inputs are exposed.
           </p>
         </div>
       </section>
@@ -334,26 +350,22 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
 
       <section class="tiers">
         <div class="tiers-copy">
-          <p class="eyebrow">TWO TIERS OF EVIDENCE</p>
+          <p class="eyebrow">PROOF FIRST, THEN USE</p>
           <h2 class="display tiers-title">
-            Provenance is the floor.
-            <em>Truth, wherever a test can reach.</em>
+            Quotations you can trace. <em>Measurements that held.</em>
           </h2>
         </div>
         <p class="tiers-body">
-          Verified means three independent operators confirmed that the source
-          says what the entry says. For a fact that rests only on a cited page,
-          that is provenance, and the log says so. Where a claim can be measured,
-          a metered call, a probe to a limit, a reproduced prompt, the submitter
-          freezes the test and validators run it themselves under a published
-          rule, each recording its own receipt. The entry moves past "a source
-          said it" toward "this was observed to hold", and its tier tells a
-          learner which it is holding.
+          Stated entries rest on a cited page. Observed entries rest on a test
+          that validators reran and passed. Both are sealed, witnessed, and
+          dated; only one has been shown to hold. A learner that reads the tier
+          can lean on measurements and hold quotations lightly, and it can prove
+          afterwards exactly what it learned and why.
         </p>
       </section>
 
       <footer class="landing-footer row mono">
-        <span>CODE APACHE-2.0 · DATA CC0 · TRAINING ON THE DATA IS FREE</span>
+        <span>CODE APACHE-2.0 · DATA CC0 · TRAINING ON THE FEED IS FREE</span>
         <span>NOMANKIND.AI</span>
       </footer>
     </div>
@@ -370,10 +382,11 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
  * sheets can move independently and neither builder edits the other's rules.
  *
  * Direction D's ground: near-black panels, one teal accent for proof and one
- * amber for what the outside world has not finished yet. Instrument Serif for
- * display, Manrope for body, JetBrains Mono for the eyebrows, the band and the
- * labels, each with a real fallback stack, because a page whose meaning depends
- * on a font that failed to load is a page that failed.
+ * amber for what the outside world has not finished yet. One typeface family for
+ * the page (D-063): Space Grotesk for the display and the body, JetBrains Mono
+ * for the eyebrows, the band and the labels, each with a real fallback stack,
+ * because a page whose meaning depends on a font that failed to load is a page
+ * that failed. No italic anywhere except the accent block's second sentence.
  *
  * The artboard is drawn at one width (1440 px); everything below that is fluid.
  * The content column stops at 1440 px, the side padding is 48 px and 24 px on a
@@ -384,7 +397,8 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
  */
 export const LANDING_CSS = `
 /* ---------------------------------------------------------------------------
-   The apex landing page (D-062, direction D). Its own namespace: body.landing.
+   The apex landing page (D-062, D-063, direction D). Its own namespace:
+   body.landing.
    --------------------------------------------------------------------------- */
 
 .landing {
@@ -398,9 +412,9 @@ export const LANDING_CSS = `
   --dim: #7f8794;
   --teal: #7fd1c4;
   --amber: #e0b458;
-  --display: "Instrument Serif", Georgia, "Times New Roman", serif;
-  --body: "Manrope", "Helvetica Neue", Arial, sans-serif;
-  --mono: "JetBrains Mono", Menlo, Consolas, monospace;
+  --display: "Space Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --body: "Space Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", "Menlo", monospace;
   --pad: 48px;
   margin: 0;
   background: var(--ground);
@@ -422,7 +436,7 @@ export const LANDING_CSS = `
 
 .display {
   font-family: var(--display);
-  font-weight: 400;
+  font-weight: 600;
   margin: 0;
 }
 
@@ -550,30 +564,35 @@ export const LANDING_CSS = `
   padding-bottom: 48px;
 }
 
+/* No min-width: 0 here, unlike every other grid child on the page. At 1440 the
+   headline's longest word, "provenance.", is a shade wider than a plain 5fr
+   share, so the column is allowed to take its min-content and the drawing beside
+   it gives up those few pixels — the artboard's own behaviour. Otherwise the word
+   would hang over the panel. */
 .hero-copy {
   display: flex;
   flex-direction: column;
   gap: 26px;
-  min-width: 0;
 }
 
-/* clamp() rather than one size: at 1440 the artboard's 124px, and small enough
-   on a phone that not one word of it has to break. */
+/* clamp() rather than one size: at 1440 the artboard's ~104px, and small enough
+   on a phone that not one word of it has to break. The longest word in the line
+   is "provenance.", so the ceiling is set by what fits the 5fr column, not by
+   taste. */
 .hero-title {
-  font-size: clamp(44px, 8.4vw, 124px);
-  line-height: 0.92;
-  letter-spacing: -0.02em;
+  font-size: clamp(38px, 7vw, 104px);
+  line-height: 0.96;
+  letter-spacing: -0.03em;
   text-wrap: balance;
 }
 
 .hero-turn {
-  font-style: italic;
   color: var(--teal);
 }
 
 .hero-sub {
   margin: 0;
-  max-width: 520px;
+  max-width: 540px;
   font-size: clamp(17px, 1.5vw, 21px);
   line-height: 1.5;
   color: var(--muted);
@@ -750,6 +769,12 @@ export const LANDING_CSS = `
   gap: 8px;
   border-top: 2px solid var(--teal);
   padding-top: 14px;
+}
+
+/* The truth card is the one thing on the page a test cannot always reach, so it
+   takes the amber rule and the amber label the artboard draws on it. */
+.card-amber {
+  border-top-color: var(--amber);
 }
 
 .card-head {
