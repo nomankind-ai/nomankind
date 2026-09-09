@@ -387,6 +387,9 @@ export const LIST_PAGE_LIMIT = 100;
  */
 export const HOME_LATEST_ENTRIES = 10;
 
+/** How many seals the landing page's live seal-chain band shows. A page size, so it lives here beside HOME_LATEST_ENTRIES. */
+export const LANDING_BAND_SEALS = 12;
+
 /** Every policy number, collected and frozen. */
 export const POLICY = Object.freeze({
   TRUSTED_POOL_SWITCH,
@@ -420,5 +423,6 @@ export const POLICY = Object.freeze({
   MODEL_PROVIDER_DOMAINS,
   LIST_PAGE_LIMIT,
   HOME_LATEST_ENTRIES,
+  LANDING_BAND_SEALS,
   BEACON,
 });

@@ -22,9 +22,8 @@
  * derived field an entry shows was derived when the entry was written.
  *
  * No policy number lives here: the bare integers are HTTP status codes, and the
- * page sizes are LIST_PAGE_LIMIT and HOME_LATEST_ENTRIES from src/policy.ts —
- * with one presentation page size, LANDING_BAND_SEALS, documented below.
- * No wall clock either — `deps.now` is the instant the router read once.
+ * page sizes are LIST_PAGE_LIMIT, HOME_LATEST_ENTRIES and LANDING_BAND_SEALS
+ * from src/policy.ts. No wall clock either — `deps.now` is the instant the router read once.
  */
 
 import type { Event } from "../events.js";
@@ -35,6 +34,7 @@ import {
 } from "../registry.js";
 import {
   HOME_LATEST_ENTRIES,
+  LANDING_BAND_SEALS,
   LIST_PAGE_LIMIT,
   POLICY,
   WITNESS_PIN,
@@ -192,17 +192,6 @@ class TrustedOperators {
 // ---------------------------------------------------------------------------
 // The pages
 // ---------------------------------------------------------------------------
-
-/**
- * How many seals the landing band shows.
- *
- * Presentation, like HOME_LATEST_ENTRIES: the band is a strip of the newest
- * seals sliding past, and twelve is what fits before the strip is longer than
- * anyone watches. It sits here rather than in src/policy.ts only because this
- * change touches no other file; it is a page size and it belongs beside
- * HOME_LATEST_ENTRIES the next time policy is edited.
- */
-const LANDING_BAND_SEALS = 12;
 
 /**
  * The apex front door (D-021, D-062 direction D).
