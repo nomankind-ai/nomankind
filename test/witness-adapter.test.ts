@@ -66,8 +66,18 @@ const NOW = new Date("2026-09-08T12:00:00.000Z");
 const SEAL_HASH = `sha256:${"ab".repeat(32)}`;
 const FINGERPRINT = "ab".repeat(32);
 
-/** Our memory.seal identity event: the fourth leaf of an eight-leaf log. */
+/**
+ * Our memory.seal identity event: the fourth leaf, and `SIZE` is the head the
+ * registry answers the inclusion proof under — the *earliest* checkpoint that
+ * covers the leaf, which is what the real registry does. The log kept growing
+ * after that, to `TOTAL`, because that is the other half of production: a
+ * witness countersigns whatever head is current when it runs, so the head it
+ * signed is normally later than the proof's.
+ */
 const SIZE = 8;
+const TOTAL = 12;
+/** A head later than the proof's, and not a power of two, so the fold is real. */
+const LATER_SIZE = 11;
 const LEAF_INDEX = 3;
 const EVENT_ID = 103;
 
@@ -185,6 +195,8 @@ interface FakeOptions {
   recordPages?: Record<string, unknown>;
   /** Whether the directory endpoint answers at all. */
   witnessesStatus?: number;
+  /** The consistency endpoint's body, for the tests that corrupt the bridge. */
+  consistency?: (from: number, to: number) => Promise<unknown> | unknown;
 }
 
 /** Our `memory.seal` identity event, as the citizen record lists it. */
@@ -312,14 +324,24 @@ async function fakeRegistry(options: FakeOptions = {}): Promise<{
           hash: eventHashes[leaf],
           leaf_index: leaf,
         },
+        // Against the earliest head that covers the leaf, never the newest:
+        // the registry's own behaviour, and the reason a bridge runs forward.
         checkpoint: await checkpointAt(SIZE),
-        proof: await pathOf(leaves, leaf),
+        proof: await pathOf(leaves.slice(0, SIZE), leaf),
       });
     }
 
     if (url.origin === ORIGIN && url.pathname === "/api/checkpoint/consistency") {
       const from = Number(url.searchParams.get("from"));
       const to = Number(url.searchParams.get("to"));
+      // The registry only proves the smaller tree into the larger; asking it
+      // the other way round is a refusal, not an answer.
+      if (!(from >= 0 && from <= to)) {
+        return json({ error: "from must not exceed to" }, 400);
+      }
+      if (options.consistency !== undefined) {
+        return json(await options.consistency(from, to));
+      }
       return json({
         log: url.searchParams.get("log"),
         from: await checkpointAt(from),
@@ -421,7 +443,7 @@ beforeAll(async () => {
   beta = await makeKey();
   gamma = await makeKey();
 
-  eventHashes = Array.from({ length: SIZE }, (_, index) =>
+  eventHashes = Array.from({ length: TOTAL }, (_, index) =>
     (index + 1).toString(16).padStart(64, "0"),
   );
   leaves = await Promise.all(eventHashes.map((hash) => leafOf(hash)));
@@ -750,6 +772,132 @@ describe("RegistryWitnessAdapter.collect", () => {
     expect(second!.evidence!.consistency_proof).toEqual([]);
   });
 
+  it("bridges forward to a head countersigned after the proof's", async () => {
+    // Production's shape: the proof is answered under the earliest head that
+    // covers our leaf, and the witness countersigned a later one.
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([await countersignatureLine(alpha, LATER_SIZE)]);
+
+    const { fetch, calls } = await fakeRegistry({ files });
+    const [first] = await adapterWith(fetch).collect(sealedSeal(), NOW);
+
+    expect(first!.head!.tree_size).toBe(LATER_SIZE);
+    expect(first!.evidence!.proved_at.tree_size).toBe(SIZE);
+    expect(first!.evidence!.consistency_proof.length).toBeGreaterThan(0);
+
+    // Asked the only way the registry can answer: the smaller tree into the
+    // larger, which here means from the proof's head to the countersigned one.
+    const asked = calls.filter((call) =>
+      call.url.includes("/api/checkpoint/consistency"),
+    );
+    expect(asked.some((call) => call.url.includes(`from=${SIZE}&to=${LATER_SIZE}`))).toBe(
+      true,
+    );
+    expect(
+      asked.some((call) => call.url.includes(`from=${LATER_SIZE}&to=${SIZE}`)),
+    ).toBe(false);
+
+    // And the rule accepts what came back, which is the whole point.
+    const check = await checkWitnesses(SEAL_HASH, [first!], testContext());
+    expect(check.ok).toBe(true);
+  });
+
+  it("takes the newest line whichever side of the proof's head it falls", async () => {
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([
+      await countersignatureLine(alpha, 6),
+      await countersignatureLine(alpha, LATER_SIZE),
+      await countersignatureLine(alpha, SIZE),
+    ]);
+
+    const { fetch } = await fakeRegistry({ files });
+    const [first] = await adapterWith(fetch).collect(sealedSeal(), NOW);
+    expect(first!.head!.tree_size).toBe(LATER_SIZE);
+  });
+
+  it("refuses a head that does not cover our leaf, however new the line", async () => {
+    // A head of three leaves cannot cover leaf three, so there is nothing to
+    // bridge to and the line is not usable at any size.
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([
+      await countersignatureLine(alpha, LEAF_INDEX),
+    ]);
+
+    const { fetch, calls } = await fakeRegistry({ files });
+    const signatures = await adapterWith(fetch).collect(sealedSeal(), NOW);
+
+    expect(signatures.map((entry) => entry.agent)).toEqual([
+      AGENT_ID_PREFIX + beta.publicKey,
+    ]);
+    // Never even asked for a bridge to it.
+    expect(
+      calls.some((call) => call.url.includes(`from=${LEAF_INDEX}`)),
+    ).toBe(false);
+  });
+
+  it("refuses a bridge whose from head is not the head the proof was fetched at", async () => {
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([await countersignatureLine(alpha, LATER_SIZE)]);
+
+    // Real proof, real heads, but the `from` head is a different tree than the
+    // one our inclusion proof folds to: a proof of some other pair of heads.
+    const { fetch } = await fakeRegistry({
+      files,
+      consistency: async (_from, to) => ({
+        log: LOG,
+        from: await checkpointAt(6),
+        to: await checkpointAt(to),
+        proof: await consistencyOf(leaves.slice(0, to), 6),
+      }),
+    });
+    const signatures = await adapterWith(fetch).collect(sealedSeal(), NOW);
+    expect(signatures.map((entry) => entry.agent)).toEqual([
+      AGENT_ID_PREFIX + beta.publicKey,
+    ]);
+  });
+
+  it("refuses a bridge whose to head is not the countersigned one", async () => {
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([await countersignatureLine(alpha, LATER_SIZE)]);
+
+    const { fetch } = await fakeRegistry({
+      files,
+      consistency: async (from) => ({
+        log: LOG,
+        from: await checkpointAt(from),
+        to: await checkpointAt(TOTAL),
+        proof: await consistencyOf(leaves.slice(0, TOTAL), from),
+      }),
+    });
+    const signatures = await adapterWith(fetch).collect(sealedSeal(), NOW);
+    expect(signatures.map((entry) => entry.agent)).toEqual([
+      AGENT_ID_PREFIX + beta.publicKey,
+    ]);
+  });
+
+  it("refuses a bridge whose path does not fold", async () => {
+    const files = await witnessFiles();
+    files[pinAlpha.url] = fileOf([await countersignatureLine(alpha, LATER_SIZE)]);
+
+    const { fetch } = await fakeRegistry({
+      files,
+      consistency: async (from, to) => ({
+        log: LOG,
+        from: await checkpointAt(from),
+        to: await checkpointAt(to),
+        // The right shape and the wrong hashes: both heads are named correctly
+        // and the path proves nothing about either.
+        proof: (await consistencyOf(leaves.slice(0, to), from)).map(() =>
+          "0".repeat(64),
+        ),
+      }),
+    });
+    const signatures = await adapterWith(fetch).collect(sealedSeal(), NOW);
+    expect(signatures.map((entry) => entry.agent)).toEqual([
+      AGENT_ID_PREFIX + beta.publicKey,
+    ]);
+  });
+
   it("never returns a first-observation line", async () => {
     const files = await witnessFiles();
     // Alpha's file now holds nothing but the first observation.
@@ -991,6 +1139,29 @@ describe("the registry's identity event (production seal 0)", () => {
   const WRONG_EVENT_HASH =
     "38b5f3cb351da58a5422b54bac6791d5ca63a5596b307a47b36609a3d31235b8";
 
+  /**
+   * The head the registry answered the proof under, and the head the pinned
+   * liveness witness had countersigned by the time the sweep ran.
+   *
+   * The first is the *earliest* checkpoint covering leaf 9873, which is what the
+   * registry always answers with; the second is whatever head was current when
+   * the witness last ran. The second being the larger is the ordinary case, and
+   * the defect this pair reproduces: nothing could bridge from 9971 back to
+   * 9874, because that proof does not exist.
+   */
+  const PROVED_SIZE = 9874;
+  const COUNTERSIGNED_SIZE = 9971;
+
+  /** The liveness witness (pin id 8) and its newest captured line, verbatim. */
+  const LIVENESS_PIN = WITNESS_PIN.find((row) => row.id === 8)!;
+  const LIVENESS_LINE = readFileSync(
+    new URL(
+      "./fixtures/registry/witness-line-liveness-9971.jsonl",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
   /** The three captured responses, and the POST the registry answers with. */
   function productionRegistry(record: unknown = fixture("record-nomankind.json")): {
     fetch: typeof fetch;
@@ -1033,6 +1204,25 @@ describe("the registry's identity event (production seal 0)", () => {
           return json(fixture("proof-identity_events-4281.json"));
         }
         return json({ error: "not found" }, 404);
+      }
+      if (url.pathname === "/api/witnesses") {
+        return json(fixture("witnesses.json"));
+      }
+      if (url.pathname === "/api/checkpoint/consistency") {
+        // Only the pair that was captured, and only in the direction the
+        // registry answers it in: `0 <= from <= to`.
+        const pair = `${url.searchParams.get("from")}-${url.searchParams.get("to")}`;
+        if (pair === `${PROVED_SIZE}-${COUNTERSIGNED_SIZE}`) {
+          return json(
+            fixture(
+              `consistency-identity_events-${PROVED_SIZE}-${COUNTERSIGNED_SIZE}.json`,
+            ),
+          );
+        }
+        return json({ error: "from must not exceed to" }, 400);
+      }
+      if (raw === LIVENESS_PIN.url) {
+        return new Response(LIVENESS_LINE, { status: 200 });
       }
       return new Response("not found", { status: 404 });
     } as unknown as typeof fetch;
@@ -1229,6 +1419,49 @@ describe("the registry's identity event (production seal 0)", () => {
     });
     const healed = await productionAdapter(fetch).heal(seal);
     expect(healed!.event_id).toBe(ANCHOR_EVENT_ID);
+  });
+
+  it("collects the liveness witness's later head, bridged forward", async () => {
+    const { fetch, asked } = productionRegistry();
+    const signatures = await productionAdapter(fetch).collect(
+      productionSeal({
+        event_id: ANCHOR_EVENT_ID,
+        event_hash: ANCHOR_EVENT_HASH,
+      }),
+      NOW,
+    );
+
+    // One countersignature, from the one pinned witness whose file was captured.
+    expect(signatures).toHaveLength(1);
+    const entry = signatures[0]!;
+    expect(entry.agent).toBe(AGENT_ID_PREFIX + LIVENESS_PIN.public_key);
+    expect(entry.head!.tree_size).toBe(COUNTERSIGNED_SIZE);
+    expect(entry.head!.registry).toBe(REGISTRY.origin);
+    expect(entry.evidence!.leaf_index).toBe(ANCHOR_LEAF_INDEX);
+    expect(entry.evidence!.event_hash).toBe(ANCHOR_EVENT_HASH);
+    expect(entry.evidence!.proved_at.tree_size).toBe(PROVED_SIZE);
+    expect(entry.evidence!.consistency_proof.length).toBeGreaterThan(0);
+
+    // The bridge was asked for the only way the registry answers it.
+    expect(
+      asked.some((url) =>
+        url.includes(`from=${PROVED_SIZE}&to=${COUNTERSIGNED_SIZE}`),
+      ),
+    ).toBe(true);
+
+    // And the rule accepts it against the real pin: this is the signature the
+    // sweep skipped as witness_pending before the bridge could run forward.
+    const pinned = pinnedWitnessesFor("production");
+    const check = await checkWitnesses(`sha256:${PRODUCTION_FINGERPRINT}`, signatures, {
+      witnesses: pinned.witnesses,
+      maintainerOperators: new Set<string>(["nomankind"]),
+      ineligibleAgents: new Set<string>(),
+      registry: pinned.registry,
+    });
+    expect(check.ok).toBe(true);
+    expect(check.ok && check.witnesses.map((witness) => witness.operator)).toEqual([
+      LIVENESS_PIN.operator,
+    ]);
   });
 });
 

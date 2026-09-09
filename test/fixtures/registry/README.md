@@ -25,4 +25,17 @@ seal response's `id` is the registry's seal row, not the identity event that anc
   seal row id asks for and gets: an unrelated August event (hash `38b5f3cb…`, leaf index 4266,
   checkpoint at tree size 4268). Kept so a test can prove it is never accepted as evidence.
 
+Captured on 2026-09-09 21:56 UTC from https://1f916.ai, verbatim, for the bridge-direction defect
+(the proof's checkpoint is the *earliest* that covers the event, so a countersigned head is
+normally later than it and the bridge runs forward):
+
+- `witness-line-liveness-9971.jsonl`: the newest `identity_events` countersignature line of the
+  liveness witness's published file (witness id 8) at capture time — tree size 9971, root
+  `a44ac4e2…`, `consistency` "verified from 9963". Later than the head production seal 0's
+  inclusion proof was fetched against (9874), which is the whole point of the capture.
+- `consistency-identity_events-9874-9971.json`: `GET /api/checkpoint/consistency?log=identity_events&from=9874&to=9971`
+  — the forward bridge, from the proof's checkpoint (`9a207489…`) to that countersigned head
+  (`a44ac4e2…`). The endpoint requires `0 <= from <= to`, so the reverse question
+  (`from=9971&to=9874`) has no answer to capture.
+
 Registry public key (Ed25519, base64url): mpQPa0FjyynqoSg2Z9j91hRhb8WckxIpRGod43CQqLw

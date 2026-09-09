@@ -127,8 +127,17 @@ const VERIFIED_FROM = "verified from";
  * checked append-only-ness rather than merely observing a log for the first time
  * — a "first observation" line attests nothing about what came before it, which
  * is exactly the guarantee we are borrowing. And our event is a leaf under the
- * head the inclusion proof was fetched against, which is that head or a later
- * one, with a consistency proof closing the gap when it is later.
+ * head the inclusion proof was fetched against, with a consistency proof closing
+ * the gap to the countersigned head whenever the two differ.
+ *
+ * The countersigned head may sit on either side of the proof's head. The
+ * registry answers an inclusion proof under the earliest checkpoint that covers
+ * the event, and a witness countersigns whatever head was current when it ran,
+ * so the countersigned head is usually the later of the two; either way the
+ * consistency path is checked from the smaller tree into the larger, because
+ * that is the only direction an append-only proof exists in. What the rule asks
+ * is unchanged: the countersigned head must cover our leaf, and continuity
+ * between the two heads has to be proven rather than assumed.
  */
 async function checkEvidence(
   entry: WitnessSignature,
@@ -163,11 +172,16 @@ async function checkEvidence(
   if (head.tree_size === provedAt.tree_size && head.root === provedAt.root) {
     return true;
   }
+
+  // Otherwise the bridge runs from whichever head is the smaller tree, which the
+  // two sizes already in the evidence say; no field on the wire is trusted to
+  // name the direction, and no direction is assumed.
+  const forward = head.tree_size > provedAt.tree_size;
   return verifyRegistryConsistency({
-    fromSize: head.tree_size,
-    fromRoot: head.root,
-    toSize: provedAt.tree_size,
-    toRoot: provedAt.root,
+    fromSize: forward ? provedAt.tree_size : head.tree_size,
+    fromRoot: forward ? provedAt.root : head.root,
+    toSize: forward ? head.tree_size : provedAt.tree_size,
+    toRoot: forward ? head.root : provedAt.root,
     path: evidence.consistency_proof,
   });
 }

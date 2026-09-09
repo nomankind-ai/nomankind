@@ -1045,7 +1045,7 @@ export async function runSweep(
     anchored = await anchorStep(db, sealing, skip);
   }
 
-  return {
+  const report: SweepReport = {
     at,
     snapshot,
     missed,
@@ -1057,6 +1057,19 @@ export async function runSweep(
     anchored,
     skipped,
   };
+
+  // The run's own account of itself, once, on stdout. Nothing else surfaces the
+  // skip counts in production: a scheduled sweep has no caller to hand the
+  // report to, so a step that did nothing looked the same as one that was never
+  // reached. Cloudflare's observability keeps this line, which is how a
+  // `witness_pending` in production becomes a reason someone can read.
+  //
+  // Safe to log in full: the report is ids, positions, counts, operator names
+  // and reason names. No key, credential or bearer token is ever in it, and the
+  // adapters that hold those never put them in what they return.
+  console.log(JSON.stringify({ sweep: report }));
+
+  return report;
 }
 
 /** The sealing deps, or null when this caller asked for the sweep without them. */
