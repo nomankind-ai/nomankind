@@ -338,23 +338,23 @@ describe("renderLanding", () => {
   });
 
   it("leads with the hero line and the primary use case", () => {
-    expect(page).toContain("Proof first.");
-    expect(page).toContain("Use second.");
-    expect(page).toContain("THE SEALED FEED FOR MODELS THAT KEEP LEARNING");
+    expect(page).toContain("Proof of provenance.");
+    expect(page).toContain("Proof of truth.");
+    expect(page).toContain("VERIFIED FACTS FOR MODELS THAT KEEP LEARNING");
   });
 
   it("names the three cards", () => {
-    expect(page).toContain("PRIMARY USE · CONTINUAL LEARNING");
-    expect(page).toContain("PROVENANCE, PROVEN");
-    expect(page).toContain("TRUTH, WHERE A TEST CAN REACH");
+    expect(page).toContain("FOR MODELS THAT KEEP LEARNING");
+    expect(page).toContain("PROOF OF PROVENANCE");
+    expect(page).toContain("PROOF OF TRUTH");
   });
 
   it("holds the five values", () => {
     expect(page).toContain("Owned by no lab.");
     expect(page).toContain("Facts, never opinions.");
-    expect(page).toContain("Rewards for being right, never for being busy.");
-    expect(page).toContain("Checkable by anyone, offline.");
-    expect(page).toContain("Exit is the only real check.");
+    expect(page).toContain("Paid for being right.");
+    expect(page).toContain("Checkable offline.");
+    expect(page).toContain("Forkable.");
   });
 
   it("offers both doors", () => {
@@ -400,8 +400,8 @@ describe("renderLanding", () => {
     expect(page).toContain("INDEPENDENT WITNESSES");
     expect(page).toContain("VERIFIED FACTS");
     expect(page).toContain("one every five minutes, each countersigned");
-    expect(page).toContain("none under a model provider");
-    expect(page).toContain("in the sealed log");
+    expect(page).toContain("none owned by a model provider");
+    expect(page).toContain("checked by three operators, sealed, dated");
   });
 
   it("says so in words when nothing is sealed yet", () => {
@@ -418,8 +418,10 @@ describe("renderLanding", () => {
   });
 
   it("closes on the two tiers and the licence line", () => {
-    expect(page).toContain("Provenance is the floor.");
-    expect(page).toContain("CODE APACHE-2.0 · DATA CC0");
+    expect(page).toContain("Quotations you can trace.");
+    expect(page).toContain(
+      "CODE APACHE-2.0 · DATA CC0 · TRAINING ON THE FEED IS FREE",
+    );
   });
 
   it("survives the content-security-policy: no script, no inline style", () => {
@@ -437,9 +439,10 @@ describe("renderLanding", () => {
 describe("LANDING_CSS", () => {
   it("is the landing page's whole look, in one string", () => {
     expect(LANDING_CSS.length).toBeGreaterThan(0);
-    expect(LANDING_CSS).toContain("Instrument Serif");
-    expect(LANDING_CSS).toContain("Manrope");
+    expect(LANDING_CSS).toContain("Space Grotesk");
     expect(LANDING_CSS).toContain("JetBrains Mono");
+    expect(LANDING_CSS).not.toContain("Instrument Serif");
+    expect(LANDING_CSS).not.toContain("Manrope");
   });
 
   it("stops every motion under prefers-reduced-motion", () => {
