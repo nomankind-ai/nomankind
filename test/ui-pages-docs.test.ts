@@ -338,15 +338,30 @@ describe("renderLanding", () => {
   });
 
   it("leads with the hero line and the primary use case", () => {
-    expect(page).toContain("Proof of provenance.");
-    expect(page).toContain("Proof of truth.");
+    expect(page).toContain("Proof-of-provenance.");
+    expect(page).toContain("Proof-of-truth.");
     expect(page).toContain("VERIFIED FACTS FOR MODELS THAT KEEP LEARNING");
+    expect(page).toContain("neutral trust substrate");
   });
 
   it("names the three cards", () => {
     expect(page).toContain("FOR MODELS THAT KEEP LEARNING");
-    expect(page).toContain("PROOF OF PROVENANCE");
-    expect(page).toContain("PROOF OF TRUTH");
+    expect(page).toContain("PROOF-OF-PROVENANCE");
+    expect(page).toContain("PROOF-OF-TRUTH");
+  });
+
+  it("names the domains it reaches next, as labels and not links", () => {
+    expect(page).toContain("WHERE IT REACHES NEXT");
+    for (const domain of [
+      "ENTERPRISE COMPLIANCE",
+      "REGULATED INDUSTRIES",
+      "SCIENTIFIC AI",
+      "LEGAL AI",
+      "MEDICAL AI",
+      "FINANCIAL AI",
+    ]) {
+      expect(page).toContain(`class="reach-tag mono">${domain}<`);
+    }
   });
 
   it("holds the five values", () => {

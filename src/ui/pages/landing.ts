@@ -107,18 +107,32 @@ const CARDS: readonly {
       "A learner asks for everything sealed since its last position and gets it in sealed order, with an inclusion proof on every event and one signed receipt for the page. Two learners at the same position learn the same sequence and can prove it. A fact that was overturned arrives as an explicit unlearn.",
   },
   {
-    label: "PROOF OF PROVENANCE",
+    label: "PROOF-OF-PROVENANCE",
     head: "Every fact carries its own audit.",
     body:
       "The source page as it stood, its hash, the three signatures, the seal time, the last-confirmed date, every dispute since. A model can point to the page each belief came from, and anyone can recheck it offline with two files and one script.",
   },
   {
-    label: "PROOF OF TRUTH",
+    label: "PROOF-OF-TRUTH",
     head: "Tested, not merely quoted.",
     body:
       "Where a claim can be measured, a metered call, a probe to a rate limit, a reproduced prompt, the test is frozen with the claim and each validator runs it: ten runs, eight must hold, receipt recorded. The entry then says observed, not just stated.",
     amber: true,
   },
+];
+
+/**
+ * Where the same two proofs are needed next, named. Labels only, no links: none
+ * of these is built yet, and a front door that links to nothing is a front door
+ * that lies. This one is saturated first (D-021's order), then these in turn.
+ */
+const DOMAINS: readonly string[] = [
+  "ENTERPRISE COMPLIANCE",
+  "REGULATED INDUSTRIES",
+  "SCIENTIFIC AI",
+  "LEGAL AI",
+  "MEDICAL AI",
+  "FINANCIAL AI",
 ];
 
 /** The five values, numbered. The paper's goals list, in its words. */
@@ -233,8 +247,8 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
             VERIFIED FACTS FOR MODELS THAT KEEP LEARNING
           </p>
           <h1 class="display hero-title">
-            Proof of provenance.<br /><span class="hero-turn"
-              >Proof of truth.</span
+            Proof-of-provenance.<br /><span class="hero-turn"
+              >Proof-of-truth.</span
             >
           </h1>
           <p class="hero-sub">
@@ -242,7 +256,9 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
             continual learners. Nothing enters the feed until its source is
             captured and hashed, three independent operators have checked it, and
             a witnessed seal has dated it. Where a fact can be tested, it was
-            tested. Where it cannot, the feed says so.
+            tested; where it cannot, the feed says so. nomankind is a trust
+            layer for inference today, and it aims to be the
+            neutral trust substrate every future AI system draws on.
           </p>
         </div>
         <div class="diagram-panel">
@@ -317,7 +333,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
         <div class="duo-col row">
           <p class="eyebrow eyebrow-amber">TRUTH ABOVE THE PROVENANCE FLOOR</p>
           <h2 class="display duo-title">
-            Provenance says who said it. Proof of truth says it held.
+            Provenance says who said it. Proof-of-truth says it held.
           </h2>
           <p class="duo-body">
             Every entry proves its provenance: three operators, none the
@@ -330,6 +346,28 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
             planned; until it is calibrated the field stays null and its raw
             inputs are exposed.
           </p>
+        </div>
+      </section>
+
+      <section class="reach" aria-label="Where nomankind reaches next">
+        <div class="reach-copy">
+          <p class="eyebrow eyebrow-amber">WHERE IT REACHES NEXT</p>
+          <h2 class="display reach-title">
+            Built first for the AI ecosystem. Made for every domain where a
+            model acts on a fact.
+          </h2>
+          <p class="reach-body">
+            Provenance proven on every fact and truth tested wherever a
+            predicate exists is what enterprise compliance, regulated
+            industries, and scientific, legal, medical, and financial AI need
+            before a model may act. Those domains come next, one at a time,
+            after this one is saturated.
+          </p>
+        </div>
+        <div class="reach-tags">
+          ${DOMAINS.map(
+            (domain) => html`<p class="reach-tag mono">${domain}</p>`,
+          )}
         </div>
       </section>
 
@@ -824,6 +862,62 @@ export const LANDING_CSS = `
   text-wrap: pretty;
 }
 
+/* --- where it reaches next ------------------------------------------------
+   A bordered panel on the panel ground, the copy at 5fr and the named domains
+   at 7fr, on the hero's proportions. The tags are labels, not links: nothing
+   there is built yet.
+   ------------------------------------------------------------------------- */
+
+.reach {
+  box-sizing: border-box;
+  margin: 56px var(--pad) 0 var(--pad);
+  border: 1px solid var(--rule-2);
+  background: var(--panel);
+  padding: 40px 48px;
+  display: grid;
+  grid-template-columns: 5fr 7fr;
+  gap: 40px;
+  align-items: center;
+}
+
+.reach-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.reach-title {
+  font-size: clamp(26px, 2.5vw, 36px);
+  line-height: 1.06;
+}
+
+.reach-body {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.reach-tags {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.reach-tag {
+  margin: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--rule-2);
+  padding: 16px 18px;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  line-height: 1.5;
+  color: var(--text);
+}
+
 /* --- the five values ------------------------------------------------------ */
 
 .values {
@@ -981,8 +1075,16 @@ export const LANDING_CSS = `
   .cards,
   .duo,
   .values-grid,
+  .reach,
   .tiers {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .reach {
+    padding: 32px;
+    gap: 28px;
+  }
+  .reach-tags {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .hero {
     padding-top: 56px;
@@ -1028,6 +1130,13 @@ export const LANDING_CSS = `
   }
   .cards {
     padding-bottom: 44px;
+  }
+  .reach {
+    margin-top: 44px;
+    padding: 24px;
+  }
+  .reach-tag {
+    padding: 14px 16px;
   }
   .values {
     padding-top: 48px;
