@@ -22,8 +22,6 @@ import {
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   SEAL_INTERVAL_MINUTES,
-  SEED_FEE_CAP_CENTS,
-  SEED_FEE_RATE_CENTS,
   SLOT_COUNT,
   STALENESS_WINDOW_DAYS,
   SWEEP_INTERVAL_MINUTES,
@@ -64,8 +62,6 @@ const EXPECTED_POLICY_KEYS = [
   "SEAL_INTERVAL_MINUTES",
   "SWEEP_INTERVAL_MINUTES",
   "FAILURE_REPORT_THRESHOLD",
-  "SEED_FEE_RATE_CENTS",
-  "SEED_FEE_CAP_CENTS",
   "NORM_VERSION",
   "FETCH_MAX_REDIRECTS",
   "FETCH_TIMEOUT_MS",
@@ -119,8 +115,6 @@ describe("policy numbers", () => {
 
   it("carries the maintainer's published amounts (D-032)", () => {
     expect(FAILURE_REPORT_THRESHOLD).toBe(3);
-    expect(SEED_FEE_RATE_CENTS).toBe(100);
-    expect(SEED_FEE_CAP_CENTS).toBe(10000);
   });
 
   it("carries the sweep's own cadence, which is operational and not a rule", () => {
@@ -136,19 +130,10 @@ describe("policy numbers", () => {
   });
 
   it("states the D-032 amounts as positive integers", () => {
-    for (const value of [
-      FAILURE_REPORT_THRESHOLD,
-      SEED_FEE_RATE_CENTS,
-      SEED_FEE_CAP_CENTS,
-    ]) {
+    for (const value of [FAILURE_REPORT_THRESHOLD]) {
       expect(Number.isInteger(value)).toBe(true);
       expect(value).toBeGreaterThan(0);
     }
-  });
-
-  it("caps a month of seed fees well above a single fee", () => {
-    expect(SEED_FEE_CAP_CENTS % SEED_FEE_RATE_CENTS).toBe(0);
-    expect(SEED_FEE_CAP_CENTS).toBeGreaterThan(SEED_FEE_RATE_CENTS);
   });
 
   it("no longer exports the retired null placeholders", async () => {
@@ -156,10 +141,15 @@ describe("policy numbers", () => {
       string,
       unknown
     >;
-    expect(policyModule["SEED_FEE_RATE"]).toBeUndefined();
-    expect(policyModule["SEED_FEE_CAP"]).toBeUndefined();
-    expect(Object.keys(POLICY)).not.toContain("SEED_FEE_RATE");
-    expect(Object.keys(POLICY)).not.toContain("SEED_FEE_CAP");
+    for (const name of [
+      "SEED_FEE_RATE",
+      "SEED_FEE_CAP",
+      "SEED_FEE_RATE_CENTS",
+      "SEED_FEE_CAP_CENTS",
+    ]) {
+      expect(policyModule[name]).toBeUndefined();
+      expect(Object.keys(POLICY)).not.toContain(name);
+    }
   });
 
   it("holds the norm version in force, which the example predates", () => {
@@ -270,8 +260,6 @@ describe("policy numbers", () => {
     expect(POLICY.SEAL_INTERVAL_MINUTES).toBe(SEAL_INTERVAL_MINUTES);
     expect(POLICY.SWEEP_INTERVAL_MINUTES).toBe(SWEEP_INTERVAL_MINUTES);
     expect(POLICY.FAILURE_REPORT_THRESHOLD).toBe(FAILURE_REPORT_THRESHOLD);
-    expect(POLICY.SEED_FEE_RATE_CENTS).toBe(SEED_FEE_RATE_CENTS);
-    expect(POLICY.SEED_FEE_CAP_CENTS).toBe(SEED_FEE_CAP_CENTS);
     expect(POLICY.NORM_VERSION).toBe(NORM_VERSION);
     expect(POLICY.FETCH_MAX_REDIRECTS).toBe(FETCH_MAX_REDIRECTS);
     expect(POLICY.FETCH_TIMEOUT_MS).toBe(FETCH_TIMEOUT_MS);

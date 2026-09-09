@@ -126,31 +126,6 @@ export const SWEEP_INTERVAL_MINUTES = 5;
 export const FAILURE_REPORT_THRESHOLD = 3;
 
 /**
- * Incentives / Money. The maintainer's flat seed fee per accepted validation,
- * in whole cents: paid once per entry per operator, for an approve or a
- * reject alike, so the fee buys the work of validating rather than the
- * verdict.
- *
- * Not a whitepaper number. The paper says the maintainer seeds fees at a
- * published rate under a published cap but states neither. This is the
- * maintainer's published policy (decision D-032, 2026-09-07), recorded in the
- * Notion Decisions database; it moves only by a later decision.
- *
- * Integer cents, never a float: money is counted, not approximated.
- */
-export const SEED_FEE_RATE_CENTS = 100;
-
-/**
- * Incentives / Money. The ceiling on seed fees one operator can accrue in a
- * calendar month, in whole cents. Caps the maintainer's exposure and blunts
- * the incentive to farm validations.
- *
- * Not a whitepaper number. The maintainer's published policy (decision D-032,
- * 2026-09-07). See SEED_FEE_RATE_CENTS.
- */
-export const SEED_FEE_CAP_CENTS = 10000;
-
-/**
  * Hash versioning. The normalization rule version in force at submission; every
  * hash on an entry is computed under it. norm-v1.2 is in force for entries
  * submitted on or after 2026-09-08; entries submitted before that keep the
@@ -300,8 +275,6 @@ export const POLICY = Object.freeze({
   SEAL_INTERVAL_MINUTES,
   SWEEP_INTERVAL_MINUTES,
   FAILURE_REPORT_THRESHOLD,
-  SEED_FEE_RATE_CENTS,
-  SEED_FEE_CAP_CENTS,
   NORM_VERSION,
   FETCH_MAX_REDIRECTS,
   FETCH_TIMEOUT_MS,
