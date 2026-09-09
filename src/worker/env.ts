@@ -43,4 +43,35 @@ export type Env = {
    * working door for a missing doorbell.
    */
   SWEEPER?: SweeperNamespace;
+  /**
+   * The sealing agent's Ed25519 private key, PKCS#8 in unpadded base64url — the
+   * `private_key_pkcs8` string a keygen file holds. It signs the seal
+   * fingerprint submitted to the founding registry, and nothing else.
+   *
+   * A Worker secret the maintainer sets on production only (D-016, D-054 item
+   * 5). Never in this repository, never in wrangler.jsonc, and never logged or
+   * returned: an adapter that put it in an error message would publish it.
+   * Absent means the registry track is unavailable, and the sweep seals
+   * locally without it rather than refusing to seal.
+   */
+  SEALING_AGENT_KEY?: string;
+  /**
+   * The bearer credential the founding registry issued nomankind's citizen, the
+   * `Authorization: Bearer` value on the seal call.
+   *
+   * A Worker secret, set on production only (D-016, D-054 item 5), never in the
+   * repository and never logged. Absent means the registry track is
+   * unavailable — which is also production's state until the citizen is
+   * registered, so production has to work without it.
+   */
+  REGISTRY_CREDENTIAL?: string;
+  /**
+   * The sealing agent's handle at the founding registry, which the signed
+   * payload `1f916.seal.v1:<handle>:<label>:<hash>` names.
+   *
+   * A var and not a secret — a handle is public — but it is still the
+   * maintainer's to set on production only, and it is empty until the citizen
+   * is registered. Empty or absent means the registry track is unavailable.
+   */
+  SEALING_AGENT_HANDLE?: string;
 };

@@ -9,8 +9,12 @@
  * An anchor is one record over one UTC calendar day: the roots of that day's
  * seals in seal order, the seq range they cover, and a hash over the pair. Pure
  * and self-contained: seals arrive typed structurally, so nothing is imported
- * from the seal module, and the external field stays null until the hash is
- * posted to an external chain in a later milestone.
+ * from the seal module, and `buildAnchor` always leaves the external receipt
+ * null — posting the hash is I/O, and an adapter's job.
+ *
+ * The receipt never enters the anchor hash (D-037, item 5). It is fetched after
+ * the day's roots are fixed, and a hash that moved when the receipt arrived
+ * would be a different anchor from the one that was posted.
  */
 
 import { canonicalize, taggedSha256Hex } from "./hash.js";
@@ -32,6 +36,29 @@ export interface SealLike {
   sealed_at: string;
 }
 
+/**
+ * The external timestamp receipt, or null until one exists.
+ *
+ * One kind for now, named rather than left open: OpenTimestamps, the calendar
+ * the hash was submitted to, when it was submitted, and the proof it returned.
+ * A second chain later is a second member of this union, not a reshaping of it.
+ */
+export type AnchorExternal = {
+  kind: "opentimestamps";
+  calendar: string;
+  submitted_at: string;
+  proof: string;
+} | null;
+
+/**
+ * What the anchor step needs of the outside world: post the day's hash and
+ * bring back the receipt. Implementations live in src/adapters, because posting
+ * is network I/O and nothing in the kernel may do any.
+ */
+export interface AnchorAdapter {
+  anchor(anchor: Anchor): Promise<AnchorExternal>;
+}
+
 /** One day's anchor record. */
 export interface Anchor {
   /** The UTC calendar day, "YYYY-MM-DD". */
@@ -42,10 +69,10 @@ export interface Anchor {
   roots: string[];
   hash: string;
   /**
-   * Reserved for the external timestamp receipt. Always null here: posting the
-   * hash to OpenTimestamps on production belongs to a later milestone.
+   * The external timestamp receipt, null until the hash was posted. Outside the
+   * anchor hash: `anchorHash` covers the date and the roots and nothing else.
    */
-  external: null;
+  external: AnchorExternal;
 }
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;

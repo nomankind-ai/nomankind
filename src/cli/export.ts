@@ -10,8 +10,10 @@
  *
  * Nothing here decides anything and nothing here is recomputed: the export is a
  * faithful copy of what the Worker says, so a verifier that disagrees with it is
- * disagreeing with the log rather than with this command. Seals are empty until
- * M16 seals, which the verifier already reads as "nothing sealed yet".
+ * disagreeing with the log rather than with this command. The seals are paged
+ * out of `GET /seals` exactly as the events are paged out of `GET /events`, and
+ * a Worker that has sealed nothing yet answers an empty list, which the verifier
+ * already reads as "nothing sealed yet".
  *
  * The core is exported over the injected http client, so the checkpoint builds a
  * bundle in process without a network. node:fs and node:path are allowed in this
@@ -24,6 +26,7 @@ import { join, resolve } from "node:path";
 import { base64Encode } from "../encoding.js";
 import type { Event } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
+import type { Seal } from "../seal.js";
 import type { Capture, LogBundle, Registry } from "../verify.js";
 import {
   errorOf,
@@ -96,6 +99,39 @@ export async function readEvents(
     after = last;
   }
   return events;
+}
+
+/**
+ * The whole seal chain, paged to its head.
+ *
+ * The same keyset walk the events take, against the same shape of answer: the
+ * last seal seq seen is what the next page resumes after, and the loop ends when
+ * the page's last seal is the head the route reported with it. A Worker that has
+ * sealed nothing answers `{seals: [], head: null}`, and the bundle carries the
+ * empty list.
+ */
+export async function readSeals(
+  http: HttpClient,
+  baseUrl: string,
+): Promise<Seal[]> {
+  const seals: Seal[] = [];
+  let after: number | null = null;
+  for (;;) {
+    const query =
+      after === null
+        ? `/seals?limit=${LIST_PAGE_LIMIT}`
+        : `/seals?after=${after}&limit=${LIST_PAGE_LIMIT}`;
+    const page = (await read(http, baseUrl, query)) as {
+      seals: Seal[];
+      head: number | null;
+    };
+    seals.push(...page.seals);
+    if (page.seals.length === 0) break;
+    const last = page.seals[page.seals.length - 1]!.seq;
+    if (page.head === null || last >= page.head) break;
+    after = last;
+  }
+  return seals;
 }
 
 /**
@@ -224,9 +260,9 @@ export async function buildExport(input: {
     as_of: input.now.toISOString(),
     events: await readEvents(input.http, input.baseUrl),
     registry: await readRegistry(input.http, input.baseUrl),
-    // M16 seals. An empty list is not a missing field: the verifier reads it as
-    // a log nothing has sealed yet.
-    seals: [],
+    // An empty list is not a missing field: the verifier reads it as a log
+    // nothing has sealed yet.
+    seals: await readSeals(input.http, input.baseUrl),
     captures,
   };
   return { entry, bundle };

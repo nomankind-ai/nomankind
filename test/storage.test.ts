@@ -16,8 +16,11 @@ import {
   buildAnchor,
   buildSeal,
   buildSubmittedCore,
+  decodeProof,
   deriveEntry,
+  entrySeal,
   sealsForEntries,
+  verifyInclusion,
   utcDay,
   verifyChain,
   type Anchor,
@@ -25,8 +28,11 @@ import {
   type Attestation,
   type Core,
   type Event,
+  type EntrySeal,
   type OpenAssignment,
+  type RegistrySeal,
   type Seal,
+  type WitnessSignature,
 } from "../src/index.js";
 import { applyMigrations, splitStatements } from "../src/storage/migrate.js";
 import {
@@ -67,13 +73,24 @@ import {
   recordPoolSnapshot,
   recordReconfirmation,
   recordValidation,
+  anchorsAfter,
+  recordSeal,
   registerOperator,
+  sealBySeq,
   sealCovering,
+  sealsAfter,
   sealsBetween,
+  sealsSealedOn,
+  SealConflictError,
+  setAnchorExternal,
+  setSealRegistry,
+  setSealWitnesses,
+  unwitnessedSeals,
   staleDue,
   submitEntry,
   supersedersOf,
   trustOperator,
+  type SealRederive,
   type AgentRecord,
   type CaptureRecord,
   type OperatorRecord,
@@ -85,6 +102,7 @@ import {
   readSidecar,
   type Sidecar,
 } from "../src/storage/r2.js";
+import { entryWorld, rederive } from "../src/worker/world.js";
 import { loadMigrations, openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
   DRAFT_ENTRY_ID,
@@ -644,6 +662,7 @@ describe("migrations", () => {
       "0003_captures.sql",
       "0004_assignments.sql",
       "0005_freshness.sql",
+      "0006_sealing.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -694,6 +713,21 @@ describe("migrations", () => {
     }
   });
 
+  it("applies 0006 after 0005, adding to the seals table and nothing else", () => {
+    // Forward-only (D-022): one nullable column and one index. Nothing is
+    // dropped and no table is reshaped, so a live database takes it as it
+    // stands, and every seal already stored reads back with registry null.
+    const statements = splitStatements(
+      loadMigrations().find((one) => one.name === "0006_sealing.sql")!.sql,
+    );
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toContain("ALTER TABLE seals ADD COLUMN registry_json");
+    expect(statements[1]).toContain("CREATE INDEX seals_sealed_at");
+    for (const statement of statements) {
+      expect(statement).not.toMatch(/\bDROP\b|\bCREATE TABLE\b/);
+    }
+  });
+
   it("records the migration under the name wrangler would use", async () => {
     const applied = await test.db
       .prepare(`SELECT name FROM "d1_migrations" ORDER BY id`)
@@ -704,6 +738,7 @@ describe("migrations", () => {
       "0003_captures.sql",
       "0004_assignments.sql",
       "0005_freshness.sql",
+      "0006_sealing.sql",
     ]);
   });
 });
@@ -1937,5 +1972,260 @@ describe("supersession and reconfirmation writes", () => {
     expect(await headSeq(store.db)).toBe(before);
     expect(await eventsForEntry(store.db, targetId)).toEqual(events);
     expect(await bountiesForEntry(store.db, targetId, 10)).toEqual(bounties);
+  });
+});
+
+/**
+ * Sealing writes: the batch that makes a seal real.
+ *
+ * Its own database, because the entries have to start unsealed — the point is
+ * that `recordSeal` is what puts the seal object on them, and the shared
+ * database above stores the world's seals before anything else happens.
+ */
+describe("sealing writes", () => {
+  let sealing: TestDatabase;
+  let first: Seal;
+  let second: Seal;
+  let now: Date;
+
+  /**
+   * What the sweep's callback does, without the Worker's world module: derive
+   * the entry over the whole log, with this seal's own entry seal handed in
+   * because inside `recordSeal`'s batch the seal is not readable yet.
+   */
+  const rederiveWith: SealRederive = async (entryId, seal, at) => {
+    const seals = new Map<string, EntrySeal>();
+    const built = await entrySeal(world.bundle.events, [seal], entryId);
+    if (built !== null) seals.set(entryId, built);
+    const derived = deriveEntry(
+      world.bundle.events,
+      entryId,
+      { now: at.toISOString() },
+      seals,
+    );
+    return {
+      entry: derived.entry,
+      sidecar: derived.sidecar,
+      derivedThroughSeq: seal.last_seq,
+    };
+  };
+
+  /** A receipt shaped like the registry's, stored and read back verbatim. */
+  const RECEIPT: RegistrySeal = {
+    registry: "https://1f916.ai",
+    handle: "nomankind",
+    label: "memory.seal",
+    event_id: 9129,
+    event_hash: "06fa8eb00cf9b709df0cb21ce1a74f416e9af2820db0770de0e5cfa996776ec4",
+    receipt: { ok: true, leaf_index: 9128 },
+    sealed_at: "2026-09-10T00:05:00.000Z",
+  };
+
+  const COUNTERSIGNED: WitnessSignature[] = [
+    { agent: "1F916:d2l0bmVzc09uZUFnZW50SWRlbnRpdHlBQUFB", signature: "c2lnbmF0dXJlLW9uZQ" },
+    { agent: "1F916:d2l0bmVzc1R3b0FnZW50SWRlbnRpdHlBQUFB", signature: "c2lnbmF0dXJlLXR3bw" },
+  ];
+
+  beforeAll(async () => {
+    sealing = await openTestDatabase();
+    now = new Date(world.bundle.as_of);
+    first = world.bundle.seals[0]!;
+    second = secondSeal;
+
+    await appendEvents(sealing.db, world.bundle.events);
+    // Both entries stored as they are before anything is sealed: derivation
+    // with no seals at all, so `seal` is null on both rows.
+    for (const id of [VERIFIED_ENTRY_ID, DRAFT_ENTRY_ID]) {
+      const derived = deriveEntry(world.bundle.events, id, clock());
+      await putEntry(sealing.db, derived.entry, derived.sidecar, 0);
+    }
+  });
+
+  afterAll(async () => {
+    await sealing?.dispose();
+  });
+
+  it("starts from entries nothing has sealed", async () => {
+    const stored = await getEntry(sealing.db, VERIFIED_ENTRY_ID);
+    expect((stored!.entry as Record<string, unknown>)["seal"]).toBeNull();
+  });
+
+  it("writes the seal and the entries it covers in one batch", async () => {
+    const rewritten = await recordSeal(sealing.db, first, now, rederiveWith);
+    expect(rewritten).toEqual([VERIFIED_ENTRY_ID]);
+    expect(await sealBySeq(sealing.db, first.seq)).toEqual(first);
+
+    const stored = await getEntry(sealing.db, VERIFIED_ENTRY_ID);
+    const seal = (stored!.entry as Record<string, unknown>)["seal"] as EntrySeal;
+    expect(seal).not.toBeNull();
+    expect(seal.log).toBe("1F916");
+    expect(seal.sealed_at).toBe(first.sealed_at);
+
+    // The proof is real: it decodes, and the submission event's hash folds up
+    // it to the root the seal committed to.
+    const proof = decodeProof(seal.inclusion_proof);
+    expect(proof).not.toBeNull();
+    const submission = world.bundle.events.find(
+      (event) =>
+        event.type === "entry_submitted" && event.entry_id === VERIFIED_ENTRY_ID,
+    )!;
+    expect(seal.position).toBe(submission.seq);
+    expect(await verifyInclusion(submission.hash, proof!, first.root)).toBe(true);
+  });
+
+  it("refuses a second seal at the same seq rather than overwriting it", async () => {
+    // Two timers racing to seal the same range: the second must fail, and the
+    // caller reports it.
+    await expect(recordSeal(sealing.db, first, now, rederiveWith)).rejects.toThrow(
+      SealConflictError,
+    );
+    // And the entry the first write sealed is untouched.
+    const stored = await getEntry(sealing.db, VERIFIED_ENTRY_ID);
+    expect((stored!.entry as Record<string, unknown>)["seal"]).not.toBeNull();
+  });
+
+  it("puts the countersignatures on the entries the seal covers", async () => {
+    const rewritten = await setSealWitnesses(
+      sealing.db,
+      first,
+      COUNTERSIGNED,
+      now,
+      rederiveWith,
+    );
+    expect(rewritten).toEqual([VERIFIED_ENTRY_ID]);
+
+    const stored = await sealBySeq(sealing.db, first.seq);
+    expect(stored!.witnesses).toEqual(COUNTERSIGNED);
+    // The seal hash is unchanged: countersignatures never enter it.
+    expect(stored!.hash).toBe(first.hash);
+
+    const entry = await getEntry(sealing.db, VERIFIED_ENTRY_ID);
+    const seal = (entry!.entry as Record<string, unknown>)["seal"] as EntrySeal;
+    expect(seal.witnesses).toEqual(COUNTERSIGNED.map((one) => one.signature));
+  });
+
+  it("records what the registry returned, and nothing else moves", async () => {
+    await setSealRegistry(sealing.db, first.seq, RECEIPT);
+    const stored = await sealBySeq(sealing.db, first.seq);
+    expect(stored!.registry).toEqual(RECEIPT);
+    expect(stored!.hash).toBe(first.hash);
+    expect(stored!.witnesses).toEqual(COUNTERSIGNED);
+
+    await setSealRegistry(sealing.db, first.seq, null);
+    expect((await sealBySeq(sealing.db, first.seq))!.registry).toBeNull();
+    await setSealRegistry(sealing.db, first.seq, RECEIPT);
+  });
+
+  it("seals the tail, and the draft submitted into it", async () => {
+    const rewritten = await recordSeal(sealing.db, second, now, rederiveWith);
+    expect(rewritten).toEqual([DRAFT_ENTRY_ID]);
+
+    const entry = await getEntry(sealing.db, DRAFT_ENTRY_ID);
+    const seal = (entry!.entry as Record<string, unknown>)["seal"] as EntrySeal;
+    const submission = world.bundle.events.find(
+      (event) =>
+        event.type === "entry_submitted" && event.entry_id === DRAFT_ENTRY_ID,
+    )!;
+    expect(seal.position).toBe(submission.seq);
+    expect(
+      await verifyInclusion(submission.hash, decodeProof(seal.inclusion_proof)!, second.root),
+    ).toBe(true);
+    // A draft is sealed like everything else (Section 6).
+    expect((entry!.entry as Record<string, unknown>)["status"]).toBe("draft");
+  });
+
+  it("pages the seal chain forward in seq order", async () => {
+    const all = await sealsAfter(sealing.db, -1, 10);
+    expect(all.map((seal) => seal.seq)).toEqual([first.seq, second.seq]);
+    expect(await sealsAfter(sealing.db, first.seq, 10)).toHaveLength(1);
+    expect(await sealsAfter(sealing.db, second.seq, 10)).toEqual([]);
+    // The caller's limit is honoured; there is no page size here.
+    expect(await sealsAfter(sealing.db, -1, 1)).toHaveLength(1);
+  });
+
+  it("answers which seals were sealed on a UTC day", async () => {
+    const day = utcDay(first.sealed_at);
+    const sealed = await sealsSealedOn(sealing.db, day);
+    expect(sealed.map((seal) => seal.seq)).toEqual(
+      [first, second]
+        .filter((seal) => utcDay(seal.sealed_at) === day)
+        .map((seal) => seal.seq),
+    );
+    expect(sealed.length).toBeGreaterThan(0);
+    expect(await sealsSealedOn(sealing.db, "2020-01-01")).toEqual([]);
+  });
+
+  it("lists the seals still waiting on the outside world", async () => {
+    // The first is finished: countersigned and accepted. The second has
+    // neither, so it is the whole queue.
+    expect((await unwitnessedSeals(sealing.db, 10)).map((seal) => seal.seq)).toEqual([
+      second.seq,
+    ]);
+
+    await setSealWitnesses(sealing.db, second, COUNTERSIGNED, now, rederiveWith);
+    // Countersigned but not yet accepted by the registry: still waiting.
+    expect((await unwitnessedSeals(sealing.db, 10)).map((seal) => seal.seq)).toEqual([
+      second.seq,
+    ]);
+
+    await setSealRegistry(sealing.db, second.seq, RECEIPT);
+    expect(await unwitnessedSeals(sealing.db, 10)).toEqual([]);
+  });
+
+  it("keeps the seal when the entry is re-derived by a later write", async () => {
+    // The seal is a derived field like any other, so every later write
+    // recomputes it — and a world gathered without it would hand derivation an
+    // empty map and quietly erase a seal that was really made. This is the
+    // path the validate door, the reconfirm door and the staleness step all
+    // take (src/worker/world.ts).
+    const stored = await getEntry(sealing.db, VERIFIED_ENTRY_ID);
+    const sealed = (stored!.entry as Record<string, unknown>)["seal"] as EntrySeal;
+
+    const world_ = await entryWorld(sealing.db, VERIFIED_ENTRY_ID);
+    expect(world_.seal).toEqual(sealed);
+    const again = rederive(world_, VERIFIED_ENTRY_ID, now);
+    expect((again.entry as Record<string, unknown>)["seal"]).toEqual(sealed);
+
+    // And an entry nothing covers still re-derives to a null seal rather than
+    // a made-up one.
+    const unsealed = await openTestDatabase();
+    try {
+      await appendEvents(unsealed.db, world.bundle.events);
+      const empty = await entryWorld(unsealed.db, VERIFIED_ENTRY_ID);
+      expect(empty.seal).toBeNull();
+      expect(
+        (rederive(empty, VERIFIED_ENTRY_ID, now).entry as Record<string, unknown>)[
+          "seal"
+        ],
+      ).toBeNull();
+    } finally {
+      await unsealed.dispose();
+    }
+  });
+
+  it("round-trips a day's external timestamp receipt", async () => {
+    const day = utcDay(first.sealed_at);
+    const built = await buildAnchor([first, second], day);
+    expect(built.ok).toBe(true);
+    const anchor = (built as { ok: true; anchor: Anchor }).anchor;
+    await putAnchor(sealing.db, anchor);
+    expect((await getAnchor(sealing.db, day))!.external).toBeNull();
+
+    const external = {
+      kind: "opentimestamps" as const,
+      calendar: "https://alice.btc.calendar.opentimestamps.org",
+      submitted_at: "2026-09-10T00:10:00.000Z",
+      proof: "AE9wZW5UaW1lc3RhbXBz",
+    };
+    await setAnchorExternal(sealing.db, day, external);
+    const stored = await getAnchor(sealing.db, day);
+    expect(stored!.external).toEqual(external);
+    // Only the receipt moved: the hash covers the date and the roots (D-037).
+    expect(stored!.hash).toBe(anchor.hash);
+    expect(stored!.roots).toEqual(anchor.roots);
+
+    // And a page of anchors after a day reads it back the same way.
+    expect(await anchorsAfter(sealing.db, "2020-01-01", 10)).toEqual([stored]);
+    expect(await anchorsAfter(sealing.db, day, 10)).toEqual([]);
   });
 });

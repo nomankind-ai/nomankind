@@ -37,13 +37,73 @@ import {
 export const HASH_TAG_SEAL = "nomankind-seal-v1";
 
 /**
- * One witness's countersignature over a seal. Declared here so the seal shape is
- * complete; the witness rule that fills it in (no two witnesses under common
- * control, nomankind ineligible) belongs to a later milestone.
+ * The registry's signed head a witness countersigned.
+ *
+ * A real 1F916 witness never signs our seal hash: it signs the registry's
+ * checkpoint, and our fingerprint reaches that head by being a leaf under it.
+ * So the countersignature carries the head it was made over, and the evidence
+ * below carries the path from our event to that head.
+ */
+export interface RegistryHead {
+  registry: string;
+  log: string;
+  tree_size: number;
+  root: string;
+  created_at: number;
+  registry_sig: string;
+}
+
+/** How the seal's fingerprint reaches the countersigned head. */
+export interface WitnessEvidence {
+  /** The witness file line's consistency field, e.g. "verified from 9125". */
+  consistency: string;
+  /** Leaf index of our memory.seal event in the registry log. */
+  leaf_index: number;
+  /** The registry's chain hash of that event (the leaf's preimage). */
+  event_hash: string;
+  /** Inclusion path from the leaf to `proved_at.root`. */
+  proof: string[];
+  /** The head the inclusion proof was fetched against (equal to `head` or later). */
+  proved_at: {
+    tree_size: number;
+    root: string;
+    created_at: number;
+    registry_sig: string;
+  };
+  /** Consistency path from `head` to `proved_at`; empty when they are the same head. */
+  consistency_proof: string[];
+}
+
+/**
+ * One witness's countersignature over a seal, in either of the two forms.
+ *
+ * The direct form is the mock's: the signature is over
+ * `witnessSigningBytes(seal.hash)`, and there is no head. The registry form is
+ * what production gathers: the signature is over
+ * `registryWitnessPayload(head)`, and `evidence` is what ties that head back to
+ * this seal. The witness rule (src/witness.ts) checks both; nothing here does.
  */
 export interface WitnessSignature {
   agent: string;
   signature: string;
+  head?: RegistryHead;
+  evidence?: WitnessEvidence;
+}
+
+/**
+ * What the registry returned when the seal's fingerprint was submitted, and
+ * null until it was. Outside the seal hash, like the witnesses and for the same
+ * reason: it is gathered after the seal exists, and gathering it must not change
+ * what was sealed.
+ */
+export interface RegistrySeal {
+  registry: string;
+  handle: string;
+  label: string;
+  event_id: number;
+  event_hash: string | null;
+  receipt: unknown;
+  sealed_at: string;
 }
 
 /** A sealed batch: a contiguous run of event seqs, committed and chained. */
@@ -66,6 +126,26 @@ export interface Seal {
   hash: string;
   /** Countersignatures over `hash`. Empty when the seal is made. */
   witnesses: WitnessSignature[];
+  /**
+   * What the registry returned when this seal's fingerprint was submitted to
+   * nomankind's agent log, and null until it was — `buildSeal` always makes it
+   * null. Outside the hash, exactly like the witnesses.
+   */
+  registry: RegistrySeal | null;
+}
+
+/**
+ * What the sweep needs of the outside world to make a seal real: submit the
+ * seal's fingerprint to the registry, and gather countersignatures over what
+ * came back.
+ *
+ * The kernel names the shape and nothing more. Implementations live in
+ * src/adapters — a mock one on the demo, the founding registry on production —
+ * because both do network I/O, and nothing in the kernel may.
+ */
+export interface WitnessAdapter {
+  seal(seal: Seal, now: Date): Promise<RegistrySeal | null>;
+  collect(seal: Seal, now: Date): Promise<WitnessSignature[]>;
 }
 
 /** Why a seal was refused. */
@@ -76,8 +156,12 @@ export type SealResult =
   | { ok: true; seal: Seal }
   | { ok: false; reason: SealRefusal };
 
-/** The fields the seal hash commits to: everything but the hash and the witnesses. */
-type SealCore = Omit<Seal, "hash" | "witnesses">;
+/**
+ * The fields the seal hash commits to: everything but the hash, the witnesses
+ * and the registry receipt. The last two are gathered after the seal exists, so
+ * neither may enter the hash they are gathered against.
+ */
+type SealCore = Omit<Seal, "hash" | "witnesses" | "registry">;
 
 /**
  * The seal hash: the tagged SHA-256 over the JCS canonical form of the sealed
@@ -136,7 +220,15 @@ export async function buildSeal(
     sealed_at: clock.now,
     prev_hash: previous === null ? null : previous.hash,
   };
-  return { ok: true, seal: { ...fields, hash: await sealHash(fields), witnesses: [] } };
+  return {
+    ok: true,
+    seal: {
+      ...fields,
+      hash: await sealHash(fields),
+      witnesses: [],
+      registry: null,
+    },
+  };
 }
 
 /**
@@ -177,7 +269,7 @@ export async function verifySeal(
   if (leaves === null || leaves.length !== seal.size) return false;
   if ((await merkleRoot(leaves)) !== seal.root) return false;
 
-  const { hash, witnesses: _witnesses, ...fields } = seal;
+  const { hash, witnesses: _witnesses, registry: _registry, ...fields } = seal;
   return (await sealHash(fields)) === hash;
 }
 

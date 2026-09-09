@@ -126,6 +126,125 @@ export const SWEEP_INTERVAL_MINUTES = 5;
 export const FAILURE_REPORT_THRESHOLD = 3;
 
 /**
+ * Lifecycle of an entry (Seal), and "Limitations" ("The identity layer is
+ * young"). How many distinct pinned operators must have countersigned the
+ * registry head, verifiably, before a seal counts as witnessed.
+ *
+ * Not a whitepaper number. The paper fixes the *bar* — published keys, no two
+ * witnesses under common control, nomankind ineligible — and states no count,
+ * so the count is the maintainer's own initial policy: one, because the
+ * founding registry's directory is small and a bar nothing can clear is a bar
+ * that gets quietly ignored. It rises by a later decision as the witness set
+ * grows, and never by an edit anywhere but this file.
+ */
+export const WITNESSES_REQUIRED = 1;
+
+/**
+ * Lifecycle of an entry (Seal). The most events one seal may cover. A run
+ * longer than this is not dropped: the seal takes the first thousand and the
+ * next run continues from where it stopped, so the chain stays contiguous.
+ *
+ * Not a whitepaper number, and not a rule: it is operational, a ceiling on the
+ * work one sweep does and on the size of one Merkle batch. The maintainer's own
+ * choice; it moves only by a later decision.
+ */
+export const SEAL_MAX_EVENTS = 1000;
+
+/**
+ * Lifecycle of an entry (Seal). How many bytes of a witness's published
+ * countersignature file are read, from the end: 256 kibibytes.
+ *
+ * The files are append-only JSONL, already hundreds of kilobytes and growing,
+ * and only the newest usable line is ever wanted — so the reader asks for a
+ * tail rather than the whole file. Not a whitepaper number; operational, and it
+ * moves only by a later decision.
+ */
+export const WITNESS_FILE_TAIL_BYTES = 262144;
+
+/**
+ * Lifecycle of an entry (Seal): "the seal hash is sealed as a memory
+ * fingerprint into nomankind's own citizen log at the founding 1F916 registry".
+ *
+ * Which registry that is, its Ed25519 public key (unpadded base64url, the D-014
+ * encoding), which of its logs carries identity events, and the label every
+ * nomankind seal is filed under. Pinned here rather than in the adapter for the
+ * same reason BEACON is: an offline reader has to be able to recheck a
+ * countersignature years later against the same key the collector used.
+ *
+ * Not a whitepaper number. The maintainer's published choice; it moves only by
+ * a later decision.
+ */
+export const REGISTRY: Readonly<{
+  origin: string;
+  public_key: string;
+  log: string;
+  seal_label: string;
+}> = Object.freeze({
+  origin: "https://1f916.ai",
+  public_key: "mpQPa0FjyynqoSg2Z9j91hRhb8WckxIpRGod43CQqLw",
+  log: "identity_events",
+  seal_label: "nomankind-seal",
+});
+
+/**
+ * "Limitations" ("The identity layer is young"): the witnesses whose
+ * countersignatures nomankind will count, pinned by operator and by key.
+ *
+ * The registry's own directory is a pointer and never an endorsement, so the
+ * set is pinned here and the collector only ever re-checks the directory to see
+ * whether a pinned row still says what it said. A row that moved is dropped for
+ * that run: code never follows a moved key, and the orchestrator re-pins by
+ * decision. Three operators, none of them nomankind's, so no two accepted
+ * countersignatures can be under common control.
+ *
+ * Not a whitepaper list. Decision D-054, re-checked before M25; it moves only
+ * by a later decision.
+ */
+export const WITNESS_PIN: readonly Readonly<{
+  id: number;
+  operator: string;
+  public_key: string;
+  url: string;
+}>[] = Object.freeze([
+  Object.freeze({
+    id: 6,
+    operator: "commonwealth",
+    public_key: "nPYx-7Q4Zq-bpWuut006X0DzsoBF0cPjgo9UEhHqm9M",
+    url: "https://raw.githubusercontent.com/GavinOB/1f916-witness/main/witness-state/countersignatures.jsonl",
+  }),
+  Object.freeze({
+    id: 7,
+    operator: "head-of-experiments",
+    public_key: "BwLjer1DCxSErLiPIOG3fu0vlgmQierr2BC7f2k4TeI",
+    url: "https://raw.githubusercontent.com/0xRyanC/1f916-witness/main/countersignatures.jsonl",
+  }),
+  Object.freeze({
+    id: 8,
+    operator: "liveness",
+    public_key: "NgHCVDwGuYeHX0qnuOKBgufNwgu804x1ZDyTU63sJwE",
+    url: "https://raw.githubusercontent.com/wyeshunf/1f916-witness/main/witness-state/countersignatures.jsonl",
+  }),
+]);
+
+/**
+ * Lifecycle of an entry (Seal): "anchoring each day's batch hash into an
+ * external timestamping chain makes the existence proof independent of the
+ * identity layer". The OpenTimestamps calendars the day's hash is offered to,
+ * in order; the first that answers is the one recorded.
+ *
+ * Not a whitepaper list. The paper names an external chain and stops there, so
+ * which calendars is the maintainer's published choice; it moves only by a
+ * later decision.
+ */
+export const ANCHOR_CALENDARS: readonly string[] = Object.freeze([
+  "https://a.pool.opentimestamps.org",
+  "https://b.pool.opentimestamps.org",
+  "https://alice.btc.calendar.opentimestamps.org",
+  "https://bob.btc.calendar.opentimestamps.org",
+  "https://finney.calendar.eternitywall.com",
+]);
+
+/**
  * Hash versioning. The normalization rule version in force at submission; every
  * hash on an entry is computed under it. norm-v1.2 is in force for entries
  * submitted on or after 2026-09-08; entries submitted before that keep the
@@ -274,6 +393,12 @@ export const POLICY = Object.freeze({
   CONTRIBUTOR_SHARE_PERCENT,
   SEAL_INTERVAL_MINUTES,
   SWEEP_INTERVAL_MINUTES,
+  WITNESSES_REQUIRED,
+  SEAL_MAX_EVENTS,
+  WITNESS_FILE_TAIL_BYTES,
+  REGISTRY,
+  WITNESS_PIN,
+  ANCHOR_CALENDARS,
   FAILURE_REPORT_THRESHOLD,
   NORM_VERSION,
   FETCH_MAX_REDIRECTS,

@@ -11,8 +11,11 @@
  * (src/worker/validate.ts) and the log's own page (src/worker/events.ts), and
  * adds the scheduled sweep (src/worker/sweep.ts) beside the request handler.
  * M15 mounts the reconfirmation door (src/worker/reconfirm.ts) beside the
- * validate one and gives the sweep its staleness step. Later milestones mount
- * the rest — the public pages — on the same router.
+ * validate one and gives the sweep its staleness step. M16 mounts the seal's own
+ * pages (src/worker/seals.ts) — the seal chain, one seal, an event's inclusion
+ * proof, and the daily anchors — and gives the sweep the three steps that make
+ * them: seal, witness, anchor. Later milestones mount the rest — the public
+ * pages — on the same router.
  *
  * This file is the one place in the system that reads a wall clock, and it
  * reads it once per request. Everything below it takes the instant as an
@@ -39,9 +42,14 @@ import type { Env } from "./env.js";
 import { handleEvents } from "./events.js";
 import { handleReconfirm } from "./reconfirm.js";
 import { handleRegistry, json } from "./registry.js";
+import { handleSeals } from "./seals.js";
 import { handleSubmit } from "./submit.js";
 import { runSweep } from "./sweep.js";
-import { ensureSweeper, type ExecutionContextLike } from "./sweeper.js";
+import {
+  ensureSweeper,
+  sweepDepsFor,
+  type ExecutionContextLike,
+} from "./sweeper.js";
 import { handleValidate } from "./validate.js";
 
 /**
@@ -135,6 +143,9 @@ export async function handleRequest(
   const events = await handleEvents(request, env);
   if (events !== null) return events;
 
+  const seals = await handleSeals(request, env);
+  if (seals !== null) return seals;
+
   return json({ ok: false, error: "not_found" }, 404);
 }
 
@@ -170,8 +181,11 @@ export interface ScheduledContext {
  * reads the instant off the controller, which is the platform's own clock for
  * this run and is read exactly once, and constructs the real drand reader: the
  * fixture beacon in src/adapters/beacon.ts is for tests and is never reachable
- * from here (decision D-013 as amended). The sweep is awaited rather than passed
- * to `waitUntil`, so a run that fails is a failed run the platform can see.
+ * from here (decision D-013 as amended). The witness and anchor adapters are
+ * built the same way, by `sweepDepsFor`, so the cron door and the Durable
+ * Object's alarm sweep against exactly the same world. The sweep is awaited
+ * rather than passed to `waitUntil`, so a run that fails is a failed run the
+ * platform can see.
  */
 export default {
   fetch: (
@@ -187,9 +201,11 @@ export default {
     env: Env,
     _ctx: ScheduledContext,
   ): Promise<void> => {
-    await runSweep(env, {
-      now: new Date(controller.scheduledTime),
-      beacon: new DrandReader(),
-    });
+    await runSweep(
+      env,
+      await sweepDepsFor(env, () => controller.scheduledTime, {
+        beacon: new DrandReader(),
+      }),
+    );
   },
 };

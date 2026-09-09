@@ -4,6 +4,13 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  AGENT_ID_PREFIX,
+  isAgentId,
+  publicKeyFromAgentId,
+} from "../src/identity.js";
+
+import {
+  ANCHOR_CALENDARS,
   ASSIGNMENT_WINDOW_HOURS,
   BEACON,
   CAPTURE_MAX_BYTES,
@@ -17,15 +24,20 @@ import {
   NONCE_RETENTION_SECONDS,
   NORM_VERSION,
   POLICY,
+  REGISTRY,
   REQUEST_CLOCK_SKEW_SECONDS,
   READ_SHARE_SPLIT,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   SEAL_INTERVAL_MINUTES,
+  SEAL_MAX_EVENTS,
   SLOT_COUNT,
   STALENESS_WINDOW_DAYS,
   SWEEP_INTERVAL_MINUTES,
   TRUSTED_POOL_SWITCH,
+  WITNESSES_REQUIRED,
+  WITNESS_FILE_TAIL_BYTES,
+  WITNESS_PIN,
 } from "../src/policy.js";
 
 const schemaPath = fileURLToPath(
@@ -61,6 +73,12 @@ const EXPECTED_POLICY_KEYS = [
   "CONTRIBUTOR_SHARE_PERCENT",
   "SEAL_INTERVAL_MINUTES",
   "SWEEP_INTERVAL_MINUTES",
+  "WITNESSES_REQUIRED",
+  "SEAL_MAX_EVENTS",
+  "WITNESS_FILE_TAIL_BYTES",
+  "REGISTRY",
+  "WITNESS_PIN",
+  "ANCHOR_CALENDARS",
   "FAILURE_REPORT_THRESHOLD",
   "NORM_VERSION",
   "FETCH_MAX_REDIRECTS",
@@ -227,6 +245,87 @@ describe("policy numbers", () => {
     expect(new URL(BEACON.endpoint).origin).toBe(BEACON.endpoint);
   });
 
+  it("holds the seal's own numbers (Seal, and the witness bar)", () => {
+    // The paper fixes the bar and states no count, so the count is the
+    // maintainer's initial policy (D-054): one distinct pinned operator.
+    expect(WITNESSES_REQUIRED).toBe(1);
+    // The most events one seal covers; the next run continues from there.
+    expect(SEAL_MAX_EVENTS).toBe(1000);
+    // How much of a witness's growing JSONL file is read, from the end.
+    expect(WITNESS_FILE_TAIL_BYTES).toBe(262144);
+    expect(WITNESS_FILE_TAIL_BYTES).toBe(256 * 1024);
+    for (const value of [
+      WITNESSES_REQUIRED,
+      SEAL_MAX_EVENTS,
+      WITNESS_FILE_TAIL_BYTES,
+    ]) {
+      expect(Number.isInteger(value)).toBe(true);
+      expect(value).toBeGreaterThan(0);
+    }
+  });
+
+  it("pins the founding registry the seal fingerprint goes to", () => {
+    expect(Object.isFrozen(REGISTRY)).toBe(true);
+    expect(REGISTRY.origin).toBe("https://1f916.ai");
+    expect(REGISTRY.public_key).toBe(
+      "mpQPa0FjyynqoSg2Z9j91hRhb8WckxIpRGod43CQqLw",
+    );
+    expect(REGISTRY.log).toBe("identity_events");
+    expect(REGISTRY.seal_label).toBe("nomankind-seal");
+    // The origin is an origin and nothing else: the adapter appends /api/...
+    // to it, so a trailing slash or a path here would build a bad URL.
+    expect(new URL(REGISTRY.origin).origin).toBe(REGISTRY.origin);
+    // The registry's key is an Ed25519 public key in the D-014 encoding.
+    expect(publicKeyFromAgentId(AGENT_ID_PREFIX + REGISTRY.public_key)).toHaveLength(32);
+    // The label the seal endpoint accepts: ^[a-z0-9._-]{1,64}$.
+    expect(REGISTRY.seal_label).toMatch(/^[a-z0-9._-]{1,64}$/);
+  });
+
+  it("pins three witnesses under three operators (D-054)", () => {
+    expect(Object.isFrozen(WITNESS_PIN)).toBe(true);
+    expect(WITNESS_PIN).toHaveLength(3);
+    expect(WITNESS_PIN.map((row) => row.id)).toEqual([6, 7, 8]);
+    expect(WITNESS_PIN.map((row) => row.operator)).toEqual([
+      "commonwealth",
+      "head-of-experiments",
+      "liveness",
+    ]);
+    // No two witnesses under common control is the whole bar, so three rows
+    // that shared an operator would be one witness wearing three hats.
+    expect(new Set(WITNESS_PIN.map((row) => row.operator)).size).toBe(3);
+    expect(new Set(WITNESS_PIN.map((row) => row.public_key)).size).toBe(3);
+    expect(new Set(WITNESS_PIN.map((row) => row.url)).size).toBe(3);
+    for (const row of WITNESS_PIN) {
+      expect(Object.isFrozen(row)).toBe(true);
+      expect(Number.isInteger(row.id)).toBe(true);
+      // Every key is a real Ed25519 public key in the encoding an agent id is
+      // built from, so "1F916:" + the key is an identity and not a string.
+      expect(publicKeyFromAgentId(AGENT_ID_PREFIX + row.public_key)).toHaveLength(32);
+      expect(isAgentId(AGENT_ID_PREFIX + row.public_key)).toBe(true);
+      // A published file, fetched over https and nothing else.
+      expect(new URL(row.url).protocol).toBe("https:");
+    }
+    // Nomankind is ineligible, so none of its own keys may be pinned.
+    expect(WITNESS_PIN.map((row) => row.operator)).not.toContain("nomankind");
+  });
+
+  it("pins the OpenTimestamps calendars the daily anchor tries", () => {
+    expect(Object.isFrozen(ANCHOR_CALENDARS)).toBe(true);
+    expect(ANCHOR_CALENDARS).toEqual([
+      "https://a.pool.opentimestamps.org",
+      "https://b.pool.opentimestamps.org",
+      "https://alice.btc.calendar.opentimestamps.org",
+      "https://bob.btc.calendar.opentimestamps.org",
+      "https://finney.calendar.eternitywall.com",
+    ]);
+    expect(new Set(ANCHOR_CALENDARS).size).toBe(ANCHOR_CALENDARS.length);
+    for (const calendar of ANCHOR_CALENDARS) {
+      // Origins only: the adapter appends "/digest".
+      expect(new URL(calendar).origin).toBe(calendar);
+      expect(new URL(calendar).protocol).toBe("https:");
+    }
+  });
+
   it("collects every constant in a frozen POLICY object", () => {
     expect(Object.isFrozen(POLICY)).toBe(true);
     expect(Object.keys(POLICY).sort()).toEqual([...EXPECTED_POLICY_KEYS].sort());
@@ -269,5 +368,11 @@ describe("policy numbers", () => {
     expect(POLICY.MODEL_PROVIDER_DOMAINS).toBe(MODEL_PROVIDER_DOMAINS);
     expect(POLICY.LIST_PAGE_LIMIT).toBe(LIST_PAGE_LIMIT);
     expect(POLICY.BEACON).toBe(BEACON);
+    expect(POLICY.WITNESSES_REQUIRED).toBe(WITNESSES_REQUIRED);
+    expect(POLICY.SEAL_MAX_EVENTS).toBe(SEAL_MAX_EVENTS);
+    expect(POLICY.WITNESS_FILE_TAIL_BYTES).toBe(WITNESS_FILE_TAIL_BYTES);
+    expect(POLICY.REGISTRY).toBe(REGISTRY);
+    expect(POLICY.WITNESS_PIN).toBe(WITNESS_PIN);
+    expect(POLICY.ANCHOR_CALENDARS).toBe(ANCHOR_CALENDARS);
   });
 });

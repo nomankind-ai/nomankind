@@ -25,6 +25,17 @@
  * their own events, because a window closing is a fact about the calendar and
  * the log rather than an event anyone signs.
  *
+ * Three more follow, and they are the Seal paragraph's: "Everything gets sealed,
+ * including drafts and rejections ... with the registry head countersigned by
+ * witnesses nomankind does not control ... at an initial interval of five
+ * minutes set by policy", and the hardening beside it, "anchoring each day's
+ * batch hash into an external public timestamping chain". So: seal whatever the
+ * last seal did not cover, gather countersignatures for the seals still waiting
+ * on the outside world, and anchor yesterday's roots once. Their order is not
+ * free — a seal has to exist before it can be countersigned, and a day's roots
+ * have to be fixed before that day is anchored — and each one refuses rather
+ * than throws, exactly like the four before them.
+ *
  * Nothing here decides anything. Whether a snapshot is owed, whether a draw is
  * owed, who is drawn, which operators are excluded, and when a window has run
  * out are all src/assign.ts's pure functions; the writers in
@@ -38,10 +49,18 @@
  *
  * No policy number lives here: the seventy-two hours are ASSIGNMENT_WINDOW_HOURS
  * inside src/assign.ts, the pool switch is TRUSTED_POOL_SWITCH inside the same,
- * and the page size is LIST_PAGE_LIMIT from src/policy.ts.
+ * and the page size LIST_PAGE_LIMIT, the batch ceiling SEAL_MAX_EVENTS and the
+ * witness bar WITNESSES_REQUIRED all come from src/policy.ts.
  */
 
 import type { BeaconReader } from "../adapters/beacon.js";
+import type { EnvironmentWitnessAdapter } from "../adapters/witness.js";
+import {
+  buildAnchor,
+  utcDay,
+  type AnchorAdapter,
+  type AnchorExternal,
+} from "../anchor.js";
 import {
   buildAssignment,
   buildAssignmentMissed,
@@ -54,30 +73,96 @@ import {
   poolSnapshotDue,
   type Beacon,
 } from "../assign.js";
-import { deriveEntry, type EntryStatus } from "../derive.js";
+import {
+  deriveEntry,
+  registeredOperatorsAt,
+  type EntryStatus,
+} from "../derive.js";
 import type { Event } from "../events.js";
-import { LIST_PAGE_LIMIT } from "../policy.js";
+import {
+  LIST_PAGE_LIMIT,
+  SEAL_MAX_EVENTS,
+  WITNESSES_REQUIRED,
+} from "../policy.js";
 import { validateEntry } from "../schema.js";
 import {
+  buildSeal,
+  entrySeal,
+  type EntrySeal,
+  type Seal,
+  type WitnessSignature,
+} from "../seal.js";
+import type { D1Like } from "../storage/d1.js";
+import {
+  SealConflictError,
   agentsForOperator,
   dueAssignments,
+  eventsAfter,
   eventsForEntry,
+  eventsInRange,
+  getAnchor,
   getEntry,
+  latestSeal,
   listEntries,
+  putAnchor,
   putEntry,
   recordAssignment,
   recordAssignmentMissed,
   recordPoolSnapshot,
+  recordSeal,
+  sealsSealedOn,
+  setAnchorExternal,
+  setSealRegistry,
+  setSealWitnesses,
   staleDue,
+  unwitnessedSeals,
+  type StoredEntryInput,
 } from "../storage/repository.js";
+import { checkWitnesses, witnessedCount, type Witness } from "../witness.js";
 import type { Env } from "./env.js";
 import { entryWorld, rederive, registryEvents } from "./world.js";
 
-/** What the sweep is given in place of the world: the instant, and the beacon. */
+/**
+ * The pinned witness set an environment judges countersignatures against:
+ * exactly what `pinnedWitnessesFor` answers, named structurally so this module
+ * imports no value from the adapters it is handed.
+ */
+export interface PinnedWitnesses {
+  readonly witnesses: readonly Witness[];
+  readonly registry: { origin: string; public_key: string } | null;
+}
+
+/**
+ * What the sweep is given in place of the world: the instant, the beacon, and —
+ * for the three sealing steps — the registry and witness adapter, the pinned
+ * set it judges what comes back against, nomankind's own agent ids, and the
+ * external timestamping adapter.
+ *
+ * The four sealing deps are optional and the three steps are skipped together
+ * when they are absent (`sealing_unconfigured`), which is what lets a caller ask
+ * for the pre-M16 sweep alone. Nothing else changes with them: the four steps
+ * before them do exactly what they always did.
+ */
 export interface SweepDeps {
   readonly now: Date;
   readonly beacon: BeaconReader;
+  readonly witness?: EnvironmentWitnessAdapter;
+  readonly pinned?: PinnedWitnesses;
+  readonly ineligibleAgents?: ReadonlySet<string>;
+  readonly anchor?: AnchorAdapter;
 }
+
+/** The four sealing deps, once they are known to be there. */
+interface SealingDeps {
+  readonly now: Date;
+  readonly witness: EnvironmentWitnessAdapter;
+  readonly pinned: PinnedWitnesses;
+  readonly ineligibleAgents: ReadonlySet<string>;
+  readonly anchor: AnchorAdapter;
+}
+
+/** How a step counts a refusal. */
+type Skip = (reason: string) => void;
 
 /** One assignment whose seventy-two hours ran out. */
 export interface SweepMiss {
@@ -122,6 +207,27 @@ export interface SweepReport {
    * Ids only: no event is appended, so there is no position to report.
    */
   readonly staled: readonly string[];
+  /** The seal this run made, or null when nothing new was there to seal. */
+  readonly sealed: {
+    readonly seq: number;
+    readonly first_seq: number;
+    readonly last_seq: number;
+    readonly size: number;
+    /** The entries whose submission fell inside the batch, rewritten with it. */
+    readonly entries: readonly string[];
+  } | null;
+  /** The seals this run attached countersignatures to, and whose. */
+  readonly witnessed: readonly {
+    readonly seq: number;
+    readonly operators: readonly string[];
+  }[];
+  /** The day this run anchored, or null when there was nothing to do. */
+  readonly anchored: {
+    readonly date: string;
+    readonly seals: number;
+    /** The receipt's kind, or null when nothing has posted the hash yet. */
+    readonly external: string | null;
+  } | null;
   /** One count per reason nothing was done, keyed by the reason's own name. */
   readonly skipped: Readonly<Record<string, number>>;
 }
@@ -133,6 +239,360 @@ function headPosition(events: readonly Event[]): number {
     if (event.seq > head) head = event.seq;
   }
   return head;
+}
+
+// ---------------------------------------------------------------------------
+// (e), (f), (g): the seal, its witnesses, and the day's anchor
+// ---------------------------------------------------------------------------
+
+/** A unit constant, not a policy number: a day, stated in milliseconds. */
+const MILLISECONDS_PER_DAY = 86_400_000;
+
+/**
+ * The published schema refused an entry the seal was about to rewrite.
+ *
+ * Thrown out of a rederive callback and caught by the step that started it, so
+ * a schema refusal counts like every other rule and leaves the log untouched:
+ * the callback runs inside `recordSeal`'s batch, and the only way out of it is
+ * an exception.
+ */
+class SealSchemaInvalid extends Error {
+  constructor(entryId: string) {
+    super(`sweep: the schema refused ${entryId} on sealing`);
+    this.name = "SealSchemaInvalid";
+  }
+}
+
+/**
+ * Rewrite one entry the seal covers.
+ *
+ * The entry's `seal` object is a derived field like every other, so it is
+ * recomputed here and stored by the writer. The seal is handed in rather than
+ * read back: inside `recordSeal`'s own batch it is not readable yet, and after
+ * `setSealWitnesses` the stored copy is still the one without the signatures
+ * this run just gathered.
+ *
+ * No event is appended by either writer, so the row keeps the position it was
+ * already derived through.
+ */
+async function rewriteForSeal(
+  db: D1Like,
+  entryId: string,
+  seal: Seal,
+  batch: readonly Event[],
+  now: Date,
+): Promise<StoredEntryInput> {
+  const world = await entryWorld(db, entryId);
+  const sealed = await entrySeal(batch, [seal], entryId);
+  const seals =
+    sealed === null
+      ? undefined
+      : new Map<string, EntrySeal>([[entryId, sealed]]);
+  const derived = rederive(world, entryId, now, [], seals);
+  if (!validateEntry(derived.entry).ok) throw new SealSchemaInvalid(entryId);
+  const stored = await getEntry(db, entryId);
+  return {
+    entry: derived.entry,
+    sidecar: derived.sidecar,
+    derivedThroughSeq:
+      stored?.derivedThroughSeq ?? headPosition(world.entryEvents),
+  };
+}
+
+/**
+ * (e) Seal every event the last seal did not cover.
+ *
+ * Whitepaper, Lifecycle of an entry (Seal): "Everything gets sealed, including
+ * drafts and rejections ... every later event ... is hashed into the day's batch
+ * and sealed the same way". Nothing here asks an entry's status, and the batch
+ * is whatever the log holds after the previous seal, up to SEAL_MAX_EVENTS.
+ *
+ * A racing timer is a refusal rather than a repair: `recordSeal` inserts plainly
+ * and the second sweep counts `seal_conflict` and carries on, because the other
+ * one sealed exactly the range this one was about to.
+ */
+async function sealStep(
+  db: D1Like,
+  deps: SealingDeps,
+  skip: Skip,
+): Promise<SweepReport["sealed"]> {
+  const previous = await latestSeal(db);
+  // -1, because eventsAfter reads strictly after and seq 0 is a real position.
+  const after = previous === null ? -1 : previous.last_seq;
+  const batch = await eventsAfter(db, after, SEAL_MAX_EVENTS);
+  if (batch.length === 0) {
+    skip("nothing_to_seal");
+    return null;
+  }
+
+  const built = await buildSeal(batch, previous, { now: deps.now.toISOString() });
+  if (!built.ok) {
+    skip(built.reason);
+    return null;
+  }
+  const seal = built.seal;
+
+  let entries: string[];
+  try {
+    entries = await recordSeal(db, seal, deps.now, (entryId, sealed, now) =>
+      rewriteForSeal(db, entryId, sealed, batch, now),
+    );
+  } catch (error) {
+    if (error instanceof SealConflictError) {
+      // The other timer got there first with the same range: its seal stands.
+      skip("seal_conflict");
+      return null;
+    }
+    if (error instanceof SealSchemaInvalid) {
+      skip("schema_invalid");
+      return null;
+    }
+    throw error;
+  }
+
+  // The registry receipt, on the track that has a registry. Gathered after the
+  // seal exists and kept beside it, never inside the hash it is gathered against.
+  if (deps.witness.kind === "registry") {
+    const receipt = await sealFingerprint(deps, seal);
+    if (receipt === null) skip("registry_unavailable");
+    else await setSealRegistry(db, seal.seq, receipt);
+  }
+
+  return {
+    seq: seal.seq,
+    first_seq: seal.first_seq,
+    last_seq: seal.last_seq,
+    size: seal.size,
+    entries,
+  };
+}
+
+/**
+ * Submit a seal's fingerprint to the registry.
+ *
+ * Null on anything the adapter could not do, including a throw: the network is
+ * not ours, and a registry that did not answer is a seal waiting for its receipt
+ * rather than a sweep that failed.
+ */
+async function sealFingerprint(
+  deps: SealingDeps,
+  seal: Seal,
+): Promise<Awaited<ReturnType<EnvironmentWitnessAdapter["seal"]>>> {
+  try {
+    return await deps.witness.seal(seal, deps.now);
+  } catch (error) {
+    // The message only: no binding contents and no credentials.
+    console.error(
+      `sweep: registry seal failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+/** The same, for the countersignatures: an empty list is "nothing came back". */
+async function collectWitnesses(
+  deps: SealingDeps,
+  seal: Seal,
+): Promise<WitnessSignature[]> {
+  try {
+    return await deps.witness.collect(seal, deps.now);
+  } catch (error) {
+    console.error(
+      `sweep: witness collection failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return [];
+  }
+}
+
+/** The operator behind a countersignature's agent, or null when it is unpinned. */
+function operatorOf(pinned: PinnedWitnesses, agent: string): string | null {
+  const witness = pinned.witnesses.find(
+    (candidate) => candidate.agent === agent,
+  );
+  return witness === undefined ? null : witness.operator;
+}
+
+/**
+ * (f) Gather countersignatures for the seals that are still waiting.
+ *
+ * Section 12's rule is src/witness.ts's, and it is asked one signature at a
+ * time: `checkWitnesses` refuses a whole set on its first bad member (D-037), so
+ * a batch holding one maintainer's witness beside three good ones would lose all
+ * four. What is kept is merged with what the seal already carries, and the
+ * entries the seal covers are rewritten in the same batch, because an entry's
+ * `seal.witnesses` is the covering seal's signature strings.
+ */
+async function witnessStep(
+  db: D1Like,
+  deps: SealingDeps,
+  maintainerOperators: ReadonlySet<string>,
+  skip: Skip,
+): Promise<SweepReport["witnessed"]> {
+  const witnessed: { seq: number; operators: string[] }[] = [];
+  const context = {
+    witnesses: deps.pinned.witnesses,
+    maintainerOperators,
+    ineligibleAgents: deps.ineligibleAgents,
+    registry: deps.pinned.registry,
+  };
+
+  for (const waiting of await unwitnessedSeals(db, LIST_PAGE_LIMIT)) {
+    let seal = waiting;
+
+    // A seal whose fingerprint never reached the registry has nothing for a
+    // real witness to have countersigned, so the receipt is retried first.
+    if (deps.witness.kind === "registry" && seal.registry === null) {
+      const receipt = await sealFingerprint(deps, seal);
+      if (receipt === null) {
+        skip("registry_unavailable");
+        continue;
+      }
+      await setSealRegistry(db, seal.seq, receipt);
+      seal = { ...seal, registry: receipt };
+    }
+
+    if ((await witnessedCount(seal, context)) >= WITNESSES_REQUIRED) {
+      skip("already_witnessed");
+      continue;
+    }
+
+    // Operators, not signatures: two keys under one operator are one witness
+    // (D-033), and the one already stored is the one that counts.
+    const used = new Set<string>();
+    for (const stored of seal.witnesses) {
+      const operator = operatorOf(deps.pinned, stored.agent);
+      if (operator !== null) used.add(operator);
+    }
+
+    const kept: WitnessSignature[] = [];
+    const operators: string[] = [];
+    for (const candidate of await collectWitnesses(deps, seal)) {
+      const check = await checkWitnesses(seal.hash, [candidate], context);
+      if (!check.ok) {
+        skip(check.reason);
+        continue;
+      }
+      const operator = check.witnesses[0]!.operator;
+      if (used.has(operator)) {
+        // Keep the earlier one: a second key under an operator that already
+        // countersigned adds no independence.
+        skip("duplicate_operator");
+        continue;
+      }
+      used.add(operator);
+      kept.push(candidate);
+      operators.push(operator);
+    }
+
+    if (kept.length === 0) {
+      skip(
+        deps.witness.kind === "unavailable"
+          ? "witness_unavailable"
+          : "witness_pending",
+      );
+      continue;
+    }
+
+    const batch = await eventsInRange(db, seal.first_seq, seal.last_seq);
+    try {
+      await setSealWitnesses(
+        db,
+        seal,
+        [...seal.witnesses, ...kept],
+        deps.now,
+        (entryId, updated, now) =>
+          rewriteForSeal(db, entryId, updated, batch, now),
+      );
+    } catch (error) {
+      if (error instanceof SealSchemaInvalid) {
+        skip("schema_invalid");
+        continue;
+      }
+      throw error;
+    }
+    witnessed.push({ seq: seal.seq, operators });
+  }
+
+  return witnessed;
+}
+
+/**
+ * (g) Anchor yesterday's seals into an external timestamping chain.
+ *
+ * Whitepaper, Lifecycle of an entry (Seal): "Anchoring each day's batch hash
+ * into an external public timestamping chain ... makes the existence proof
+ * independent of 1F916's maturity." Yesterday's, because today is not over: a
+ * day anchored while seals are still being made would be false rather than
+ * stale (src/anchor.ts, `verifyAnchor`).
+ *
+ * The record is written before the hash is posted, and the receipt is recorded
+ * separately when it comes back, because the receipt is not in the anchor hash
+ * (D-037): the day that was posted and the day that verifies are the same day.
+ */
+async function anchorStep(
+  db: D1Like,
+  deps: SealingDeps,
+  skip: Skip,
+): Promise<SweepReport["anchored"]> {
+  const date = utcDay(
+    new Date(deps.now.getTime() - MILLISECONDS_PER_DAY).toISOString(),
+  );
+
+  const existing = await getAnchor(db, date);
+  if (existing !== null) {
+    // Already anchored, and already carrying its receipt: nothing to do. Named
+    // like every other no-op here, so a run that anchored nothing says why.
+    if (existing.external !== null) {
+      skip("already_anchored");
+      return null;
+    }
+    const external = await postAnchor(deps, existing);
+    if (external === null) skip("anchor_pending");
+    else await setAnchorExternal(db, date, external);
+    return {
+      date,
+      seals: existing.roots.length,
+      external: external === null ? null : external.kind,
+    };
+  }
+
+  const seals = await sealsSealedOn(db, date);
+  if (seals.length === 0) {
+    skip("no_seals_to_anchor");
+    return null;
+  }
+
+  const built = await buildAnchor(seals, date);
+  if (!built.ok) {
+    skip(built.reason);
+    return null;
+  }
+
+  await putAnchor(db, built.anchor);
+  const external = await postAnchor(deps, built.anchor);
+  if (external === null) skip("anchor_pending");
+  else await setAnchorExternal(db, date, external);
+
+  return {
+    date,
+    seals: seals.length,
+    external: external === null ? null : external.kind,
+  };
+}
+
+/** Post one day's hash. Null on anything the adapter could not do. */
+async function postAnchor(
+  deps: SealingDeps,
+  anchor: Parameters<AnchorAdapter["anchor"]>[0],
+): Promise<AnchorExternal> {
+  try {
+    return await deps.anchor.anchor(anchor);
+  } catch (error) {
+    console.error(
+      `sweep: anchor failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
 }
 
 /**
@@ -370,5 +830,49 @@ export async function runSweep(
     afterId = page[page.length - 1]!.id;
   }
 
-  return { at, snapshot, missed, drawn, staled, skipped };
+  // (e), (f) and (g). The seal, the countersignatures, and yesterday's anchor,
+  // in that order: a seal has to exist before anyone can countersign it, and a
+  // day's roots have to be fixed before the day is anchored. Every refusal is
+  // counted like the four steps above, and the run carries on.
+  let sealed: SweepReport["sealed"] = null;
+  let witnessed: SweepReport["witnessed"] = [];
+  let anchored: SweepReport["anchored"] = null;
+  const sealing = sealingDeps(deps);
+  if (sealing === null) {
+    skip("sealing_unconfigured");
+  } else {
+    sealed = await sealStep(db, sealing, skip);
+    // Who the maintainer is, read exactly as derivation reads it: the operators
+    // the registry events flag, at the head of what this run read.
+    const { maintainers } = registeredOperatorsAt(
+      registry,
+      headPosition(registry),
+    );
+    witnessed = await witnessStep(db, sealing, maintainers, skip);
+    anchored = await anchorStep(db, sealing, skip);
+  }
+
+  return {
+    at,
+    snapshot,
+    missed,
+    drawn,
+    staled,
+    sealed,
+    witnessed,
+    anchored,
+    skipped,
+  };
+}
+
+/** The sealing deps, or null when this caller asked for the sweep without them. */
+function sealingDeps(deps: SweepDeps): SealingDeps | null {
+  if (deps.witness === undefined || deps.anchor === undefined) return null;
+  return {
+    now: deps.now,
+    witness: deps.witness,
+    pinned: deps.pinned ?? { witnesses: [], registry: null },
+    ineligibleAgents: deps.ineligibleAgents ?? new Set<string>(),
+    anchor: deps.anchor,
+  };
 }

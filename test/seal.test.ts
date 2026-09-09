@@ -28,6 +28,7 @@ import {
   sealHash,
   sealsForEntries,
   verifySeal,
+  type RegistrySeal,
   type Seal,
   type WitnessSignature,
 } from "../src/seal.js";
@@ -362,6 +363,47 @@ describe("entrySeal", () => {
     expect(
       await verifyInclusion(submission.hash, proof!, await merkleRoot(tampered)),
     ).toBe(false);
+  });
+
+  it("makes a seal the registry has not accepted yet", async () => {
+    const events = await firstBatch();
+    const first = await seal(events, null, CLOCK);
+    // The fingerprint is submitted after the seal exists, so a seal is made
+    // with nothing from the registry on it.
+    expect(first.registry).toBeNull();
+    expect(first.witnesses).toEqual([]);
+  });
+
+  it("leaves the seal hash alone when the registry receipt arrives", async () => {
+    const events = await firstBatch();
+    const first = await seal(events, null, CLOCK);
+
+    // The receipt is what another party said about this seal, gathered after
+    // the fact like the countersignatures, so it cannot be inside the hash it
+    // was gathered against.
+    const receipt: RegistrySeal = {
+      registry: "https://1f916.ai",
+      handle: "nomankind",
+      label: "memory.seal",
+      event_id: 9129,
+      event_hash: "06fa8eb00cf9b709df0cb21ce1a74f416e9af2820db0770de0e5cfa996776ec4",
+      receipt: { ok: true },
+      sealed_at: "2026-09-07T00:05:00Z",
+    };
+    const accepted: Seal = {
+      ...first,
+      registry: receipt,
+      witnesses: [...COUNTERSIGNATURES],
+    };
+    const { hash, witnesses: _witnesses, registry: _registry, ...fields } = accepted;
+    expect(await sealHash(fields)).toBe(first.hash);
+    expect(hash).toBe(first.hash);
+    expect(await verifySeal(events, accepted, null)).toBe(true);
+
+    // And the next seal chains to the same hash either way.
+    const later = await seal(await secondBatch(events), accepted, LATER);
+    expect(later.prev_hash).toBe(first.hash);
+    expect(later.registry).toBeNull();
   });
 
   it("leaves the seal hash alone when witnesses arrive, and carries their signatures in order", async () => {

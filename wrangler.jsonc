@@ -185,7 +185,16 @@
         // going to hold the genesis naming power in public. Empty means no
         // maintainer is configured, so production refuses genesis naming
         // outright rather than granting it to whoever asks first.
-        "MAINTAINER_AGENT_ID": ""
+        "MAINTAINER_AGENT_ID": "",
+        // The sealing agent's handle at the founding 1F916 registry (D-054).
+        // Empty until the maintainer registers the citizen and fills it in;
+        // empty means the registry track is unavailable and the sweep seals
+        // locally, which is what production does today.
+        //
+        // A handle is public, so it is a var. The two secrets that go with it —
+        // SEALING_AGENT_KEY and REGISTRY_CREDENTIAL — are set with
+        // `wrangler secret put` and are never in this file.
+        "SEALING_AGENT_HANDLE": ""
       }
     }
   }

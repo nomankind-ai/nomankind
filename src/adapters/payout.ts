@@ -62,9 +62,10 @@ export class UnavailablePayoutAdapter implements PayoutAdapter {
  * The only environment name written down in src/, and it is here because the
  * refusal is the point: production must not be able to fall through to a mock
  * by a missing branch elsewhere, so production is named and everything else
- * gets the mock.
+ * gets the mock. The witness and anchor adapters import it from here for the
+ * same reason, so the name exists once.
  */
-const PRODUCTION = "production";
+export const PRODUCTION = "production";
 
 /** The adapter this environment runs (decision D-013 as amended). */
 export function payoutAdapterFor(environment: string): PayoutAdapter {
