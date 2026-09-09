@@ -299,8 +299,16 @@ describe("renderLanding", () => {
     expect(page).toContain("fonts.googleapis.com");
   });
 
-  it("leads with the hero line", () => {
-    expect(page).toContain("Proof first. Use second.");
+  it("leads with the hero line and the primary use case", () => {
+    expect(page).toContain("Proof first.");
+    expect(page).toContain("Use second.");
+    expect(page).toContain("THE SEALED FEED FOR MODELS THAT KEEP LEARNING");
+  });
+
+  it("names the three cards", () => {
+    expect(page).toContain("PRIMARY USE · CONTINUAL LEARNING");
+    expect(page).toContain("PROVENANCE, PROVEN");
+    expect(page).toContain("TRUTH, WHERE A TEST CAN REACH");
   });
 
   it("holds the five values", () => {
@@ -322,11 +330,21 @@ describe("renderLanding", () => {
     expect(page).toContain(
       "https://github.com/nomankind-ai/nomankind/blob/main/paper/WHITEPAPER.md",
     );
+    expect(page).toContain(`href="https://github.com/nomankind-ai/nomankind"`);
     expect(page).toContain(`href="https://github.com/nomankind-ai/log"`);
     expect(page).toContain(`href="https://1f916.org"`);
   });
 
-  it("closes on the two tiers and the licence line only", () => {
+  it("draws the proof pipeline inline, from the source to the learner", () => {
+    expect(page).toContain("<svg");
+    const svg = page.slice(page.indexOf("<svg"), page.indexOf("</svg>"));
+    expect(svg).toContain("Source");
+    expect(svg).toContain("Snapshot");
+    expect(svg).toContain("Seal");
+    expect(svg).toContain("Learner");
+  });
+
+  it("closes on the two tiers and the licence line", () => {
     expect(page).toContain("Provenance is the floor.");
     expect(page).toContain("CODE APACHE-2.0 · DATA CC0");
   });
@@ -334,6 +352,7 @@ describe("renderLanding", () => {
   it("survives the content-security-policy: no script, no inline style", () => {
     expect(page).not.toContain("<script");
     expect(page).not.toContain("style=");
+    expect(page).not.toContain("javascript:");
   });
 });
 
@@ -349,11 +368,7 @@ describe("LANDING_CSS", () => {
     expect(LANDING_CSS).toContain("prefers-reduced-motion");
   });
 
-  it("reveals on scroll only where the browser has a view timeline", () => {
-    expect(LANDING_CSS).toContain("@supports (animation-timeline: view())");
-  });
-
-  it("answers under 700 px", () => {
-    expect(LANDING_CSS).toContain("@media (max-width: 700px)");
+  it("stacks the grids on a narrow viewport", () => {
+    expect(LANDING_CSS).toContain("@media (max-width: 900px)");
   });
 });
