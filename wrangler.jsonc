@@ -164,8 +164,10 @@
           "bucket_name": "nomankind-production-captures"
         }
       ],
-      // Both custom domains: Cloudflare creates the DNS records and issues the
-      // certificates on deploy. The apex serves nothing new in this milestone.
+      // Every custom domain: Cloudflare creates the DNS records and issues the
+      // certificates on deploy. The apex serves the landing page; the www host
+      // is routed here only so the Worker can redirect it to the apex
+      // (src/worker/pages.ts), which is why nothing is served on it.
       "routes": [
         {
           "pattern": "app.nomankind.ai",
@@ -173,6 +175,10 @@
         },
         {
           "pattern": "nomankind.ai",
+          "custom_domain": true
+        },
+        {
+          "pattern": "www.nomankind.ai",
           "custom_domain": true
         }
       ],

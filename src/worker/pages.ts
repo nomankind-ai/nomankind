@@ -529,9 +529,28 @@ export async function handlePages(
   deps: { now: Date },
 ): Promise<Response | null> {
   void deps;
-  if (request.method !== "GET" && request.method !== "HEAD") return null;
 
   const url = new URL(request.url);
+
+  // The www host is a fourth custom domain of the production Worker and serves
+  // nothing: every request on it is redirected permanently to the apex, so the
+  // landing page has one canonical host. This is the first rule in the file and
+  // it is above the method check on purpose — a POST to www is redirected too,
+  // because there is no door on www for it to have been meant for. Only
+  // production sets APEX_HOST, so no local or demo hostname can match.
+  const apex = env.APEX_HOST;
+  if (apex !== undefined && apex !== "" && url.hostname === `www.${apex}`) {
+    return new Response(null, {
+      status: 301,
+      headers: {
+        location: `https://${apex}${url.pathname}${url.search}`,
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  if (request.method !== "GET" && request.method !== "HEAD") return null;
+
   if (url.pathname === "/static/app.css") {
     return forMethod(request, cssResponse(APP_CSS));
   }
