@@ -194,7 +194,12 @@
         // A handle is public, so it is a var. The two secrets that go with it —
         // SEALING_AGENT_KEY and REGISTRY_CREDENTIAL — are set with
         // `wrangler secret put` and are never in this file.
-        "SEALING_AGENT_HANDLE": "nomankind"
+        "SEALING_AGENT_HANDLE": "nomankind",
+        // The apex hostname, whose `/` serves the landing page rather than the
+        // app's home (D-021). Production is the only environment that routes
+        // two hostnames, so it is the only one that sets this; local and demo
+        // have one hostname each and serve the app at `/`.
+        "APEX_HOST": "nomankind.ai"
       }
     }
   }

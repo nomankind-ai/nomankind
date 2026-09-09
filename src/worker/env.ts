@@ -81,4 +81,16 @@ export type Env = {
    * is registered. Empty or absent means the registry track is unavailable.
    */
   SEALING_AGENT_HANDLE?: string;
+  /**
+   * The hostname whose `/` serves the landing page instead of the app's home
+   * (decision D-021): the apex, nomankind.ai. Production alone routes it, so
+   * production alone sets this var, and a request whose Host matches it gets the
+   * front door while app.nomankind.ai gets the instrument panel.
+   *
+   * A var and not a secret — a hostname is public. Absent or empty means there
+   * is no apex here, which is exactly local's and demo's situation: their single
+   * hostname serves the app at `/` and no request can be mistaken for the front
+   * door.
+   */
+  APEX_HOST?: string;
 };

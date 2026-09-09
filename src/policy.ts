@@ -376,6 +376,17 @@ export const BEACON: Readonly<{
  */
 export const LIST_PAGE_LIMIT = 100;
 
+/**
+ * How many entries the home page's "latest sealed entries" row shows. A page
+ * size, so it lives here beside LIST_PAGE_LIMIT rather than inside the page that
+ * renders it: src/ui/ holds no numbers of this kind and src/storage/ holds no
+ * default limit at all.
+ *
+ * Not a whitepaper number, and not a rule: it is presentation. The maintainer's
+ * published policy; it moves only by a later decision.
+ */
+export const HOME_LATEST_ENTRIES = 10;
+
 /** Every policy number, collected and frozen. */
 export const POLICY = Object.freeze({
   TRUSTED_POOL_SWITCH,
@@ -408,5 +419,6 @@ export const POLICY = Object.freeze({
   NONCE_RETENTION_SECONDS,
   MODEL_PROVIDER_DOMAINS,
   LIST_PAGE_LIMIT,
+  HOME_LATEST_ENTRIES,
   BEACON,
 });
