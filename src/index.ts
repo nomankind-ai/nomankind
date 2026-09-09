@@ -16,6 +16,8 @@ export * from "./identity.js";
 export * from "./merkle.js";
 export * from "./normalize.js";
 export * from "./policy.js";
+export * from "./read.js";
+export * from "./receipt.js";
 export * from "./reconfirm.js";
 export * from "./records.js";
 export * from "./registry-proof.js";

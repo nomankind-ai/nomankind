@@ -93,7 +93,39 @@ export type EventPayloads = {
   reconfirmation: { record: ReconfirmationRecord; signature: string };
   /** Recorded on the overturned entry; M20 refines the dispute rules. */
   dispute_upheld: { correction_entry_id: string };
+  /**
+   * One UTC day's read counts, published to the log.
+   *
+   * Whitepaper Section 9, Money: "Read counts are published to the sealed log
+   * daily", so "any reader can compare the receipts they hold against the
+   * published counts". The event is the publication, and the receipts
+   * (src/receipt.ts) are what a reader holds against it.
+   *
+   * Not entry-scoped: one event covers every entry read that day, so a single
+   * entry_id would be a lie about what it says. The per-entry counts are in
+   * `reads`, sorted by entry_id so the canonical form — and therefore the event
+   * hash — does not depend on what order the rows came back in.
+   *
+   * `counter_first` and `counter_last` are the smallest and largest receipt
+   * counter issued that day, both null when the day counted nothing. They are
+   * what makes the day's slice of the running counter checkable: a reader
+   * holding a receipt whose counter falls inside the range knows which day's
+   * count should have contained it.
+   */
+  read_count: {
+    date: string;
+    reads: readonly ReadCountRow[];
+    total: number;
+    counter_first: number | null;
+    counter_last: number | null;
+  };
 };
+
+/** One entry's reads on a published day. */
+export interface ReadCountRow {
+  entry_id: string;
+  count: number;
+}
 
 export type EventType = keyof EventPayloads;
 
@@ -110,12 +142,14 @@ export const EVENT_TYPES: readonly EventType[] = [
   "validation",
   "reconfirmation",
   "dispute_upheld",
+  "read_count",
 ] as const;
 
 /**
- * Events scoped to an entry carry entry_id; the operator and pool events carry
- * null. Whitepaper Section 6: an entry's lifecycle is the sub-sequence of the
- * log bearing its id, so the scope must be unambiguous for every event.
+ * Events scoped to an entry carry entry_id; the operator, pool and read-count
+ * events carry null. Whitepaper Section 6: an entry's lifecycle is the
+ * sub-sequence of the log bearing its id, so the scope must be unambiguous for
+ * every event — and a day's read counts belong to no single entry.
  */
 export const ENTRY_SCOPED_TYPES: readonly EventType[] = [
   "entry_submitted",

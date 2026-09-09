@@ -11,14 +11,22 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  CORE_KEYS,
+  agentIdFromPublicKey,
   appendEvent,
   bountyAccrual,
+  buildReadCountPayload,
   buildAnchor,
   buildSeal,
   buildSubmittedCore,
   decodeProof,
   deriveEntry,
+  entryHash,
   entrySeal,
+  exportPublicKeyRaw,
+  generateKeypair,
+  signReadReceipt,
+  verifyReadReceipt,
   sealsForEntries,
   verifyInclusion,
   utcDay,
@@ -29,7 +37,9 @@ import {
   type Core,
   type Event,
   type EntrySeal,
+  type Entry,
   type OpenAssignment,
+  type ReadReceipt,
   type RegistrySeal,
   type Seal,
   type WitnessSignature,
@@ -46,12 +56,14 @@ import {
   eventsAfter,
   eventsForEntry,
   eventsInRange,
+  earliestReadReceiptDay,
   eventsOfType,
   getAnchor,
   getEntry,
   getOperator,
   headSeq,
   latestAnchor,
+  latestEventOfType,
   latestSeal,
   listEntries,
   listOperators,
@@ -67,7 +79,15 @@ import {
   putCapture,
   putEntry,
   putOperator,
+  putReadReceipt,
   putSeal,
+  nextReadCounter,
+  readCandidates,
+  readCountsOn,
+  readCounterRangeOn,
+  readReceiptByCounter,
+  readReceiptsForEntry,
+  ReceiptConflictError,
   recordAssignment,
   recordAssignmentMissed,
   recordPoolSnapshot,
@@ -663,6 +683,7 @@ describe("migrations", () => {
       "0004_assignments.sql",
       "0005_freshness.sql",
       "0006_sealing.sql",
+      "0007_receipts.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -728,6 +749,21 @@ describe("migrations", () => {
     }
   });
 
+  it("applies 0007 after 0006, indexing the receipts table and nothing else", () => {
+    // Forward-only (D-022): three indexes over the placeholder table 0001
+    // declared, and no reshaping at all. A live database takes it as it stands.
+    const statements = splitStatements(
+      loadMigrations().find((one) => one.name === "0007_receipts.sql")!.sql,
+    );
+    expect(statements).toHaveLength(3);
+    expect(statements[0]).toContain("CREATE UNIQUE INDEX receipts_kind_seq");
+    expect(statements[1]).toContain("CREATE INDEX receipts_kind_created_at");
+    expect(statements[2]).toContain("CREATE INDEX receipts_kind_entry");
+    for (const statement of statements) {
+      expect(statement).not.toMatch(/\bDROP\b|\bCREATE TABLE\b|\bALTER TABLE\b/);
+    }
+  });
+
   it("records the migration under the name wrangler would use", async () => {
     const applied = await test.db
       .prepare(`SELECT name FROM "d1_migrations" ORDER BY id`)
@@ -739,6 +775,7 @@ describe("migrations", () => {
       "0004_assignments.sql",
       "0005_freshness.sql",
       "0006_sealing.sql",
+      "0007_receipts.sql",
     ]);
   });
 });
@@ -2227,5 +2264,324 @@ describe("sealing writes", () => {
     // And a page of anchors after a day reads it back the same way.
     expect(await anchorsAfter(sealing.db, "2020-01-01", 10)).toEqual([stored]);
     expect(await anchorsAfter(sealing.db, day, 10)).toEqual([]);
+  });
+});
+
+/**
+ * Read receipts and the reader's candidates, in their own database.
+ *
+ * Whitepaper Section 8, "The frozen reader": a read returns "a signed read
+ * receipt naming the entry, the time, and a running counter". Section 9, Money:
+ * "Read counts are published to the sealed log daily", so "any reader can
+ * compare the receipts they hold against the published counts". So the
+ * questions here are the ones that publication asks: does the counter really
+ * run, does a day group and page, and do the counters bound the day.
+ *
+ * Its own database, because the world above is asserted against its own head
+ * and these tests move it.
+ */
+describe("read receipts", () => {
+  const SUBJECT = "openai/gpt-5";
+  const CATEGORY = "pricing";
+
+  /** Three verified entries and one draft, oldest submission first. */
+  const VERIFIED_IDS = ["nmk_read1", "nmk_read2", "nmk_read3"];
+  const DRAFT_ID = "nmk_read4";
+
+  let reading: TestDatabase;
+  let issuerAgent: string;
+  let issuerKeys: CryptoKeyPair;
+  let log: Event[];
+
+  /** The verified entry's own core, re-keyed: a real core under a new id. */
+  function coreWithId(source: Entry, id: string): Core {
+    const record = source as unknown as Record<string, unknown>;
+    const core: Record<string, unknown> = {};
+    for (const key of CORE_KEYS) core[key] = record[key];
+    core["id"] = id;
+    return core as Core;
+  }
+
+  /**
+   * The world's own derived entry under a new id. Nothing is invented: the
+   * status, the sidecar and every derived field are what `deriveEntry` made of
+   * the real log, so the only variable these tests change is which entry is
+   * which and in what order they were submitted.
+   */
+  function entryWithId(source: Entry, id: string): Entry {
+    return { ...(source as unknown as Record<string, unknown>), id } as Entry;
+  }
+
+  /** A real signed receipt for one entry at one instant. */
+  async function issue(
+    entryId: string,
+    createdAt: string,
+  ): Promise<ReadReceipt> {
+    const counter = await nextReadCounter(reading.db);
+    const receipt = await signReadReceipt(
+      {
+        entry_id: entryId,
+        entry_hash: await entryHash(world.entry),
+        read_at: createdAt,
+        counter,
+        issuer: issuerAgent,
+      },
+      issuerKeys.privateKey,
+    );
+    await putReadReceipt(reading.db, { entryId, createdAt, receipt });
+    return receipt;
+  }
+
+  beforeAll(async () => {
+    reading = await openTestDatabase();
+    issuerKeys = await generateKeypair();
+    issuerAgent = agentIdFromPublicKey(
+      await exportPublicKeyRaw(issuerKeys.publicKey),
+    );
+
+    // A real log: one entry_submitted per entry, in the order they were
+    // submitted, so submitted_seq is the log position and not a number a test
+    // chose.
+    log = [];
+    for (const id of [...VERIFIED_IDS, DRAFT_ID]) {
+      log = await appendEvent(log, {
+        at: "2026-09-08T00:00:00.000Z",
+        type: "entry_submitted",
+        entry_id: id,
+        payload: {
+          core: coreWithId(
+            id === DRAFT_ID ? world.draftEntry : world.entry,
+            id,
+          ),
+          signature: (world.entry as unknown as Record<string, string>)[
+            "signature"
+          ]!,
+        },
+      });
+    }
+    await appendEvents(reading.db, log);
+
+    for (const id of VERIFIED_IDS) {
+      await putEntry(
+        reading.db,
+        entryWithId(world.entry, id),
+        (await getEntry(test.db, VERIFIED_ENTRY_ID))!.sidecar,
+        log[log.length - 1]!.seq,
+      );
+    }
+    await putEntry(
+      reading.db,
+      entryWithId(world.draftEntry, DRAFT_ID),
+      (await getEntry(test.db, DRAFT_ENTRY_ID))!.sidecar,
+      log[log.length - 1]!.seq,
+    );
+  });
+
+  afterAll(async () => {
+    await reading?.dispose();
+  });
+
+  it("starts the running counter at 1 and never repeats a number", async () => {
+    expect(await earliestReadReceiptDay(reading.db)).toBeNull();
+    expect(await nextReadCounter(reading.db)).toBe(1);
+
+    const first = await issue("nmk_read1", "2026-09-09T09:00:00.000Z");
+    expect(first.counter).toBe(1);
+    expect(await nextReadCounter(reading.db)).toBe(2);
+
+    const second = await issue("nmk_read1", "2026-09-09T10:00:00.000Z");
+    const third = await issue("nmk_read2", "2026-09-09T11:00:00.000Z");
+    expect([second.counter, third.counter]).toEqual([2, 3]);
+
+    // Round-tripped verbatim, signature and all: the reader who lost their copy
+    // gets back the bytes that were signed.
+    expect(await readReceiptByCounter(reading.db, 1)).toEqual(first);
+    await expect(
+      verifyReadReceipt((await readReceiptByCounter(reading.db, 1))!),
+    ).resolves.toBe(true);
+    expect(await readReceiptByCounter(reading.db, 99)).toBeNull();
+  });
+
+  it("refuses a counter another reader already took", async () => {
+    // What a race looks like from the loser's side: both isolates read the same
+    // next counter, and the unique index refuses the second insert.
+    const taken = await nextReadCounter(reading.db);
+    const mine = await issue("nmk_read3", "2026-09-09T12:00:00.000Z");
+    expect(mine.counter).toBe(taken);
+
+    const theirs = await signReadReceipt(
+      {
+        entry_id: "nmk_read1",
+        entry_hash: await entryHash(world.entry),
+        read_at: "2026-09-09T12:00:01.000Z",
+        counter: taken,
+        issuer: issuerAgent,
+      },
+      issuerKeys.privateKey,
+    );
+    const refused = putReadReceipt(reading.db, {
+      entryId: "nmk_read1",
+      createdAt: "2026-09-09T12:00:01.000Z",
+      receipt: theirs,
+    });
+    await expect(refused).rejects.toBeInstanceOf(ReceiptConflictError);
+    await expect(refused).rejects.toMatchObject({
+      name: "ReceiptConflictError",
+      counter: taken,
+    });
+
+    // The winner's receipt is untouched: nothing was overwritten.
+    expect(await readReceiptByCounter(reading.db, taken)).toEqual(mine);
+  });
+
+  it("pages one entry's receipts in counter order", async () => {
+    const all = await readReceiptsForEntry(reading.db, "nmk_read1", 0, 10);
+    expect(all.map((receipt) => receipt.counter)).toEqual([1, 2]);
+    expect(all.every((receipt) => receipt.entry_id === "nmk_read1")).toBe(true);
+
+    const page = await readReceiptsForEntry(reading.db, "nmk_read1", 0, 1);
+    expect(page.map((receipt) => receipt.counter)).toEqual([1]);
+    expect(
+      (
+        await readReceiptsForEntry(reading.db, "nmk_read1", page[0]!.counter, 10)
+      ).map((receipt) => receipt.counter),
+    ).toEqual([2]);
+    expect(await readReceiptsForEntry(reading.db, "nmk_nothing", 0, 10)).toEqual(
+      [],
+    );
+  });
+
+  it("groups a UTC day by entry and pages it by entry_id", async () => {
+    // A second day, so the day range is really a range and not "everything".
+    await issue("nmk_read3", "2026-09-10T00:30:00.000Z");
+
+    expect(await readCountsOn(reading.db, "2026-09-09", undefined, 10)).toEqual([
+      { entry_id: "nmk_read1", count: 2 },
+      { entry_id: "nmk_read2", count: 1 },
+      { entry_id: "nmk_read3", count: 1 },
+    ]);
+    expect(await readCountsOn(reading.db, "2026-09-10", undefined, 10)).toEqual([
+      { entry_id: "nmk_read3", count: 1 },
+    ]);
+    expect(await readCountsOn(reading.db, "2026-09-11", undefined, 10)).toEqual(
+      [],
+    );
+
+    const page = await readCountsOn(reading.db, "2026-09-09", undefined, 2);
+    expect(page.map((row) => row.entry_id)).toEqual(["nmk_read1", "nmk_read2"]);
+    expect(
+      await readCountsOn(reading.db, "2026-09-09", "nmk_read2", 10),
+    ).toEqual([{ entry_id: "nmk_read3", count: 1 }]);
+  });
+
+  it("bounds each day by the counters issued in it", async () => {
+    expect(await readCounterRangeOn(reading.db, "2026-09-09")).toEqual({
+      total: 4,
+      counter_first: 1,
+      counter_last: 4,
+    });
+    expect(await readCounterRangeOn(reading.db, "2026-09-10")).toEqual({
+      total: 1,
+      counter_first: 5,
+      counter_last: 5,
+    });
+    // A day nobody read is a true thing to publish, and it has no counters.
+    expect(await readCounterRangeOn(reading.db, "2026-09-11")).toEqual({
+      total: 0,
+      counter_first: null,
+      counter_last: null,
+    });
+
+    // The published payload the two reads build together, sorted and summed.
+    const day = "2026-09-09";
+    const range = await readCounterRangeOn(reading.db, day);
+    const payload = buildReadCountPayload(
+      day,
+      await readCountsOn(reading.db, day, undefined, 10),
+      range.counter_first,
+      range.counter_last,
+    );
+    expect(payload.total).toBe(range.total);
+    expect(payload.reads.map((row) => row.entry_id)).toEqual([
+      "nmk_read1",
+      "nmk_read2",
+      "nmk_read3",
+    ]);
+  });
+
+  it("knows the day the receipts start from", async () => {
+    expect(await earliestReadReceiptDay(reading.db)).toBe("2026-09-09");
+  });
+
+  it("offers only verified entries, newest submission first, paged", async () => {
+    const all = await readCandidates(reading.db, {
+      subject: SUBJECT,
+      category: CATEGORY,
+      limit: 10,
+    });
+    expect(
+      all.map((stored) => (stored.entry as unknown as Record<string, string>)["id"]),
+    ).toEqual(["nmk_read3", "nmk_read2", "nmk_read1"]);
+    expect(
+      all.every(
+        (stored) =>
+          (stored.entry as unknown as Record<string, string>)["status"] ===
+          "verified",
+      ),
+    ).toBe(true);
+
+    const page = await readCandidates(reading.db, {
+      subject: SUBJECT,
+      category: CATEGORY,
+      limit: 2,
+    });
+    expect(page.map((stored) => stored.submittedSeq)).toEqual([2, 1]);
+    const next = await readCandidates(reading.db, {
+      subject: SUBJECT,
+      category: CATEGORY,
+      limit: 10,
+      beforeSubmittedSeq: page[page.length - 1]!.submittedSeq,
+    });
+    expect(next.map((stored) => stored.submittedSeq)).toEqual([0]);
+
+    // A subject or category nobody wrote about offers nothing.
+    expect(
+      await readCandidates(reading.db, {
+        subject: "nobody/nothing",
+        category: CATEGORY,
+        limit: 10,
+      }),
+    ).toEqual([]);
+    expect(
+      await readCandidates(reading.db, {
+        subject: SUBJECT,
+        category: "outage",
+        limit: 10,
+      }),
+    ).toEqual([]);
+  });
+
+  it("finds the newest event of one type, and null when there is none", async () => {
+    expect(await latestEventOfType(reading.db, "read_count")).toBeNull();
+
+    const published = await appendEvent(log, {
+      at: "2026-09-10T00:05:00.000Z",
+      type: "read_count",
+      entry_id: null,
+      payload: buildReadCountPayload(
+        "2026-09-09",
+        await readCountsOn(reading.db, "2026-09-09", undefined, 10),
+        1,
+        4,
+      ),
+    });
+    await appendEvents(reading.db, published.slice(log.length));
+
+    const latest = await latestEventOfType(reading.db, "read_count");
+    expect(latest).toEqual(published[published.length - 1]);
+    expect(await latestEventOfType(reading.db, "entry_submitted")).toEqual(
+      log[log.length - 1],
+    );
+    expect(await latestEventOfType(reading.db, "validation")).toBeNull();
   });
 });
