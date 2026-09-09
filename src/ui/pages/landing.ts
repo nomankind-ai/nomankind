@@ -562,24 +562,26 @@ export const LANDING_CSS = `
   padding-bottom: 48px;
 }
 
-/* No min-width: 0 here, unlike every other grid child on the page. At 1440 the
-   headline's longest word, "provenance.", is a shade wider than a plain 5fr
-   share, so the column is allowed to take its min-content and the drawing beside
-   it gives up those few pixels — the artboard's own behaviour. Otherwise the word
-   would hang over the panel. */
+/* min-width: 0, like every other grid child on the page. Without it the column
+   took its min-content width — set by the headline's longest word,
+   "provenance." — and grew past its 5fr share, squeezing the drawing beside it.
+   The headline is now small enough to fit the share instead, so the column can
+   hold to it and the two columns keep the artboard's proportions. */
 .hero-copy {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 26px;
 }
 
-/* clamp() rather than one size: at 1440 the artboard's ~104px, and small enough
-   on a phone that not one word of it has to break. The longest word in the line
-   is "provenance.", so the ceiling is set by what fits the 5fr column, not by
-   taste. */
+/* clamp() rather than one size: the artboard's 84px ceiling, and small enough on
+   a phone that not one word of it has to break. The longest word in the line is
+   "provenance.", ~5.65x the font size in Space Grotesk 600, so the middle term
+   is set by what fits the 5fr column at every width — at 1440 that word measures
+   456px against a 543px column, at 1024 324px against 370px — not by taste. */
 .hero-title {
-  font-size: clamp(38px, 7vw, 104px);
-  line-height: 0.96;
+  font-size: clamp(34px, 5.6vw, 84px);
+  line-height: 0.98;
   letter-spacing: -0.03em;
   text-wrap: balance;
 }
