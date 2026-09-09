@@ -17,6 +17,10 @@
  * them: seal, witness, anchor. M17 mounts Section 8's read door
  * (src/worker/read.ts), which serves one entry with its seal and a signed read
  * receipt, and gives the sweep the step that publishes each day's read count.
+ * M18 mounts Section 8's other door beside it, the delta stream
+ * (src/worker/sync.ts), which serves the sealed log after a position a trainer
+ * already holds, with an inclusion proof for every event and one signed sync
+ * receipt covering the page.
  * Later milestones mount the rest — the public pages — on the same router.
  *
  * This file is the one place in the system that reads a wall clock, and it
@@ -53,6 +57,7 @@ import {
   sweepDepsFor,
   type ExecutionContextLike,
 } from "./sweeper.js";
+import { handleSync } from "./sync.js";
 import { handleValidate } from "./validate.js";
 
 /**
@@ -145,6 +150,9 @@ export async function handleRequest(
 
   const readable = await handleRead(request, env, { now });
   if (readable !== null) return readable;
+
+  const synced = await handleSync(request, env, { now });
+  if (synced !== null) return synced;
 
   const events = await handleEvents(request, env);
   if (events !== null) return events;

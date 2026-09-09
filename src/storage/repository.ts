@@ -29,7 +29,7 @@ import {
   type EventType,
   type ReadCountRow,
 } from "../events.js";
-import type { ReadReceipt } from "../receipt.js";
+import type { ReadReceipt, SyncReceipt } from "../receipt.js";
 import type { Entry } from "../schema.js";
 import type { RegistrySeal, Seal, WitnessSignature } from "../seal.js";
 import {
@@ -1874,15 +1874,68 @@ export async function setAnchorExternal(
  */
 const READ_RECEIPT_KIND = "read";
 
+/**
+ * The `kind` a sync receipt is stored under.
+ *
+ * Whitepaper Section 8, "The delta stream": a sync response carries one signed
+ * receipt covering every delivered entry, and each delivered verified entry
+ * counts as a read. A different kind because the row is a different shape — one
+ * receipt covering many entries, so `entry_id` is null and the entries live in
+ * the payload — and the same counter because Section 9's running number is one
+ * stream over everything served, never one per door.
+ */
+const SYNC_RECEIPT_KIND = "sync";
+
+/** The two kinds that share the running counter, in the order they are bound. */
+const COUNTED_RECEIPT_KINDS: readonly string[] = Object.freeze([
+  READ_RECEIPT_KIND,
+  SYNC_RECEIPT_KIND,
+]);
+
+/** `kind IN (?, ?)`, written from the list so the two can never drift apart. */
+const COUNTED_KINDS_IN = `kind IN (${COUNTED_RECEIPT_KINDS.map(() => "?").join(", ")})`;
+
+/**
+ * One UTC day of receipt rows, as a half-open text range on `created_at`.
+ *
+ * `created_at` is the injected clock's ISO instant, always "<day>T...", so the
+ * day is the range from "<day>T" to "<day>U" ('U' is the character after 'T') —
+ * the same trick `sealsSealedOn` uses, and for the same reason: a range seeks
+ * the (kind, created_at) index and a function call over every row does not.
+ */
+function dayRange(date: string): [string, string] {
+  return [`${date}T`, `${date}U`];
+}
+
+/**
+ * Every verified entry of every sync receipt on one UTC day, one row per entry.
+ *
+ * The counting happens in SQLite, through json_each over the stored payload,
+ * because loading a day's receipts into an isolate to count them is exactly the
+ * whole-log-in-memory failure this module exists to prevent: one sync receipt
+ * can name a page of entries, and a busy day names a great many. The receipt is
+ * still stored verbatim — nothing here recomputes a field, it only reads the
+ * `status` the receipt was signed over.
+ */
+const SYNC_VERIFIED_ENTRIES = `
+  SELECT json_extract(item.value, '$.entry_id') AS entry_id
+  FROM receipts, json_each(receipts.payload_json, '$.entries') AS item
+  WHERE receipts.kind = ?
+    AND receipts.created_at >= ? AND receipts.created_at < ?
+    AND json_extract(item.value, '$.status') = 'verified'`;
+
 const RECEIPT_COLUMNS = `id, kind, entry_id, seq, created_at, payload_json`;
 
 /**
- * The row id for a read receipt: its kind and its counter.
+ * The row id for a receipt that carries the running counter: the counter
+ * itself.
  *
  * Deterministic rather than random, so the primary key and the unique index
  * refuse the same duplicate. A random id would let two isolates racing for the
- * same counter differ in the id while colliding on (kind, seq), which is a
- * second way to say the same thing and one more thing to keep in step.
+ * same counter differ in the id while colliding on the counter, which is a
+ * second way to say the same thing and one more thing to keep in step. The
+ * counter is shared by read and sync receipts, so the id is the same for both
+ * and the primary key refuses a cross-kind duplicate on its own.
  */
 export function readReceiptId(counter: number): string {
   return `rcpt_${counter}`;
@@ -1919,11 +1972,29 @@ export class ReceiptConflictError extends Error {
  */
 export async function nextReadCounter(db: D1Like): Promise<number> {
   const row = await db
-    .prepare(`SELECT MAX(seq) AS last FROM receipts WHERE kind = ?`)
-    .bind(READ_RECEIPT_KIND)
+    .prepare(`SELECT MAX(seq) AS last FROM receipts WHERE ${COUNTED_KINDS_IN}`)
+    .bind(...COUNTED_RECEIPT_KINDS)
     .first<Row>();
   const last = row === null ? null : readNullableInteger(row, "last");
   return last === null ? 1 : last + 1;
+}
+
+/**
+ * Whether some receipt already stands at this counter, of either kind.
+ *
+ * What "conflict" means, asked of the table rather than read out of a driver's
+ * error message. Both kinds, because they share the counter: a read receipt
+ * losing the race to a sync receipt is the same race, and the caller has to be
+ * told the same thing.
+ */
+async function counterIsTaken(db: D1Like, counter: number): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT seq FROM receipts WHERE ${COUNTED_KINDS_IN} AND seq = ? ${ONE_ROW}`,
+    )
+    .bind(...COUNTED_RECEIPT_KINDS, counter)
+    .first<Row>();
+  return row !== null;
 }
 
 /**
@@ -1965,11 +2036,67 @@ export async function putReadReceipt(
     // Ask the table rather than read the driver's message: a receipt now
     // standing at this counter is what "conflict" means, and any other failure
     // is not ours to rename.
-    if ((await readReceiptByCounter(db, counter)) !== null) {
+    if (await counterIsTaken(db, counter)) {
       throw new ReceiptConflictError(counter, { cause });
     }
     throw cause;
   }
+}
+
+/**
+ * Store one signed sync receipt.
+ *
+ * Whitepaper Section 8, "The delta stream": one receipt covers the whole
+ * response, so the row names no entry — `entry_id` is null and the entries the
+ * receipt covers are inside the signed payload, which goes in verbatim. `seq`
+ * is the counter the receipt carries, drawn from the same running number read
+ * receipts use.
+ *
+ * Throws `ReceiptConflictError` when the counter was already issued by either
+ * kind. The unique index is the guard; see migrations/0008_sync.sql.
+ */
+export async function putSyncReceipt(
+  db: D1Like,
+  input: {
+    readonly createdAt: string;
+    readonly receipt: SyncReceipt;
+  },
+): Promise<void> {
+  const counter = input.receipt.counter;
+  try {
+    await db
+      .prepare(
+        `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        readReceiptId(counter),
+        SYNC_RECEIPT_KIND,
+        null,
+        counter,
+        input.createdAt,
+        writeJson(input.receipt),
+      )
+      .run();
+  } catch (cause) {
+    if (await counterIsTaken(db, counter)) {
+      throw new ReceiptConflictError(counter, { cause });
+    }
+    throw cause;
+  }
+}
+
+/** One sync receipt by its counter, or null. */
+export async function syncReceiptByCounter(
+  db: D1Like,
+  counter: number,
+): Promise<SyncReceipt | null> {
+  const row = await db
+    .prepare(
+      `SELECT payload_json FROM receipts WHERE kind = ? AND seq = ? ${ONE_ROW}`,
+    )
+    .bind(SYNC_RECEIPT_KIND, counter)
+    .first<Row>();
+  return row === null ? null : readJson<SyncReceipt>(row, "payload_json");
 }
 
 /** One receipt by its counter, or null. */
@@ -2015,6 +2142,13 @@ export async function readReceiptsForEntry(
  * daily", so "any reader can compare the receipts they hold against the
  * published counts". This is the read behind that publication.
  *
+ * Both kinds of receipt count. A read receipt is one read of the entry it
+ * names; a sync receipt is one read of each verified entry it delivered
+ * (Section 8, "Paying for the training path"), so the day is the union of the
+ * read rows and the verified entries inside the sync payloads, grouped and
+ * summed together. A trainer's read and a reader's read are the same read, and
+ * the entry earns for both.
+ *
  * `created_at` is the injected clock's ISO instant, always "<day>T...", so the
  * day is the half-open text range from "<day>T" to "<day>U" — the same trick
  * `sealsSealedOn` uses, and for the same reason: a range seeks the index and a
@@ -2029,18 +2163,31 @@ export async function readCountsOn(
   afterEntryId: string | undefined,
   limit: number,
 ): Promise<ReadCountRow[]> {
-  const bindings: unknown[] = [READ_RECEIPT_KIND, `${date}T`, `${date}U`];
+  const [dayFrom, dayTo] = dayRange(date);
+  const bindings: unknown[] = [
+    READ_RECEIPT_KIND,
+    dayFrom,
+    dayTo,
+    SYNC_RECEIPT_KIND,
+    dayFrom,
+    dayTo,
+  ];
   let after = "";
   if (afterEntryId !== undefined) {
-    after = "AND entry_id > ? ";
+    after = "WHERE entry_id > ? ";
     bindings.push(afterEntryId);
   }
   bindings.push(limit);
 
   const rows = await db
     .prepare(
-      `SELECT entry_id, COUNT(*) AS reads FROM receipts
-       WHERE kind = ? AND created_at >= ? AND created_at < ? ${after}
+      `SELECT entry_id, SUM(reads) AS reads FROM (
+         SELECT entry_id, COUNT(*) AS reads FROM receipts
+           WHERE kind = ? AND created_at >= ? AND created_at < ?
+           GROUP BY entry_id
+         UNION ALL
+         SELECT entry_id, 1 AS reads FROM (${SYNC_VERIFIED_ENTRIES})
+       ) ${after}
        GROUP BY entry_id ORDER BY entry_id LIMIT ?`,
     )
     .bind(...bindings)
@@ -2055,6 +2202,10 @@ export async function readCountsOn(
  * The day's total and the counters that bound it: the smallest and largest
  * counter issued on that UTC day, both null when the day counted nothing.
  *
+ * The total counts both kinds — read rows plus the verified entries the day's
+ * sync receipts delivered — and the bounds are over both kinds' counters,
+ * because the counter is one running number across everything served.
+ *
  * The bounds are what make the published count checkable. A reader holding a
  * receipt whose counter falls inside the day's range knows their read should be
  * in that day's total, and a day that published fewer reads than its own
@@ -2068,13 +2219,34 @@ export async function readCounterRangeOn(
   counter_first: number | null;
   counter_last: number | null;
 }> {
+  const [dayFrom, dayTo] = dayRange(date);
   const row = await db
     .prepare(
-      `SELECT COUNT(*) AS total, MIN(seq) AS first_seq, MAX(seq) AS last_seq
-       FROM receipts
-       WHERE kind = ? AND created_at >= ? AND created_at < ?`,
+      `SELECT
+         (SELECT COUNT(*) FROM receipts
+            WHERE kind = ? AND created_at >= ? AND created_at < ?)
+         + (SELECT COUNT(*) FROM (${SYNC_VERIFIED_ENTRIES})) AS total,
+         (SELECT MIN(seq) FROM receipts
+            WHERE ${COUNTED_KINDS_IN} AND created_at >= ? AND created_at < ?)
+           AS first_seq,
+         (SELECT MAX(seq) FROM receipts
+            WHERE ${COUNTED_KINDS_IN} AND created_at >= ? AND created_at < ?)
+           AS last_seq`,
     )
-    .bind(READ_RECEIPT_KIND, `${date}T`, `${date}U`)
+    .bind(
+      READ_RECEIPT_KIND,
+      dayFrom,
+      dayTo,
+      SYNC_RECEIPT_KIND,
+      dayFrom,
+      dayTo,
+      ...COUNTED_RECEIPT_KINDS,
+      dayFrom,
+      dayTo,
+      ...COUNTED_RECEIPT_KINDS,
+      dayFrom,
+      dayTo,
+    )
     .first<Row>();
   if (row === null) {
     return { total: 0, counter_first: null, counter_last: null };
@@ -2087,7 +2259,8 @@ export async function readCounterRangeOn(
 }
 
 /**
- * The UTC day of the oldest read receipt, or null when none was ever issued.
+ * The UTC day of the oldest receipt of either kind, or null when none was ever
+ * issued.
  *
  * Where the daily publication starts from: a sweep that has never published
  * has to know which day is the first one with anything to say.
@@ -2096,8 +2269,10 @@ export async function earliestReadReceiptDay(
   db: D1Like,
 ): Promise<string | null> {
   const row = await db
-    .prepare(`SELECT MIN(created_at) AS earliest FROM receipts WHERE kind = ?`)
-    .bind(READ_RECEIPT_KIND)
+    .prepare(
+      `SELECT MIN(created_at) AS earliest FROM receipts WHERE ${COUNTED_KINDS_IN}`,
+    )
+    .bind(...COUNTED_RECEIPT_KINDS)
     .first<Row>();
   const earliest = row === null ? null : readNullableText(row, "earliest");
   return earliest === null ? null : utcDay(earliest);

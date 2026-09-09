@@ -26,7 +26,9 @@ import {
   exportPublicKeyRaw,
   generateKeypair,
   signReadReceipt,
+  signSyncReceipt,
   verifyReadReceipt,
+  verifySyncReceipt,
   sealsForEntries,
   verifyInclusion,
   utcDay,
@@ -39,7 +41,9 @@ import {
   type EntrySeal,
   type Entry,
   type OpenAssignment,
+  type EntryStatus,
   type ReadReceipt,
+  type SyncReceipt,
   type RegistrySeal,
   type Seal,
   type WitnessSignature,
@@ -80,6 +84,7 @@ import {
   putEntry,
   putOperator,
   putReadReceipt,
+  putSyncReceipt,
   putSeal,
   nextReadCounter,
   readCandidates,
@@ -88,6 +93,7 @@ import {
   readReceiptByCounter,
   readReceiptsForEntry,
   ReceiptConflictError,
+  syncReceiptByCounter,
   recordAssignment,
   recordAssignmentMissed,
   recordPoolSnapshot,
@@ -684,6 +690,7 @@ describe("migrations", () => {
       "0005_freshness.sql",
       "0006_sealing.sql",
       "0007_receipts.sql",
+      "0008_sync.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -764,6 +771,22 @@ describe("migrations", () => {
     }
   });
 
+  it("applies 0008 after 0007, adding one partial index and nothing else", () => {
+    // Forward-only (D-022): one partial unique index over the table 0001
+    // declared, and no reshaping at all. It closes the one duplicate 0007's
+    // (kind, seq) index permits: a read receipt and a sync receipt at the same
+    // running counter.
+    const statements = splitStatements(
+      loadMigrations().find((one) => one.name === "0008_sync.sql")!.sql,
+    );
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toContain("CREATE UNIQUE INDEX receipts_counter");
+    expect(statements[0]).toContain("WHERE kind IN ('read', 'sync')");
+    for (const statement of statements) {
+      expect(statement).not.toMatch(/\bDROP\b|\bCREATE TABLE\b|\bALTER TABLE\b/);
+    }
+  });
+
   it("records the migration under the name wrangler would use", async () => {
     const applied = await test.db
       .prepare(`SELECT name FROM "d1_migrations" ORDER BY id`)
@@ -776,6 +799,7 @@ describe("migrations", () => {
       "0005_freshness.sql",
       "0006_sealing.sql",
       "0007_receipts.sql",
+      "0008_sync.sql",
     ]);
   });
 });
@@ -2583,5 +2607,213 @@ describe("read receipts", () => {
       log[log.length - 1],
     );
     expect(await latestEventOfType(reading.db, "validation")).toBeNull();
+  });
+});
+
+/**
+ * Sync receipts, in their own database.
+ *
+ * Whitepaper Section 8, "The delta stream" and "Paying for the training path":
+ * a sync response carries one signed receipt covering every delivered entry,
+ * and each delivered verified entry counts as a read. Section 9, Money: the
+ * counter is one running number, and the day's published count is what readers
+ * check their receipts against. So the questions here are whether the two kinds
+ * of receipt really share the counter, and whether a day's count sees a
+ * trainer's reads as the reads they are.
+ *
+ * Its own database, because the counter starts at 1 and the day's totals are
+ * asserted exactly.
+ */
+describe("sync receipts", () => {
+  let syncing: TestDatabase;
+  let agent: string;
+  let keys: CryptoKeyPair;
+
+  const hashOf = (id: string) => `sha256:${id.slice(-1).repeat(64)}`;
+
+  /** A real signed read receipt at the next shared counter. */
+  async function issueRead(
+    entryId: string,
+    createdAt: string,
+  ): Promise<ReadReceipt> {
+    const counter = await nextReadCounter(syncing.db);
+    const receipt = await signReadReceipt(
+      {
+        entry_id: entryId,
+        entry_hash: hashOf(entryId),
+        read_at: createdAt,
+        counter,
+        issuer: agent,
+      },
+      keys.privateKey,
+    );
+    await putReadReceipt(syncing.db, { entryId, createdAt, receipt });
+    return receipt;
+  }
+
+  /** A real signed sync receipt at the next shared counter. */
+  async function issueSync(
+    createdAt: string,
+    entries: readonly { entry_id: string; status: EntryStatus }[],
+    counter?: number,
+  ): Promise<SyncReceipt> {
+    const receipt = await signSyncReceipt(
+      {
+        from: 100,
+        head: 142,
+        entries: entries.map((entry) => ({
+          entry_id: entry.entry_id,
+          entry_hash: hashOf(entry.entry_id),
+          status: entry.status,
+        })),
+        event_count: entries.length,
+        issued_at: createdAt,
+        counter: counter ?? (await nextReadCounter(syncing.db)),
+        issuer: agent,
+      },
+      keys.privateKey,
+    );
+    await putSyncReceipt(syncing.db, { createdAt, receipt });
+    return receipt;
+  }
+
+  beforeAll(async () => {
+    syncing = await openTestDatabase();
+    keys = await generateKeypair();
+    agent = agentIdFromPublicKey(await exportPublicKeyRaw(keys.publicKey));
+  });
+
+  afterAll(async () => {
+    await syncing?.dispose();
+  });
+
+  it("shares one running counter with read receipts", async () => {
+    expect(await nextReadCounter(syncing.db)).toBe(1);
+
+    const first = await issueRead("nmk_sync1", "2026-09-09T09:00:00.000Z");
+    expect(first.counter).toBe(1);
+
+    // The sync takes the next number, not a number of its own.
+    const delta = await issueSync("2026-09-09T10:00:00.000Z", [
+      { entry_id: "nmk_sync1", status: "verified" },
+      { entry_id: "nmk_sync2", status: "verified" },
+      { entry_id: "nmk_sync3", status: "draft" },
+    ]);
+    expect(delta.counter).toBe(2);
+    expect(await nextReadCounter(syncing.db)).toBe(3);
+
+    // Round-tripped verbatim, signature and all.
+    const stored = await syncReceiptByCounter(syncing.db, 2);
+    expect(stored).toEqual(delta);
+    await expect(verifySyncReceipt(stored!)).resolves.toBe(true);
+    expect(await syncReceiptByCounter(syncing.db, 99)).toBeNull();
+    // The two kinds are not each other: a read counter names no sync receipt.
+    expect(await syncReceiptByCounter(syncing.db, 1)).toBeNull();
+    expect(await readReceiptByCounter(syncing.db, 2)).toBeNull();
+  });
+
+  it("refuses a counter the other kind already took", async () => {
+    // A sync losing the race to a read receipt.
+    await expect(
+      issueSync(
+        "2026-09-09T10:00:01.000Z",
+        [{ entry_id: "nmk_sync1", status: "verified" }],
+        1,
+      ),
+    ).rejects.toBeInstanceOf(ReceiptConflictError);
+
+    // And a read losing the race to a sync receipt: the same error, because it
+    // is the same race.
+    const theirs = await signReadReceipt(
+      {
+        entry_id: "nmk_sync1",
+        entry_hash: hashOf("nmk_sync1"),
+        read_at: "2026-09-09T10:00:02.000Z",
+        counter: 2,
+        issuer: agent,
+      },
+      keys.privateKey,
+    );
+    const refused = putReadReceipt(syncing.db, {
+      entryId: "nmk_sync1",
+      createdAt: "2026-09-09T10:00:02.000Z",
+      receipt: theirs,
+    });
+    await expect(refused).rejects.toBeInstanceOf(ReceiptConflictError);
+    await expect(refused).rejects.toMatchObject({ counter: 2 });
+
+    // Nothing was overwritten: both winners stand.
+    expect((await readReceiptByCounter(syncing.db, 1))!.counter).toBe(1);
+    expect((await syncReceiptByCounter(syncing.db, 2))!.event_count).toBe(3);
+  });
+
+  it("counts each delivered verified entry as one read of that entry", async () => {
+    const second = await issueRead("nmk_sync2", "2026-09-09T11:00:00.000Z");
+    expect(second.counter).toBe(3);
+    // A sync on an earlier day, so the day range is really a range.
+    const earlier = await issueSync("2026-09-08T23:00:00.000Z", [
+      { entry_id: "nmk_sync1", status: "verified" },
+      { entry_id: "nmk_sync4", status: "overturned" },
+    ]);
+    expect(earlier.counter).toBe(4);
+
+    // nmk_sync1: one read row and one sync entry. nmk_sync2: the same.
+    // nmk_sync3 was delivered as a draft, so it earned nothing.
+    expect(await readCountsOn(syncing.db, "2026-09-09", undefined, 10)).toEqual(
+      [
+        { entry_id: "nmk_sync1", count: 2 },
+        { entry_id: "nmk_sync2", count: 2 },
+      ],
+    );
+    // The earlier day saw only the sync, and only its verified entry.
+    expect(await readCountsOn(syncing.db, "2026-09-08", undefined, 10)).toEqual(
+      [{ entry_id: "nmk_sync1", count: 1 }],
+    );
+    expect(await readCountsOn(syncing.db, "2026-09-07", undefined, 10)).toEqual(
+      [],
+    );
+
+    // The union pages by entry_id like any other listing.
+    const page = await readCountsOn(syncing.db, "2026-09-09", undefined, 1);
+    expect(page).toEqual([{ entry_id: "nmk_sync1", count: 2 }]);
+    expect(
+      await readCountsOn(syncing.db, "2026-09-09", "nmk_sync1", 10),
+    ).toEqual([{ entry_id: "nmk_sync2", count: 2 }]);
+  });
+
+  it("bounds and totals a day over both kinds", async () => {
+    // Two read rows and two verified sync entries, bounded by counters 1 and 3.
+    expect(await readCounterRangeOn(syncing.db, "2026-09-09")).toEqual({
+      total: 4,
+      counter_first: 1,
+      counter_last: 3,
+    });
+    // A day whose only receipt is a sync: the bounds are that sync's counter,
+    // and the total is the one entry it delivered verified.
+    expect(await readCounterRangeOn(syncing.db, "2026-09-08")).toEqual({
+      total: 1,
+      counter_first: 4,
+      counter_last: 4,
+    });
+    expect(await readCounterRangeOn(syncing.db, "2026-09-07")).toEqual({
+      total: 0,
+      counter_first: null,
+      counter_last: null,
+    });
+
+    // The published payload the two reads build together adds up to the total.
+    const day = "2026-09-09";
+    const range = await readCounterRangeOn(syncing.db, day);
+    const payload = buildReadCountPayload(
+      day,
+      await readCountsOn(syncing.db, day, undefined, 10),
+      range.counter_first,
+      range.counter_last,
+    );
+    expect(payload.total).toBe(range.total);
+  });
+
+  it("starts the publication from the sync receipt's earlier day", async () => {
+    expect(await earliestReadReceiptDay(syncing.db)).toBe("2026-09-08");
   });
 });

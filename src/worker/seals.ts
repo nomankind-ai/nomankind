@@ -21,8 +21,10 @@
  * page size is LIST_PAGE_LIMIT from src/policy.ts.
  */
 
+import type { Event } from "../events.js";
 import { encodeProof, inclusionProof, verifyInclusion } from "../merkle.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
+import type { Seal } from "../seal.js";
 import type { D1Like } from "../storage/d1.js";
 import {
   anchorsAfter,
@@ -113,6 +115,40 @@ async function seal(raw: string, db: D1Like): Promise<Response> {
 }
 
 /**
+ * The encoded inclusion proof for one sealed event, or null when it cannot be
+ * built or does not verify.
+ *
+ * Factored out of the proof route because the delta stream serves the very same
+ * proof beside every event it delivers (src/worker/sync.ts), and two
+ * recomputations of one proof are two chances to disagree about it. The reads
+ * stay with the caller: the proof route wants one event's covering seal, while
+ * a sync page walks a run of events sharing a handful of seals and reads each
+ * one once.
+ *
+ * Null rather than a throw, and null on a batch whose size is not the seal's,
+ * because either way the answer is the same refusal: a proof that does not
+ * verify against the root the seal committed to is not an answer, whatever the
+ * reason.
+ */
+export async function buildInclusionProof(
+  event: Event,
+  covering: Seal,
+  batch: readonly Event[],
+): Promise<string | null> {
+  if (batch.length !== covering.size) return null;
+  try {
+    const built = await inclusionProof(
+      batch.map((leaf) => leaf.hash),
+      event.seq - covering.first_seq,
+    );
+    if (!(await verifyInclusion(event.hash, built, covering.root))) return null;
+    return encodeProof(built);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The inclusion proof for one event.
  *
  * Two reads, because a proof needs the whole batch: the seal covering the event,
@@ -135,23 +171,8 @@ async function proof(raw: string, db: D1Like): Promise<Response> {
   if (covering === null) return refuse(404, "unsealed");
 
   const batch = await eventsInRange(db, covering.first_seq, covering.last_seq);
-  if (batch.length !== covering.size) return refuse(500, "bad_proof");
-
-  let included: string;
-  try {
-    const built = await inclusionProof(
-      batch.map((leaf) => leaf.hash),
-      seq - covering.first_seq,
-    );
-    // Checked before it is served: a proof that does not verify against the
-    // root the seal committed to is not an answer, whatever the reason.
-    if (!(await verifyInclusion(event.hash, built, covering.root))) {
-      return refuse(500, "bad_proof");
-    }
-    included = encodeProof(built);
-  } catch {
-    return refuse(500, "bad_proof");
-  }
+  const included = await buildInclusionProof(event, covering, batch);
+  if (included === null) return refuse(500, "bad_proof");
 
   return json(
     {

@@ -76,8 +76,15 @@ const ENTRY_ID_PATTERN = /^nmk_[0-9a-f]{32}$/;
  */
 const RECEIPT_ATTEMPTS = 3;
 
-/** The key that signs receipts, and the agent id it belongs to. */
-interface ReceiptSigner {
+/**
+ * The key that signs receipts, and the agent id it belongs to.
+ *
+ * Exported because the delta stream signs its own receipts with exactly this
+ * key (src/worker/sync.ts): one sealing agent signs everything nomankind hands
+ * out, and two routes importing two copies of the import would be two chances
+ * to disagree about who that agent is.
+ */
+export interface ReceiptSigner {
   readonly key: CryptoKey;
   readonly issuer: string;
 }
@@ -120,8 +127,14 @@ async function importSigner(secret: string): Promise<ReceiptSigner | null> {
   }
 }
 
-/** The memoized signer for this environment's secret, or null when there is none. */
-function signerFor(secret: string | undefined): Promise<ReceiptSigner | null> {
+/**
+ * The memoized signer for this environment's secret, or null when there is
+ * none. Shared with the sync route, so the import is paid for once per isolate
+ * however many doors ask for it.
+ */
+export function signerFor(
+  secret: string | undefined,
+): Promise<ReceiptSigner | null> {
   if (secret === undefined || secret === "") return Promise.resolve(null);
   const memoized = SIGNERS.get(secret);
   if (memoized !== undefined) return memoized;

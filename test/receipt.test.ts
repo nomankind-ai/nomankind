@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   HASH_TAG_READ_RECEIPT,
+  HASH_TAG_SYNC_RECEIPT,
   READ_COUNT_REFUSALS,
   agentIdFromPublicKey,
   appendEvent,
@@ -23,10 +24,15 @@ import {
   generateKeypair,
   readReceiptSigningBytes,
   signReadReceipt,
+  signSyncReceipt,
+  syncReceiptSigningBytes,
   verifyReadReceipt,
+  verifySyncReceipt,
   type Event,
   type ReadReceipt,
   type ReadReceiptFields,
+  type SyncReceipt,
+  type SyncReceiptFields,
 } from "../src/index.js";
 import { verifyOffline } from "../src/verify.js";
 import { buildVerifyWorld } from "./helpers/verify-world.js";
@@ -146,6 +152,158 @@ describe("signReadReceipt and verifyReadReceipt", () => {
     ]) {
       await expect(verifyReadReceipt(bad)).resolves.toBe(false);
     }
+  });
+});
+
+/**
+ * Sync receipts: one signature over a whole delta-stream response.
+ *
+ * Whitepaper Section 8, "The delta stream": the response carries the new head
+ * and one signed sync receipt covering every delivered entry. The same story as
+ * the read receipt, one field wider: sign it, then change exactly one thing and
+ * watch the verdict turn — including the list of entries, which is the part a
+ * server would be tempted to edit after the fact.
+ */
+describe("signSyncReceipt and verifySyncReceipt", () => {
+  const ENTRIES = [
+    { entry_id: ENTRY_ID, entry_hash: ENTRY_HASH, status: "verified" as const },
+    {
+      entry_id: "nmk_ffffffffffffffffffffffffffffffff",
+      entry_hash: `sha256:${"c".repeat(64)}`,
+      status: "overturned" as const,
+    },
+  ];
+
+  async function syncReceipt(
+    overrides: Partial<SyncReceiptFields> = {},
+  ): Promise<{ receipt: SyncReceipt; agent: string }> {
+    const { agent, keys } = await issuer();
+    const fields: SyncReceiptFields = {
+      from: 100,
+      head: 142,
+      entries: ENTRIES.map((entry) => ({ ...entry })),
+      event_count: 9,
+      issued_at: "2026-09-09T12:00:00.000Z",
+      counter: 41,
+      issuer: agent,
+      ...overrides,
+    };
+    return { receipt: await signSyncReceipt(fields, keys.privateKey), agent };
+  }
+
+  it("signs the seven fields and verifies against the issuer's own key", async () => {
+    const { receipt: signed, agent } = await syncReceipt();
+    expect(signed.issuer).toBe(agent);
+    expect(signed.head).toBe(142);
+    expect(signed.signature).toMatch(/^[A-Za-z0-9_-]+$/);
+    await expect(verifySyncReceipt(signed)).resolves.toBe(true);
+  });
+
+  it("signs its own tag, a newline and the canonical seven fields", () => {
+    const bytes = syncReceiptSigningBytes({
+      from: 100,
+      head: 142,
+      entries: [
+        { entry_id: ENTRY_ID, entry_hash: ENTRY_HASH, status: "verified" },
+      ],
+      event_count: 9,
+      issued_at: "2026-09-09T12:00:00.000Z",
+      counter: 41,
+      issuer: "1F916:abc",
+    });
+    const text = new TextDecoder().decode(bytes);
+    expect(text.startsWith(`${HASH_TAG_SYNC_RECEIPT}\n`)).toBe(true);
+    // Its own tag, so a sync receipt can never be replayed as a read receipt.
+    expect(HASH_TAG_SYNC_RECEIPT).not.toBe(HASH_TAG_READ_RECEIPT);
+    expect(text.slice(HASH_TAG_SYNC_RECEIPT.length + 1)).toBe(
+      `{"counter":41,"entries":[{"entry_hash":"${ENTRY_HASH}","entry_id":"${ENTRY_ID}","status":"verified"}],"event_count":9,"from":100,"head":142,"issued_at":"2026-09-09T12:00:00.000Z","issuer":"1F916:abc"}`,
+    );
+    expect(text).not.toContain("signature");
+  });
+
+  it("refuses a signature with one byte flipped", async () => {
+    const { receipt: signed } = await syncReceipt();
+    const forged = { ...signed, signature: flipSignature(signed.signature) };
+    expect(forged.signature).not.toBe(signed.signature);
+    await expect(verifySyncReceipt(forged)).resolves.toBe(false);
+  });
+
+  it("refuses a changed entries list", async () => {
+    const { receipt: signed } = await syncReceipt();
+    // One entry dropped.
+    await expect(
+      verifySyncReceipt({ ...signed, entries: [signed.entries[0]!] }),
+    ).resolves.toBe(false);
+    // One entry's version swapped for another's.
+    await expect(
+      verifySyncReceipt({
+        ...signed,
+        entries: [
+          { ...signed.entries[0]!, entry_hash: `sha256:${"d".repeat(64)}` },
+          signed.entries[1]!,
+        ],
+      }),
+    ).resolves.toBe(false);
+    // An unverified entry re-labelled, which is what a read would be billed on.
+    await expect(
+      verifySyncReceipt({
+        ...signed,
+        entries: [
+          signed.entries[0]!,
+          { ...signed.entries[1]!, status: "verified" },
+        ],
+      }),
+    ).resolves.toBe(false);
+    // The order reversed: the receipt reads in the order it was delivered.
+    await expect(
+      verifySyncReceipt({ ...signed, entries: [...signed.entries].reverse() }),
+    ).resolves.toBe(false);
+  });
+
+  it("refuses a changed range, count, time, counter or issuer", async () => {
+    const { receipt: signed } = await syncReceipt();
+    const other = await issuer();
+    for (const forged of [
+      { ...signed, from: signed.from + 1 },
+      { ...signed, head: signed.head + 1 },
+      { ...signed, event_count: signed.event_count + 1 },
+      { ...signed, issued_at: "2026-09-10T12:00:00.000Z" },
+      { ...signed, counter: signed.counter + 1 },
+      { ...signed, issuer: other.agent },
+    ]) {
+      await expect(verifySyncReceipt(forged)).resolves.toBe(false);
+    }
+  });
+
+  it("answers false, and never throws, on malformed input", async () => {
+    const { receipt: signed } = await syncReceipt();
+    for (const bad of [
+      null,
+      undefined,
+      42,
+      "receipt",
+      [signed],
+      {},
+      { ...signed, issuer: "not-an-agent-id" },
+      { ...signed, signature: "not base64url!!" },
+      { ...signed, counter: 1.5 },
+      { ...signed, from: "100" },
+      { ...signed, head: null },
+      { ...signed, event_count: 1.5 },
+      { ...signed, issued_at: 20260909 },
+      { ...signed, entries: "none" },
+      { ...signed, entries: [null] },
+      { ...signed, entries: [{ entry_id: ENTRY_ID }] },
+    ]) {
+      await expect(verifySyncReceipt(bad)).resolves.toBe(false);
+    }
+  });
+
+  it("does not touch the read receipt's own bytes", async () => {
+    const { receipt: read } = await receipt();
+    await expect(verifyReadReceipt(read)).resolves.toBe(true);
+    // A read receipt is not a sync receipt, whatever it is handed to.
+    await expect(verifySyncReceipt(read)).resolves.toBe(false);
   });
 });
 
