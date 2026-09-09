@@ -12,6 +12,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   appendEvent,
+  bountyAccrual,
   buildAnchor,
   buildSeal,
   buildSubmittedCore,
@@ -48,6 +49,7 @@ import {
   latestSeal,
   listEntries,
   listOperators,
+  bountiesForEntry,
   markAssignmentAnswered,
   markAssignmentMissed,
   MissingSubmissionError,
@@ -63,11 +65,14 @@ import {
   recordAssignment,
   recordAssignmentMissed,
   recordPoolSnapshot,
+  recordReconfirmation,
   recordValidation,
   registerOperator,
   sealCovering,
   sealsBetween,
+  staleDue,
   submitEntry,
+  supersedersOf,
   trustOperator,
   type AgentRecord,
   type CaptureRecord,
@@ -108,6 +113,27 @@ let secondSeal: Seal;
 /** The derivation clock the world was built under. */
 function clock(): { now: string } {
   return { now: world.bundle.as_of };
+}
+
+/**
+ * 0005's three columns, read raw. The repository never selects them back into
+ * an entry — they exist for the sweep's WHERE clause — so the only way to ask
+ * what was written is to ask the table.
+ */
+async function freshnessColumns(
+  db: D1Like,
+  id: string,
+): Promise<Record<string, unknown> | null> {
+  const row = await db
+    .prepare(`SELECT stale, expires_at, supersedes FROM entries WHERE id = ?`)
+    .bind(id)
+    .first<Record<string, unknown>>();
+  if (row === null) return null;
+  return {
+    stale: row["stale"],
+    expires_at: row["expires_at"] ?? null,
+    supersedes: row["supersedes"] ?? null,
+  };
 }
 
 beforeAll(async () => {
@@ -256,6 +282,48 @@ describe("entries", () => {
       const stored = await getEntry(test.db, id);
       expect(rederived.entry).toEqual(stored!.entry);
       expect(rederived.sidecar).toEqual(stored!.sidecar);
+    }
+  });
+
+  it("copies stale, expires_at and supersedes out beside the JSON", async () => {
+    // 0005's three columns are copies of fields already inside entry_json,
+    // exactly as subject, category and status are. Read raw, so this is the
+    // column and not the JSON answering.
+    for (const id of [VERIFIED_ENTRY_ID, DRAFT_ENTRY_ID]) {
+      const stored = await getEntry(test.db, id);
+      expect(await freshnessColumns(test.db, id)).toEqual({
+        stale: stored!.entry["stale"] === true ? 1 : 0,
+        expires_at: stored!.entry["expires_at"] ?? null,
+        supersedes: stored!.entry["supersedes"] ?? null,
+      });
+    }
+  });
+
+  it("backfills the three columns from the JSON of rows already stored", async () => {
+    // 0005's backfill, run against real rows: a live database takes the
+    // migration with entries already in it, and the copies have to come out of
+    // the JSON those rows carry. Wrong values first, so the assertion cannot
+    // pass on what putEntry already wrote.
+    const backfill = splitStatements(
+      loadMigrations().find((one) => one.name === "0005_freshness.sql")!.sql,
+    ).find((statement) => statement.includes("UPDATE entries SET"))!;
+    const before = new Map(
+      await Promise.all(
+        [VERIFIED_ENTRY_ID, DRAFT_ENTRY_ID].map(
+          async (id) => [id, await freshnessColumns(test.db, id)] as const,
+        ),
+      ),
+    );
+
+    await test.db
+      .prepare(
+        `UPDATE entries SET stale = 1, expires_at = '1999-01-01', supersedes = 'nmk_wrong'`,
+      )
+      .run();
+    await test.db.prepare(backfill).run();
+
+    for (const [id, columns] of before) {
+      expect(await freshnessColumns(test.db, id)).toEqual(columns);
     }
   });
 
@@ -575,6 +643,7 @@ describe("migrations", () => {
       "0002_registry.sql",
       "0003_captures.sql",
       "0004_assignments.sql",
+      "0005_freshness.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -606,6 +675,25 @@ describe("migrations", () => {
     expect(await openAssignment(test.db, "nmk_migrated")).toBeNull();
   });
 
+  it("applies 0005 after 0004, adding to the entries table and nothing else", () => {
+    // Forward-only (D-022): three columns, a backfill of the rows already
+    // stored, and two partial indexes. Nothing is dropped and no table is
+    // reshaped, so a live database takes it without rewriting a table.
+    const statements = splitStatements(
+      loadMigrations().find((one) => one.name === "0005_freshness.sql")!.sql,
+    );
+    expect(statements).toHaveLength(6);
+    expect(statements[0]).toContain("ALTER TABLE entries ADD COLUMN stale");
+    expect(statements[1]).toContain("ALTER TABLE entries ADD COLUMN expires_at");
+    expect(statements[2]).toContain("ALTER TABLE entries ADD COLUMN supersedes");
+    expect(statements[3]).toContain("UPDATE entries SET");
+    expect(statements[4]).toContain("CREATE INDEX entries_stale_due");
+    expect(statements[5]).toContain("CREATE INDEX entries_supersedes");
+    for (const statement of statements) {
+      expect(statement).not.toMatch(/\bDROP\b|\bCREATE TABLE\b/);
+    }
+  });
+
   it("records the migration under the name wrangler would use", async () => {
     const applied = await test.db
       .prepare(`SELECT name FROM "d1_migrations" ORDER BY id`)
@@ -615,6 +703,7 @@ describe("migrations", () => {
       "0002_registry.sql",
       "0003_captures.sql",
       "0004_assignments.sql",
+      "0005_freshness.sql",
     ]);
   });
 });
@@ -1331,5 +1420,522 @@ describe("validation writes", () => {
     expect(await verifyChain(await eventsInRange(store.db, 0, before!))).toEqual(
       { ok: true, length: before! + 1 },
     );
+  });
+});
+
+/**
+ * The staleness sweep's read, in its own database.
+ *
+ * Whitepaper Section 7, "Freshness and decay": "Past its window an entry stays
+ * verified but shows as stale." A window closing is a fact about the calendar
+ * and not an event anyone appends, so something has to find the entries the day
+ * turned on. This is the query it starts from, and the only one beside the
+ * assignment sweep that starts from a date rather than from an entry.
+ *
+ * Its own database because it needs entries with chosen expiry dates, and the
+ * world above is asserted against its own two.
+ */
+describe("the staleness sweep's read", () => {
+  const AUTHOR = "1F916:6PmY_Rl-vJoqcBTdMBoMbLZLc0nUqYHpXK0dK7hM8kQ";
+
+  let store: TestDatabase;
+  /** Submission day -> entry id, and entry id -> the expires_at derivation gave it. */
+  const idFor = new Map<string, string>();
+  const expiryOf = new Map<string, string>();
+  /** The release entry: an event category, so no window and no expires_at ever. */
+  let eventCategoryId: string;
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+    let log: Event[] = [];
+
+    // Submitted out of order on purpose: the sweep orders by expiry, not by the
+    // order the entries arrived in.
+    const days = ["2026-03-01", "2026-01-01", "2026-02-01"];
+    for (const day of days) {
+      const at = `${day}T12:00:00.000Z`;
+      const core = await buildSubmittedCore(
+        {
+          subject: `kestrel/kestrel-${day}`,
+          category: "pricing",
+          claim: `Kestrel seat pricing as of ${day}`,
+          before: "$20 per seat per month",
+          after: "$25 per seat per month",
+          effective_at: day,
+          citation: `https://kestrel.example/pricing/${day}`,
+          snapshot_hash: `sha256:${"5e".repeat(32)}`,
+          author: AUTHOR,
+        },
+        { now: at },
+      );
+      const id = core["id"] as string;
+      log = await appendEvent(log, {
+        at,
+        type: "entry_submitted",
+        entry_id: id,
+        payload: { core, signature: "c2lnbmF0dXJl" },
+      });
+      const event = log[log.length - 1]!;
+      // Derived at its own submission instant, so every one of them is fresh:
+      // the sweep's job is to find the ones the calendar has since passed.
+      const derived = deriveEntry(log, id, { now: at });
+      await submitEntry(store.db, {
+        events: [event],
+        entry: derived.entry,
+        sidecar: derived.sidecar,
+        derivedThroughSeq: event.seq,
+        captures: [],
+      });
+      idFor.set(day, id);
+      expiryOf.set(id, derived.entry["expires_at"] as string);
+    }
+
+    const at = "2026-01-15T12:00:00.000Z";
+    const core = await buildSubmittedCore(
+      {
+        subject: "kestrel/kestrel-2",
+        category: "release",
+        claim: "Kestrel-2 shipped",
+        before: "unreleased",
+        after: "generally available",
+        effective_at: "2026-01-15",
+        citation: "https://kestrel.example/releases/kestrel-2",
+        snapshot_hash: `sha256:${"6f".repeat(32)}`,
+        author: AUTHOR,
+      },
+      { now: at },
+    );
+    eventCategoryId = core["id"] as string;
+    log = await appendEvent(log, {
+      at,
+      type: "entry_submitted",
+      entry_id: eventCategoryId,
+      payload: { core, signature: "c2lnbmF0dXJl" },
+    });
+    const event = log[log.length - 1]!;
+    const derived = deriveEntry(log, eventCategoryId, { now: at });
+    expect(derived.entry["expires_at"]).toBeNull();
+    await submitEntry(store.db, {
+      events: [event],
+      entry: derived.entry,
+      sidecar: derived.sidecar,
+      derivedThroughSeq: event.seq,
+      captures: [],
+    });
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  /** The three windowed entries, oldest expiry first. */
+  function inExpiryOrder(): Array<{ id: string; expires_at: string }> {
+    return ["2026-01-01", "2026-02-01", "2026-03-01"].map((day) => ({
+      id: idFor.get(day)!,
+      expires_at: expiryOf.get(idFor.get(day)!)!,
+    }));
+  }
+
+  it("gives back the windowed entries in expiry order, and nothing else", async () => {
+    const due = await staleDue(store.db, { today: "2030-01-01", limit: 10 });
+    expect(due).toEqual(inExpiryOrder());
+    // The event category has no window, so it is not in the index and never due.
+    expect(due.map((row) => row.id)).not.toContain(eventCategoryId);
+  });
+
+  it("counts the expiry day itself as still fresh", async () => {
+    const order = inExpiryOrder();
+    // Strictly before, matching derivation: the expiry date is day 90 and the
+    // entry goes stale on day 91.
+    const onTheDay = await staleDue(store.db, {
+      today: order[0]!.expires_at,
+      limit: 10,
+    });
+    expect(onTheDay).toEqual([]);
+
+    const nextOne = await staleDue(store.db, {
+      today: order[1]!.expires_at,
+      limit: 10,
+    });
+    expect(nextOne).toEqual([order[0]]);
+  });
+
+  it("honours the caller's limit and pages on by keyset", async () => {
+    const order = inExpiryOrder();
+
+    const first = await staleDue(store.db, { today: "2030-01-01", limit: 2 });
+    expect(first).toEqual(order.slice(0, 2));
+
+    const next = await staleDue(store.db, {
+      today: "2030-01-01",
+      limit: 2,
+      afterExpiresAt: first[first.length - 1]!.expires_at,
+      afterId: first[first.length - 1]!.id,
+    });
+    expect(next).toEqual(order.slice(2));
+
+    const past = await staleDue(store.db, {
+      today: "2030-01-01",
+      limit: 2,
+      afterExpiresAt: next[next.length - 1]!.expires_at,
+      afterId: next[next.length - 1]!.id,
+    });
+    expect(past).toEqual([]);
+  });
+
+  it("drops an entry once its stale column says the sweep has had it", async () => {
+    const order = inExpiryOrder();
+    await store.db
+      .prepare(`UPDATE entries SET stale = 1 WHERE id = ?`)
+      .bind(order[0]!.id)
+      .run();
+
+    expect(await staleDue(store.db, { today: "2030-01-01", limit: 10 })).toEqual(
+      order.slice(1),
+    );
+
+    await store.db
+      .prepare(`UPDATE entries SET stale = 0 WHERE id = ?`)
+      .bind(order[0]!.id)
+      .run();
+    expect(
+      await staleDue(store.db, { today: "2030-01-01", limit: 10 }),
+    ).toHaveLength(3);
+  });
+});
+
+/**
+ * The same database with one statement broken, so a batch fails where it is
+ * applied rather than where it is built. The writers below seal their own event,
+ * so a caller cannot hand them a broken run; this is how the write still gets to
+ * fail after the events are checked, which is where atomicity has to hold.
+ */
+function brokenEntryWrite(db: D1Like): D1Like {
+  return {
+    prepare(sql: string): D1LikeStatement {
+      return db.prepare(sql.replace("INSERT INTO entries (", "INSERT INTO no_such_table ("));
+    },
+    batch: (statements) => db.batch(statements),
+    exec: (statement) => db.exec(statement),
+  };
+}
+
+/**
+ * Supersession and reconfirmation, in their own database.
+ *
+ * Section 7, "Freshness and decay": a superseding entry names its target in its
+ * own signed core, and the old entry's superseded-by pointer is derived from it,
+ * so verifying the superseder is the moment the target's row changes too — both
+ * rows or neither. And reconfirmation "advances the derived last-confirmed date,
+ * reopens the freshness window, and collects the bounty that built up while the
+ * entry was stale", so the bounty and the event that earned it land together.
+ */
+describe("supersession and reconfirmation writes", () => {
+  const AUTHOR = "1F916:6PmY_Rl-vJoqcBTdMBoMbLZLc0nUqYHpXK0dK7hM8kQ";
+  const SUBJECT = "kestrel/kestrel-4";
+  const AT = "2026-09-08T12:00:00.000Z";
+  const RECONFIRMER = "harrier.example";
+
+  let store: TestDatabase;
+  let log: Event[] = [];
+  let targetId: string;
+  let supersederId: string;
+  let secondSupersederId: string;
+
+  async function submit(
+    overrides: { claim: string; supersedes: string | null; at: string },
+  ): Promise<string> {
+    const core = await buildSubmittedCore(
+      {
+        subject: SUBJECT,
+        category: "pricing",
+        claim: overrides.claim,
+        before: "$25 per seat per month",
+        after: "$30 per seat per month",
+        effective_at: "2026-09-01",
+        citation: "https://kestrel.example/pricing-4",
+        snapshot_hash: `sha256:${"8a".repeat(32)}`,
+        supersedes: overrides.supersedes,
+        author: AUTHOR,
+      },
+      { now: overrides.at },
+    );
+    const id = core["id"] as string;
+    log = await appendEvent(log, {
+      at: overrides.at,
+      type: "entry_submitted",
+      entry_id: id,
+      payload: { core, signature: "c2lnbmF0dXJl" },
+    });
+    const event = log[log.length - 1]!;
+    const derived = deriveEntry(log, id, { now: overrides.at });
+    await submitEntry(store.db, {
+      events: [event],
+      entry: derived.entry,
+      sidecar: derived.sidecar,
+      derivedThroughSeq: event.seq,
+      captures: [],
+    });
+    return id;
+  }
+
+  function approver(operator: string): ApproverRecord {
+    return {
+      agent: `1F916:agent-${operator}`,
+      operator,
+      decision: "approve",
+      reason: null,
+      snapshot_hash: `sha256:${"8a".repeat(32)}`,
+      assigned_random: true,
+      test_accepted: null,
+      reproduction: null,
+      observation: null,
+      signed_at: AT,
+    };
+  }
+
+  function reconfirmationRecord(): {
+    agent: string;
+    operator: string;
+    snapshot_hash: string;
+    reproduction: null;
+    observation: null;
+    signed_at: string;
+  } {
+    return {
+      agent: `1F916:agent-${RECONFIRMER}`,
+      operator: RECONFIRMER,
+      snapshot_hash: `sha256:${"9b".repeat(32)}`,
+      reproduction: null,
+      observation: null,
+      signed_at: AT,
+    };
+  }
+
+  /** Rederive one entry from everything the store holds for it, plus `extra`. */
+  async function rederive(
+    id: string,
+    extra: readonly Event[],
+  ): Promise<ReturnType<typeof deriveEntry>> {
+    const events = await eventsForEntry(store.db, id);
+    return deriveEntry([...events, ...extra], id, { now: AT });
+  }
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+    targetId = await submit({
+      claim: "Kestrel-4 seat pricing is $25 per seat per month",
+      supersedes: null,
+      at: AT,
+    });
+    supersederId = await submit({
+      claim: "Kestrel-4 seat pricing rose to $30 per seat per month",
+      supersedes: targetId,
+      at: "2026-09-08T13:00:00.000Z",
+    });
+    secondSupersederId = await submit({
+      claim: "Kestrel-4 seat pricing rose to $35 per seat per month",
+      supersedes: targetId,
+      at: "2026-09-08T14:00:00.000Z",
+    });
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  it("finds the entries that declare they supersede one, in submission order", async () => {
+    expect(await supersedersOf(store.db, targetId, 10)).toEqual([
+      supersederId,
+      secondSupersederId,
+    ]);
+    // The caller's own limit, and nothing beyond it.
+    expect(await supersedersOf(store.db, targetId, 1)).toEqual([supersederId]);
+    // An entry nothing points at, and one that supersedes rather than is
+    // superseded.
+    expect(await supersedersOf(store.db, supersederId, 10)).toEqual([]);
+    expect(await supersedersOf(store.db, "nmk_01NOTHERE", 10)).toEqual([]);
+  });
+
+  it("writes the superseded target's row in the same batch as the validation", async () => {
+    const targetBefore = (await getEntry(store.db, targetId))!;
+    const supersederBefore = (await getEntry(store.db, supersederId))!;
+
+    const event = await recordValidation(store.db, {
+      event: {
+        at: AT,
+        type: "validation",
+        entry_id: supersederId,
+        payload: { record: approver("op_one.example"), signature: "c2lnbmF0dXJl" },
+      },
+      stored: (validation) => ({
+        entry: supersederBefore.entry,
+        sidecar: supersederBefore.sidecar,
+        derivedThroughSeq: validation.seq,
+      }),
+      // The target, rederived by the caller at the same log position. Nothing
+      // in storage derives it: `also` only carries the row across.
+      also: (validation) => [
+        {
+          entry: targetBefore.entry,
+          sidecar: targetBefore.sidecar,
+          derivedThroughSeq: validation.seq,
+        },
+      ],
+      answeredAssignmentSeq: null,
+    });
+
+    const target = (await getEntry(store.db, targetId))!;
+    const superseder = (await getEntry(store.db, supersederId))!;
+    expect(target.derivedThroughSeq).toBe(event.seq);
+    expect(superseder.derivedThroughSeq).toBe(event.seq);
+    // Each row keeps its own submitted_seq: submitted_seq is the position of
+    // that entry's own submission, not of the event that rewrote the row.
+    expect(target.submittedSeq).toBe(targetBefore.submittedSeq);
+    expect(superseder.submittedSeq).toBe(supersederBefore.submittedSeq);
+    expect(target.submittedSeq).not.toBe(superseder.submittedSeq);
+  });
+
+  it("appends the reconfirmation, stores the entry, and accrues no bounty on a fresh entry", async () => {
+    const before = await eventsForEntry(store.db, targetId);
+    let derived: ReturnType<typeof deriveEntry> | null = null;
+
+    const event = await recordReconfirmation(store.db, {
+      event: {
+        at: AT,
+        type: "reconfirmation",
+        entry_id: targetId,
+        payload: { record: reconfirmationRecord(), signature: "c2lnbmF0dXJl" },
+      },
+      stored: (reconfirmation) => {
+        derived = deriveEntry([...before, reconfirmation], targetId, { now: AT });
+        return {
+          entry: derived.entry,
+          sidecar: derived.sidecar,
+          derivedThroughSeq: reconfirmation.seq,
+        };
+      },
+      // Inside its window, so nothing was withheld and nothing is owed.
+      bounty: (reconfirmation) =>
+        bountyAccrual({ expires_at: "2026-12-07", stale: false }, reconfirmation),
+    });
+
+    expect(await eventBySeq(store.db, event.seq)).toEqual(event);
+    expect(await headSeq(store.db)).toBe(event.seq);
+    expect(await verifyChain(await eventsInRange(store.db, 0, event.seq))).toEqual({
+      ok: true,
+      length: event.seq + 1,
+    });
+
+    const stored = (await getEntry(store.db, targetId))!;
+    expect(stored.entry).toEqual(derived!.entry);
+    expect(stored.derivedThroughSeq).toBe(event.seq);
+    expect(stored.entry["reconfirmations"]).toHaveLength(1);
+    expect(await bountiesForEntry(store.db, targetId, 10)).toEqual([]);
+  });
+
+  it("writes the bounty in the same batch when the entry had gone stale", async () => {
+    const before = await eventsForEntry(store.db, targetId);
+    let accrued: ReturnType<typeof bountyAccrual> = null;
+
+    const event = await recordReconfirmation(store.db, {
+      event: {
+        at: AT,
+        type: "reconfirmation",
+        entry_id: targetId,
+        payload: { record: reconfirmationRecord(), signature: "c2lnbmF0dXJl" },
+      },
+      stored: (reconfirmation) => {
+        const derived = deriveEntry([...before, reconfirmation], targetId, {
+          now: AT,
+        });
+        return {
+          entry: derived.entry,
+          sidecar: derived.sidecar,
+          derivedThroughSeq: reconfirmation.seq,
+        };
+      },
+      bounty: (reconfirmation) => {
+        accrued = bountyAccrual(
+          { expires_at: "2026-06-01", stale: true },
+          reconfirmation,
+        );
+        return accrued;
+      },
+    });
+
+    expect(accrued).not.toBeNull();
+    expect(await bountiesForEntry(store.db, targetId, 10)).toEqual([accrued]);
+    // The ledger row keeps the placeholder table's shape (0001_init).
+    const row = await store.db
+      .prepare(`SELECT id, kind, operator_id, seq, created_at FROM ledger`)
+      .first<Record<string, unknown>>();
+    expect(row).toEqual({
+      id: `bounty_accrual:${event.seq}`,
+      kind: "bounty_accrual",
+      operator_id: RECONFIRMER,
+      seq: event.seq,
+      created_at: AT,
+    });
+    // Only this entry's bounties, and only up to the caller's limit.
+    expect(await bountiesForEntry(store.db, supersederId, 10)).toEqual([]);
+    expect(await bountiesForEntry(store.db, targetId, 1)).toHaveLength(1);
+  });
+
+  it("refuses a reconfirmation for an entry with no submission behind it", async () => {
+    const before = await headSeq(store.db);
+    await expect(
+      recordReconfirmation(store.db, {
+        event: {
+          at: AT,
+          type: "reconfirmation",
+          entry_id: "nmk_never_submitted",
+          payload: { record: reconfirmationRecord(), signature: "c2lnbmF0dXJl" },
+        },
+        stored: () => {
+          throw new Error("stored must not be called");
+        },
+        bounty: () => {
+          throw new Error("bounty must not be called");
+        },
+      }),
+    ).rejects.toBeInstanceOf(MissingSubmissionError);
+
+    expect(await headSeq(store.db)).toBe(before);
+  });
+
+  it("leaves no event behind when the entry row cannot be written", async () => {
+    const before = await headSeq(store.db);
+    const bounties = await bountiesForEntry(store.db, targetId, 10);
+    const events = await eventsForEntry(store.db, targetId);
+
+    await expect(
+      recordReconfirmation(brokenEntryWrite(store.db), {
+        event: {
+          at: AT,
+          type: "reconfirmation",
+          entry_id: targetId,
+          payload: { record: reconfirmationRecord(), signature: "c2lnbmF0dXJl" },
+        },
+        stored: (reconfirmation) => {
+          const derived = deriveEntry([...events, reconfirmation], targetId, {
+            now: AT,
+          });
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: reconfirmation.seq,
+          };
+        },
+        bounty: (reconfirmation) =>
+          bountyAccrual({ expires_at: "2026-06-01", stale: true }, reconfirmation),
+      }),
+    ).rejects.toBeTruthy();
+
+    // One write or none: the event, the entry row and the ledger row are one
+    // batch, so a failure in any of them leaves the log exactly as it was.
+    expect(await headSeq(store.db)).toBe(before);
+    expect(await eventsForEntry(store.db, targetId)).toEqual(events);
+    expect(await bountiesForEntry(store.db, targetId, 10)).toEqual(bounties);
   });
 });

@@ -20,6 +20,7 @@
 
 import type { Anchor } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
+import type { BountyAccrual } from "../bounty.js";
 import type { Sidecar } from "../derive.js";
 import { appendEvent, type Event, type EventInput, type EventType } from "../events.js";
 import type { Entry } from "../schema.js";
@@ -321,6 +322,30 @@ function entryField(entry: Entry, field: string): string {
   return value;
 }
 
+/**
+ * A field the schema declares present but nullable — `expires_at` on an
+ * event-category entry, `supersedes` on an entry that supersedes nothing. Absent
+ * is not the same as null and is refused: the schema writes an unused slot as
+ * null, never by leaving it out.
+ */
+function entryNullableField(entry: Entry, field: string): string | null {
+  const value = (entry as Record<string, unknown>)[field];
+  if (value === null) return null;
+  if (typeof value !== "string") {
+    throw new TypeError(`putEntry: entry.${field} must be a string or null`);
+  }
+  return value;
+}
+
+/** A required boolean field on the entry. */
+function entryBooleanField(entry: Entry, field: string): boolean {
+  const value = (entry as Record<string, unknown>)[field];
+  if (typeof value !== "boolean") {
+    throw new TypeError(`putEntry: entry.${field} must be a boolean`);
+  }
+  return value;
+}
+
 /** The position of the entry's submission event. */
 async function submittedSeqOf(db: D1Like, entryId: string): Promise<number> {
   const row = await db
@@ -369,8 +394,9 @@ function entryStatement(
     .prepare(
       `INSERT INTO entries (
          id, subject, category, status, submitted_at, submitted_seq, author,
+         stale, expires_at, supersedes,
          entry_json, sidecar_json, derived_through_seq
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          subject = excluded.subject,
          category = excluded.category,
@@ -378,6 +404,9 @@ function entryStatement(
          submitted_at = excluded.submitted_at,
          submitted_seq = excluded.submitted_seq,
          author = excluded.author,
+         stale = excluded.stale,
+         expires_at = excluded.expires_at,
+         supersedes = excluded.supersedes,
          entry_json = excluded.entry_json,
          sidecar_json = excluded.sidecar_json,
          derived_through_seq = excluded.derived_through_seq`,
@@ -390,6 +419,9 @@ function entryStatement(
       entryField(entry, "submitted_at"),
       submittedSeq,
       entryField(entry, "author"),
+      writeBoolean(entryBooleanField(entry, "stale")),
+      entryNullableField(entry, "expires_at"),
+      entryNullableField(entry, "supersedes"),
       writeJson(entry),
       writeJson(sidecar),
       derivedThroughSeq,
@@ -459,6 +491,95 @@ export async function listEntries(
     .bind(...bindings)
     .all<Row>();
   return rows.results.map(toStoredEntry);
+}
+
+/**
+ * The entries that declare they supersede this one, oldest submission first.
+ *
+ * `supersedes` is part of the signed core — "Id of the earlier entry this one
+ * supersedes, declared by the submitter and checked by validators" — so this
+ * reads what submitters declared, not what derivation concluded. Which of them
+ * actually took effect is derivation's answer (the target's `superseded_by`),
+ * and the rule that picks it lives in src/derive.ts, not here.
+ *
+ * The caller's limit is explicit and there is no default: this module holds no
+ * page size. Served by the partial `entries_supersedes` index
+ * (migrations/0005_freshness.sql).
+ */
+export async function supersedersOf(
+  db: D1Like,
+  entryId: string,
+  limit: number,
+): Promise<string[]> {
+  const rows = await db
+    .prepare(
+      `SELECT id FROM entries WHERE supersedes = ? ORDER BY submitted_seq LIMIT ?`,
+    )
+    .bind(entryId, limit)
+    .all<Row>();
+  return rows.results.map((row) => readText(row, "id"));
+}
+
+/** Where a staleness sweep looks, and where it resumes. */
+export interface StaleDueQuery {
+  /**
+   * The current UTC calendar day, "YYYY-MM-DD" (the schema's `date` format, the
+   * same shape `expires_at` carries). Compared as text, which is chronological
+   * because the format is fixed-width and zero-padded.
+   */
+  readonly today: string;
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+  /** Resume strictly after this (expires_at, id); omit both for the first page. */
+  readonly afterExpiresAt?: string;
+  readonly afterId?: string;
+}
+
+/**
+ * The entries whose freshness window has run out but which are not yet marked
+ * stale.
+ *
+ * Whitepaper Section 7, "Freshness and decay": "Past its window an entry stays
+ * verified but shows as stale." The window closing is a fact about the calendar
+ * rather than an event anyone appends, so something has to walk the entries the
+ * day turned on and rederive them. This is that read.
+ *
+ * Strictly before today, matching derivation: src/derive.ts marks an entry stale
+ * once the current day is past `expires_at`, so the expiry day itself is still
+ * fresh and an entry expiring today is not due. `stale = 0` keeps an entry the
+ * sweep already handled from coming back, and `expires_at IS NOT NULL` leaves
+ * out the event categories, which carry no window and can never go stale.
+ *
+ * Keyset by (expires_at, id), not offset: the caller passes back the last pair
+ * it saw, so a page is an index seek whose cost does not grow with how far in it
+ * is, and an entry rewritten between two pages cannot shift a row across the
+ * boundary. The id breaks the tie between two entries expiring on the same day,
+ * so the order is total and no row is skipped or served twice. Served by the
+ * partial `entries_stale_due` index (migrations/0005_freshness.sql).
+ */
+export async function staleDue(
+  db: D1Like,
+  query: StaleDueQuery,
+): Promise<Array<{ id: string; expires_at: string }>> {
+  const bindings: unknown[] = [query.today];
+  let cursor = "";
+  if (query.afterExpiresAt !== undefined && query.afterId !== undefined) {
+    cursor = "AND (expires_at > ? OR (expires_at = ? AND id > ?)) ";
+    bindings.push(query.afterExpiresAt, query.afterExpiresAt, query.afterId);
+  }
+  bindings.push(query.limit);
+
+  const rows = await db
+    .prepare(
+      `SELECT id, expires_at FROM entries
+       WHERE stale = 0 AND expires_at IS NOT NULL AND expires_at < ? ${cursor}ORDER BY expires_at, id LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    id: readText(row, "id"),
+    expires_at: readText(row, "expires_at"),
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,6 +1245,15 @@ export interface StoredEntryInput {
  * unit, so any agent under the assigned operator answers the assignment; which
  * assignment that is belongs to the caller's rules (src/assign.ts), not to
  * storage.
+ *
+ * `also` is for the entries this one's verification changes besides itself. The
+ * case is supersession: the validation that verifies a superseding entry is the
+ * moment the entry it supersedes acquires a `superseded_by`, and that target's
+ * row has to be rewritten from the same log position, in the same batch, or a
+ * reader between the two writes sees a superseding entry verified and its target
+ * still standing. The caller rederives each of them and hands them in; nothing
+ * here derives a field, and each row keeps its own submitted_seq because
+ * submitted_seq is the position of that entry's own submission.
  */
 export async function recordValidation(
   db: D1Like,
@@ -1131,6 +1261,7 @@ export async function recordValidation(
     readonly event: EventInput<"validation">;
     readonly stored: (event: Event<"validation">) => StoredEntryInput;
     readonly answeredAssignmentSeq: number | null;
+    readonly also?: (event: Event<"validation">) => readonly StoredEntryInput[];
   },
 ): Promise<Event<"validation">> {
   const { event, statements } = await sealOntoHead(db, input.event);
@@ -1148,6 +1279,19 @@ export async function recordValidation(
       stored.derivedThroughSeq,
     ),
   );
+  if (input.also !== undefined) {
+    for (const other of input.also(validation)) {
+      statements.push(
+        entryStatement(
+          db,
+          other.entry,
+          other.sidecar,
+          await submittedSeqOf(db, entryField(other.entry, "id")),
+          other.derivedThroughSeq,
+        ),
+      );
+    }
+  }
   if (input.answeredAssignmentSeq !== null) {
     statements.push(
       db
@@ -1159,6 +1303,106 @@ export async function recordValidation(
   }
   await db.batch(statements);
   return validation;
+}
+
+const LEDGER_COLUMNS = `id, kind, operator_id, seq, created_at, payload_json`;
+
+/** The `kind` a bounty accrual is stored under: the record's own. */
+const BOUNTY_ACCRUAL: BountyAccrual["kind"] = "bounty_accrual";
+
+/**
+ * Record a reconfirmation: append the event, store the entry derived including
+ * it, and write the bounty it collected, atomically.
+ *
+ * The mirror of `recordValidation`, for the same reason: a reconfirmation
+ * advances `last_confirmed`, reopens the window and rotates a read-share slot,
+ * and every one of those is derived, so the entry row has to be recomputed from
+ * a log that already holds this event — which does not exist until it is sealed
+ * onto the head. The caller hands in callbacks rather than values, is given the
+ * sealed event, and returns what derivation made of it. Nothing here derives a
+ * field.
+ *
+ * Whitepaper Section 7, "Freshness and decay": the withheld half of a stale
+ * entry's earnings "builds up on the entry as a reconfirmation bounty, paid to
+ * whoever makes it fresh again". `bounty` returns that record (src/bounty.ts)
+ * when the entry was stale and null when it was not, and it lands in the same
+ * batch as the event that earned it: a ledger row without its reconfirmation
+ * would be a bounty nobody can verify offline, and the event without the row
+ * would be a bounty that was earned and never recorded.
+ *
+ * The row goes into `ledger`, which 0001 declared as a placeholder for the
+ * read-share accounting M21 fills. It keeps that table's shape exactly — an id,
+ * a kind, the operator the row is about, the log position it was produced at,
+ * and the whole record as JSON — so M21 adds to it rather than reshaping it.
+ */
+export async function recordReconfirmation(
+  db: D1Like,
+  input: {
+    readonly event: EventInput<"reconfirmation">;
+    readonly stored: (event: Event<"reconfirmation">) => StoredEntryInput;
+    readonly bounty: (event: Event<"reconfirmation">) => BountyAccrual | null;
+  },
+): Promise<Event<"reconfirmation">> {
+  const { event, statements } = await sealOntoHead(db, input.event);
+  const reconfirmation = event as Event<"reconfirmation">;
+  const entryId = scopedEntryId(reconfirmation);
+  const submittedSeq = await submittedSeqOf(db, entryId);
+
+  const stored = input.stored(reconfirmation);
+  statements.push(
+    entryStatement(
+      db,
+      stored.entry,
+      stored.sidecar,
+      submittedSeq,
+      stored.derivedThroughSeq,
+    ),
+  );
+
+  const accrual = input.bounty(reconfirmation);
+  if (accrual !== null) {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO ledger (${LEDGER_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          `${BOUNTY_ACCRUAL}:${accrual.seq}`,
+          BOUNTY_ACCRUAL,
+          accrual.operator,
+          reconfirmation.seq,
+          reconfirmation.at,
+          writeJson(accrual),
+        ),
+    );
+  }
+  await db.batch(statements);
+  return reconfirmation;
+}
+
+/**
+ * The bounties one entry accrued, oldest first.
+ *
+ * Read through `json_extract` rather than a column of its own: `ledger` is the
+ * placeholder 0001 declared and M21 is the milestone that shapes it, so adding
+ * an entry_id column now would be guessing at that shape a milestone early. The
+ * volume is one row per reconfirmation of one entry, and the caller's limit
+ * bounds it.
+ */
+export async function bountiesForEntry(
+  db: D1Like,
+  entryId: string,
+  limit: number,
+): Promise<BountyAccrual[]> {
+  const rows = await db
+    .prepare(
+      `SELECT payload_json FROM ledger
+       WHERE kind = ? AND json_extract(payload_json, '$.entry_id') = ?
+       ORDER BY seq LIMIT ?`,
+    )
+    .bind(BOUNTY_ACCRUAL, entryId, limit)
+    .all<Row>();
+  return rows.results.map((row) => readJson<BountyAccrual>(row, "payload_json"));
 }
 
 // ---------------------------------------------------------------------------

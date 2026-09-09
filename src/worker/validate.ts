@@ -35,24 +35,19 @@ import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: 
 
 import { openAssignment as openAssignmentOf } from "../assign.js";
 import type { Core } from "../core.js";
-import {
-  agentOperatorsAt,
-  deriveEntry,
-  registeredOperatorsAt,
-} from "../derive.js";
-import type { ApproverRecord, Event, EventType } from "../events.js";
+import { agentOperatorsAt, registeredOperatorsAt } from "../derive.js";
+import type { ApproverRecord, Event } from "../events.js";
 import { checkRecordEvidence } from "../evidence.js";
 import { LIST_PAGE_LIMIT, REQUEST_CLOCK_SKEW_SECONDS } from "../policy.js";
 import { verifyRecordSignature } from "../records.js";
 import { validateEntry, type ValidationError } from "../schema.js";
 import type { D1Like } from "../storage/d1.js";
 import {
-  eventsForEntry,
-  eventsOfType,
   getEntry,
   headSeq,
   listOperators,
   recordValidation,
+  type StoredEntryInput,
 } from "../storage/repository.js";
 import { checkValidation, type OperatorInfo } from "../validate.js";
 import type { Env } from "./env.js";
@@ -64,6 +59,15 @@ import {
   methodNotAllowed,
   refuse,
 } from "./registry.js";
+import { entryWorld, rederive, type EntryWorld } from "./world.js";
+
+/**
+ * Every registry event in the log, in seq order.
+ *
+ * Kept as a re-export because the gathering moved to src/worker/world.ts, where
+ * it sits beside the rest of the event set an entry is derived over.
+ */
+export { registryEvents } from "./world.js";
 
 /**
  * What this route is given besides its bindings: the instant the request is
@@ -88,44 +92,6 @@ const MILLISECONDS_PER_SECOND = 1000;
 // ---------------------------------------------------------------------------
 // The registry read
 // ---------------------------------------------------------------------------
-
-/**
- * The event types that say who is registered, who is trusted, which agent
- * answers for which operator, and what the sealed pool snapshots are. Everything
- * the validation rules and the draw are recomputed from, and nothing else.
- */
-const REGISTRY_EVENT_TYPES: readonly EventType[] = Object.freeze([
-  "operator_registered",
-  "operator_trusted",
-  "operator_untrusted",
-  "agent_bound",
-  "pool_snapshot",
-] as const);
-
-/**
- * Every registry event in the log, in seq order.
- *
- * Read type by type through the (type, seq) index and paged to exhaustion, never
- * as one unbounded scan of the events table: the PoC loaded the whole log into
- * memory and that is exactly what the storage layer exists to prevent. The
- * sweep (src/worker/sweep.ts) reads the same thing through this same function,
- * so the pool a draw is computed against and the registry a validation is judged
- * against can never come from two different readings of the log.
- */
-export async function registryEvents(db: D1Like): Promise<Event[]> {
-  const events: Event[] = [];
-  for (const type of REGISTRY_EVENT_TYPES) {
-    // -1, because eventsOfType reads strictly after: seq 0 is a real position.
-    let after = -1;
-    for (;;) {
-      const page = await eventsOfType(db, type, after, LIST_PAGE_LIMIT);
-      events.push(...page);
-      if (page.length < LIST_PAGE_LIMIT) break;
-      after = page[page.length - 1]!.seq;
-    }
-  }
-  return events.sort((left, right) => left.seq - right.seq);
-}
 
 /**
  * The provider flag for every registered operator, from the operator rows.
@@ -279,6 +245,28 @@ function priorRecordsOf(
 }
 
 /**
+ * The world of the entry this one declares it supersedes, or null when it
+ * declares none or the declared target is not in the log.
+ *
+ * A core naming a target that was never submitted is not a supersession at all
+ * — src/supersede.ts refuses it as `target_missing`, and derivation asks that
+ * question for itself — so there is nothing here to rewrite and nothing to
+ * derive. Gathered before the write because the batch's callbacks are
+ * synchronous.
+ */
+async function supersessionTarget(
+  db: D1Like,
+  declared: string | null,
+): Promise<{ id: string; world: EntryWorld } | null> {
+  if (declared === null) return null;
+  const world = await entryWorld(db, declared);
+  const submitted = world.entryEvents.some(
+    (event) => event.type === "entry_submitted",
+  );
+  return submitted ? { id: declared, world } : null;
+}
+
+/**
  * The derived entry did not validate against the schema.
  *
  * Thrown from inside `recordValidation`'s derivation callback, which runs before
@@ -353,8 +341,11 @@ async function validate(
     return refuse(422, "bad_record_signature");
   }
 
-  const registry = await registryEvents(env.DB);
-  const entryEvents = await eventsForEntry(env.DB, id);
+  // The whole event set this entry is derived over, superseders included, so a
+  // partial read can never drop a `superseded_by` the log already says is there
+  // (src/worker/world.ts).
+  const world = await entryWorld(env.DB, id);
+  const { registry, entryEvents } = world;
   const core = submissionCore(entryEvents, id);
   if (core === null) {
     // Unreachable: an entry row exists only where its submission event does.
@@ -395,8 +386,22 @@ async function validate(
   const answeredAssignmentSeq =
     open !== null && open.operator === record.operator ? open.seq : null;
 
+  // Freshness and decay: the superseding entry "names the superseded entry
+  // inside the new entry's frozen, signed core ... and the old entry's
+  // superseded-by pointer is derived from it". The approvals are the check, so
+  // the target's pointer appears at exactly the decision that verifies this
+  // entry and never earlier. Its world is gathered now, before the write, so the
+  // sync callback below has it in hand; whether it is used at all is decided
+  // there, from what derivation made of this decision.
+  const declared = core["supersedes"];
+  const supersession = await supersessionTarget(
+    env.DB,
+    typeof declared === "string" ? declared : null,
+  );
+
   const at = deps.now.toISOString();
   let derivedEntry: Record<string, unknown> | null = null;
+  let verifiedByThisDecision = false;
   try {
     await recordValidation(env.DB, {
       event: {
@@ -409,17 +414,41 @@ async function validate(
       // is written, so the entry stored is derived from a log that holds this
       // decision, and a schema refusal here leaves the log exactly as it was.
       stored: (event) => {
-        const derived = deriveEntry([...registry, ...entryEvents, event], id, {
-          now: at,
-        });
+        const derived = rederive(world, id, deps.now, [event]);
         const result = validateEntry(derived.entry);
         if (!result.ok) throw new SchemaInvalid(result.errors);
         derivedEntry = derived.entry as Record<string, unknown>;
+        verifiedByThisDecision = derived.derived.status === "verified";
         return {
           entry: derived.entry,
           sidecar: derived.sidecar,
           derivedThroughSeq: event.seq,
         };
+      },
+      // The target of a supersession, rewritten in the same batch. Nothing is
+      // decided here either: the target is rederived over its own world with
+      // this entry's events and this decision folded in, and derivation is what
+      // says whether the pointer is there. A decision that does not verify this
+      // entry leaves the target's row untouched, which is why this is asked
+      // after `stored` has run rather than before.
+      also: (event): readonly StoredEntryInput[] => {
+        if (supersession === null) return [];
+        if (verifiedByThisDecision !== true) return [];
+        const merged: EntryWorld = {
+          registry: supersession.world.registry,
+          entryEvents: supersession.world.entryEvents,
+          superseders: [...supersession.world.superseders, ...entryEvents],
+        };
+        const target = rederive(merged, supersession.id, deps.now, [event]);
+        const result = validateEntry(target.entry);
+        if (!result.ok) throw new SchemaInvalid(result.errors);
+        return [
+          {
+            entry: target.entry,
+            sidecar: target.sidecar,
+            derivedThroughSeq: event.seq,
+          },
+        ];
       },
       answeredAssignmentSeq,
     });

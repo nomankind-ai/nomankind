@@ -11,13 +11,19 @@
  * has seventy-two hours to respond. A miss costs standing, and the next beacon
  * round draws a replacement."
  *
- * Three steps, in the paper's own order. Commit the pool snapshot when the
+ * Four steps. The first three are the paper's own order. Commit the pool
+ * snapshot when the
  * sealed one no longer says what the pool is; close the assignments whose window
  * has run out; then draw for the entries that are owed a draw. The snapshot goes
  * first on purpose: a snapshot committed in this run is later than every beacon
  * round this run can read, so the draw that follows it refuses with
  * `snapshot_after_beacon` and waits for the next run. That refusal is the rule
  * working, not a failure, and the report says so by counting it.
+ *
+ * The fourth step is Section 7's, "Freshness and decay", and it appends nothing
+ * at all: the entries whose freshness window has run out are rewritten from
+ * their own events, because a window closing is a fact about the calendar and
+ * the log rather than an event anyone signs.
  *
  * Nothing here decides anything. Whether a snapshot is owed, whether a draw is
  * owed, who is drawn, which operators are excluded, and when a window has run
@@ -51,18 +57,21 @@ import {
 import { deriveEntry, type EntryStatus } from "../derive.js";
 import type { Event } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
+import { validateEntry } from "../schema.js";
 import {
   agentsForOperator,
   dueAssignments,
   eventsForEntry,
+  getEntry,
   listEntries,
   putEntry,
   recordAssignment,
   recordAssignmentMissed,
   recordPoolSnapshot,
+  staleDue,
 } from "../storage/repository.js";
 import type { Env } from "./env.js";
-import { registryEvents } from "./validate.js";
+import { entryWorld, rederive, registryEvents } from "./world.js";
 
 /** What the sweep is given in place of the world: the instant, and the beacon. */
 export interface SweepDeps {
@@ -108,6 +117,11 @@ export interface SweepReport {
   } | null;
   readonly missed: readonly SweepMiss[];
   readonly drawn: readonly SweepDraw[];
+  /**
+   * The entries this run rewrote because their freshness window had run out.
+   * Ids only: no event is appended, so there is no position to report.
+   */
+  readonly staled: readonly string[];
   /** One count per reason nothing was done, keyed by the reason's own name. */
   readonly skipped: Readonly<Record<string, number>>;
 }
@@ -291,5 +305,70 @@ export async function runSweep(
     afterSubmittedSeq = page[page.length - 1]!.submittedSeq;
   }
 
-  return { at, snapshot, missed, drawn, skipped };
+  // (d) Staleness. Whitepaper Section 7, "Freshness and decay": past its window
+  // an entry stays verified but shows as stale. Nobody appends an event for
+  // that — the window closing is a fact about the calendar and about the log,
+  // and derivation already computes it — so this step appends nothing. It finds
+  // the rows the day turned on and rewrites them from their own events, which
+  // is what makes the stored copy agree with what a reader deriving for
+  // themselves would get.
+  //
+  // The rederivation goes through the entry's whole world (src/worker/world.ts)
+  // rather than its own events alone, because a superseded entry can also go
+  // stale, and reading it without its superseders would drop the
+  // `superseded_by` the log says is there.
+  const staled: string[] = [];
+  const today = at.slice(0, 10);
+  let afterExpiresAt: string | undefined;
+  let afterId: string | undefined;
+  for (;;) {
+    const page = await staleDue(
+      db,
+      afterExpiresAt === undefined || afterId === undefined
+        ? { today, limit: LIST_PAGE_LIMIT }
+        : { today, limit: LIST_PAGE_LIMIT, afterExpiresAt, afterId },
+    );
+    if (page.length === 0) break;
+
+    for (const due of page) {
+      const world = await entryWorld(db, due.id);
+      const derived = rederive(world, due.id, deps.now);
+      // The column said the window had run out; derivation is the authority on
+      // whether it actually has. A row that comes back fresh is left alone —
+      // storing it would be storing the column's opinion over the log's — and
+      // the cursor carries past it, so the loop still terminates.
+      if (!derived.derived.stale) {
+        skip("not_stale_on_rederive");
+        continue;
+      }
+      // A rewrite is a write, so the whole derived entry goes past the
+      // published schema first, exactly as the two write doors do it before
+      // they store anything. A refusal is counted like any other rule rather
+      // than thrown — the run carries on — and, as with a row that came back
+      // fresh, the cursor carries past the row it refused, so the loop still
+      // terminates.
+      if (!validateEntry(derived.entry).ok) {
+        skip("schema_invalid");
+        continue;
+      }
+      // The entry is stored at the position it was already derived through: no
+      // event was appended, so the log has not moved.
+      const stored = await getEntry(db, due.id);
+      await putEntry(
+        db,
+        derived.entry,
+        derived.sidecar,
+        stored?.derivedThroughSeq ?? headPosition(world.entryEvents),
+      );
+      staled.push(due.id);
+    }
+
+    // Keyset, always advanced past the page just read. A row this run rewrote
+    // leaves the index, so resuming from the start would be right too; resuming
+    // from the cursor is what keeps a row it skipped from coming back forever.
+    afterExpiresAt = page[page.length - 1]!.expires_at;
+    afterId = page[page.length - 1]!.id;
+  }
+
+  return { at, snapshot, missed, drawn, staled, skipped };
 }
