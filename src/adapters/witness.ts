@@ -223,6 +223,14 @@ const CONFLICT = 409;
 /** The status a ranged read answers when it really returned a tail. */
 const PARTIAL_CONTENT = 206;
 
+/**
+ * The status a suffix range answers when the file is smaller than the range.
+ * raw.githubusercontent.com does this rather than sending the whole file: on
+ * 2026-09-09 two of the three pinned files were under the tail (227,928 and
+ * 141,875 bytes against a 262,144-byte tail) and answered 416.
+ */
+const RANGE_NOT_SATISFIABLE = 416;
+
 /** The consistency field a witness line carries when it really checked one. */
 const VERIFIED_FROM = "verified from";
 
@@ -354,8 +362,9 @@ export interface RegistryWitnessOptions {
  * the three steps a countersignature has to survive before it is worth
  * offering: the pin still matches the directory, our event is provably a leaf
  * under a head the registry signed, and a pinned witness signed that head (or
- * an earlier one, bridged by a consistency proof). Everything is verified here
- * as well as by the rule, because an unverifiable claim is not worth storing.
+ * another head of the same log, on either side of it, bridged by a consistency
+ * proof). Everything is verified here as well as by the rule, because an
+ * unverifiable claim is not worth storing.
  */
 export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
   readonly kind = "registry";
@@ -823,23 +832,37 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
    *
    * The files are append-only and already hundreds of kilobytes, so only the
    * tail is read; on a 206 the first line is whatever the range landed inside
-   * of and is dropped unparsed. Lines for other logs, and lines that refuse
-   * (any status but "countersigned", or a first observation rather than a
-   * verified consistency) are exactly the lines this must not return: a first
-   * observation attests nothing about what came before it, which is the whole
-   * guarantee being borrowed.
+   * of and is dropped unparsed. A file smaller than the tail is not a tail at
+   * all: raw.githubusercontent.com answers 416 rather than sending what it has,
+   * so that file is read again without a range and every line of it is whole.
+   * Lines for other logs, and lines that refuse (any status but
+   * "countersigned", or a first observation rather than a verified consistency)
+   * are exactly the lines this must not return: a first observation attests
+   * nothing about what came before it, which is the whole guarantee being
+   * borrowed.
    */
   async #newestLine(
     witness: WitnessPin,
     proof: CheckedProof,
   ): Promise<CheckedLine | null> {
-    const response = await this.#call(witness.url, {
+    const ranged = await this.#call(witness.url, {
       method: "GET",
       headers: {
         "user-agent": USER_AGENT,
         range: `bytes=-${this.#tailBytes}`,
       },
     });
+    if (ranged === null) return null;
+
+    // A 416 means the file is shorter than the tail asked for, so ask for the
+    // file itself; anything else it answers is the answer.
+    const response =
+      ranged.status === RANGE_NOT_SATISFIABLE
+        ? await this.#call(witness.url, {
+            method: "GET",
+            headers: { "user-agent": USER_AGENT },
+          })
+        : ranged;
     if (response === null || !response.ok) return null;
 
     let text: string;
@@ -907,17 +930,30 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
     if (registrySig === null || witnessSig === null) return null;
     if (!isHex64(root)) return null;
 
-    // The head has to cover our leaf and cannot be ahead of the head the
-    // inclusion proof was fetched against: there is no proof bridging forward.
-    if (treeSize <= proof.leafIndex || treeSize > proof.treeSize) return null;
+    // The head has to cover our leaf, and that is the whole test: whether it
+    // sits before or after the head the inclusion proof was fetched against is
+    // the bridge's business, and in production it is almost always after.
+    if (treeSize <= proof.leafIndex) return null;
 
     return { treeSize, root, createdAt, registrySig, witnessSig, consistency };
   }
 
   /**
-   * The consistency path from the countersigned head to the head the inclusion
-   * proof was fetched against, empty when they are the same head, and null when
-   * the two cannot be bridged.
+   * The consistency path between the countersigned head and the head the
+   * inclusion proof was fetched against, empty when they are the same head, and
+   * null when the two cannot be bridged.
+   *
+   * Which way the bridge runs is read off the two sizes, never assumed. The
+   * registry answers an inclusion proof under the *earliest* checkpoint that
+   * covers the event, while a witness countersigns whatever head is current when
+   * it runs, so in production the countersigned head is the later of the two and
+   * the bridge runs forward from the proof's head to it. The endpoint only ever
+   * proves the smaller tree into the larger (it requires `0 <= from <= to`), so
+   * asking it the other way round is not a refusal to work with — it is a
+   * question it cannot answer.
+   *
+   * Both heads it answers with are checked against the roots already held, so a
+   * proof of some other pair of heads is not mistaken for a proof of this one.
    */
   async #bridge(
     line: CheckedLine,
@@ -927,26 +963,34 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
       return line.root === proof.root ? [] : null;
     }
 
+    const forward = line.treeSize > proof.treeSize;
+    const fromSize = forward ? proof.treeSize : line.treeSize;
+    const fromRoot = forward ? proof.root : line.root;
+    const toSize = forward ? line.treeSize : proof.treeSize;
+    const toRoot = forward ? line.root : proof.root;
+
     const body = objectOf(
       await this.#json(
         `${this.#origin}/api/checkpoint/consistency` +
           `?log=${encodeURIComponent(this.#log)}` +
-          `&from=${line.treeSize}&to=${proof.treeSize}`,
+          `&from=${fromSize}&to=${toSize}`,
       ),
     );
     if (body === null) return null;
 
     const from = objectOf(body["from"]);
-    if (from === null || from["root"] !== line.root) return null;
+    const to = objectOf(body["to"]);
+    if (from === null || from["root"] !== fromRoot) return null;
+    if (to === null || to["root"] !== toRoot) return null;
 
     const path = hexPathOf(body["proof"]);
     if (path === null) return null;
 
     const consistent = await verifyRegistryConsistency({
-      fromSize: line.treeSize,
-      fromRoot: line.root,
-      toSize: proof.treeSize,
-      toRoot: proof.root,
+      fromSize,
+      fromRoot,
+      toSize,
+      toRoot,
       path,
     });
     return consistent ? path : null;

@@ -481,6 +481,27 @@ describe("checkWitnesses, the registry form", () => {
     ).toEqual({ ok: false, reason: "bad_signature", agent: alpha.agent });
   });
 
+  it("refuses a bridge between what is one and the same head", async () => {
+    // The countersigned head *is* the head the inclusion proof was fetched
+    // against, so there is nothing to bridge. A path presented anyway proves
+    // some other pair of heads, and an unchecked one is a place to hide it: the
+    // rule asks for the path to be empty exactly when the heads are equal.
+    const alpha = await makeParty("alpha");
+    const bridged = registryFixture<{ proof: string[] }>(
+      "consistency-identity_events-89-9128.json",
+    ).proof;
+    const entry = await countersignHead(alpha, CAPTURED_HEAD, {
+      ...CAPTURED_EVIDENCE,
+      consistency_proof: bridged,
+    });
+
+    expect(
+      await checkWitnesses(SEAL_HASH, [entry], context(pin(alpha), ["nomankind"], {
+        registry: PINNED_REGISTRY,
+      })),
+    ).toEqual({ ok: false, reason: "bad_evidence", agent: alpha.agent });
+  });
+
   it("refuses a registry-form signature carrying no evidence", async () => {
     const alpha = await makeParty("alpha");
     const entry = await countersignHead(alpha, CAPTURED_HEAD, CAPTURED_EVIDENCE);
@@ -597,10 +618,21 @@ describe("checkWitnesses, a head bridged to a later one", () => {
   const LATE_SIZE = 20;
   const OUR_LEAF = 5;
 
-  async function build(): Promise<{
+  /** A head neither side of the bridge is: 16 leaves, between the two. */
+  const MIDDLE_SIZE = 16;
+
+  async function build(forward = false): Promise<{
     head: RegistryHead;
     evidence: WitnessEvidence;
     registry: { origin: string; public_key: string };
+    /** The log itself, for the tests that need a third head of it. */
+    leaves: string[];
+    /** The registry's own signature over any head, for the same reason. */
+    sign: (
+      tree_size: number,
+      root: string,
+      created_at: number,
+    ) => Promise<string>;
   }> {
     const registryKeys = await generateKeypair();
     const registryKey = base64urlEncode(
@@ -631,29 +663,53 @@ describe("checkWitnesses, a head bridged to a later one", () => {
         ),
       );
 
+    const early = {
+      tree_size: EARLY_SIZE,
+      root: earlyRoot,
+      created_at: SEALED_AT,
+      registry_sig: await sign(EARLY_SIZE, earlyRoot, SEALED_AT),
+    };
+    const late = {
+      tree_size: LATE_SIZE,
+      root: lateRoot,
+      created_at: SEALED_AT + 1,
+      registry_sig: await sign(LATE_SIZE, lateRoot, SEALED_AT + 1),
+    };
+
+    // The countersigned head is the early one by default, and the late one when
+    // the bridge runs forward — production's case, because the registry answers
+    // an inclusion proof under the earliest head that covers the leaf. Either
+    // way the inclusion is proved against the *other* head, and the one
+    // consistency proof between the two closes the gap.
+    const countersigned = forward ? late : early;
+    const proved = forward ? early : late;
+
     return {
       head: {
         registry: ORIGIN,
         log: LOG,
-        tree_size: EARLY_SIZE,
-        root: earlyRoot,
-        created_at: SEALED_AT,
-        registry_sig: await sign(EARLY_SIZE, earlyRoot, SEALED_AT),
+        tree_size: countersigned.tree_size,
+        root: countersigned.root,
+        created_at: countersigned.created_at,
+        registry_sig: countersigned.registry_sig,
       },
       evidence: {
-        consistency: `verified from ${EARLY_SIZE - 1}`,
+        consistency: `verified from ${countersigned.tree_size - 1}`,
         leaf_index: OUR_LEAF,
         event_hash: eventHashes[OUR_LEAF]!,
-        proof: await pathOf(leaves, OUR_LEAF),
-        proved_at: {
-          tree_size: LATE_SIZE,
-          root: lateRoot,
-          created_at: SEALED_AT + 1,
-          registry_sig: await sign(LATE_SIZE, lateRoot, SEALED_AT + 1),
-        },
-        consistency_proof: await consistencyOf(leaves, EARLY_SIZE),
+        proof: await pathOf(
+          leaves.slice(0, proved.tree_size),
+          OUR_LEAF,
+        ),
+        proved_at: proved,
+        consistency_proof: await consistencyOf(
+          leaves.slice(0, LATE_SIZE),
+          EARLY_SIZE,
+        ),
       },
       registry: { origin: ORIGIN, public_key: registryKey },
+      leaves,
+      sign,
     };
   }
 
@@ -702,6 +758,125 @@ describe("checkWitnesses, a head bridged to a later one", () => {
           await countersignHead(alpha, head, {
             ...evidence,
             proved_at: { ...evidence.proved_at, root: flipped },
+          }),
+        ],
+        context(pin(alpha), ["nomankind"], { registry }),
+      ),
+    ).toEqual({ ok: false, reason: "bad_evidence", agent: alpha.agent });
+  });
+
+  // -------------------------------------------------------------------------
+  // The other direction, which is the one production is actually in: the
+  // registry answers the inclusion proof under the earliest head that covers
+  // the leaf, and the witness countersigned a head later than that.
+  // -------------------------------------------------------------------------
+
+  it("accepts a countersigned head later than the head the proof was fetched at", async () => {
+    const alpha = await makeParty("alpha");
+    const { head, evidence, registry } = await build(true);
+
+    expect(head.tree_size).toBeGreaterThan(evidence.proved_at.tree_size);
+    expect(
+      await checkWitnesses(
+        SEAL_HASH,
+        [await countersignHead(alpha, head, evidence)],
+        context(pin(alpha), ["nomankind"], { registry }),
+      ),
+    ).toEqual({ ok: true, witnesses: [{ agent: alpha.agent, operator: "alpha" }] });
+  });
+
+  it("refuses a forward bridge with no consistency proof at all", async () => {
+    const alpha = await makeParty("alpha");
+    const { head, evidence, registry } = await build(true);
+
+    expect(
+      await checkWitnesses(
+        SEAL_HASH,
+        [
+          await countersignHead(alpha, head, {
+            ...evidence,
+            consistency_proof: [],
+          }),
+        ],
+        context(pin(alpha), ["nomankind"], { registry }),
+      ),
+    ).toEqual({ ok: false, reason: "bad_evidence", agent: alpha.agent });
+  });
+
+  it("refuses a forward bridge whose path does not fold", async () => {
+    const alpha = await makeParty("alpha");
+    const { head, evidence, registry } = await build(true);
+
+    expect(
+      await checkWitnesses(
+        SEAL_HASH,
+        [
+          await countersignHead(alpha, head, {
+            ...evidence,
+            // The right shape and the wrong hashes.
+            consistency_proof: evidence.consistency_proof.map(() =>
+              "0".repeat(64),
+            ),
+          }),
+        ],
+        context(pin(alpha), ["nomankind"], { registry }),
+      ),
+    ).toEqual({ ok: false, reason: "bad_evidence", agent: alpha.agent });
+  });
+
+  it("refuses a bridge that folds and lands on another root than the head's", async () => {
+    const alpha = await makeParty("alpha");
+    const { head, evidence, registry, leaves, sign } = await build(true);
+
+    // A head signed and countersigned in good order, and a bridge that really
+    // does fold — onto the root of a third head, not this one's. Folding is not
+    // the test; landing on the countersigned root is.
+    const otherRoot = await rootOf(leaves.slice(0, MIDDLE_SIZE));
+    expect(otherRoot).not.toBe(head.root);
+    const substituted: RegistryHead = {
+      ...head,
+      root: otherRoot,
+      registry_sig: await sign(head.tree_size, otherRoot, head.created_at),
+    };
+
+    expect(
+      await checkWitnesses(
+        SEAL_HASH,
+        [await countersignHead(alpha, substituted, evidence)],
+        context(pin(alpha), ["nomankind"], { registry }),
+      ),
+    ).toEqual({ ok: false, reason: "bad_evidence", agent: alpha.agent });
+  });
+
+  it("refuses a countersigned head that does not cover our leaf", async () => {
+    const alpha = await makeParty("alpha");
+    const { head, evidence, registry } = await build(true);
+
+    expect(
+      await checkWitnesses(
+        SEAL_HASH,
+        [
+          await countersignHead(alpha, head, {
+            ...evidence,
+            leaf_index: head.tree_size,
+          }),
+        ],
+        context(pin(alpha), ["nomankind"], { registry }),
+      ),
+    ).toEqual({ ok: false, reason: "bad_evidence", agent: alpha.agent });
+  });
+
+  it("refuses a forward-bridged first observation", async () => {
+    const alpha = await makeParty("alpha");
+    const { head, evidence, registry } = await build(true);
+
+    expect(
+      await checkWitnesses(
+        SEAL_HASH,
+        [
+          await countersignHead(alpha, head, {
+            ...evidence,
+            consistency: "first observation",
           }),
         ],
         context(pin(alpha), ["nomankind"], { registry }),
