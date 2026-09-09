@@ -171,8 +171,8 @@ describe("wrangler.jsonc routes and hostnames", () => {
    * public, so it is a var; the two secrets that go with it are never in this
    * file, and this pins that they are not.
    */
-  it("leaves production's sealing handle empty until the citizen is registered", () => {
-    expect(config.env.production.vars.SEALING_AGENT_HANDLE).toBe("");
+  it("pins production's sealing handle to the registered citizen", () => {
+    expect(config.env.production.vars.SEALING_AGENT_HANDLE).toBe("nomankind");
     // Local and demo run the mock witness set and have no registry track, so
     // they carry no handle at all.
     expect(config.vars.SEALING_AGENT_HANDLE).toBeUndefined();
