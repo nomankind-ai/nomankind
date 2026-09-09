@@ -15,6 +15,8 @@
  * on exactly one request header and in nothing this module ever gives back.
  */
 
+import { readFileSync } from "node:fs";
+
 import { beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -41,7 +43,9 @@ import {
 import { REGISTRY, WITNESS_PIN } from "../src/policy.js";
 import {
   registryCheckpointPayload,
+  registryLeafHash,
   registryWitnessPayload,
+  verifyRegistryInclusion,
 } from "../src/registry-proof.js";
 import type { Seal } from "../src/seal.js";
 import { checkWitnesses, signWitness } from "../src/witness.js";
@@ -66,6 +70,16 @@ const FINGERPRINT = "ab".repeat(32);
 const SIZE = 8;
 const LEAF_INDEX = 3;
 const EVENT_ID = 103;
+
+/**
+ * The row id the registry's seals table gave the same seal. A different number
+ * from the identity event's, because it is a different thing: reading it as an
+ * event id is the defect this file's newer tests pin down.
+ */
+const SEAL_ROW_ID = 4281;
+
+/** The leaf a proof for any other event answers with: unrelated to ours. */
+const OTHER_LEAF_INDEX = 1;
 
 /** A key pair in every form the wire and the adapter want it in. */
 interface TestKey {
@@ -165,9 +179,40 @@ interface FakeOptions {
   directory?: { id: number; public_key: string }[];
   files?: Record<string, string>;
   seal?: { status: number; body: unknown };
-  seals?: unknown;
+  /** The citizen record, defaulting to one that lists our `memory.seal` event. */
+  record?: unknown;
+  /** The citizen record per `events_since` page, for the paging test. */
+  recordPages?: Record<string, unknown>;
   /** Whether the directory endpoint answers at all. */
   witnessesStatus?: number;
+}
+
+/** Our `memory.seal` identity event, as the citizen record lists it. */
+function sealEvent(): Record<string, unknown> {
+  return {
+    id: EVENT_ID,
+    kind: "memory.seal",
+    detail: `label='${LABEL}' sha256=${FINGERPRINT}, signed by thumbprint`,
+    created_at: 1788922500000,
+    prev_hash: eventHashes[LEAF_INDEX - 1],
+    hash: eventHashes[LEAF_INDEX],
+    leaf_index: LEAF_INDEX,
+    proof: [],
+  };
+}
+
+/** A citizen record listing these events and nothing more to page to. */
+function recordOf(events: readonly Record<string, unknown>[]): unknown {
+  return {
+    handle: HANDLE,
+    events,
+    events_total: events.length,
+    events_returned: events.length,
+    events_has_more: false,
+    // The convenience list names the registry's own seal row, which is exactly
+    // the id that must never be read as an identity event id.
+    seals: [{ id: SEAL_ROW_ID, hash: FINGERPRINT, label: LABEL }],
+  };
 }
 
 interface FakeCall {
@@ -224,26 +269,28 @@ async function fakeRegistry(options: FakeOptions = {}): Promise<{
     const url = new URL(raw);
 
     if (url.origin === ORIGIN && url.pathname === "/api/seal") {
+      // The registry's own shape: the seal row's id, and the anchoring identity
+      // event named by its hash under `chained` and by nothing else.
       const answer = options.seal ?? {
         status: 200,
         body: {
-          seal: { id: 7, hash: FINGERPRINT, label: LABEL },
-          event: { id: EVENT_ID, hash: eventHashes[LEAF_INDEX] },
+          ok: true,
+          seal: { id: SEAL_ROW_ID, hash: FINGERPRINT, label: LABEL },
+          chained: eventHashes[LEAF_INDEX],
         },
       };
       return json(answer.body, answer.status);
     }
 
-    if (url.origin === ORIGIN && url.pathname === "/api/seals") {
-      return json(
-        options.seals ?? {
-          latest: { id: 999, hash: "ff".repeat(32), label: LABEL },
-          seals: [
-            { id: 12, hash: "11".repeat(32), label: LABEL },
-            { id: EVENT_ID, hash: FINGERPRINT, label: LABEL },
-          ],
-        },
-      );
+    if (url.origin === ORIGIN && url.pathname === `/api/record/${HANDLE}`) {
+      const since = url.searchParams.get("events_since");
+      if (options.recordPages !== undefined) {
+        const page = options.recordPages[since ?? ""];
+        return page === undefined
+          ? json({ error: "not found" }, 404)
+          : json(page);
+      }
+      return json(options.record ?? recordOf([sealEvent()]));
     }
 
     if (url.origin === ORIGIN && url.pathname === "/api/witnesses") {
@@ -253,15 +300,20 @@ async function fakeRegistry(options: FakeOptions = {}): Promise<{
     }
 
     if (url.origin === ORIGIN && url.pathname === "/api/proof") {
+      // A proof endpoint answers about the event it was asked about: ask it for
+      // the seal row's id and it answers some other event entirely, which is
+      // what the production defect did.
+      const asked = Number(url.searchParams.get("event"));
+      const leaf = asked === EVENT_ID ? LEAF_INDEX : OTHER_LEAF_INDEX;
       return json({
         log: url.searchParams.get("log"),
         event: {
-          id: Number(url.searchParams.get("event")),
-          hash: eventHashes[LEAF_INDEX],
-          leaf_index: LEAF_INDEX,
+          id: asked,
+          hash: eventHashes[leaf],
+          leaf_index: leaf,
         },
         checkpoint: await checkpointAt(SIZE),
-        proof: await pathOf(leaves, LEAF_INDEX),
+        proof: await pathOf(leaves, leaf),
       });
     }
 
@@ -312,11 +364,25 @@ function sealedSeal(): Seal {
       handle: HANDLE,
       label: LABEL,
       event_id: EVENT_ID,
-      event_hash: null,
+      event_hash: eventHashes[LEAF_INDEX]!,
       receipt: null,
       sealed_at: NOW.toISOString(),
     },
   };
+}
+
+/**
+ * The same seal as production's seal 0 kept it: the registry's seal row id where
+ * the identity event id belongs, and no chain hash at all.
+ */
+function sealWithSealRowId(): Seal {
+  const seal = sealedSeal();
+  seal.registry = {
+    ...seal.registry!,
+    event_id: SEAL_ROW_ID,
+    event_hash: null,
+  };
+  return seal;
 }
 
 function adapterWith(fetchFn: typeof fetch, tailBytes?: number) {
@@ -486,9 +552,15 @@ describe("RegistryWitnessAdapter.seal", () => {
     expect(sealed!.event_hash).toBe(eventHashes[LEAF_INDEX]);
     expect(sealed!.sealed_at).toBe(NOW.toISOString());
     expect(sealed!.receipt).toEqual({
-      seal: { id: 7, hash: FINGERPRINT, label: LABEL },
-      event: { id: EVENT_ID, hash: eventHashes[LEAF_INDEX] },
+      ok: true,
+      seal: { id: SEAL_ROW_ID, hash: FINGERPRINT, label: LABEL },
+      chained: eventHashes[LEAF_INDEX],
     });
+    // The response's own id is the seal row's, and it is never stored as one.
+    expect(sealed!.event_id).not.toBe(SEAL_ROW_ID);
+    expect(
+      calls.some((call) => call.url.includes(`/api/record/${HANDLE}`)),
+    ).toBe(true);
 
     const post = calls.find((call) => call.url.endsWith("/api/seal"))!;
     expect(post.method).toBe("POST");
@@ -513,30 +585,97 @@ describe("RegistryWitnessAdapter.seal", () => {
     ).toBe(true);
   });
 
-  it("resolves a 409 through the seal listing", async () => {
+  it("resolves a 409 through the citizen record, by fingerprint", async () => {
     const { fetch, calls } = await fakeRegistry({
       seal: { status: 409, body: { error: "already_sealed" } },
     });
     const sealed = await adapterWith(fetch).seal(sealedSeal(), NOW);
 
     expect(sealed).not.toBeNull();
+    // The conflict body names neither the event nor its hash, so both come from
+    // the record: the event whose detail names our fingerprint.
     expect(sealed!.event_id).toBe(EVENT_ID);
-    // The listing names the seal row, not the chain hash, so it stays null
-    // rather than being guessed at.
-    expect(sealed!.event_hash).toBeNull();
+    expect(sealed!.event_hash).toBe(eventHashes[LEAF_INDEX]);
     expect(sealed!.receipt).toEqual({ error: "already_sealed" });
     expect(
-      calls.some((call) => call.url.includes("/api/seals?citizen=")),
+      calls.some((call) => call.url.includes(`/api/record/${HANDLE}`)),
     ).toBe(true);
   });
 
-  it("resolves a 200 that names no event id the same way", async () => {
+  it("never matches a memory.seal event under another label", async () => {
+    // The same fingerprint sealed under someone else's label is someone else's
+    // event, and a 409 leaves only the `detail` to tell them apart.
+    const otherLabel = {
+      ...sealEvent(),
+      id: 4444,
+      detail: `label='another-label' sha256=${FINGERPRINT}, signed by thumbprint`,
+      hash: eventHashes[OTHER_LEAF_INDEX],
+      leaf_index: OTHER_LEAF_INDEX,
+    };
+    const conflict = { status: 409, body: { error: "already_sealed" } };
+
     const { fetch } = await fakeRegistry({
-      seal: { status: 200, body: { seal: { hash: FINGERPRINT } } },
+      seal: conflict,
+      record: recordOf([otherLabel]),
+    });
+    const sealed = await adapterWith(fetch).seal(sealedSeal(), NOW);
+    expect(sealed).not.toBeNull();
+    expect(sealed!.event_id).toBeNull();
+    expect(sealed!.event_hash).toBeNull();
+
+    // Ours listed beside it is the one that is taken.
+    const { fetch: both } = await fakeRegistry({
+      seal: conflict,
+      record: recordOf([otherLabel, sealEvent()]),
+    });
+    const resolved = await adapterWith(both).seal(sealedSeal(), NOW);
+    expect(resolved!.event_id).toBe(EVENT_ID);
+    expect(resolved!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+  });
+
+  it("resolves a 200 that names no event the same way", async () => {
+    const { fetch } = await fakeRegistry({
+      seal: { status: 200, body: { seal: { id: SEAL_ROW_ID, hash: FINGERPRINT } } },
     });
     const sealed = await adapterWith(fetch).seal(sealedSeal(), NOW);
     expect(sealed!.event_id).toBe(EVENT_ID);
-    expect(sealed!.event_hash).toBeNull();
+    expect(sealed!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+  });
+
+  it("keeps the chained hash and no id when the record has not listed it", async () => {
+    const { fetch } = await fakeRegistry({
+      // A record with the key-bind event and no seal event yet.
+      record: recordOf([
+        { id: 88, kind: "key-bind", detail: "Ed25519 key bound", hash: eventHashes[0] },
+      ]),
+    });
+    const sealed = await adapterWith(fetch).seal(sealedSeal(), NOW);
+
+    expect(sealed).not.toBeNull();
+    // Null, never the seal row id: the witness step resolves it on a later run.
+    expect(sealed!.event_id).toBeNull();
+    expect(sealed!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+  });
+
+  it("pages the record's events with the parameter the route publishes", async () => {
+    const filler = Array.from({ length: 3 }, (_, index) => ({
+      id: 80 + index,
+      kind: "key-bind",
+      detail: "Ed25519 key bound",
+      hash: eventHashes[index],
+    }));
+    const { fetch, calls } = await fakeRegistry({
+      recordPages: {
+        "": { ...(recordOf(filler) as object), events_has_more: true },
+        "82": recordOf([sealEvent()]),
+      },
+    });
+    const sealed = await adapterWith(fetch).seal(sealedSeal(), NOW);
+
+    expect(sealed!.event_id).toBe(EVENT_ID);
+    expect(
+      calls.some((call) => call.url.endsWith("?events_since=82")),
+    ).toBe(true);
   });
 
   it("answers null when the registry refuses, and leaks no credential", async () => {
@@ -709,6 +848,387 @@ describe("RegistryWitnessAdapter.collect", () => {
     expect(signatures.map((entry) => entry.agent)).toEqual([
       AGENT_ID_PREFIX + alpha.publicKey,
     ]);
+  });
+});
+
+describe("RegistryWitnessAdapter.heal", () => {
+  it("re-resolves a record that kept the registry's seal row id", async () => {
+    const { fetch, calls } = await fakeRegistry({ files: await witnessFiles() });
+    const healed = await adapterWith(fetch).heal(sealWithSealRowId());
+
+    expect(healed).not.toBeNull();
+    expect(healed!.event_id).toBe(EVENT_ID);
+    expect(healed!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+    // Everything else the record carried is kept: this corrects a reading, it
+    // does not re-seal anything.
+    expect(healed!.registry).toBe(ORIGIN);
+    expect(healed!.handle).toBe(HANDLE);
+    expect(healed!.label).toBe(LABEL);
+    expect(healed!.sealed_at).toBe(NOW.toISOString());
+    expect(
+      calls.some((call) => call.url.includes(`/api/record/${HANDLE}`)),
+    ).toBe(true);
+  });
+
+  it("answers null for a record that already names the identity event", async () => {
+    const { fetch } = await fakeRegistry();
+    expect(await adapterWith(fetch).heal(sealedSeal())).toBeNull();
+  });
+
+  it("answers null rather than overwriting when the record cannot be read", async () => {
+    const seal = sealWithSealRowId();
+    const { fetch } = await fakeRegistry({
+      record: { events: "not a list" },
+    });
+    expect(await adapterWith(fetch).heal(seal)).toBeNull();
+
+    const dead = (async () => {
+      throw new TypeError("network down");
+    }) as unknown as typeof fetch;
+    expect(await adapterWith(dead).heal(seal)).toBeNull();
+  });
+
+  it("answers null when there is no registry record at all", async () => {
+    const seal = sealedSeal();
+    seal.registry = null;
+    const { fetch, calls } = await fakeRegistry();
+    expect(await adapterWith(fetch).heal(seal)).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("re-resolves a stored id whose own proof is not the stored hash", async () => {
+    // A record naming an id and a hash that do not belong together is not
+    // believed because it named both: the proof for the id has to *be* that
+    // event, and the seal row's proof is another event entirely.
+    const seal = sealedSeal();
+    seal.registry = {
+      ...seal.registry!,
+      event_id: SEAL_ROW_ID,
+      event_hash: eventHashes[LEAF_INDEX]!,
+    };
+
+    const { fetch } = await fakeRegistry({ files: await witnessFiles() });
+    const healed = await adapterWith(fetch).heal(seal);
+    expect(healed).not.toBeNull();
+    expect(healed!.event_id).toBe(EVENT_ID);
+    expect(healed!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+
+    // And nothing is countersigned against the proof that id answers with.
+    const signatures = await adapterWith(fetch).collect(seal, NOW);
+    expect(signatures).toHaveLength(2);
+    for (const signature of signatures) {
+      expect(signature.evidence!.leaf_index).toBe(LEAF_INDEX);
+      expect(signature.evidence!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+    }
+    expect((await checkWitnesses(SEAL_HASH, signatures, testContext())).ok).toBe(
+      true,
+    );
+  });
+
+  it("collects against the re-resolved event, never the seal row's", async () => {
+    const { fetch, calls } = await fakeRegistry({ files: await witnessFiles() });
+    const signatures = await adapterWith(fetch).collect(
+      sealWithSealRowId(),
+      NOW,
+    );
+
+    expect(signatures).toHaveLength(2);
+    for (const signature of signatures) {
+      expect(signature.evidence!.leaf_index).toBe(LEAF_INDEX);
+      expect(signature.evidence!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+      // The proof the seal row id answers with is another event's, and no
+      // evidence ever carries it.
+      expect(signature.evidence!.event_hash).not.toBe(
+        eventHashes[OTHER_LEAF_INDEX],
+      );
+    }
+    const check = await checkWitnesses(SEAL_HASH, signatures, testContext());
+    expect(check.ok).toBe(true);
+
+    // The wrong proof was asked for once, and its answer was refused; the leaf
+    // that was used came from the record.
+    expect(calls.some((call) => call.url.includes(`&event=${EVENT_ID}`))).toBe(
+      true,
+    );
+  });
+
+  it("collects nothing when the record cannot name the event", async () => {
+    const { fetch } = await fakeRegistry({
+      files: await witnessFiles(),
+      record: recordOf([]),
+    });
+    expect(await adapterWith(fetch).collect(sealWithSealRowId(), NOW)).toEqual(
+      [],
+    );
+  });
+});
+
+/**
+ * The same fix against production's own wire.
+ *
+ * Everything here comes out of test/fixtures/registry: the citizen record of
+ * `nomankind` and the two proofs — the identity event that really anchors
+ * production seal 0, and the unrelated August event the stored seal row id asks
+ * for. The registry key is the pinned one, so the checkpoint signatures are
+ * checked exactly as production checks them, and nothing is generated.
+ */
+describe("the registry's identity event (production seal 0)", () => {
+  const fixture = (name: string): unknown =>
+    JSON.parse(
+      readFileSync(new URL(`./fixtures/registry/${name}`, import.meta.url), "utf8"),
+    );
+
+  const PRODUCTION_HANDLE = "nomankind";
+  const PRODUCTION_FINGERPRINT =
+    "a61ae671cdb6f7579a0decfc9ea56f3ac3c472298017c233d6108a0619c922d6";
+  /** The `memory.seal` identity event that anchors it, from the record. */
+  const ANCHOR_EVENT_ID = 9888;
+  const ANCHOR_EVENT_HASH =
+    "3eb4ad8a83b598f9625286f419288f75949c8655c1e458f87b2f0a5f8f188ab7";
+  const ANCHOR_LEAF_INDEX = 9873;
+  /** The registry's seal row id, which is what was stored in its place. */
+  const PRODUCTION_SEAL_ROW_ID = 4281;
+  const WRONG_EVENT_HASH =
+    "38b5f3cb351da58a5422b54bac6791d5ca63a5596b307a47b36609a3d31235b8";
+
+  /** The three captured responses, and the POST the registry answers with. */
+  function productionRegistry(record: unknown = fixture("record-nomankind.json")): {
+    fetch: typeof fetch;
+    asked: string[];
+  } {
+    const asked: string[] = [];
+    const fetchFn = async function (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> {
+      const raw = String(input);
+      asked.push(raw);
+      const url = new URL(raw);
+      const json = (body: unknown, status = 200): Response =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+
+      if (url.pathname === "/api/seal" && init?.method === "POST") {
+        // The registry names the seal row under `id` and the identity event it
+        // chained under `chained`, and no identity event id anywhere.
+        return json({
+          ok: true,
+          id: PRODUCTION_SEAL_ROW_ID,
+          hash: PRODUCTION_FINGERPRINT,
+          label: REGISTRY.seal_label,
+          chained: ANCHOR_EVENT_HASH,
+        });
+      }
+      if (url.pathname === `/api/record/${PRODUCTION_HANDLE}`) {
+        return json(record);
+      }
+      if (url.pathname === "/api/proof") {
+        const event = url.searchParams.get("event");
+        if (event === String(ANCHOR_EVENT_ID)) {
+          return json(fixture("proof-identity_events-9888.json"));
+        }
+        if (event === String(PRODUCTION_SEAL_ROW_ID)) {
+          return json(fixture("proof-identity_events-4281.json"));
+        }
+        return json({ error: "not found" }, 404);
+      }
+      return new Response("not found", { status: 404 });
+    } as unknown as typeof fetch;
+    return { fetch: fetchFn, asked };
+  }
+
+  function productionAdapter(fetchFn: typeof fetch): RegistryWitnessAdapter {
+    return new RegistryWitnessAdapter({
+      fetch: fetchFn,
+      handle: PRODUCTION_HANDLE,
+      credential: CREDENTIAL,
+      privateKeyPkcs8: sealingKey.pkcs8,
+    });
+  }
+
+  /** Production seal 0, as its fingerprint says it is. */
+  function productionSeal(registry: {
+    event_id: number | null;
+    event_hash: string | null;
+  }): Seal {
+    return {
+      seq: 0,
+      first_seq: 0,
+      last_seq: 0,
+      size: 1,
+      root: `sha256:${"cd".repeat(32)}`,
+      sealed_at: NOW.toISOString(),
+      prev_hash: null,
+      hash: `sha256:${PRODUCTION_FINGERPRINT}`,
+      witnesses: [],
+      registry: {
+        registry: REGISTRY.origin,
+        handle: PRODUCTION_HANDLE,
+        label: REGISTRY.seal_label,
+        receipt: null,
+        sealed_at: NOW.toISOString(),
+        ...registry,
+      },
+    };
+  }
+
+  it("stores the event the record names, not the seal row the response does", async () => {
+    const { fetch } = productionRegistry();
+    const sealed = await productionAdapter(fetch).seal(
+      productionSeal({ event_id: null, event_hash: null }),
+      NOW,
+    );
+
+    expect(sealed).not.toBeNull();
+    expect(sealed!.event_id).toBe(ANCHOR_EVENT_ID);
+    expect(sealed!.event_hash).toBe(ANCHOR_EVENT_HASH);
+    expect(sealed!.event_id).not.toBe(PRODUCTION_SEAL_ROW_ID);
+  });
+
+  it("stores no id at all when the record has not listed the event", async () => {
+    const record = fixture("record-nomankind.json") as {
+      events: { kind: string }[];
+    };
+    const { fetch } = productionRegistry({
+      ...record,
+      events: record.events.filter((event) => event.kind !== "memory.seal"),
+    });
+    const sealed = await productionAdapter(fetch).seal(
+      productionSeal({ event_id: null, event_hash: null }),
+      NOW,
+    );
+
+    expect(sealed!.event_id).toBeNull();
+    // The chained hash is still worth keeping: it is what the next run resolves
+    // the id by.
+    expect(sealed!.event_hash).toBe(ANCHOR_EVENT_HASH);
+  });
+
+  it("heals the stored record production really has", async () => {
+    const { fetch } = productionRegistry();
+    const healed = await productionAdapter(fetch).heal(
+      productionSeal({ event_id: PRODUCTION_SEAL_ROW_ID, event_hash: null }),
+    );
+
+    expect(healed).not.toBeNull();
+    expect(healed!.event_id).toBe(ANCHOR_EVENT_ID);
+    expect(healed!.event_hash).toBe(ANCHOR_EVENT_HASH);
+    // Never the event the seal row id's own proof answers with.
+    expect(healed!.event_hash).not.toBe(WRONG_EVENT_HASH);
+  });
+
+  it("heals a stored record that kept the chained hash and no id", async () => {
+    const { fetch } = productionRegistry();
+    const healed = await productionAdapter(fetch).heal(
+      productionSeal({ event_id: null, event_hash: ANCHOR_EVENT_HASH }),
+    );
+    expect(healed!.event_id).toBe(ANCHOR_EVENT_ID);
+    expect(healed!.event_hash).toBe(ANCHOR_EVENT_HASH);
+  });
+
+  it("answers null once the stored record is the healed one", async () => {
+    const { fetch, asked } = productionRegistry();
+    const healed = await productionAdapter(fetch).heal(
+      productionSeal({
+        event_id: ANCHOR_EVENT_ID,
+        event_hash: ANCHOR_EVENT_HASH,
+      }),
+    );
+    expect(healed).toBeNull();
+    // Believed on the strength of its own proof: the record is not even read.
+    expect(asked.some((url) => url.includes("/api/record/"))).toBe(false);
+  });
+
+  it("heals a stored id that came with the anchoring hash beside it", async () => {
+    // The pairing production would have stored had the response named an event
+    // id as well: the id is the seal row's, the hash is the right event's, and
+    // the proof for the id says they are not the same event.
+    const { fetch } = productionRegistry();
+    const healed = await productionAdapter(fetch).heal(
+      productionSeal({
+        event_id: PRODUCTION_SEAL_ROW_ID,
+        event_hash: ANCHOR_EVENT_HASH,
+      }),
+    );
+    expect(healed).not.toBeNull();
+    expect(healed!.event_id).toBe(ANCHOR_EVENT_ID);
+    expect(healed!.event_hash).toBe(ANCHOR_EVENT_HASH);
+  });
+
+  it("verifies the right event's proof against its checkpoint root", async () => {
+    const proof = fixture("proof-identity_events-9888.json") as {
+      event: { id: number; hash: string; leaf_index: number };
+      checkpoint: { tree_size: number; root: string; sig: string; created_at: number };
+      proof: string[];
+    };
+    expect(proof.event.id).toBe(ANCHOR_EVENT_ID);
+    expect(proof.event.hash).toBe(ANCHOR_EVENT_HASH);
+    expect(proof.event.leaf_index).toBe(ANCHOR_LEAF_INDEX);
+
+    // The pinned registry key signed the head the proof was fetched against.
+    expect(
+      await verifyBytes(
+        base64urlDecode(REGISTRY.public_key),
+        registryCheckpointPayload({
+          log: REGISTRY.log,
+          tree_size: proof.checkpoint.tree_size,
+          root: proof.checkpoint.root,
+          created_at: proof.checkpoint.created_at,
+        }),
+        base64urlDecode(proof.checkpoint.sig),
+      ),
+    ).toBe(true);
+
+    expect(
+      await verifyRegistryInclusion({
+        leafHash: await registryLeafHash(proof.event.hash),
+        leafIndex: proof.event.leaf_index,
+        treeSize: proof.checkpoint.tree_size,
+        path: proof.proof,
+        root: proof.checkpoint.root,
+      }),
+    ).toBe(true);
+  });
+
+  it("never accepts the seal row id's proof as evidence for this seal", async () => {
+    const wrong = fixture("proof-identity_events-4281.json") as {
+      event: { id: number; hash: string; leaf_index: number };
+      checkpoint: { tree_size: number; root: string };
+      proof: string[];
+    };
+    const right = fixture("proof-identity_events-9888.json") as {
+      checkpoint: { tree_size: number; root: string };
+    };
+
+    // What the stored seal row id asks for: another citizen's August event,
+    // under a head 5,606 leaves behind ours.
+    expect(wrong.event.id).toBe(PRODUCTION_SEAL_ROW_ID);
+    expect(wrong.event.hash).toBe(WRONG_EVENT_HASH);
+    expect(wrong.event.leaf_index).toBe(4266);
+    expect(wrong.checkpoint.tree_size).toBeLessThan(right.checkpoint.tree_size);
+
+    // Its leaf folds to its own root and to no other, so no countersignature of
+    // our head could ever cover it.
+    expect(
+      await verifyRegistryInclusion({
+        leafHash: await registryLeafHash(wrong.event.hash),
+        leafIndex: wrong.event.leaf_index,
+        treeSize: wrong.checkpoint.tree_size,
+        path: wrong.proof,
+        root: right.checkpoint.root,
+      }),
+    ).toBe(false);
+
+    // And the adapter, handed that record, resolves past it rather than using it.
+    const { fetch } = productionRegistry();
+    const seal = productionSeal({
+      event_id: PRODUCTION_SEAL_ROW_ID,
+      event_hash: null,
+    });
+    const healed = await productionAdapter(fetch).heal(seal);
+    expect(healed!.event_id).toBe(ANCHOR_EVENT_ID);
   });
 });
 

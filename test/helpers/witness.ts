@@ -51,6 +51,12 @@ export interface FakeWitnessOptions {
   readonly signers?: readonly FakeWitness[];
   /** What the registry answers when a fingerprint is submitted. Null by default. */
   readonly registrySeal?: RegistrySeal | null;
+  /**
+   * The corrected record `heal` answers with, or null for a stored record that
+   * needs no correction (and for one the registry cannot correct yet, which is
+   * the same answer: nothing is written).
+   */
+  readonly healed?: RegistrySeal | null;
 }
 
 /**
@@ -67,15 +73,26 @@ export class FakeWitnessAdapter implements EnvironmentWitnessAdapter {
   readonly signers: readonly FakeWitness[];
   /** What `seal` answers. Settable, so a run can find the registry back up. */
   registrySeal: RegistrySeal | null;
+  /** What `heal` answers. Settable, like the receipt, so a run can correct one. */
+  healed: RegistrySeal | null;
   /** The seal seqs whose fingerprint was submitted, in order. */
   readonly sealed: number[] = [];
   /** The seal seqs countersignatures were asked for, in order. */
   readonly collected: number[] = [];
+  /** The seal seqs a correction was asked for, in order. */
+  readonly healedSeqs: number[] = [];
+  /**
+   * The registry record each seal carried when countersignatures were asked
+   * for, so a test can see whether the correction was persisted *before* the
+   * proof was asked for rather than after.
+   */
+  readonly collectedRegistry: (RegistrySeal | null)[] = [];
 
   constructor(options: FakeWitnessOptions = {}) {
     this.kind = options.kind ?? "mock";
     this.signers = options.signers ?? [];
     this.registrySeal = options.registrySeal ?? null;
+    this.healed = options.healed ?? null;
   }
 
   async seal(seal: Seal): Promise<RegistrySeal | null> {
@@ -83,8 +100,19 @@ export class FakeWitnessAdapter implements EnvironmentWitnessAdapter {
     return this.registrySeal;
   }
 
+  /**
+   * The correction the real adapter re-resolves from the citizen record, handed
+   * back from configuration instead: what a test cares about here is that the
+   * sweep asks, and keeps the answer before it asks for a proof.
+   */
+  async heal(seal: Seal): Promise<RegistrySeal | null> {
+    this.healedSeqs.push(seal.seq);
+    return this.healed;
+  }
+
   async collect(seal: Seal): Promise<WitnessSignature[]> {
     this.collected.push(seal.seq);
+    this.collectedRegistry.push(seal.registry);
     const signatures: WitnessSignature[] = [];
     for (const signer of this.signers) {
       signatures.push({
