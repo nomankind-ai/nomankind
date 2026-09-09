@@ -1,0 +1,31 @@
+-- 0008_sync: the running counter is shared by read receipts and sync receipts.
+--
+-- Decision D-022 and the PoC retrospective's DEPLOY-1: migrations are numbered,
+-- forward-only, applied by the deploy workflow with wrangler before the Worker
+-- goes live, and never edited after merge. 0001 through 0007 are closed; this
+-- file adds and never reshapes.
+--
+-- No IF NOT EXISTS: idempotence belongs to the d1_migrations tracking table,
+-- not to the SQL. A migration that ran twice is a bug in the runner, and
+-- IF NOT EXISTS would hide it.
+--
+-- Whitepaper Section 8, "The delta stream" and "Paying for the training path":
+-- a sync response carries one signed receipt covering every delivered entry,
+-- and each delivered verified entry counts as a read. So a sync is paid for on
+-- the reader's terms, and Section 9's accounting has to hold across both: the
+-- counter a receipt carries is one running number over everything nomankind
+-- served, not one per door. Two numbering schemes would let a reader's receipt
+-- and a trainer's receipt both claim the same position in the stream, and the
+-- day's published count could then hide a served entry behind a duplicate.
+--
+-- 0007's receipts_kind_seq is unique on (kind, seq), which is exactly the index
+-- that permits that duplicate: 'read' at 41 and 'sync' at 41 do not collide in
+-- it. This partial index closes it across the two kinds that share the counter,
+-- and stays partial so a later kind of receipt with a numbering of its own can
+-- be added without reshaping anything. The guard is the database's, not the
+-- application's: an isolate cannot see what another is halfway through
+-- inserting, so SELECT MAX(seq) followed by an INSERT is a race however
+-- carefully it is written. The loser's insert fails, and
+-- src/storage/repository.ts turns that failure into ReceiptConflictError so the
+-- caller re-reads the counter and signs again.
+CREATE UNIQUE INDEX receipts_counter ON receipts (seq) WHERE kind IN ('read', 'sync');

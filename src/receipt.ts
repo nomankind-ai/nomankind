@@ -1,5 +1,5 @@
 /**
- * Read receipts, and the day's published count.
+ * Read receipts, sync receipts, and the day's published count.
  *
  * Whitepaper Section 8, "The frozen reader": a read returns "a signed read
  * receipt naming the entry, the time, and a running counter". Section 9, the
@@ -29,6 +29,7 @@ import { base64urlDecode, base64urlEncode } from "./encoding.js";
 import type { EventPayloads, ReadCountRow } from "./events.js";
 import { canonicalize } from "./hash.js";
 import { publicKeyFromAgentId, signBytes, verifyBytes } from "./identity.js";
+import type { SyncReceiptEntry } from "./sync.js";
 
 /**
  * Domain-separation tag for a read receipt. A format constant, not a policy
@@ -125,6 +126,159 @@ export async function verifyReadReceipt(receipt: unknown): Promise<boolean> {
         entry_id,
         entry_hash,
         read_at,
+        counter: counter as number,
+        issuer,
+      }),
+      base64urlDecode(signature),
+    );
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sync receipts
+// ---------------------------------------------------------------------------
+
+/**
+ * Domain-separation tag for a sync receipt. Its own tag, not the read
+ * receipt's: the two cover different fields, and a signature over one must
+ * never be replayable as the other.
+ */
+export const HASH_TAG_SYNC_RECEIPT = "nomankind-sync-receipt-v1";
+
+/**
+ * One signed receipt covering a whole delta-stream response.
+ *
+ * Whitepaper Section 8, "The delta stream": the response carries the new head
+ * and one signed receipt covering every delivered entry. One receipt rather
+ * than one per entry, because a trainer syncing a page of a thousand events is
+ * having one conversation, and a thousand signatures would be a thousand
+ * things to keep and check for a single exchange.
+ *
+ * `from` and `head` are what make the receipt resumable evidence: together they
+ * say exactly which stretch of sealed positions the trainer was served, so two
+ * receipts held side by side show whether anything between them was skipped.
+ * `event_count` is how many events that stretch delivered — filtered items
+ * included, because the trainer was served the page, not the entries — while
+ * `entries` names only the distinct entries it touched. `counter` is the same
+ * running counter the read receipt carries, shared across both kinds, so a
+ * trainer and a reader can place their receipts in one stream of everything
+ * nomankind served (Section 9's accounting paragraph).
+ */
+export interface SyncReceipt {
+  /** The sealed position the trainer resumed from. */
+  from: number;
+  /** The sealed head this response leaves the trainer at. */
+  head: number;
+  /** The distinct entries delivered, in first-delivery order. */
+  entries: SyncReceiptEntry[];
+  /** How many events the response delivered. */
+  event_count: number;
+  /** ISO 8601 date-time, from the injected clock. */
+  issued_at: string;
+  /** The running counter, shared with read receipts. */
+  counter: number;
+  /** The signing agent's 1F916 id (D-014: an agent id is its public key). */
+  issuer: string;
+  /** Unpadded base64url, the encoding every other kernel signature uses. */
+  signature: string;
+}
+
+/** A receipt before it is signed: the seven fields the signature covers. */
+export type SyncReceiptFields = Omit<SyncReceipt, "signature">;
+
+/**
+ * The exact bytes an issuer signs: the tag, a newline, and the canonical JSON
+ * of the seven fields.
+ *
+ * The entries are rebuilt field by field rather than passed through, exactly as
+ * the read receipt's five fields are: the signature covers the three fields
+ * that name an entry and its version, and nothing a caller happened to hang off
+ * the objects it handed in.
+ */
+export function syncReceiptSigningBytes(fields: SyncReceiptFields): Uint8Array {
+  const canonical = canonicalize({
+    from: fields.from,
+    head: fields.head,
+    entries: fields.entries.map((entry) => ({
+      entry_id: entry.entry_id,
+      entry_hash: entry.entry_hash,
+      status: entry.status,
+    })),
+    event_count: fields.event_count,
+    issued_at: fields.issued_at,
+    counter: fields.counter,
+    issuer: fields.issuer,
+  });
+  return encoder.encode(`${HASH_TAG_SYNC_RECEIPT}\n${canonical}`);
+}
+
+/** Sign a sync receipt, returning the whole record the trainer is handed. */
+export async function signSyncReceipt(
+  fields: SyncReceiptFields,
+  privateKey: CryptoKey,
+): Promise<SyncReceipt> {
+  const signature = await signBytes(
+    privateKey,
+    syncReceiptSigningBytes(fields),
+  );
+  return { ...fields, signature: base64urlEncode(signature) };
+}
+
+/** Whether a value is one entry of a sync receipt and nothing else. */
+function isSyncReceiptEntry(value: unknown): value is SyncReceiptEntry {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value["entry_id"] === "string" &&
+    typeof value["entry_hash"] === "string" &&
+    typeof value["status"] === "string"
+  );
+}
+
+/**
+ * Verify a sync receipt against the key inside its own `issuer` id.
+ *
+ * Returns false, never throws, on any malformed input, exactly as
+ * `verifyReadReceipt` does: a trainer checking the receipts it kept from last
+ * year's syncs gets a verdict, not an exception.
+ */
+export async function verifySyncReceipt(receipt: unknown): Promise<boolean> {
+  try {
+    if (!isRecord(receipt)) return false;
+    const {
+      from,
+      head,
+      entries,
+      event_count,
+      issued_at,
+      counter,
+      issuer,
+      signature,
+    } = receipt;
+    if (typeof issued_at !== "string" || typeof issuer !== "string") {
+      return false;
+    }
+    if (typeof signature !== "string") return false;
+    if (
+      !Number.isSafeInteger(from) ||
+      !Number.isSafeInteger(head) ||
+      !Number.isSafeInteger(event_count) ||
+      !Number.isSafeInteger(counter)
+    ) {
+      return false;
+    }
+    if (!Array.isArray(entries) || !entries.every(isSyncReceiptEntry)) {
+      return false;
+    }
+    return await verifyBytes(
+      publicKeyFromAgentId(issuer),
+      syncReceiptSigningBytes({
+        from: from as number,
+        head: head as number,
+        entries: entries as SyncReceiptEntry[],
+        event_count: event_count as number,
+        issued_at,
         counter: counter as number,
         issuer,
       }),

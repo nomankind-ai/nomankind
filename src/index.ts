@@ -27,6 +27,7 @@ export * from "./seal.js";
 export * from "./sign.js";
 export * from "./submit.js";
 export * from "./supersede.js";
+export * from "./sync.js";
 export * from "./validate.js";
 export * from "./verify.js";
 export * from "./witness.js";

@@ -151,6 +151,32 @@ export async function entryWorld(
 }
 
 /**
+ * The same world as it stood at one sealed position.
+ *
+ * Whitepaper Section 8, "The delta stream": events are served strictly by
+ * sealed position, so an entry delivered at position p must be described as it
+ * was derived at p and not as it stands now. Two trainers resuming from the
+ * same `from` would otherwise be told different things about the same event,
+ * and neither could reproduce what the other received.
+ *
+ * Every event of the three lists is dropped past `position`; the seal is kept,
+ * because the entry's own seal covers its submission and the submission
+ * precedes every later event, so a seal that exists at all already existed at
+ * any position an event of this entry occupies. Pure: the world handed in is
+ * not touched.
+ */
+export function worldAt(world: EntryWorld, position: number): EntryWorld {
+  const upTo = (events: readonly Event[]): Event[] =>
+    events.filter((event) => event.seq <= position);
+  return {
+    registry: upTo(world.registry),
+    entryEvents: upTo(world.entryEvents),
+    superseders: upTo(world.superseders),
+    seal: world.seal,
+  };
+}
+
+/**
  * Every event in a world, deduplicated by seq and in seq order.
  *
  * Deduplication matters: a superseding entry's own world holds its target's

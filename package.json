@@ -16,6 +16,7 @@
     "read": "npm run build --silent && node dist/cli/read.js",
     "reconfirm": "npm run build --silent && node dist/cli/reconfirm.js",
     "submit": "npm run build --silent && node dist/cli/submit.js",
+    "sync": "npm run build --silent && node dist/cli/sync.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
