@@ -255,10 +255,9 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
             nomankind is a sealed feed of facts about the AI ecosystem, made for
             continual learners. Nothing enters the feed until its source is
             captured and hashed, three independent operators have checked it, and
-            a witnessed seal has dated it. Where a fact can be tested, it was
-            tested; where it cannot, the feed says so. nomankind is a trust
-            layer for inference today, and it aims to be the
-            neutral trust substrate every future AI system draws on.
+            a witnessed seal has dated it. nomankind is a trust layer for
+            inference today, and it aims to be the neutral trust substrate every
+            future AI system draws on.
           </p>
         </div>
         <div class="diagram-panel">
