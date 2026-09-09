@@ -498,8 +498,10 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
    * both together — the seal response carries the chained hash but no identity
    * event id, and the seals listing carries a seal row id and no chain hash. The
    * event is matched by hash when the seal response chained one, and by the
-   * fingerprint its `detail` names when it did not (a 409, whose body names the
-   * conflict and nothing else).
+   * fingerprint *and* the label its `detail` names when it did not (a 409, whose
+   * body names the conflict and nothing else) — both, because the same
+   * fingerprint sealed under a second label is a second event, and the record
+   * this seal names is the one under this seal's label.
    *
    * Paged with the parameter this route publishes, `events_since`, while
    * `events_has_more` says there is more; a record that stops answering, or that
@@ -510,7 +512,10 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
     chained: string | null,
   ): Promise<{ id: number; hash: string } | null> {
     const base = `${this.#origin}/api/record/${encodeURIComponent(this.#handle)}`;
-    const detail = `sha256=${fingerprint}`;
+    // Both halves of what the event's `detail` says about a seal, matched
+    // independently so the registry may spell them in either order.
+    const sealed = `sha256=${fingerprint}`;
+    const labelled = `label='${this.#label}'`;
 
     let since: number | null = null;
     for (let page = 0; page < MAX_RECORD_PAGES; page += 1) {
@@ -532,10 +537,11 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
 
         const hash = event["hash"];
         if (!isHex64(hash)) continue;
+        const detail = stringOf(event["detail"]) ?? "";
         const matched =
           chained !== null
             ? hash === chained
-            : (stringOf(event["detail"]) ?? "").includes(detail);
+            : detail.includes(sealed) && detail.includes(labelled);
         if (matched) return { id, hash };
       }
 

@@ -602,6 +602,37 @@ describe("RegistryWitnessAdapter.seal", () => {
     ).toBe(true);
   });
 
+  it("never matches a memory.seal event under another label", async () => {
+    // The same fingerprint sealed under someone else's label is someone else's
+    // event, and a 409 leaves only the `detail` to tell them apart.
+    const otherLabel = {
+      ...sealEvent(),
+      id: 4444,
+      detail: `label='another-label' sha256=${FINGERPRINT}, signed by thumbprint`,
+      hash: eventHashes[OTHER_LEAF_INDEX],
+      leaf_index: OTHER_LEAF_INDEX,
+    };
+    const conflict = { status: 409, body: { error: "already_sealed" } };
+
+    const { fetch } = await fakeRegistry({
+      seal: conflict,
+      record: recordOf([otherLabel]),
+    });
+    const sealed = await adapterWith(fetch).seal(sealedSeal(), NOW);
+    expect(sealed).not.toBeNull();
+    expect(sealed!.event_id).toBeNull();
+    expect(sealed!.event_hash).toBeNull();
+
+    // Ours listed beside it is the one that is taken.
+    const { fetch: both } = await fakeRegistry({
+      seal: conflict,
+      record: recordOf([otherLabel, sealEvent()]),
+    });
+    const resolved = await adapterWith(both).seal(sealedSeal(), NOW);
+    expect(resolved!.event_id).toBe(EVENT_ID);
+    expect(resolved!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+  });
+
   it("resolves a 200 that names no event the same way", async () => {
     const { fetch } = await fakeRegistry({
       seal: { status: 200, body: { seal: { id: SEAL_ROW_ID, hash: FINGERPRINT } } },
@@ -865,6 +896,35 @@ describe("RegistryWitnessAdapter.heal", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("re-resolves a stored id whose own proof is not the stored hash", async () => {
+    // A record naming an id and a hash that do not belong together is not
+    // believed because it named both: the proof for the id has to *be* that
+    // event, and the seal row's proof is another event entirely.
+    const seal = sealedSeal();
+    seal.registry = {
+      ...seal.registry!,
+      event_id: SEAL_ROW_ID,
+      event_hash: eventHashes[LEAF_INDEX]!,
+    };
+
+    const { fetch } = await fakeRegistry({ files: await witnessFiles() });
+    const healed = await adapterWith(fetch).heal(seal);
+    expect(healed).not.toBeNull();
+    expect(healed!.event_id).toBe(EVENT_ID);
+    expect(healed!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+
+    // And nothing is countersigned against the proof that id answers with.
+    const signatures = await adapterWith(fetch).collect(seal, NOW);
+    expect(signatures).toHaveLength(2);
+    for (const signature of signatures) {
+      expect(signature.evidence!.leaf_index).toBe(LEAF_INDEX);
+      expect(signature.evidence!.event_hash).toBe(eventHashes[LEAF_INDEX]);
+    }
+    expect((await checkWitnesses(SEAL_HASH, signatures, testContext())).ok).toBe(
+      true,
+    );
+  });
+
   it("collects against the re-resolved event, never the seal row's", async () => {
     const { fetch, calls } = await fakeRegistry({ files: await witnessFiles() });
     const signatures = await adapterWith(fetch).collect(
@@ -1079,6 +1139,22 @@ describe("the registry's identity event (production seal 0)", () => {
     expect(healed).toBeNull();
     // Believed on the strength of its own proof: the record is not even read.
     expect(asked.some((url) => url.includes("/api/record/"))).toBe(false);
+  });
+
+  it("heals a stored id that came with the anchoring hash beside it", async () => {
+    // The pairing production would have stored had the response named an event
+    // id as well: the id is the seal row's, the hash is the right event's, and
+    // the proof for the id says they are not the same event.
+    const { fetch } = productionRegistry();
+    const healed = await productionAdapter(fetch).heal(
+      productionSeal({
+        event_id: PRODUCTION_SEAL_ROW_ID,
+        event_hash: ANCHOR_EVENT_HASH,
+      }),
+    );
+    expect(healed).not.toBeNull();
+    expect(healed!.event_id).toBe(ANCHOR_EVENT_ID);
+    expect(healed!.event_hash).toBe(ANCHOR_EVENT_HASH);
   });
 
   it("verifies the right event's proof against its checkpoint root", async () => {
