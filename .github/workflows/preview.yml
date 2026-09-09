@@ -74,12 +74,18 @@ jobs:
         run: |
           set -euo pipefail
           npx wrangler versions upload --env demo --preview-alias "pr-$PR_NUMBER" --message "PR #$PR_NUMBER $HEAD_SHA" 2>&1 | tee upload.log
+          # The version id is the proof the upload landed. A Worker that
+          # implements a Durable Object gets no preview URL from Cloudflare
+          # (decision D-050), so a missing URL is not a failure; a missing
+          # version id is.
+          version_id=$(grep 'Worker Version ID:' upload.log | grep -o '[0-9a-f-]\{36\}' | head -n 1 || true)
           preview_url=$(grep 'Version Preview URL:' upload.log | grep -o 'https://[^[:space:]]*' | head -n 1 || true)
           alias_url=$(grep 'Version Preview Alias URL:' upload.log | grep -o 'https://[^[:space:]]*' | head -n 1 || true)
-          if [ -z "$preview_url" ]; then
-            echo "wrangler printed no version preview URL"
+          if [ -z "$version_id" ]; then
+            echo "wrangler printed no worker version id; the upload did not succeed"
             exit 1
           fi
+          echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
           echo "preview_url=$preview_url" >> "$GITHUB_OUTPUT"
           echo "alias_url=$alias_url" >> "$GITHUB_OUTPUT"
         env:
@@ -94,6 +100,12 @@ jobs:
           short_sha=$(printf '%s' "$HEAD_SHA" | cut -c1-7)
           if [ -n "$MISSING" ]; then
             printf '%s\n\nNo preview for this pull request: %s.\n' "$marker" "$MISSING" > comment.md
+          elif [ -z "$PREVIEW_URL" ]; then
+            {
+              printf '%s\n\n' "$marker"
+              printf 'Demo version `%s` uploaded for `%s`.\n\n' "$VERSION_ID" "$short_sha"
+              printf 'Cloudflare generates no preview URL for a Worker that implements a Durable Object, so this pull request has no preview link.\n'
+            } > comment.md
           else
             {
               printf '%s\n\n' "$marker"
@@ -121,5 +133,6 @@ jobs:
           PR_NUMBER: ${{ github.event.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           MISSING: ${{ steps.probe.outputs.missing }}
+          VERSION_ID: ${{ steps.upload.outputs.version_id }}
           PREVIEW_URL: ${{ steps.upload.outputs.preview_url }}
           ALIAS_URL: ${{ steps.upload.outputs.alias_url }}

@@ -292,9 +292,42 @@ describe("workflow commands", () => {
 
   it("uploads a demo version for previews", () => {
     expect(previewYml).toContain("versions upload --env demo");
+    expect(previewYml).toContain('--preview-alias "pr-$PR_NUMBER"');
     expect(previewYml).toContain(
       "if: github.event.pull_request.head.repo.full_name == github.repository",
     );
+  });
+
+  /**
+   * Decision D-050: the demo Worker implements a Durable Object, and
+   * Cloudflare prints no preview URL for such a Worker. A successful upload
+   * without one is a third green outcome, so the old red path must not creep
+   * back; a failed upload, read as a missing version id, still fails.
+   */
+  it("does not fail a preview upload that printed no preview URL", () => {
+    expect(previewYml).not.toContain("wrangler printed no version preview URL");
+    expect(previewYml).not.toMatch(/no version preview URL[\s\S]{0,80}?exit 1/);
+  });
+
+  it("fails a preview upload that produced no version id", () => {
+    expect(previewYml).toContain("grep 'Worker Version ID:' upload.log");
+    expect(previewYml).toMatch(
+      /if \[ -z "\$version_id" \]; then\n(?: *#[^\n]*\n)* *echo [^\n]*\n *exit 1\n/,
+    );
+    expect(previewYml).toContain("set -euo pipefail");
+  });
+
+  it("comments the version id and the Durable Object reason with no preview URL", () => {
+    const branch = previewYml.indexOf('elif [ -z "$PREVIEW_URL" ]; then');
+    expect(branch).toBeGreaterThan(-1);
+    expect(previewYml).toContain('"$VERSION_ID"');
+    expect(previewYml).toContain("VERSION_ID: ${{ steps.upload.outputs.version_id }}");
+    expect(previewYml).toMatch(
+      /no preview URL for a Worker that implements a Durable Object/,
+    );
+    // The same marker-based upsert still carries all three outcomes.
+    expect(previewYml).toContain("marker='<!-- nomankind-preview -->'");
+    expect(previewYml.indexOf("marker='<!-- nomankind-preview -->'")).toBeLessThan(branch);
   });
 
   it("keeps the required build check in CI", () => {
