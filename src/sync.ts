@@ -38,12 +38,15 @@ import entrySchema from "../schema/nomankind-entry-schema.json" with { type: "js
 import type { EntryStatus } from "./derive.js";
 import type { Event } from "./events.js";
 import type { EvidenceTier } from "./evidence.js";
-import { LIST_PAGE_LIMIT } from "./policy.js";
+import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "./policy.js";
 import { tierSatisfies } from "./read.js";
 
 /** The schema's evidence_tier enum. */
 const EVIDENCE_TIERS: readonly string[] =
   entrySchema.properties.evidence_tier.enum;
+
+/** The schema's domain enum: every registered domain, from the schema itself. */
+const DOMAINS: readonly string[] = entrySchema.properties.domain.enum;
 
 /** Every query parameter a sync may carry, and nothing else. */
 export const SYNC_QUERY_PARAMETERS: readonly string[] = Object.freeze([
@@ -51,6 +54,7 @@ export const SYNC_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "limit",
   "flatten",
   "min_tier",
+  "domain",
 ]);
 
 /** Every reason a sync query can be refused, in the order they are checked. */
@@ -60,6 +64,7 @@ export const SYNC_QUERY_REFUSALS = [
   "bad_limit",
   "bad_flatten",
   "bad_min_tier",
+  "unknown_domain",
 ] as const;
 
 export type SyncQueryRefusal = (typeof SYNC_QUERY_REFUSALS)[number];
@@ -78,6 +83,11 @@ export interface SyncQuery {
   readonly limit: number;
   readonly flatten: boolean;
   readonly min_tier: EvidenceTier | null;
+  /**
+   * The registered domain to stream. Null means every domain, which is what a
+   * trainer replaying the whole log asks for.
+   */
+  readonly domain: string | null;
 }
 
 export type SyncQueryResult =
@@ -140,6 +150,12 @@ export function parseSyncQuery(params: URLSearchParams): SyncQueryResult {
     return { ok: false, refusal: "bad_min_tier" };
   }
 
+  const domain = params.getAll("domain");
+  if (domain.length > 1) return { ok: false, refusal: "unknown_domain" };
+  if (domain.length === 1 && !DOMAINS.includes(domain[0]!)) {
+    return { ok: false, refusal: "unknown_domain" };
+  }
+
   return {
     ok: true,
     query: {
@@ -147,6 +163,7 @@ export function parseSyncQuery(params: URLSearchParams): SyncQueryResult {
       limit: limitValue,
       flatten: flattenValue,
       min_tier: minTier.length === 0 ? null : (minTier[0] as EvidenceTier),
+      domain: domain.length === 0 ? null : (domain[0] as string),
     },
   };
 }
@@ -178,6 +195,11 @@ export function syncItemKind(event: Event): SyncItemKind {
 export interface SyncEntryState {
   readonly status: EntryStatus;
   readonly effective_tier: EvidenceTier | null;
+  /**
+   * The entry's domain, from its signed core (`domainOf`). Absent reads as the
+   * default domain, exactly as a legacy v0.6 core does.
+   */
+  readonly domain?: string;
 }
 
 /**
@@ -205,6 +227,22 @@ export function keepSyncItem(
   state: SyncEntryState | null,
   query: SyncQuery,
 ): boolean {
+  if (kind === "event") return true;
+
+  // The domain filter is the one filter an unlearn is subject to, and for the
+  // reason the others are not: an entry of another domain was never delivered
+  // to this trainer, so being told it was overturned is noise about a fact it
+  // does not hold. The head still advances past both (the caller's job), so a
+  // filtered stream resumes exactly where an unfiltered one would.
+  const demanded = query.domain ?? null;
+  if (
+    demanded !== null &&
+    state !== null &&
+    (state.domain ?? DEFAULT_DOMAIN) !== demanded
+  ) {
+    return false;
+  }
+
   if (kind !== "entry") return true;
   if (state === null) {
     throw new Error("keepSyncItem: an entry item has no derived state");

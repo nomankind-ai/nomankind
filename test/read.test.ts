@@ -23,6 +23,8 @@ import {
   type Sidecar,
 } from "../src/index.js";
 
+import { DEFAULT_DOMAIN } from "../src/policy.js";
+
 const ENTRY_ID = "nmk_0123456789abcdef0123456789abcdef";
 
 function query(search: string): ReturnType<typeof parseReadQuery> {
@@ -93,7 +95,7 @@ describe("parseReadQuery", () => {
     }
   });
 
-  it("names its eight refusals in the order it checks them", () => {
+  it("names its nine refusals in the order it checks them", () => {
     expect(READ_QUERY_REFUSALS).toEqual([
       "unknown_parameter",
       "bad_entry_id",
@@ -101,9 +103,30 @@ describe("parseReadQuery", () => {
       "missing_subject",
       "missing_category",
       "bad_category",
+      "unknown_domain",
       "bad_min_tier",
       "bad_max_age",
     ]);
+  });
+
+  it("takes a domain, and refuses one the schema does not register", () => {
+    const asked = accepted(
+      `subject=openai/gpt-5&category=pricing&domain=${DEFAULT_DOMAIN}`,
+    );
+    expect(asked.by === "subject" && asked.domain).toBe(DEFAULT_DOMAIN);
+
+    for (const bad of ["", "biotech", "Ai-Ecosystem"]) {
+      expect(refusal(`subject=openai/gpt-5&category=pricing&domain=${bad}`)).toBe(
+        "unknown_domain",
+      );
+    }
+    // After bad_category, before bad_min_tier: the first fault wins.
+    expect(refusal("subject=s&category=nope&domain=biotech")).toBe(
+      "bad_category",
+    );
+    expect(
+      refusal("subject=s&category=pricing&domain=biotech&min_tier=gold"),
+    ).toBe("unknown_domain");
   });
 
   it("refuses an unknown parameter before anything else", () => {

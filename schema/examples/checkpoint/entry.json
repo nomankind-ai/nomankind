@@ -1,7 +1,8 @@
 {
-  "id": "nmk_cc64299e1653fd8cac4b819f870274bb",
+  "id": "nmk_0e859abba8813de70b598dc413de7401",
   "subject": "example/demo-model",
   "category": "limit",
+  "domain": "ai-ecosystem",
   "claim": "demo checkpoint seed: example/demo-model request limit is documented at its cited page",
   "before": "demo checkpoint seed: no documented request limit",
   "after": "demo checkpoint seed: the cited page is the documented request limit",
@@ -10,45 +11,53 @@
   "evidence": null,
   "observation": null,
   "citation": "https://example.com/",
-  "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+  "snapshot_hash": "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888",
   "norm_version": "norm-v1.2",
   "supersedes": null,
-  "author": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+  "author": "1F916:wmU1v0hE5PwXklZRhiWp0IX--gJKo-7dcEG66tYZuN8",
   "author_operator": null,
-  "submitted_at": "2026-09-08T21:02:00.831Z",
-  "signature": "lgo0yvYBmvxFz++KCEyuWa9vmK8CORr+ixtowO8B4HUbNaUL0x0mnF6PHYQtFJ552Vm+8aU/64Yf2YFvkMkkAg==",
+  "submitted_at": "2026-09-08T12:00:00.000Z",
+  "signature": "EVHpxtHtEAJWrgspIHxsk3o8hSYHIAMzNaLn6zb59H0AizD4ZfPhAKkQoMnPSti+n0M89hjlPgemahDfsvFFDQ==",
   "approvers": [
     {
-      "agent": "1F916:ZJTlpf93Xr9RNGeixeFbkMbnxz8Mbdb4PGPO9AiCtBc",
+      "agent": "1F916:RYEy26g5ubpH_-mImEstjwa2BVMyCiQJQ40rPnBc6oc",
       "operator": "fixture-a.nomankind.ai",
       "decision": "approve",
       "reason": null,
-      "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+      "snapshot_hash": "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888",
       "assigned_random": false,
       "test_accepted": null,
       "reproduction": null,
       "observation": null,
-      "signed_at": "2026-09-08T21:02:00.831Z"
+      "signed_at": "2026-09-08T12:00:00.000Z"
     },
     {
-      "agent": "1F916:GwNvWtrOr42ZNLbje4GEyJDeVfCi07zOI8B4H9yxRK8",
+      "agent": "1F916:h_MELnKFIESGxSvT_Z7U-Y26Iqk7_Znw0YsjxXq3Ypo",
       "operator": "fixture-b.nomankind.ai",
       "decision": "approve",
       "reason": null,
-      "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+      "snapshot_hash": "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888",
       "assigned_random": false,
       "test_accepted": null,
       "reproduction": null,
       "observation": null,
-      "signed_at": "2026-09-08T21:02:00.831Z"
+      "signed_at": "2026-09-08T12:00:00.000Z"
     }
   ],
   "reconfirmations": [],
   "disputes": [],
   "failure_reports": [],
-  "seal": null,
+  "seal": {
+    "log": "1F916",
+    "inclusion_proof": "{\"index\":9,\"path\":[\"sha256:bb81fc03cdcc8d57a8a2b9310e4bf9de16f19ba92179c499ff30ae52bcebf6b5\",\"sha256:d432227b4dc7180f44d57337f56d6786f4a81561ebf2908da3f8ee1379d4e99a\",\"sha256:5d6956a2efbf75e0f46eba690e6374d3d55c373afe1769a2548ac7e4bf087ac0\",\"sha256:dc57607864523cbcd0c4264f1984528602fe7b90afd05614978f2267c4e755b8\"],\"size\":13}",
+    "position": 9,
+    "witnesses": [
+      "MKsziBt0SVSBinZKadhOqA7iF6R0ZwrI1kD_6x5JOHB7-Ji_2KvbsJASmRUCNPF4qH4atDrm60h_dgM7jW1eCw"
+    ],
+    "sealed_at": "2026-09-08T12:00:00.000Z"
+  },
   "staleness_window_days": 90,
-  "verified_at": "2026-09-08T21:02:00.831Z",
+  "verified_at": "2026-09-08T12:00:00.000Z",
   "last_confirmed": "2026-09-08",
   "expires_at": "2026-12-07",
   "stale": false,

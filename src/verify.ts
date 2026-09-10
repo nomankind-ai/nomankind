@@ -23,7 +23,7 @@
 
 import { openAssignment } from "./assign.js";
 import { buildTranscriptArtifact, transcriptArtifactHash } from "./artifact.js";
-import { CORE_KEYS, extractCore } from "./core.js";
+import { CORE_KEYS, coreVersion, domainOf, extractCore } from "./core.js";
 import { deriveEntry, registeredOperatorsAt } from "./derive.js";
 import { base64Decode } from "./encoding.js";
 import { isTranscriptCategory } from "./evidence.js";
@@ -31,7 +31,7 @@ import { verifyChain, type ApproverRecord, type Event } from "./events.js";
 import { canonicalize } from "./hash.js";
 import { decodeProof, verifyInclusion } from "./merkle.js";
 import { snapshotHash } from "./normalize.js";
-import { NORM_VERSION } from "./policy.js";
+import { DEFAULT_DOMAIN, NORM_VERSION, SCHEMA_VERSION } from "./policy.js";
 import { validateEntry } from "./schema.js";
 import { sealFor, sealsForEntries, verifySeal, type Seal } from "./seal.js";
 import { verifyEntrySignature } from "./sign.js";
@@ -48,7 +48,19 @@ export interface Capture {
 export interface Registry {
   /** Agent id -> its operator. */
   agents: Record<string, string>;
-  operators: Record<string, { maintainer: boolean; provider: boolean }>;
+  operators: Record<
+    string,
+    {
+      maintainer: boolean;
+      provider: boolean;
+      /**
+       * Every domain the operator is attested in (decision D-071). Absent reads
+       * as ai-ecosystem: that is what a registry exported before v0.7 meant, and
+       * what the operator's registration attested to.
+       */
+      domains?: readonly string[];
+    }
+  >;
 }
 
 /** The second file: everything an entry has to be checked against. */
@@ -460,6 +472,7 @@ function checkExclusions(
       operators[operator] = {
         maintainer: registered.maintainers.has(operator),
         provider: known?.provider === true,
+        domains: known?.domains ?? [DEFAULT_DOMAIN],
       };
     }
 
@@ -467,6 +480,7 @@ function checkExclusions(
       submitter,
       agentOperators: bundle.registry.agents,
       operators,
+      domain: domainOf(logCore),
       priorRecords,
       openAssignment: open === null ? null : { operator: open.operator },
     });
@@ -610,7 +624,7 @@ async function checkSnapshot(
     return;
   }
 
-  if (isTranscriptCategory(entry["category"])) {
+  if (isTranscriptCategory(domainOf(entry), entry["category"])) {
     const evidence = entry["evidence"];
     const source = isRecord(evidence) ? evidence : {};
     const artifact = buildTranscriptArtifact(
@@ -789,6 +803,21 @@ async function runChecks(
         error.message,
       );
     }
+  }
+
+  // b (continued). The schema version the entry was sealed under. A core
+  // without `domain` is a v0.6 core: still served, listed and synced exactly as
+  // it always was, but not checkable against v0.7's rules, so the verifier says
+  // which version it checks against rather than pretending -- exactly as
+  // `unsupported_norm_version` does for the normalization rule.
+  if (isRecord(entry) && coreVersion(entry) !== SCHEMA_VERSION) {
+    report.add(
+      "schema",
+      "/domain",
+      "unsupported_schema_version",
+      SCHEMA_VERSION,
+      coreVersion(entry),
+    );
   }
 
   if (!isRecord(entry)) {

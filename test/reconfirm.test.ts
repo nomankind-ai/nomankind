@@ -5,6 +5,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_DOMAIN } from "../src/policy.js";
+
 import {
   RECONFIRMATION_REFUSALS,
   checkReconfirmation,
@@ -80,6 +82,7 @@ function core(overrides: Partial<Record<string, unknown>> = {}): Core {
     id: "nmk_01J8Z9",
     subject: "vendor/model-4",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim: "Input tokens cost two dollars per million.",
     before: null,
     after: null,
@@ -119,6 +122,7 @@ function context(overrides: Partial<ReconfirmationContext> = {}): Reconfirmation
     submitter: { agent: SUBMITTER_AGENT, operator: SUBMITTER_OPERATOR },
     agentOperators: AGENT_OPERATORS,
     trustedOperators: TRUSTED,
+    operatorDomains: [DEFAULT_DOMAIN],
     status: "verified",
     effectiveTier: "stated",
     ...overrides,
@@ -139,6 +143,7 @@ describe("the refusal list", () => {
       "submitter_agent",
       "submitter_operator",
       "untrusted_operator",
+      "operator_not_in_domain",
       "missing_snapshot_hash",
       "unexpected_reproduction",
       "unexpected_observation",
@@ -155,6 +160,31 @@ describe("the refusal list", () => {
 });
 
 describe("who may reconfirm", () => {
+  it("refuses an operator not attested in the entry's domain (D-071)", () => {
+    expect(
+      checkReconfirmation(
+        record(),
+        core(),
+        context({ operatorDomains: ["elsewhere"] }),
+      ),
+    ).toEqual({ ok: false, reason: "operator_not_in_domain" });
+
+    // The same trusted operator, refreshing an entry of a domain it attested
+    // in: being trusted is not being attested everywhere.
+    expect(
+      checkReconfirmation(
+        record(),
+        core({ domain: "elsewhere" }),
+        context({ operatorDomains: ["elsewhere"] }),
+      ).ok,
+    ).toBe(true);
+  });
+
+  it("reads a context that names no domains as the default domain", () => {
+    const { operatorDomains: _absent, ...legacy } = context();
+    expect(checkReconfirmation(record(), core(), legacy).ok).toBe(true);
+  });
+
   it("refuses a draft entry", () => {
     expect(checkReconfirmation(record(), core(), context({ status: "draft" }))).toEqual({
       ok: false,

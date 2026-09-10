@@ -45,9 +45,10 @@ import {
   type ReconfirmationRecord,
 } from "../src/events.js";
 import {
+  DEFAULT_DOMAIN,
   APPROVALS_TO_VERIFY_SMALL_POOL,
   LIST_PAGE_LIMIT,
-  STALENESS_WINDOW_DAYS,
+  stalenessWindowDays,
 } from "../src/policy.js";
 import { signRecord } from "../src/records.js";
 import { txtRecordName } from "../src/registry.js";
@@ -122,7 +123,8 @@ const AT = NOW.toISOString();
 const DAY_MS = 86_400_000;
 
 /** The pricing window, read from the published policy rather than restated. */
-const WINDOW_DAYS = STALENESS_WINDOW_DAYS["pricing"] as number;
+// Decision D-071: the window is the domain's table, not a global one.
+const WINDOW_DAYS = stalenessWindowDays(DEFAULT_DOMAIN, "pricing") as number;
 
 /** The instant `days` after day 0, at the same time of day. */
 function day(days: number): Date {
@@ -271,6 +273,7 @@ function pricing(
   return {
     subject: "kestrel/kestrel-1",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim,
     before: "$35 per seat per month",
     after: "$40 per seat per month",

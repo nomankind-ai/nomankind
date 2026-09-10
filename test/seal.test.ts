@@ -14,6 +14,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_DOMAIN } from "../src/policy.js";
+
 import { CORE_KEYS, type Core } from "../src/core.js";
 import { deriveEntry, type Clock } from "../src/derive.js";
 import { appendEvent, eventHash, type Event } from "../src/events.js";
@@ -62,6 +64,7 @@ function core(overrides: Record<string, unknown>): Core {
     id: DRAFT_ID,
     subject: "openai/gpt-5",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim: "gpt-5 input price is $2.50 per million tokens",
     before: "$3.00 per million input tokens",
     after: "$2.50 per million input tokens",

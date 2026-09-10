@@ -59,15 +59,24 @@ export async function makeAgent(): Promise<TestAgent> {
   return { agentId: agentIdFromPublicKey(raw), privateKey: pair.privateKey };
 }
 
-/** The independence attestation, signed by this agent for this operator. */
+/**
+ * The independence attestation, signed by this agent for this operator.
+ *
+ * `domain` is the registered domain the sentence is for (decision D-071). Left
+ * out, the record carries no domain key at all and reads as ai-ecosystem, which
+ * is exactly what an attestation sealed before v0.7 looks like -- so the tests
+ * written before this milestone keep signing the bytes they always signed.
+ */
 export async function attestFor(
   agent: TestAgent,
   operator: string,
   signedAt: string,
+  domain?: string,
 ): Promise<Attestation> {
   return signAttestation(agent.privateKey, {
     operator,
     agent: agent.agentId,
+    ...(domain === undefined ? {} : { domain }),
     signed_at: signedAt,
   });
 }

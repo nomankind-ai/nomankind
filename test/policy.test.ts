@@ -20,7 +20,9 @@ import {
   FETCH_TIMEOUT_MS,
   HOLDBACK_DAYS,
   LIST_PAGE_LIMIT,
-  MODEL_PROVIDER_DOMAINS,
+  DEFAULT_DOMAIN,
+  DOMAINS,
+  excludedPartyDomains,
   NONCE_RETENTION_SECONDS,
   NORM_VERSION,
   PAYOUT_CYCLE,
@@ -34,8 +36,9 @@ import {
   REPRODUCTION_RUNS,
   SEAL_INTERVAL_MINUTES,
   SEAL_MAX_EVENTS,
+  SCHEMA_VERSION,
   SLOT_COUNT,
-  STALENESS_WINDOW_DAYS,
+  stalenessWindowDays,
   STANDING_ASSIGNMENT_MISSED,
   STANDING_DECAY_PAUSED,
   STANDING_DISPUTE_UPHELD,
@@ -78,7 +81,7 @@ const EXPECTED_POLICY_KEYS = [
   "ASSIGNMENT_WINDOW_HOURS",
   "REPRODUCTION_RUNS",
   "REPRODUCTION_HOLDS",
-  "STALENESS_WINDOW_DAYS",
+  "DOMAINS",
   "HOLDBACK_DAYS",
   "READ_SHARE_SPLIT",
   "SLOT_COUNT",
@@ -109,12 +112,12 @@ const EXPECTED_POLICY_KEYS = [
   "PAYOUT_MINIMUM_MICROS",
   "PAYOUT_CYCLE",
   "NORM_VERSION",
+  "SCHEMA_VERSION",
   "FETCH_MAX_REDIRECTS",
   "FETCH_TIMEOUT_MS",
   "CAPTURE_MAX_BYTES",
   "REQUEST_CLOCK_SKEW_SECONDS",
   "NONCE_RETENTION_SECONDS",
-  "MODEL_PROVIDER_DOMAINS",
   "PROBE_SET_SIZE",
   "PROBE_SET_MIN_CANDIDATES",
   "ATTESTATION_SCORERS",
@@ -146,14 +149,13 @@ describe("policy numbers", () => {
     ).toBe(CONTRIBUTOR_SHARE_PERCENT);
   });
 
-  it("covers every category in the schema enum with a staleness window", () => {
+  it("covers every category of the default domain with a staleness window", () => {
     const categories = schema.properties.category.enum;
-    expect(Object.keys(STALENESS_WINDOW_DAYS).sort()).toEqual(
-      [...categories].sort(),
-    );
-    expect(STALENESS_WINDOW_DAYS.pricing).toBe(90);
-    expect(STALENESS_WINDOW_DAYS.limit).toBe(90);
-    expect(STALENESS_WINDOW_DAYS.behavior).toBe(30);
+    const table = DOMAINS[DEFAULT_DOMAIN]!.staleness_window_days;
+    expect(Object.keys(table).sort()).toEqual([...categories].sort());
+    expect(stalenessWindowDays(DEFAULT_DOMAIN, "pricing")).toBe(90);
+    expect(stalenessWindowDays(DEFAULT_DOMAIN, "limit")).toBe(90);
+    expect(stalenessWindowDays(DEFAULT_DOMAIN, "behavior")).toBe(30);
     for (const event of [
       "release",
       "deprecation",
@@ -161,8 +163,13 @@ describe("policy numbers", () => {
       "misbehavior",
       "correction",
     ] as const) {
-      expect(STALENESS_WINDOW_DAYS[event]).toBeNull();
+      expect(stalenessWindowDays(DEFAULT_DOMAIN, event)).toBeNull();
     }
+  });
+
+  it("names the schema version in force beside the norm version", () => {
+    expect(SCHEMA_VERSION).toBe("v0.7");
+    expect(POLICY.SCHEMA_VERSION).toBe(SCHEMA_VERSION);
   });
 
   it("carries the maintainer's published amounts (D-032)", () => {
@@ -237,17 +244,16 @@ describe("policy numbers", () => {
     expect(NONCE_RETENTION_SECONDS).toBe(2 * REQUEST_CLOCK_SKEW_SECONDS);
   });
 
-  it("holds the maintainer's published model provider list (Section 10)", () => {
-    expect(Object.isFrozen(MODEL_PROVIDER_DOMAINS)).toBe(true);
-    expect(MODEL_PROVIDER_DOMAINS).toContain("openai.com");
-    expect(MODEL_PROVIDER_DOMAINS).toContain("anthropic.com");
-    expect(MODEL_PROVIDER_DOMAINS).toContain("google.com");
-    expect(MODEL_PROVIDER_DOMAINS.length).toBe(
-      new Set(MODEL_PROVIDER_DOMAINS).size,
-    );
+  it("holds the maintainer's published excluded-party list (Section 10)", () => {
+    const providers = excludedPartyDomains(DEFAULT_DOMAIN);
+    expect(Object.isFrozen(providers)).toBe(true);
+    expect(providers).toContain("openai.com");
+    expect(providers).toContain("anthropic.com");
+    expect(providers).toContain("google.com");
+    expect(providers.length).toBe(new Set(providers).size);
     // Every entry is a registrable domain, lowercase, with no scheme, no path
     // and no leading dot: the suffix check in src/registry.ts depends on it.
-    for (const domain of MODEL_PROVIDER_DOMAINS) {
+    for (const domain of providers) {
       expect(domain).toBe(domain.toLowerCase());
       expect(domain).toMatch(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/);
     }
@@ -435,10 +441,14 @@ describe("policy numbers", () => {
     }
   });
 
-  it("exports only numbers, two names, one flag, and frozen objects", () => {
+  it("exports only numbers, three names, one flag, and frozen objects", () => {
     for (const [key, value] of Object.entries(POLICY)) {
       expect(value).not.toBeNull();
-      if (key === "NORM_VERSION" || key === "PAYOUT_CYCLE") {
+      if (
+        key === "NORM_VERSION" ||
+        key === "PAYOUT_CYCLE" ||
+        key === "SCHEMA_VERSION"
+      ) {
         expect(typeof value).toBe("string");
         continue;
       }
@@ -461,7 +471,7 @@ describe("policy numbers", () => {
     expect(POLICY.ASSIGNMENT_WINDOW_HOURS).toBe(ASSIGNMENT_WINDOW_HOURS);
     expect(POLICY.REPRODUCTION_RUNS).toBe(REPRODUCTION_RUNS);
     expect(POLICY.REPRODUCTION_HOLDS).toBe(REPRODUCTION_HOLDS);
-    expect(POLICY.STALENESS_WINDOW_DAYS).toBe(STALENESS_WINDOW_DAYS);
+    expect(POLICY.DOMAINS).toBe(DOMAINS);
     expect(POLICY.HOLDBACK_DAYS).toBe(HOLDBACK_DAYS);
     expect(POLICY.READ_SHARE_SPLIT).toBe(READ_SHARE_SPLIT);
     expect(POLICY.SLOT_COUNT).toBe(SLOT_COUNT);
@@ -475,7 +485,6 @@ describe("policy numbers", () => {
     expect(POLICY.CAPTURE_MAX_BYTES).toBe(CAPTURE_MAX_BYTES);
     expect(POLICY.REQUEST_CLOCK_SKEW_SECONDS).toBe(REQUEST_CLOCK_SKEW_SECONDS);
     expect(POLICY.NONCE_RETENTION_SECONDS).toBe(NONCE_RETENTION_SECONDS);
-    expect(POLICY.MODEL_PROVIDER_DOMAINS).toBe(MODEL_PROVIDER_DOMAINS);
     expect(POLICY.LIST_PAGE_LIMIT).toBe(LIST_PAGE_LIMIT);
     expect(POLICY.BEACON).toBe(BEACON);
     expect(POLICY.WITNESSES_REQUIRED).toBe(WITNESSES_REQUIRED);

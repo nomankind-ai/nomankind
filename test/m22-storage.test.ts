@@ -43,6 +43,7 @@ import {
   recordAttestationScore,
 } from "../src/storage/repository.js";
 import { loadMigrations, openTestDatabase, type TestDatabase } from "./helpers/d1.js";
+import { DEFAULT_DOMAIN } from "../src/policy.js";
 
 const CLOCK: Clock = { now: "2026-09-10T00:00:00.000Z" };
 const SIGNATURE = "c2lnbmF0dXJl";
@@ -169,6 +170,7 @@ describe("the attestation store", () => {
       entry_id: null,
       payload: {
         attestation: input.id,
+        domain: DEFAULT_DOMAIN,
         model: input.model,
         model_operator: input.modelOperator,
         probes: PROBES,

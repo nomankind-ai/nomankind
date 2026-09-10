@@ -30,7 +30,7 @@ import {
   exportPrivateKeyPkcs8,
   generateKeypair,
 } from "../src/identity.js";
-import { POLICY, TRUSTED_POOL_SWITCH } from "../src/policy.js";
+import { DEFAULT_DOMAIN, POLICY, TRUSTED_POOL_SWITCH } from "../src/policy.js";
 import { signRecord } from "../src/records.js";
 import { txtRecordName } from "../src/registry.js";
 import {
@@ -179,6 +179,7 @@ function pricing(
   return {
     subject: SUBJECT,
     category: CATEGORY,
+    domain: DEFAULT_DOMAIN,
     claim,
     before: "$35 per seat per month",
     after: "$40 per seat per month",

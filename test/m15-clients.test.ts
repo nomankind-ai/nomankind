@@ -45,7 +45,11 @@ import {
 } from "../src/cli/validator.js";
 import type { Core } from "../src/core.js";
 import type { Event } from "../src/events.js";
-import { LIST_PAGE_LIMIT, STALENESS_WINDOW_DAYS } from "../src/policy.js";
+import {
+  DEFAULT_DOMAIN,
+  LIST_PAGE_LIMIT,
+  stalenessWindowDays,
+} from "../src/policy.js";
 import { txtRecordName } from "../src/registry.js";
 import { validateEntry } from "../src/schema.js";
 import { getEntry } from "../src/storage/repository.js";
@@ -75,7 +79,8 @@ const NOW = SUBMIT_NOW;
 const DAY_MS = 86_400_000;
 
 /** The window a `limit` entry carries, read from the published policy. */
-const WINDOW_DAYS = STALENESS_WINDOW_DAYS["limit"] as number;
+// Decision D-071: the window is the domain's table, not a global one.
+const WINDOW_DAYS = stalenessWindowDays(DEFAULT_DOMAIN, "limit") as number;
 
 /** The instant `days` after day 0, at the same time of day. */
 function day(days: number): Date {
@@ -193,6 +198,9 @@ function fieldsFor(
   return {
     subject: CHECKPOINT_SUBJECT,
     category: "limit",
+    // Decision D-071: the fields file names the domain the author signs, and a
+    // file without one is `bad_fields` before any I/O.
+    domain: DEFAULT_DOMAIN,
     claim,
     before: "m15 clients: no documented request limit",
     after: "m15 clients: the cited page is the documented request limit",

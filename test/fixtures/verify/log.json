@@ -119,6 +119,7 @@
           "id": "nmk_01M9VERIFIED",
           "subject": "openai/gpt-5",
           "category": "pricing",
+          "domain": "ai-ecosystem",
           "claim": "gpt-5 input price is $2.50 per million tokens",
           "before": "$3.00 per million input tokens",
           "after": "$2.50 per million input tokens",
@@ -130,14 +131,14 @@
           "snapshot_hash": "sha256:ed7da6bd834358f107147c766ead53b643930e282f2d77e80e73ae3cac384076",
           "norm_version": "norm-v1.2",
           "supersedes": null,
-          "author": "1F916:O3CT_eVhQoE3a2GygHGXDqTiVzhgwN_n9kQHlFfYjCY",
+          "author": "1F916:Qx5I61XYG4_4X3QX_VEHHmFwZj89DbnIUDwDkTVLZD0",
           "author_operator": "op_lattice",
           "submitted_at": "2026-09-08T00:09:00.000Z"
         },
-        "signature": "tVoZDDSqlartWmWrftY79WACYv6ImK5El30/QKyEvV3LIHZXrdI++c37wNbWi/s7V6YiV1qjdKksIskR+EB1DA=="
+        "signature": "vbxWUNcW/FiO/YJIbJtCriyTEIodozM8eKo1woqrvpsDg5JGPwkzKKTt0lmXB6ZGGa6uM7HWYiZSWOT47+krCA=="
       },
       "prev_hash": "sha256:c392beffc8e158ece6c48e96ba9bf731a82fbdbe990d930810d8edf13c7566ff",
-      "hash": "sha256:3a06f78904acc6964f2cfb1dd83407f725b4d39bb143d1e600b5f4f6ce792c72"
+      "hash": "sha256:a6ff7bdb78569dc5165f299b81aacd411feb0b0619e4e2fe0ed8217d461dabd2"
     },
     {
       "seq": 10,
@@ -146,7 +147,7 @@
       "entry_id": "nmk_01M9VERIFIED",
       "payload": {
         "record": {
-          "agent": "1F916:pXl78oJ6WgzN7kOzeIEMy_FaVukGxwVNApP0QocNEJw",
+          "agent": "1F916:He2cF8QK6xwnSVXSP6bLnf2D1e5zTnP4R9QjEyURQ6o",
           "operator": "op_outside1",
           "decision": "approve",
           "reason": null,
@@ -157,10 +158,10 @@
           "observation": null,
           "signed_at": "2026-09-08T00:10:00.000Z"
         },
-        "signature": "06vQyEiUhz1x2TzmDu5HDwC7bLHRbBU_gF5e0TyP2_VMlc9aU7QTUY0QDSKRKL7g-CPNeVPRGPSCI8-UW9wPAg"
+        "signature": "iPoKdLZbDvrTuU7hR14t-cbek__tFJGpSSEJ5r06Jsy2Uglcl6YDyJPIkpOq3S5qP7IGUKy-vPXMdpD83zYDBQ"
       },
-      "prev_hash": "sha256:3a06f78904acc6964f2cfb1dd83407f725b4d39bb143d1e600b5f4f6ce792c72",
-      "hash": "sha256:28662ef41076c65d92c47ba8e75cd1106c28959a67cd12b16ad709fca4c2913c"
+      "prev_hash": "sha256:a6ff7bdb78569dc5165f299b81aacd411feb0b0619e4e2fe0ed8217d461dabd2",
+      "hash": "sha256:ca7d2939ad9624e8d016b3fe145ff1b8f0b86268d555e2bb0d21d87faba90e70"
     },
     {
       "seq": 11,
@@ -169,7 +170,7 @@
       "entry_id": "nmk_01M9VERIFIED",
       "payload": {
         "record": {
-          "agent": "1F916:akdWxnqrmtwXbsVoogvb6-ZZva94BHTQsEnY5aj7vNc",
+          "agent": "1F916:64a59d6OF0n6NUR7HI65vTChAAhcAb3yKLL3a7AFHPo",
           "operator": "op_outside2",
           "decision": "approve",
           "reason": null,
@@ -180,10 +181,10 @@
           "observation": null,
           "signed_at": "2026-09-08T00:11:00.000Z"
         },
-        "signature": "9zP05oeeL3rJiZ9Rj1W0jjJrAdUXR8_ARvoicVVU_QL985OGOUUlUfhACjdD8y-T5dI-nNpZJIdsuXvIJO6LAQ"
+        "signature": "4WBBhqXI9KElIY5pX3SKDAmsiwZS_sRKfOJ_s-iaLelEOnzc40gCc-D6dpCNyduh101vLNVBfqZhV6DMOt99Bw"
       },
-      "prev_hash": "sha256:28662ef41076c65d92c47ba8e75cd1106c28959a67cd12b16ad709fca4c2913c",
-      "hash": "sha256:8e95c3aff5baeebce36ab276fcf7fb059eb5dc7fad21ce691fcef021570a8376"
+      "prev_hash": "sha256:ca7d2939ad9624e8d016b3fe145ff1b8f0b86268d555e2bb0d21d87faba90e70",
+      "hash": "sha256:a25cc254b55d2d9256728249c31519f1e3e838fdab3d65ab3ba4a5b436d598cc"
     },
     {
       "seq": 12,
@@ -195,6 +196,7 @@
           "id": "nmk_01M9DRAFT",
           "subject": "anthropic/claude-4",
           "category": "pricing",
+          "domain": "ai-ecosystem",
           "claim": "claude-4 input price is $3.00 per million tokens",
           "before": "$4.00 per million input tokens",
           "after": "$3.00 per million input tokens",
@@ -206,43 +208,58 @@
           "snapshot_hash": "sha256:ed7da6bd834358f107147c766ead53b643930e282f2d77e80e73ae3cac384076",
           "norm_version": "norm-v1.2",
           "supersedes": null,
-          "author": "1F916:O3CT_eVhQoE3a2GygHGXDqTiVzhgwN_n9kQHlFfYjCY",
+          "author": "1F916:Qx5I61XYG4_4X3QX_VEHHmFwZj89DbnIUDwDkTVLZD0",
           "author_operator": "op_lattice",
           "submitted_at": "2026-09-08T00:12:00.000Z"
         },
-        "signature": "VDavtaPLI6sBuqUs4LqL7DCFDcBke2Eic0Zn1K/d8oqz1a/idQS1pfnZNzFA4ONrR3T3XQyJRNQQlB5JU8KrDg=="
+        "signature": "eiVl/kBZ+b02llreb6+aKnMr3NdmwsZX8XKAy8BmrCmQjVDRyN9l/hZFFSS6FexDOWLWhrl9gNvygMe/FECWDA=="
       },
-      "prev_hash": "sha256:8e95c3aff5baeebce36ab276fcf7fb059eb5dc7fad21ce691fcef021570a8376",
-      "hash": "sha256:bfe54a638c4bc0d57122fbd9ff0294c42b5b66216eca6d40860e3e816c93baf0"
+      "prev_hash": "sha256:a25cc254b55d2d9256728249c31519f1e3e838fdab3d65ab3ba4a5b436d598cc",
+      "hash": "sha256:e4bd571a0cfb2aa943104c2f8e8d8cb41759f84781542bbcbceb8ee222276a75"
     }
   ],
   "registry": {
     "agents": {
-      "1F916:O3CT_eVhQoE3a2GygHGXDqTiVzhgwN_n9kQHlFfYjCY": "op_lattice",
-      "1F916:pXl78oJ6WgzN7kOzeIEMy_FaVukGxwVNApP0QocNEJw": "op_outside1",
-      "1F916:akdWxnqrmtwXbsVoogvb6-ZZva94BHTQsEnY5aj7vNc": "op_outside2",
-      "1F916:MJHi8_b0KUi2MhwhH6pcJGgX-Gf6tomK-Qea_LA0sQk": "op_outside3"
+      "1F916:Qx5I61XYG4_4X3QX_VEHHmFwZj89DbnIUDwDkTVLZD0": "op_lattice",
+      "1F916:He2cF8QK6xwnSVXSP6bLnf2D1e5zTnP4R9QjEyURQ6o": "op_outside1",
+      "1F916:64a59d6OF0n6NUR7HI65vTChAAhcAb3yKLL3a7AFHPo": "op_outside2",
+      "1F916:d7_mdS4d6TKRpGAoT2rmAM7RDGeoNB1ciesznJP3CsE": "op_outside3"
     },
     "operators": {
       "nomankind": {
         "maintainer": true,
-        "provider": false
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
       },
       "op_lattice": {
         "maintainer": false,
-        "provider": false
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
       },
       "op_outside1": {
         "maintainer": false,
-        "provider": false
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
       },
       "op_outside2": {
         "maintainer": false,
-        "provider": false
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
       },
       "op_outside3": {
         "maintainer": false,
-        "provider": false
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
       }
     }
   },
@@ -252,11 +269,12 @@
       "first_seq": 0,
       "last_seq": 11,
       "size": 12,
-      "root": "sha256:eae4ceb3391d305f829b62b94770ad1bf58c33c90a5db4928720648d8eab8ebd",
+      "root": "sha256:61be7f689e3a6c07bf47e579441f534cffc784b34ea249805ca625fe379fd3fe",
       "sealed_at": "2026-09-08T00:12:00.000Z",
       "prev_hash": null,
-      "hash": "sha256:b78b718079b38e17935bbd8bb477bdce9dc29a1c06315e606822a305f42e8ce5",
-      "witnesses": []
+      "hash": "sha256:4e61eda1edf39ee65ffe6218d8921ae6f9ef7c6b5c1e545d916d20de9b437970",
+      "witnesses": [],
+      "registry": null
     }
   ],
   "captures": {

@@ -1,166 +1,143 @@
 {
-  "as_of": "2026-09-08T21:02:00.831Z",
+  "as_of": "2026-09-08T12:00:00.000Z",
   "events": [
     {
       "seq": 0,
-      "at": "2026-09-08T18:37:55.344Z",
-      "type": "entry_submitted",
-      "entry_id": "nmk_8de6fec758a8016cec3f69974c25f2b1",
+      "at": "2026-09-08T12:00:00.000Z",
+      "type": "operator_registered",
+      "entry_id": null,
       "payload": {
-        "core": {
-          "id": "nmk_8de6fec758a8016cec3f69974c25f2b1",
-          "subject": "example/site",
-          "category": "release",
-          "claim": "The example.com landing page says the domain is for use in illustrative examples.",
-          "before": "no cited statement",
-          "after": "the page states the domain's purpose",
-          "effective_at": "2026-09-08",
-          "evidence_tier": "stated",
-          "evidence": null,
-          "observation": null,
-          "citation": "https://example.com/",
-          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
-          "norm_version": "norm-v1.2",
-          "supersedes": null,
-          "author": "1F916:ZHwg397MgTpybbKnN2R8i-C092XlcX31t_YvwHUNKnU",
-          "author_operator": null,
-          "submitted_at": "2026-09-08T18:37:55.145Z"
-        },
-        "signature": "3ZGzV0zsJOdGkIUbDCsvzLZkmAnIV9OaPBqLf9z7UUwVKESr8kt4XoenV1YcnvSpgG2QecYH7nx3w8V0w4BGAQ=="
+        "operator": "fixture-a.nomankind.ai",
+        "maintainer": false,
+        "domain": "ai-ecosystem"
       },
       "prev_hash": null,
-      "hash": "sha256:fb1dcd7bdda872b6f2af6de1e223b540911371bee5767981f7f6b3ee18c80511"
+      "hash": "sha256:44a23674b86ec16f832ac218a448437c774ed624156efc3ed7c294332664f777"
     },
     {
       "seq": 1,
-      "at": "2026-09-08T21:02:01.044Z",
-      "type": "operator_registered",
+      "at": "2026-09-08T12:00:00.000Z",
+      "type": "agent_bound",
       "entry_id": null,
       "payload": {
         "operator": "fixture-a.nomankind.ai",
-        "maintainer": false
+        "agent": "1F916:RYEy26g5ubpH_-mImEstjwa2BVMyCiQJQ40rPnBc6oc",
+        "attestation": {
+          "version": "nomankind-independence-v1",
+          "domain": "ai-ecosystem",
+          "signed_at": "2026-09-08T12:00:00.000Z",
+          "signature": "5_nLAUsEQjLZ4yDrMkhSphxvngfSNwUj2itLbHlW9MvZesKdIKmJEvsx267LKnszecH17NKX2gji1GukAxHIBA"
+        }
       },
-      "prev_hash": "sha256:fb1dcd7bdda872b6f2af6de1e223b540911371bee5767981f7f6b3ee18c80511",
-      "hash": "sha256:dc31cf3513abbdafc87c7e5f65e2fbc950d39a5754fe2f1e9bc8b4c22bfbf380"
+      "prev_hash": "sha256:44a23674b86ec16f832ac218a448437c774ed624156efc3ed7c294332664f777",
+      "hash": "sha256:2f16c416b1f65d9c2869c695eab3094bf6f9c0b0b98991cdcdc19d0f1938f337"
     },
     {
       "seq": 2,
-      "at": "2026-09-08T21:02:01.044Z",
-      "type": "agent_bound",
+      "at": "2026-09-08T12:00:00.000Z",
+      "type": "operator_registered",
       "entry_id": null,
       "payload": {
-        "operator": "fixture-a.nomankind.ai",
-        "agent": "1F916:ZJTlpf93Xr9RNGeixeFbkMbnxz8Mbdb4PGPO9AiCtBc",
-        "attestation": {
-          "version": "nomankind-independence-v1",
-          "signed_at": "2026-09-08T21:02:00.831Z",
-          "signature": "Ne7ZtD8T1G8E2fk8q1Gbp8TOIlizim89qP4od0D38GzIj-YQy3CsQX8MeYQlpcTsIJxc_YX3t-6EyYrGJdQ2Bw"
-        }
+        "operator": "fixture-b.nomankind.ai",
+        "maintainer": false,
+        "domain": "ai-ecosystem"
       },
-      "prev_hash": "sha256:dc31cf3513abbdafc87c7e5f65e2fbc950d39a5754fe2f1e9bc8b4c22bfbf380",
-      "hash": "sha256:913eab0d7f3538c901d5cfd80f390815c39ef8ac79620cd0dc6c89e67864d90f"
+      "prev_hash": "sha256:2f16c416b1f65d9c2869c695eab3094bf6f9c0b0b98991cdcdc19d0f1938f337",
+      "hash": "sha256:ba6ebeef19b7527541b80fe3c2015dad3f46ebd501c1b491f00a914527aeba19"
     },
     {
       "seq": 3,
-      "at": "2026-09-08T21:02:01.658Z",
-      "type": "operator_registered",
+      "at": "2026-09-08T12:00:00.000Z",
+      "type": "agent_bound",
       "entry_id": null,
       "payload": {
         "operator": "fixture-b.nomankind.ai",
-        "maintainer": false
+        "agent": "1F916:h_MELnKFIESGxSvT_Z7U-Y26Iqk7_Znw0YsjxXq3Ypo",
+        "attestation": {
+          "version": "nomankind-independence-v1",
+          "domain": "ai-ecosystem",
+          "signed_at": "2026-09-08T12:00:00.000Z",
+          "signature": "I27f1xpmLvnVgwncXwV1pu55B3-5TWLUC6JopJ47GoZcguhE1kbA3O7_gbgImNru2JWc_5QptkZsQAe_PDOOBA"
+        }
       },
-      "prev_hash": "sha256:913eab0d7f3538c901d5cfd80f390815c39ef8ac79620cd0dc6c89e67864d90f",
-      "hash": "sha256:40fe27bc6a9452f2a02a0865713f4ec9d32150396e3e49e7da02ae9cfdc5a324"
+      "prev_hash": "sha256:ba6ebeef19b7527541b80fe3c2015dad3f46ebd501c1b491f00a914527aeba19",
+      "hash": "sha256:3c5d56688612cd0d7e929810be8c9c23965d205ecbcd02fc8f2f43a671f435e4"
     },
     {
       "seq": 4,
-      "at": "2026-09-08T21:02:01.658Z",
-      "type": "agent_bound",
-      "entry_id": null,
-      "payload": {
-        "operator": "fixture-b.nomankind.ai",
-        "agent": "1F916:GwNvWtrOr42ZNLbje4GEyJDeVfCi07zOI8B4H9yxRK8",
-        "attestation": {
-          "version": "nomankind-independence-v1",
-          "signed_at": "2026-09-08T21:02:00.831Z",
-          "signature": "hTa7D8XMuSdjJlsjVldIfGSAYgzOixsyMqjcVZmeAUkUuoPdh--T54cd7022yIIv5BxBi6G1kJ9DI5AACsPcAg"
-        }
-      },
-      "prev_hash": "sha256:40fe27bc6a9452f2a02a0865713f4ec9d32150396e3e49e7da02ae9cfdc5a324",
-      "hash": "sha256:2e9b35db51cdf03e921e4940578ac7b6e16023367d4fa8089ed71437e65e85f7"
-    },
-    {
-      "seq": 5,
-      "at": "2026-09-08T21:02:02.226Z",
+      "at": "2026-09-08T12:00:00.000Z",
       "type": "operator_registered",
       "entry_id": null,
       "payload": {
         "operator": "fixture-c.nomankind.ai",
-        "maintainer": false
+        "maintainer": false,
+        "domain": "ai-ecosystem"
       },
-      "prev_hash": "sha256:2e9b35db51cdf03e921e4940578ac7b6e16023367d4fa8089ed71437e65e85f7",
-      "hash": "sha256:d69002a4125209a43ef63f61106e9eb9b87ae83c4dc7c592877007e8ae5c33ce"
+      "prev_hash": "sha256:3c5d56688612cd0d7e929810be8c9c23965d205ecbcd02fc8f2f43a671f435e4",
+      "hash": "sha256:70db607fadf0af31d39e4298043715c18f123f88d8c06f6184bfefc1df00995c"
     },
     {
-      "seq": 6,
-      "at": "2026-09-08T21:02:02.226Z",
+      "seq": 5,
+      "at": "2026-09-08T12:00:00.000Z",
       "type": "agent_bound",
       "entry_id": null,
       "payload": {
         "operator": "fixture-c.nomankind.ai",
-        "agent": "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY",
+        "agent": "1F916:S_vNUomwVQ3YFQrzOxeefhFYfl6_XhIibKCdb-wSTQ0",
         "attestation": {
           "version": "nomankind-independence-v1",
-          "signed_at": "2026-09-08T21:02:00.831Z",
-          "signature": "57R0PGQm1pMvZ9FlazFD57oDPIZ4OWZP48dzzXh0qTXfyMnpgRhtRFV6j_HTXR-KKEnsEWMv5OerkyenENHNBA"
+          "domain": "ai-ecosystem",
+          "signed_at": "2026-09-08T12:00:00.000Z",
+          "signature": "_B5wSyqvOd55KCxOUu4XqknWDr6lb9XLxtuDQdxOOQfCa37wCFq82Dn6rnLEreJfgoWf2llWL4YHSRwv2hyFBg"
         }
       },
-      "prev_hash": "sha256:d69002a4125209a43ef63f61106e9eb9b87ae83c4dc7c592877007e8ae5c33ce",
-      "hash": "sha256:a41ccb944e9b7f51e0d1d68782ff81df69970df0c0c8d6209a128c8e2c982eda"
+      "prev_hash": "sha256:70db607fadf0af31d39e4298043715c18f123f88d8c06f6184bfefc1df00995c",
+      "hash": "sha256:233e47c559d852c37bf715b23f9813aeb58ebea61c2f234544393a101819d121"
     },
     {
-      "seq": 7,
-      "at": "2026-09-08T21:02:02.875Z",
+      "seq": 6,
+      "at": "2026-09-08T12:00:00.000Z",
       "type": "operator_trusted",
       "entry_id": null,
       "payload": {
         "operator": "fixture-a.nomankind.ai"
       },
-      "prev_hash": "sha256:a41ccb944e9b7f51e0d1d68782ff81df69970df0c0c8d6209a128c8e2c982eda",
-      "hash": "sha256:3bdb7e0022b6f477d28e310c0c13acc916416c0f7c116c133647be477051e75e"
+      "prev_hash": "sha256:233e47c559d852c37bf715b23f9813aeb58ebea61c2f234544393a101819d121",
+      "hash": "sha256:7eb7bff06270f4bf6de16b9e2bf12822819e3d485f0220c3c21aaaaa2e24acde"
     },
     {
-      "seq": 8,
-      "at": "2026-09-08T21:02:03.387Z",
+      "seq": 7,
+      "at": "2026-09-08T12:00:00.000Z",
       "type": "operator_trusted",
       "entry_id": null,
       "payload": {
         "operator": "fixture-b.nomankind.ai"
       },
-      "prev_hash": "sha256:3bdb7e0022b6f477d28e310c0c13acc916416c0f7c116c133647be477051e75e",
-      "hash": "sha256:896142fd06313f55b3b5615ebea0cf3e7c501b37cc940c5e14834f0decf9efc3"
+      "prev_hash": "sha256:7eb7bff06270f4bf6de16b9e2bf12822819e3d485f0220c3c21aaaaa2e24acde",
+      "hash": "sha256:aa2aa5762e7ce356be37c6b96ce24b5ebe39c6cdd565b3f08a476451ffe9a9aa"
     },
     {
-      "seq": 9,
-      "at": "2026-09-08T21:02:03.888Z",
+      "seq": 8,
+      "at": "2026-09-08T12:00:00.000Z",
       "type": "operator_trusted",
       "entry_id": null,
       "payload": {
         "operator": "fixture-c.nomankind.ai"
       },
-      "prev_hash": "sha256:896142fd06313f55b3b5615ebea0cf3e7c501b37cc940c5e14834f0decf9efc3",
-      "hash": "sha256:2e9197092ea2950653ad33afdd4e5b9298a1e356ac98c8014c2cf4c32e785d22"
+      "prev_hash": "sha256:aa2aa5762e7ce356be37c6b96ce24b5ebe39c6cdd565b3f08a476451ffe9a9aa",
+      "hash": "sha256:b312491d691da2a6110bd2b97b65b4b7d5bba5e054165a89d375cde2f884e217"
     },
     {
-      "seq": 10,
-      "at": "2026-09-08T21:02:04.469Z",
+      "seq": 9,
+      "at": "2026-09-08T12:00:00.000Z",
       "type": "entry_submitted",
-      "entry_id": "nmk_cc64299e1653fd8cac4b819f870274bb",
+      "entry_id": "nmk_0e859abba8813de70b598dc413de7401",
       "payload": {
         "core": {
-          "id": "nmk_cc64299e1653fd8cac4b819f870274bb",
+          "id": "nmk_0e859abba8813de70b598dc413de7401",
           "subject": "example/demo-model",
           "category": "limit",
+          "domain": "ai-ecosystem",
           "claim": "demo checkpoint seed: example/demo-model request limit is documented at its cited page",
           "before": "demo checkpoint seed: no documented request limit",
           "after": "demo checkpoint seed: the cited page is the documented request limit",
@@ -169,91 +146,133 @@
           "evidence": null,
           "observation": null,
           "citation": "https://example.com/",
-          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "snapshot_hash": "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888",
           "norm_version": "norm-v1.2",
           "supersedes": null,
-          "author": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+          "author": "1F916:wmU1v0hE5PwXklZRhiWp0IX--gJKo-7dcEG66tYZuN8",
           "author_operator": null,
-          "submitted_at": "2026-09-08T21:02:00.831Z"
+          "submitted_at": "2026-09-08T12:00:00.000Z"
         },
-        "signature": "lgo0yvYBmvxFz++KCEyuWa9vmK8CORr+ixtowO8B4HUbNaUL0x0mnF6PHYQtFJ552Vm+8aU/64Yf2YFvkMkkAg=="
+        "signature": "EVHpxtHtEAJWrgspIHxsk3o8hSYHIAMzNaLn6zb59H0AizD4ZfPhAKkQoMnPSti+n0M89hjlPgemahDfsvFFDQ=="
       },
-      "prev_hash": "sha256:2e9197092ea2950653ad33afdd4e5b9298a1e356ac98c8014c2cf4c32e785d22",
-      "hash": "sha256:e4b7558a0d7491b2bf7344afd65164df51f908423fd3e961662fdcc440e67335"
+      "prev_hash": "sha256:b312491d691da2a6110bd2b97b65b4b7d5bba5e054165a89d375cde2f884e217",
+      "hash": "sha256:e501b877673b4112a4fbdc9298dd6b0ce096525a3ecfd59a231f727c5d472e2e"
     },
     {
-      "seq": 11,
-      "at": "2026-09-08T21:02:05.661Z",
+      "seq": 10,
+      "at": "2026-09-08T12:00:00.000Z",
       "type": "validation",
-      "entry_id": "nmk_cc64299e1653fd8cac4b819f870274bb",
+      "entry_id": "nmk_0e859abba8813de70b598dc413de7401",
       "payload": {
         "record": {
-          "agent": "1F916:ZJTlpf93Xr9RNGeixeFbkMbnxz8Mbdb4PGPO9AiCtBc",
+          "agent": "1F916:RYEy26g5ubpH_-mImEstjwa2BVMyCiQJQ40rPnBc6oc",
           "operator": "fixture-a.nomankind.ai",
           "decision": "approve",
           "reason": null,
-          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "snapshot_hash": "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888",
           "assigned_random": false,
           "test_accepted": null,
           "reproduction": null,
           "observation": null,
-          "signed_at": "2026-09-08T21:02:00.831Z"
+          "signed_at": "2026-09-08T12:00:00.000Z"
         },
-        "signature": "7qAAFQU1UQBUYbs1ezNfJlg5qy1xcPnBmsIK-qA3X_INegdEC5v-Rm1YAr30ySYdrSM8VPtUb55A3fvjjfRrCw"
+        "signature": "7Uv31pp2OVNPJgCcFERv_oCnKhfScqJAlDLIwJSRcjSPKKnr6GiPeUmh5j44kRl0JpfvDZ2GbzTyEEUCU5geCw"
       },
-      "prev_hash": "sha256:e4b7558a0d7491b2bf7344afd65164df51f908423fd3e961662fdcc440e67335",
-      "hash": "sha256:b0ad13f7338ee2745e490c0276570c0c2cb2484a5d7c53ac895c51f215397452"
+      "prev_hash": "sha256:e501b877673b4112a4fbdc9298dd6b0ce096525a3ecfd59a231f727c5d472e2e",
+      "hash": "sha256:6b3668d040fd3fcfca60cf5d7a81723d38dc8b893435e51a67b1f26300e2c21c"
     },
     {
-      "seq": 12,
-      "at": "2026-09-08T21:02:06.802Z",
+      "seq": 11,
+      "at": "2026-09-08T12:00:00.000Z",
       "type": "validation",
-      "entry_id": "nmk_cc64299e1653fd8cac4b819f870274bb",
+      "entry_id": "nmk_0e859abba8813de70b598dc413de7401",
       "payload": {
         "record": {
-          "agent": "1F916:GwNvWtrOr42ZNLbje4GEyJDeVfCi07zOI8B4H9yxRK8",
+          "agent": "1F916:h_MELnKFIESGxSvT_Z7U-Y26Iqk7_Znw0YsjxXq3Ypo",
           "operator": "fixture-b.nomankind.ai",
           "decision": "approve",
           "reason": null,
-          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "snapshot_hash": "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888",
           "assigned_random": false,
           "test_accepted": null,
           "reproduction": null,
           "observation": null,
-          "signed_at": "2026-09-08T21:02:00.831Z"
+          "signed_at": "2026-09-08T12:00:00.000Z"
         },
-        "signature": "81c5AeMpDS6OJaOmFxLc2HuqvdVVylVibgN0hCjy78cgH0IUlulGhqSQuhQj6tWIVFlzJ0wBL--fS22sIzJ7DA"
+        "signature": "5uWMo7uclY3ROiAutdfwUyCI2anV0Q6cPWrTm4BcuIgUwXyWbzBSI1fBWFK2fneBOS4pc4_faS1Gw-PJtdS1DQ"
       },
-      "prev_hash": "sha256:b0ad13f7338ee2745e490c0276570c0c2cb2484a5d7c53ac895c51f215397452",
-      "hash": "sha256:315552165f1756b423578742a47b217c9d3988b55ccdcf43585095553cba7774"
+      "prev_hash": "sha256:6b3668d040fd3fcfca60cf5d7a81723d38dc8b893435e51a67b1f26300e2c21c",
+      "hash": "sha256:053cb69af89f3b6e2ed789d9ae01734f9d4f678cf18b06c806ab16991d240150"
+    },
+    {
+      "seq": 12,
+      "at": "2026-09-08T12:00:00.000Z",
+      "type": "pool_snapshot",
+      "entry_id": null,
+      "payload": {
+        "operators": [
+          "fixture-a.nomankind.ai",
+          "fixture-b.nomankind.ai",
+          "fixture-c.nomankind.ai"
+        ]
+      },
+      "prev_hash": "sha256:053cb69af89f3b6e2ed789d9ae01734f9d4f678cf18b06c806ab16991d240150",
+      "hash": "sha256:9a6cc35f70d7166dc7e6da5a75b6044f9cf70e97003ddd7fc075172d25941240"
     }
   ],
   "registry": {
     "agents": {
-      "1F916:ZJTlpf93Xr9RNGeixeFbkMbnxz8Mbdb4PGPO9AiCtBc": "fixture-a.nomankind.ai",
-      "1F916:GwNvWtrOr42ZNLbje4GEyJDeVfCi07zOI8B4H9yxRK8": "fixture-b.nomankind.ai",
-      "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY": "fixture-c.nomankind.ai"
+      "1F916:RYEy26g5ubpH_-mImEstjwa2BVMyCiQJQ40rPnBc6oc": "fixture-a.nomankind.ai",
+      "1F916:h_MELnKFIESGxSvT_Z7U-Y26Iqk7_Znw0YsjxXq3Ypo": "fixture-b.nomankind.ai",
+      "1F916:S_vNUomwVQ3YFQrzOxeefhFYfl6_XhIibKCdb-wSTQ0": "fixture-c.nomankind.ai"
     },
     "operators": {
       "fixture-a.nomankind.ai": {
         "maintainer": false,
-        "provider": false
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
       },
       "fixture-b.nomankind.ai": {
         "maintainer": false,
-        "provider": false
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
       },
       "fixture-c.nomankind.ai": {
         "maintainer": false,
-        "provider": false
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
       }
     }
   },
-  "seals": [],
+  "seals": [
+    {
+      "seq": 0,
+      "first_seq": 0,
+      "last_seq": 12,
+      "size": 13,
+      "root": "sha256:faca0bfc0e3e940e081b0aef3b10e64f2df492cfbcc3e6286e3a856590e96b15",
+      "sealed_at": "2026-09-08T12:00:00.000Z",
+      "prev_hash": null,
+      "hash": "sha256:ab61082ea6dc832aa140462ec9155786c1cf290b9734bb256429315c21f36900",
+      "witnesses": [
+        {
+          "agent": "1F916:1EXjZGeqKz11t9tRX6zSPeyT3u3vEYqEGqp4HzBeke8",
+          "signature": "MKsziBt0SVSBinZKadhOqA7iF6R0ZwrI1kD_6x5JOHB7-Ji_2KvbsJASmRUCNPF4qH4atDrm60h_dgM7jW1eCw"
+        }
+      ],
+      "registry": null
+    }
+  ],
   "captures": {
-    "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c": {
-      "content_type": "text/html",
-      "body_base64": "PCFkb2N0eXBlIGh0bWw+PGh0bWwgbGFuZz0iZW4iPjxoZWFkPjx0aXRsZT5FeGFtcGxlIERvbWFpbjwvdGl0bGU+PGxpbmsgcmVsPSJpY29uIiBocmVmPSJkYXRhOiwiPjxtZXRhIG5hbWU9InZpZXdwb3J0IiBjb250ZW50PSJ3aWR0aD1kZXZpY2Utd2lkdGgsIGluaXRpYWwtc2NhbGU9MSI+PHN0eWxlPmJvZHl7YmFja2dyb3VuZDojZWVlO3dpZHRoOjYwdnc7bWFyZ2luOjE1dmggYXV0bztmb250LWZhbWlseTpzeXN0ZW0tdWksc2Fucy1zZXJpZn1oMXtmb250LXNpemU6MS41ZW19ZGl2e29wYWNpdHk6MC44fWE6bGluayxhOnZpc2l0ZWR7Y29sb3I6IzM0OH08L3N0eWxlPjwvaGVhZD48Ym9keT48ZGl2PjxoMT5FeGFtcGxlIERvbWFpbjwvaDE+PHA+VGhpcyBkb21haW4gaXMgZm9yIHVzZSBpbiBkb2N1bWVudGF0aW9uIGV4YW1wbGVzIHdpdGhvdXQgbmVlZGluZyBwZXJtaXNzaW9uLiBBdm9pZCB1c2UgaW4gb3BlcmF0aW9ucy48L3A+PHA+PGEgaHJlZj0iaHR0cHM6Ly9pYW5hLm9yZy9kb21haW5zL2V4YW1wbGUiPkxlYXJuIG1vcmU8L2E+PC9wPjwvZGl2PjwvYm9keT48L2h0bWw+Cg=="
+    "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888": {
+      "content_type": "text/html; charset=utf-8",
+      "body_base64": "PCFkb2N0eXBlIGh0bWw+PGh0bWw+PGhlYWQ+PHRpdGxlPmV4YW1wbGUvZGVtby1tb2RlbDwvdGl0bGU+PC9oZWFkPjxib2R5PjxtYWluPjxoMT5leGFtcGxlL2RlbW8tbW9kZWw8L2gxPjxwPjkwIHJlcXVlc3RzIHBlciBtaW51dGU8L3A+PC9tYWluPjwvYm9keT48L2h0bWw+"
     }
   }
 }

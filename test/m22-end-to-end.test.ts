@@ -49,6 +49,7 @@ import {
   generateKeypair,
 } from "../src/identity.js";
 import {
+  DEFAULT_DOMAIN,
   ATTESTATION_SCORERS,
   ATTESTATION_WINDOW_HOURS,
   LIST_PAGE_LIMIT,
@@ -222,6 +223,7 @@ function proposal(): Omit<SubmissionProposal, "author"> {
     author_operator: k1.operator,
     subject: SUBJECT,
     category: CATEGORY,
+    domain: DEFAULT_DOMAIN,
     claim: CLAIM,
     before: "$35 per seat per month",
     after: "$40 per seat per month",
@@ -809,6 +811,7 @@ describe("a scorer under the model's own operator", () => {
         entry_id: null,
         payload: {
           attestation: id,
+          domain: DEFAULT_DOMAIN,
           model: model.agentId,
           model_operator: k5.operator,
           probes: first.probes,

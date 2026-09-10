@@ -15,7 +15,8 @@ import {
   APPROVALS_TO_VERIFY_SMALL_POOL,
   POLICY,
   REJECTIONS_TO_REJECT,
-  STALENESS_WINDOW_DAYS,
+  DEFAULT_DOMAIN,
+  stalenessWindowDays,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
 } from "../src/policy.js";
 import { validateEntry } from "../src/schema.js";
@@ -225,7 +226,9 @@ describe("freshness and decay", () => {
     const derived = deriveEntry(pricingLog().events, ENTRY_ID, {
       now: "2026-12-01T00:00:00Z",
     }).derived;
-    expect(derived.staleness_window_days).toBe(STALENESS_WINDOW_DAYS.pricing);
+    expect(derived.staleness_window_days).toBe(
+      stalenessWindowDays(DEFAULT_DOMAIN, "pricing"),
+    );
     expect(derived.last_confirmed).toBe("2026-09-01");
     expect(derived.expires_at).toBe(PRICING_EXPIRES);
     expect(derived.stale).toBe(true);

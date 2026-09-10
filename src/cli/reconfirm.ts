@@ -46,7 +46,7 @@
 import { resolve } from "node:path";
 
 import { receiptArtifactHash } from "../artifact.js";
-import { extractCore, type Core } from "../core.js";
+import { domainOf, extractCore, type Core } from "../core.js";
 import { deriveEntry } from "../derive.js";
 import { isTranscriptCategory, proposedTest } from "../evidence.js";
 import type { ReconfirmationRecord } from "../events.js";
@@ -249,7 +249,7 @@ export async function runReconfirm(input: {
   // Section 4: reconfirming a behavior or misbehavior entry means rerunning the
   // frozen prompt. Asked before the citation is fetched, because a page this
   // fixture cannot judge is a page it has no reason to pull.
-  if (isTranscriptCategory(core["category"])) {
+  if (isTranscriptCategory(domainOf(core), core["category"])) {
     return stopped(CANNOT_REPRODUCE);
   }
 

@@ -42,6 +42,7 @@ import {
   generateKeypair,
 } from "../src/identity.js";
 import {
+  DEFAULT_DOMAIN,
   ASSIGNMENT_WINDOW_HOURS,
   DISPUTE_FILING_FEE_CENTS,
   DISPUTE_STAKE_STANDING,
@@ -253,6 +254,7 @@ function pricing(
   return {
     subject,
     category: CATEGORY,
+    domain: DEFAULT_DOMAIN,
     claim,
     before: "$35 per seat per month",
     after: "$40 per seat per month",

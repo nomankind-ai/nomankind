@@ -43,7 +43,7 @@ import {
   generateKeypair,
 } from "../src/identity.js";
 import { decodeProof, verifyInclusion } from "../src/merkle.js";
-import { LIST_PAGE_LIMIT } from "../src/policy.js";
+import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "../src/policy.js";
 import { verifyReadReceipt, type ReadReceipt } from "../src/receipt.js";
 import { signRecord } from "../src/records.js";
 import { txtRecordName } from "../src/registry.js";
@@ -280,6 +280,7 @@ function pricing(claim: string): Omit<SubmissionProposal, "author"> {
   return {
     subject: SUBJECT,
     category: CATEGORY,
+    domain: DEFAULT_DOMAIN,
     claim,
     before: "$35 per seat per month",
     after: "$40 per seat per month",

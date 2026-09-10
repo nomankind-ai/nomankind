@@ -36,7 +36,7 @@ import {
   type SnapshotFetcher,
 } from "../adapters/fetch.js";
 import { receiptArtifactHash } from "../artifact.js";
-import { extractCore, type Core } from "../core.js";
+import { domainOf, extractCore, type Core } from "../core.js";
 import { base64urlDecode } from "../encoding.js";
 import type { ApproverRecord } from "../events.js";
 import { isTranscriptCategory, proposedTest } from "../evidence.js";
@@ -285,7 +285,7 @@ export interface TestJudgement {
 export function judgeTest(core: Core): TestJudgement {
   const test = proposedTest(core);
   if (test === null) return { test_accepted: null, predicate: null };
-  if (isTranscriptCategory(core["category"])) {
+  if (isTranscriptCategory(domainOf(core), core["category"])) {
     return { test_accepted: false, predicate: null };
   }
   const predicate = parsePredicate(test);

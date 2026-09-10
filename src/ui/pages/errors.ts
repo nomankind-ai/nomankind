@@ -10,6 +10,10 @@
  */
 
 import { html, layout } from "../html.js";
+// The list the parser actually accepts, read from the parser rather than
+// retyped: a parameter added to one and not the other is a page that tells the
+// reader their query is wrong about a filter the listing takes.
+import { ENTRIES_QUERY_PARAMETERS } from "../query.js";
 import type { PageContext } from "../types.js";
 
 /** Nothing lives at this path. */
@@ -55,7 +59,7 @@ export function renderBadQuery(ctx: PageContext, reason: string): string {
         <dd>${ctx.path}</dd>
       </dl>
       <p class="note">
-        Accepted parameters: category, status, tier, fresh, before. Each may
+        Accepted parameters: ${ENTRIES_QUERY_PARAMETERS.join(", ")}. Each may
         appear once, each enum value comes from the entry schema, and
         <span class="mono">before</span> is a sealed position.
       </p>

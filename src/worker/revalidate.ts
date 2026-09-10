@@ -43,6 +43,8 @@
 
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
+import { domainOf } from "../core.js";
+import { operatorDomainsOf } from "../derive.js";
 import {
   checkRevalidationRequest,
   checkStakeCover,
@@ -61,6 +63,7 @@ import { validateEntry, type ValidationError } from "../schema.js";
 import { revalidationOutcomeStakes, revalidationStake } from "../stake.js";
 import {
   getEntry,
+  headSeq,
   openRevalidationAssignment,
   openStakeRowsForOperator,
   operatorForAgent,
@@ -162,10 +165,24 @@ async function request_(
   // what the registry says.
   const operator = await operatorForAgent(env.DB, auth.agent);
 
+  const head = (await headSeq(env.DB)) ?? 0;
   const verdict = checkRevalidationRequest(
-    { status: before.derived.status, stale: before.derived.stale },
+    {
+      status: before.derived.status,
+      stale: before.derived.stale,
+      // The entry's own domain, off the stored entry, which carries the signed
+      // core's `domain` verbatim; the derived fields hold no domain at all, so
+      // reading them would hand every entry the default. A legacy v0.6 entry has
+      // no `domain` in its core and reads as the default (decision D-071).
+      domain: domainOf(before.entry),
+    },
     {
       requesterOperator: operator,
+      // The domains this operator is attested in, folded out of the registry
+      // events. A bare key has no operator and is refused `bare_key` first.
+      ...(operator === null
+        ? {}
+        : { operatorDomains: operatorDomainsOf(world.registry, operator, head) }),
       // "Requests are capped per operator per window", and the window opened at
       // the entry's own last_confirmed, which derivation already computes.
       requestsThisWindow:

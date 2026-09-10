@@ -41,7 +41,7 @@ import {
   generateKeypair,
 } from "../src/identity.js";
 import { decodeProof, verifyInclusion } from "../src/merkle.js";
-import { LIST_PAGE_LIMIT } from "../src/policy.js";
+import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "../src/policy.js";
 import {
   verifySyncReceipt,
   type ReadReceipt,
@@ -312,6 +312,7 @@ function pricing(
   return {
     subject,
     category: CATEGORY,
+    domain: DEFAULT_DOMAIN,
     claim,
     before: "$35 per seat per month",
     after: "$40 per seat per month",

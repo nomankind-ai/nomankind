@@ -57,6 +57,7 @@ import {
   submittedCore,
   type FixturePage,
 } from "./helpers/submit.js";
+import { DEFAULT_DOMAIN } from "../src/policy.js";
 
 const NOW = SUBMIT_NOW;
 const AT = NOW.toISOString();
@@ -179,6 +180,7 @@ function pricing(
   return {
     subject: "kestrel/kestrel-2",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim: "Kestrel-2 seat pricing rose to $25 per seat per month",
     before: "$20 per seat per month",
     after: "$25 per seat per month",
@@ -392,11 +394,16 @@ describe("the door refuses before it writes", () => {
   });
 
   it("refuses an entry the schema rejects, and names the field", async () => {
+    // Not the category: since v0.7 the submission gate refuses a category
+    // outside the entry's domain (`category_not_in_domain`) before the schema
+    // is consulted at all, and today's one registered domain admits exactly the
+    // schema's enum -- so a bad category never reaches the schema. A malformed
+    // date does, and the refusal still names the field it failed on.
     const core = await submittedCore(
       alice,
       pricing({
-        claim: "Kestrel-2 costs $25 per seat, filed under no category at all",
-        category: "gossip",
+        claim: "Kestrel-2 costs $25 per seat, dated in no calendar at all",
+        effective_at: "the first of September",
         citation: LIMITS_URL,
         snapshot_hash: limitsHash,
       }),
@@ -406,7 +413,23 @@ describe("the door refuses before it writes", () => {
       422,
       "schema_invalid",
     )) as { errors: { path: string }[] };
-    expect(body.errors.map((error) => error.path)).toContain("/category");
+    expect(body.errors.map((error) => error.path)).toContain("/effective_at");
+  });
+
+  it("refuses a category the entry's domain does not admit", async () => {
+    // Decision D-071: which categories a domain admits is the registry
+    // document's table, application-enforced, and the refusal comes before any
+    // fetch or write.
+    const core = await submittedCore(
+      alice,
+      pricing({
+        claim: "Kestrel-2 costs $25 per seat, filed under no category at all",
+        category: "gossip",
+        citation: LIMITS_URL,
+        snapshot_hash: limitsHash,
+      }),
+    );
+    await refused({ core, page: LIMITS }, 422, "category_not_in_domain");
   });
 
   it("refuses an unsigned request", async () => {

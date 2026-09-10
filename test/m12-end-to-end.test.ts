@@ -26,7 +26,7 @@ import {
   MockPayoutAdapter,
   UnavailablePayoutAdapter,
 } from "../src/adapters/payout.js";
-import { LIST_PAGE_LIMIT } from "../src/policy.js";
+import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "../src/policy.js";
 import { txtRecordName } from "../src/registry.js";
 import { eventBySeq, headSeq } from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
@@ -303,7 +303,13 @@ describe("joining", () => {
     const bound = await eventBySeq(store.db, (await head()) as number);
     const registered = await eventBySeq(store.db, ((await head()) as number) - 1);
     expect(registered?.type).toBe("operator_registered");
-    expect(registered?.payload).toEqual({ operator: OUTSIDE, maintainer: false });
+    // Decision D-071: the registration names the domain it attested to, and the
+    // fold reads the operator's first domain out of this payload alone.
+    expect(registered?.payload).toEqual({
+      operator: OUTSIDE,
+      maintainer: false,
+      domain: DEFAULT_DOMAIN,
+    });
     expect(bound?.type).toBe("agent_bound");
     expect(bound?.prev_hash).toBe(registered?.hash);
     expect((bound?.payload as { agent: string }).agent).toBe(alice.agentId);

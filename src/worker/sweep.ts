@@ -101,9 +101,11 @@ import {
   type Beacon,
 } from "../assign.js";
 import { attestationDue, deriveAttestation } from "../attest.js";
+import { coreVersion, domainOf } from "../core.js";
 import type { BountyAccrual } from "../bounty.js";
 import {
   deriveEntry,
+  operatorDomainsAt,
   registeredOperatorsAt,
   type EntryStatus,
 } from "../derive.js";
@@ -126,12 +128,13 @@ import {
   type LedgerRow,
 } from "../ledger.js";
 import {
+  DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
   SEAL_MAX_EVENTS,
   WITNESSES_REQUIRED,
 } from "../policy.js";
 import { buildReadCountPayload } from "../receipt.js";
-import { validateEntry } from "../schema.js";
+import { validateEntry, type Entry } from "../schema.js";
 import {
   buildSeal,
   entrySeal,
@@ -415,6 +418,52 @@ function headPosition(events: readonly Event[]): number {
   return head;
 }
 
+/**
+ * The pool operators that are not attested in one domain (decision D-071).
+ *
+ * Whitepaper Section 10's rule is per domain now, and the independence
+ * attestation with it, so an operator judges an entry only in a domain it has
+ * signed that domain's attestation for. The draws themselves stay domain-blind
+ * — `drawValidator`, `drawChecker` and `drawScorers` know nothing about domains
+ * and are recomputable from the beacon, the snapshot and this list — so the
+ * keying lives here, in the caller, as an exclusion like every other.
+ *
+ * An operator the fold does not know reads as the default domain, which is what
+ * its registration meant before v0.7.
+ */
+function outsideDomain(
+  attested: ReadonlyMap<string, readonly string[]>,
+  operators: readonly string[],
+  domain: string,
+): string[] {
+  return operators.filter(
+    (operator) => !(attested.get(operator) ?? [DEFAULT_DOMAIN]).includes(domain),
+  );
+}
+
+/**
+ * Does this rederived entry still pass the published schema?
+ *
+ * Every rewrite this sweep makes -- the seal, the countersignatures, and the
+ * staleness step -- validates the whole entry before it stores it, exactly as
+ * the two write doors do. Schema v0.7 requires `domain` in the core, and a
+ * legacy v0.6 entry does not have one, so the plain check would refuse every
+ * batch that happened to cover one and the log would stop sealing (decision
+ * D-071: legacy records are served and swept unchanged).
+ *
+ * So a v0.6 entry is checked against a probe copy with `domain` spliced in at
+ * the value its core has always been read as. The probe is thrown away: nothing
+ * about the stored core moves, and `rederive` copies the core verbatim, so no
+ * hash, id or signature can move either. The derived fields are still checked
+ * on the probe, which is the whole point of validating before a write -- a
+ * derivation that went wrong is still refused, on a legacy entry as on any
+ * other.
+ */
+function passesSchemaForRewrite(entry: Entry): boolean {
+  if (coreVersion(entry) === "v0.7") return validateEntry(entry).ok;
+  return validateEntry({ ...entry, domain: DEFAULT_DOMAIN }).ok;
+}
+
 /** A unit constant, not a policy number: a day, stated in milliseconds. */
 const MILLISECONDS_PER_DAY = 86_400_000;
 
@@ -677,7 +726,7 @@ async function rewriteForSeal(
       ? undefined
       : new Map<string, EntrySeal>([[entryId, sealed]]);
   const derived = rederive(world, entryId, now, [], seals);
-  if (!validateEntry(derived.entry).ok) throw new SealSchemaInvalid(entryId);
+  if (!passesSchemaForRewrite(derived.entry)) throw new SealSchemaInvalid(entryId);
   const stored = await getEntry(db, entryId);
   return {
     entry: derived.entry,
@@ -1410,6 +1459,11 @@ export async function runSweep(
   // (a) The pool snapshot. Committed before any draw, and never by a draw: the
   // commitment has to be in the log before the beacon round that uses it.
   const registry = await registryEvents(db);
+  // Decision D-071: every draw below is domain-blind by construction, so the
+  // caller is the one that keeps an operator out of a domain it never attested
+  // in. This is the fold the exclusion lists are built from, taken once for the
+  // run and read again after the snapshot is sealed, because a registration in
+  // this same run would otherwise be invisible to it.
   let snapshot: SweepReport["snapshot"] = null;
   const owed = poolSnapshotDue(registry);
   if (owed !== null) {
@@ -1556,11 +1610,22 @@ export async function runSweep(
         continue;
       }
 
+      // The dispute's own exclusions, plus every pool operator that never
+      // attested in this entry's domain (decision D-071). The entry's domain is
+      // read off its stored copy, which carries the signed core's `domain`
+      // verbatim; a legacy v0.6 entry has none and reads as ai-ecosystem.
       const draw = await drawValidator({
         entryId,
         snapshot: pool,
         beacon,
-        exclude: exclusionsFor(all, entryId),
+        exclude: [
+          ...exclusionsFor(all, entryId),
+          ...outsideDomain(
+            operatorDomainsAt(registry, headPosition(registry)),
+            pool.operators,
+            domainOf(stored.entry),
+          ),
+        ],
       });
       if (!draw.ok) {
         // snapshot_after_beacon is the paper's own ordering rule: the round
@@ -1669,10 +1734,19 @@ export async function runSweep(
       ) as Event<"entry_submitted"> | undefined;
       const authorOperator =
         (submission?.payload.core["author_operator"] as string | null) ?? null;
-      const exclude = revalidationDrawExclusions(
-        authorOperator,
-        (open as Event<"revalidation_requested">).payload.operator,
-      );
+      const exclude = [
+        ...revalidationDrawExclusions(
+          authorOperator,
+          (open as Event<"revalidation_requested">).payload.operator,
+        ),
+        // And every pool operator not attested in the entry's own domain, off
+        // the signed core the submission event carries (decision D-071).
+        ...outsideDomain(
+          operatorDomainsAt(registry, headPosition(registry)),
+          pool.operators,
+          domainOf(submission?.payload.core ?? null),
+        ),
+      ];
 
       // The M4 draw first, so above the switch a checker and a validator are
       // drawn by exactly the same function. Below it, `drawChecker` answers the
@@ -1781,7 +1855,7 @@ export async function runSweep(
       // than thrown — the run carries on — and, as with a row that came back
       // fresh, the cursor carries past the row it refused, so the loop still
       // terminates.
-      if (!validateEntry(derived.entry).ok) {
+      if (!passesSchemaForRewrite(derived.entry)) {
         skip("schema_invalid");
         continue;
       }

@@ -41,7 +41,7 @@ import {
   receiptArtifactHash,
   transcriptArtifactHash,
 } from "../artifact.js";
-import { CORE_KEYS, extractCore, type Core } from "../core.js";
+import { CORE_KEYS, domainOf, extractCore, type Core } from "../core.js";
 import { deriveEntry, type DerivedEntry } from "../derive.js";
 import { appendEvent, type Event } from "../events.js";
 import { isTranscriptCategory } from "../evidence.js";
@@ -509,7 +509,9 @@ export async function prepareSubmission(
   const fetcher = env.MAINTAINER_AGENT_ID;
   if (fetcher === "") return refused(refuse(503, "fetcher_not_configured"));
 
-  const snapshot = isTranscriptCategory(core["category"])
+  // Which categories carry a transcript is the entry's own domain's table
+  // (decision D-071), read off the signed core rather than off a global.
+  const snapshot = isTranscriptCategory(domainOf(core), core["category"])
     ? await transcriptCapture(core, at, fetcher)
     : await fetchedCapture(core, deps, at, fetcher);
   if (!snapshot.ok) return refused(refuse(422, snapshot.reason));

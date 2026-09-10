@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { verify } from "../src/cli/verify.js";
+import { SCHEMA_VERSION } from "../src/policy.js";
 
 const FIXTURE_DIR = join(import.meta.dirname, "fixtures", "verify");
 const ENTRY = join(FIXTURE_DIR, "verified-entry.json");
@@ -53,7 +54,8 @@ describe("verify (the one script)", () => {
     const { out, err, io } = capture();
     expect(await verify(ENTRY, LOG, io)).toBe(0);
     const entry = JSON.parse(await readFile(ENTRY, "utf8")) as { id: string };
-    expect(out).toEqual([`ok ${entry.id}`]);
+    // Decision D-071: the schema version this run checked against, first.
+    expect(out).toEqual([`schema ${SCHEMA_VERSION}`, `ok ${entry.id}`]);
     expect(err).toEqual([]);
   });
 
@@ -61,7 +63,7 @@ describe("verify (the one script)", () => {
     const { out, err, io } = capture();
     expect(await verify(DRAFT, LOG, io)).toBe(0);
     const entry = JSON.parse(await readFile(DRAFT, "utf8")) as { id: string };
-    expect(out).toEqual([`ok ${entry.id}`]);
+    expect(out).toEqual([`schema ${SCHEMA_VERSION}`, `ok ${entry.id}`]);
     expect(err).toEqual([]);
   });
 
@@ -79,9 +81,11 @@ describe("verify (the one script)", () => {
     expect(err).toEqual([]);
     expect(out.length).toBeGreaterThan(1);
 
-    const last = out[out.length - 1]!;
-    expect(last).toBe(`${out.length - 1} diff(s)`);
-    for (const line of out.slice(0, -1)) {
+    expect(out[0]).toBe(`schema ${SCHEMA_VERSION}`);
+    const diffs = out.slice(1);
+    const last = diffs[diffs.length - 1]!;
+    expect(last).toBe(`${diffs.length - 1} diff(s)`);
+    for (const line of diffs.slice(0, -1)) {
       // "<check> <field> <reason>", then the two values when there are any.
       expect(line).toMatch(
         /^[a-z]+ \/\S* [a-z0-9_]+( expected=.* actual=.*)?$/,

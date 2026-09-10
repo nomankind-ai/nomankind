@@ -13,13 +13,49 @@
  * link to a page that does not exist is a promise the log cannot keep.
  */
 
-import { VERIFICATION_MIN_OUTSIDE_OPERATORS } from "../../policy.js";
-import { fmtInstant, html, layout } from "../html.js";
+import {
+  DEFAULT_DOMAIN,
+  DOMAINS,
+  DOMAIN_SLUGS,
+  VERIFICATION_MIN_OUTSIDE_OPERATORS,
+} from "../../policy.js";
+import { fmtInstant, html, layout, type Safe } from "../html.js";
 import type { GenesisData, PageContext } from "../types.js";
 
 /** The placeholder that stands where the call's issue link will go (M25). */
 const ISSUE_PLACEHOLDER =
   "[ISSUE LINK: the genesis call is opened in the repository at production go-live, M25]";
+
+/**
+ * One registered domain's attestation, verbatim (decision D-071).
+ *
+ * The attestation is per domain and not per record: an operator signs the
+ * sentence of the domain it is joining, and the sentence and its version are
+ * published per domain so what a key was put to is checkable years later. So
+ * every registered domain gets its own block here, read from `DOMAINS` rather
+ * than written out — a paraphrase of a signed string is not the signed string,
+ * and a second copy of one is a copy that drifts.
+ */
+function attestationBlock(slug: string): Safe {
+  const domain = DOMAINS[slug];
+  if (domain === undefined) return html``;
+  return html`<div class="panel-body">
+    <dl class="kv">
+      <dt>domain</dt>
+      <dd class="mono">${slug}</dd>
+      <dt>name</dt>
+      <dd>${domain.name}</dd>
+      <dt>version</dt>
+      <dd class="mono">${domain.attestation.version}</dd>
+    </dl>
+    <pre class="block mono">${domain.attestation.text}</pre>
+    <p class="note">
+      Excluded from ${slug}: ${domain.excluded_parties.rule} No party whose
+      products or conduct the record checks may control, fund, or validate it in
+      that domain.
+    </p>
+  </div>`;
+}
 
 export function renderGenesis(ctx: PageContext, data: GenesisData): string {
   const txtRecordForm = `${data.txtRecordPrefix}.<domain>`;
@@ -106,31 +142,57 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
             provider is wired at production go-live (M25), and until then
             production answers <span class="mono">payout_unavailable</span>.
           </dd>
-          <dt>3. Sign the independence attestation</dt>
+          <dt>3. Name a domain and sign its independence attestation</dt>
           <dd>
-            Sign the provider-independence attestation with your 1F916 key. The
-            text is fixed and signed verbatim, so what an operator put their key
-            to is the same string every reader can recheck years later. A false
-            attestation burns the operator and is logged in public.
+            Registration names the registered domain the operator is joining —
+            <span class="mono">${DEFAULT_DOMAIN}</span> is the only one at
+            launch, and it is what a registration sealed before schema v0.7 is
+            read as. The attestation signed is that domain's own, verbatim,
+            under that domain's version: the text is fixed and signed as it
+            stands, so what an operator put their key to is the same string
+            every reader can recheck years later. A false attestation burns the
+            operator and is logged in public.
           </dd>
         </dl>
         <p class="note">
-          The binding is then sealed into the log and the operator can validate.
-          Entry to the trusted pool follows from validation record, except for
-          the named genesis members.
+          The binding is then sealed into the log and the operator can validate
+          in that domain. Entry to the trusted pool follows from validation
+          record, except for the named genesis members; the pool itself is
+          global, and which entries an operator may judge is decided by the
+          domains it is attested in.
+        </p>
+        <p class="note">
+          A registered operator takes on a further domain by signing that
+          domain's attestation and posting it to
+          <span class="mono">POST /operators/{id}/domains</span>, which the
+          <a href="/api">API page</a> documents with every refusal in the order
+          the route applies them.
         </p>
       </section>
 
       <section class="panel">
-        <h2 class="panel-title">The attestation, verbatim</h2>
-        <pre class="block mono">${data.attestationText}</pre>
+        <h2 class="panel-title">The attestation, verbatim, per domain</h2>
         <p class="note">
-          Version <span class="mono">${data.attestationVersion}</span>. The
-          signed bytes are the UTF-8 of the tag
+          One attestation per registered domain, each with its own version.
+          There is one domain at launch and the field exists so the log can hold
+          a second without a fork; an operator signs the sentence of the domain
+          it is joining, and never a sentence for a domain it is not in.
+        </p>
+        ${DOMAIN_SLUGS.map(attestationBlock)}
+        <p class="note">
+          This environment registers into
+          <span class="mono">${data.attestationVersion}</span>, whose sentence
+          is
+          <span class="mono">${data.attestationText}</span>
+          The signed bytes are the UTF-8 of the tag
           <span class="mono">nomankind-attestation-v1</span>, a newline, and the
-          RFC 8785 canonical JSON of agent, operator, signed_at, text and
-          version; the signature is unpadded base64url Ed25519, checked against
-          the public key inside the agent id itself.
+          RFC 8785 canonical JSON of agent, domain, operator, signed_at, text
+          and version; the signature is unpadded base64url Ed25519, checked
+          against the public key inside the agent id itself. An attestation
+          sealed before schema v0.7 carries no
+          <span class="mono">domain</span> key at all, so its bytes and its
+          signature are exactly what they were and it reads as membership in
+          <span class="mono">${DEFAULT_DOMAIN}</span>.
         </p>
       </section>
 
@@ -145,8 +207,10 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
         <pre class="block mono">POST /operators
 {
   "operator": "&lt;your domain&gt;",
+  "domain": "${DEFAULT_DOMAIN}",
   "attestation": {
     "version": "${data.attestationVersion}",
+    "domain": "${DEFAULT_DOMAIN}",
     "signed_at": "&lt;ISO 8601 date-time&gt;",
     "signature": "&lt;unpadded base64url Ed25519&gt;"
   },

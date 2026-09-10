@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_DOMAIN } from "../src/policy.js";
+
 import { CORE_KEYS, type Core } from "../src/core.js";
 import {
   appendEvent,
@@ -16,12 +18,13 @@ const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 const ENTRY_ID = "entry-0001";
 
-/** A core with exactly the seventeen schema keys; M3 treats it as opaque. */
+/** A core with exactly the eighteen schema keys; M3 treats it as opaque. */
 function makeCore(id: string = ENTRY_ID): Core {
   const core: Record<string, unknown> = {
     id,
     subject: "example.com",
     category: "fact",
+    domain: DEFAULT_DOMAIN,
     claim: "The sky is blue.",
     before: null,
     after: "blue",
@@ -93,11 +96,12 @@ function clone(log: readonly Event[]): Event[] {
 }
 
 describe("event types", () => {
-  it("names exactly the twenty-three event types", () => {
+  it("names exactly the twenty-four event types", () => {
     expect(EVENT_TYPES).toEqual([
       "operator_registered",
       "operator_trusted",
       "operator_untrusted",
+      "operator_joined_domain",
       "agent_bound",
       "pool_snapshot",
       "entry_submitted",
@@ -119,7 +123,7 @@ describe("event types", () => {
       "attestation_scored",
       "attestation_expired",
     ]);
-    expect(new Set(EVENT_TYPES).size).toBe(23);
+    expect(new Set(EVENT_TYPES).size).toBe(24);
   });
 
   it("scopes thirteen of them to an entry", () => {

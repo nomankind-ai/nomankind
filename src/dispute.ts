@@ -39,6 +39,7 @@ import type { Core } from "./core.js";
 import type { EntryStatus } from "./derive.js";
 import type { ApproverRecord, Event } from "./events.js";
 import {
+  DEFAULT_DOMAIN,
   FAILURE_REPORT_THRESHOLD,
   REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW,
 } from "./policy.js";
@@ -232,6 +233,7 @@ export type RevalidationRefusal =
   | "entry_not_verified"
   | "entry_stale"
   | "bare_key"
+  | "operator_not_in_domain"
   | "cap_exceeded"
   | "request_open";
 
@@ -240,6 +242,7 @@ export const REVALIDATION_REFUSALS: readonly RevalidationRefusal[] = Object.free
   "entry_not_verified",
   "entry_stale",
   "bare_key",
+  "operator_not_in_domain",
   "cap_exceeded",
   "request_open",
 ] as const);
@@ -248,6 +251,11 @@ export const REVALIDATION_REFUSALS: readonly RevalidationRefusal[] = Object.free
 export interface RevalidationTarget {
   readonly status: EntryStatus;
   readonly stale: boolean;
+  /**
+   * The entry's domain, from its signed core (`domainOf`). Absent reads as the
+   * default domain, exactly as a legacy v0.6 core does.
+   */
+  readonly domain?: string;
 }
 
 /** Everything the check needs, gathered by the caller at the request's position. */
@@ -258,6 +266,11 @@ export interface RevalidationRequestContext {
   readonly requestsThisWindow: number;
   /** Whether a request on this entry is still open. */
   readonly openRequest: boolean;
+  /**
+   * The domains the requester's operator is attested in (src/derive.ts,
+   * `operatorDomainsAt`). Absent reads as the default domain.
+   */
+  readonly operatorDomains?: readonly string[];
 }
 
 /** Accepted, or refused with the reason. */
@@ -290,6 +303,15 @@ export function checkRevalidationRequest(
   // flood Section 12 names. A bare key that has evidence files a dispute (which
   // it can, on a refundable fee) or a failure report.
   if (context.requesterOperator === null) return refuseRevalidation("bare_key");
+
+  // 3a. Decision D-071: eligibility is per domain, because the independence
+  // attestation is. An operator asks for a check of an entry only in a domain
+  // it has attested in; standing staked in one domain buys nothing in another.
+  const entryDomain = target.domain ?? DEFAULT_DOMAIN;
+  const attestedIn = context.operatorDomains ?? [DEFAULT_DOMAIN];
+  if (!attestedIn.includes(entryDomain)) {
+    return refuseRevalidation("operator_not_in_domain");
+  }
 
   // 4. Section 6: "requests are capped per operator per window." The cap is
   // per operator, per entry, per freshness window (src/policy.ts), so one

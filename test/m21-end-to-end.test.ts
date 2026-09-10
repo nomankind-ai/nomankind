@@ -49,6 +49,7 @@ import {
 } from "../src/identity.js";
 import type { LedgerRow } from "../src/ledger.js";
 import {
+  DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
   HOLDBACK_DAYS,
   LIST_PAGE_LIMIT,
@@ -257,6 +258,7 @@ function pricing(
     author_operator: author.operator,
     subject,
     category: CATEGORY,
+    domain: DEFAULT_DOMAIN,
     claim: `${subject} seat pricing is $40 per seat per month`,
     before: "$35 per seat per month",
     after: "$40 per seat per month",
@@ -350,6 +352,7 @@ async function correction(
       author_operator: challenger.operator,
       subject: target["subject"] as string,
       category: "correction",
+      domain: DEFAULT_DOMAIN,
       claim: `${target["subject"] as string} seat pricing is $44 per seat per month, not $40`,
       before: "$40 per seat per month",
       after: "$44 per seat per month",
@@ -1015,6 +1018,7 @@ describe("a validation the log has not sealed yet", () => {
         author_operator: k1.operator,
         subject: "kestrel/kestrel-4",
         category: CATEGORY,
+        domain: DEFAULT_DOMAIN,
         claim: "kestrel/kestrel-4 seat pricing is $40 per seat per month",
         before: "$35 per seat per month",
         after: "$40 per seat per month",

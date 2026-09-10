@@ -34,9 +34,10 @@
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
 import { openAssignment as openAssignmentOf } from "../assign.js";
-import type { Core } from "../core.js";
+import { domainOf, type Core } from "../core.js";
 import {
   agentOperatorsAt,
+  operatorDomainsAt,
   registeredOperatorsAt,
   type DerivedEntry,
 } from "../derive.js";
@@ -429,11 +430,17 @@ async function validate(
   const head = (await headSeq(env.DB)) ?? 0;
   const registered = registeredOperatorsAt(registry, head);
   const providers = await providerFlags(env.DB);
+  // Decision D-071: eligibility is per domain, so each operator carries the
+  // domains it is attested in, folded out of the same events the rest of the
+  // context is. An operator the fold does not know reads as the default domain,
+  // which is what its registration meant before v0.7.
+  const attested = operatorDomainsAt(registry, head);
   const operators: Record<string, OperatorInfo> = {};
   for (const operator of registered.operators) {
     operators[operator] = {
       maintainer: registered.maintainers.has(operator),
       provider: providers.has(operator),
+      ...(attested.has(operator) ? { domains: attested.get(operator)! } : {}),
     };
   }
   const open = openAssignmentOf(entryEvents, id);
@@ -463,6 +470,9 @@ async function validate(
     },
     agentOperators: Object.fromEntries(agentOperatorsAt(registry, head)),
     operators,
+    // The entry's own domain, off its signed core: a legacy v0.6 core carries
+    // none and reads as the default domain.
+    domain: domainOf(core),
     priorRecords: priorRecordsOf(entryEvents, id),
     openAssignment: open === null ? null : { operator: open.operator },
     excludedOperators,

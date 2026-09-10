@@ -3,7 +3,53 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { CORE_KEYS, extractCore } from "../src/core.js";
+import { CORE_KEYS, coreVersion, domainOf, extractCore } from "../src/core.js";
+import { entryHash } from "../src/hash.js";
+import { DEFAULT_DOMAIN } from "../src/policy.js";
+
+/**
+ * A v0.6 core, copied here byte for byte as the shipped worked example carried
+ * it before schema v0.7 added `domain` -- and the entry hash it had then.
+ *
+ * The point of the copy is that it cannot move with the code. Every core sealed
+ * under v0.6 is in the log forever, and its hash, its id and its author's
+ * signature are all over seventeen keys; if `extractCore` ever added an
+ * eighteenth to such an object -- with any value, null included -- every one of
+ * those would change and the log would stop verifying. So the seventeen keys and
+ * the hash are pinned here rather than recomputed from anything the current
+ * schema says.
+ */
+const LEGACY_CORE: Record<string, unknown> = {
+  id: "nmk_01J8ZQ2K7",
+  subject: "openai/gpt-5",
+  category: "deprecation",
+  claim: "GPT-5 API marked deprecated on the OpenAI deprecations page",
+  before: "available",
+  after: "deprecated",
+  effective_at: "2026-08-15",
+  evidence_tier: "observed",
+  evidence: null,
+  observation: {
+    method: "endpoint_error",
+    test: "POST https://api.openai.com/v1/chat/completions with model=gpt-5 and a one-token prompt; holds if the response is HTTP 404 with error.code model_deprecated.",
+    receipt_hash:
+      "sha256:10a4e08072e337f1d58551ab0d2a56fae48e6a93f7ee7f0d6b06c45211d5275d",
+    observed_at: "2026-09-01",
+    notes: "Single call returned 404 model_deprecated.",
+  },
+  citation: "https://platform.openai.com/docs/deprecations",
+  snapshot_hash:
+    "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
+  norm_version: "norm-v1.1",
+  supersedes: null,
+  author: "1F916:JpFo4VI5q9AZ62i23W5AOx_m5J7eOwrPmaUFeScS-gY",
+  author_operator: "op_brightloop",
+  submitted_at: "2026-09-01T14:05:00Z",
+};
+
+/** That core's entry hash, taken under v0.6 and unchanged ever since. */
+const LEGACY_CORE_HASH =
+  "sha256:a6874414854c11f7c2b7f821cd87dc998c87c6a885744e1bb9fb107b9135fa2d";
 
 const schemaPath = fileURLToPath(
   new URL("../schema/nomankind-entry-schema.json", import.meta.url),
@@ -40,11 +86,15 @@ function schemaCoreKeys(): string[] {
 }
 
 describe("the immutable core", () => {
-  it("holds exactly the seventeen key names the schema declares", () => {
+  it("holds exactly the eighteen key names the schema declares", () => {
     const declared = schemaCoreKeys();
-    expect(declared).toHaveLength(17);
-    expect(CORE_KEYS).toHaveLength(17);
+    expect(declared).toHaveLength(18);
+    expect(CORE_KEYS).toHaveLength(18);
     expect(new Set(CORE_KEYS)).toEqual(new Set(declared));
+  });
+
+  it("names the domain right after the category, as the schema orders them", () => {
+    expect(CORE_KEYS.indexOf("domain")).toBe(CORE_KEYS.indexOf("category") + 1);
   });
 
   it("names only real schema properties", () => {
@@ -140,7 +190,7 @@ describe("the immutable core", () => {
     delete entry.author_operator;
     delete entry.evidence;
     const core = extractCore(entry);
-    expect(Object.keys(core)).toHaveLength(17);
+    expect(Object.keys(core)).toHaveLength(18);
     expect(core.supersedes).toBeNull();
     expect(core.author_operator).toBeNull();
     expect(core.evidence).toBeNull();
@@ -149,7 +199,48 @@ describe("the immutable core", () => {
   it("treats an explicitly undefined nullable key as null", () => {
     const core = extractCore({ ...exampleEntry(), supersedes: undefined });
     expect(core.supersedes).toBeNull();
+    expect(Object.keys(core)).toHaveLength(18);
+  });
+
+  it("leaves a legacy v0.6 core at seventeen keys, adding no domain", () => {
+    const core = extractCore(LEGACY_CORE);
+
     expect(Object.keys(core)).toHaveLength(17);
+    expect(Object.keys(core)).not.toContain("domain");
+    expect("domain" in core).toBe(false);
+    expect(Object.keys(core)).toEqual(
+      [...CORE_KEYS].filter((key) => key !== "domain"),
+    );
+  });
+
+  it("hashes a legacy v0.6 core to exactly what it hashed to before", async () => {
+    expect(await entryHash(LEGACY_CORE)).toBe(LEGACY_CORE_HASH);
+  });
+
+  it("hashes two cores differing only in domain differently", async () => {
+    const ai = { ...LEGACY_CORE, domain: DEFAULT_DOMAIN };
+    const other = { ...LEGACY_CORE, domain: "some-other-domain" };
+
+    const hashAi = await entryHash(ai);
+    const hashOther = await entryHash(other);
+
+    expect(hashAi).not.toBe(hashOther);
+    // And neither is the seventeen-key hash: adding the key changes the bytes.
+    expect(hashAi).not.toBe(LEGACY_CORE_HASH);
+  });
+
+  it("reads the schema version off the core and nothing else", () => {
+    expect(coreVersion(LEGACY_CORE)).toBe("v0.6");
+    expect(coreVersion({ ...LEGACY_CORE, domain: DEFAULT_DOMAIN })).toBe("v0.7");
+    expect(coreVersion(exampleEntry())).toBe("v0.7");
+    expect(coreVersion(null)).toBe("v0.6");
+  });
+
+  it("reads a legacy core's domain as the default one", () => {
+    expect(domainOf(LEGACY_CORE)).toBe(DEFAULT_DOMAIN);
+    expect(domainOf({ ...LEGACY_CORE, domain: "elsewhere" })).toBe("elsewhere");
+    expect(domainOf(exampleEntry())).toBe(DEFAULT_DOMAIN);
+    expect(domainOf(42)).toBe(DEFAULT_DOMAIN);
   });
 
   it("throws naming a missing required core key", () => {

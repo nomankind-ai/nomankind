@@ -31,7 +31,8 @@ import {
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   SLOT_COUNT,
-  STALENESS_WINDOW_DAYS,
+  DEFAULT_DOMAIN,
+  stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
 } from "../src/policy.js";
@@ -51,8 +52,11 @@ const SUBMITTED_DATE = "2026-09-01";
 const RECONFIRMED_AT = "2026-10-15T09:00:00Z";
 const RECONFIRMED_DATE = "2026-10-15";
 
-const PRICING_WINDOW = STALENESS_WINDOW_DAYS.pricing as number;
-const BEHAVIOR_WINDOW = STALENESS_WINDOW_DAYS.behavior as number;
+const PRICING_WINDOW = stalenessWindowDays(DEFAULT_DOMAIN, "pricing") as number;
+const BEHAVIOR_WINDOW = stalenessWindowDays(
+  DEFAULT_DOMAIN,
+  "behavior",
+) as number;
 
 const MILLISECONDS_PER_DAY = 86_400_000;
 
@@ -131,12 +135,13 @@ function baseLog(pool: readonly string[]): Log {
   return log;
 }
 
-/** A stated pricing core: the seventeen keys, exactly as the schema names them. */
+/** A stated pricing core: the eighteen keys, exactly as the schema names them. */
 function statedCore(overrides: Record<string, unknown> = {}): Core {
   return {
     id: ENTRY,
     subject: "openai/gpt-5",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim: "gpt-5 input price is $2.50 per million tokens",
     before: "$3.00",
     after: "$2.50",

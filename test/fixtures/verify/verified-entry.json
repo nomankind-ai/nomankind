@@ -2,6 +2,7 @@
   "id": "nmk_01M9VERIFIED",
   "subject": "openai/gpt-5",
   "category": "pricing",
+  "domain": "ai-ecosystem",
   "claim": "gpt-5 input price is $2.50 per million tokens",
   "before": "$3.00 per million input tokens",
   "after": "$2.50 per million input tokens",
@@ -13,13 +14,13 @@
   "snapshot_hash": "sha256:ed7da6bd834358f107147c766ead53b643930e282f2d77e80e73ae3cac384076",
   "norm_version": "norm-v1.2",
   "supersedes": null,
-  "author": "1F916:O3CT_eVhQoE3a2GygHGXDqTiVzhgwN_n9kQHlFfYjCY",
+  "author": "1F916:Qx5I61XYG4_4X3QX_VEHHmFwZj89DbnIUDwDkTVLZD0",
   "author_operator": "op_lattice",
   "submitted_at": "2026-09-08T00:09:00.000Z",
-  "signature": "tVoZDDSqlartWmWrftY79WACYv6ImK5El30/QKyEvV3LIHZXrdI++c37wNbWi/s7V6YiV1qjdKksIskR+EB1DA==",
+  "signature": "vbxWUNcW/FiO/YJIbJtCriyTEIodozM8eKo1woqrvpsDg5JGPwkzKKTt0lmXB6ZGGa6uM7HWYiZSWOT47+krCA==",
   "approvers": [
     {
-      "agent": "1F916:pXl78oJ6WgzN7kOzeIEMy_FaVukGxwVNApP0QocNEJw",
+      "agent": "1F916:He2cF8QK6xwnSVXSP6bLnf2D1e5zTnP4R9QjEyURQ6o",
       "operator": "op_outside1",
       "decision": "approve",
       "reason": null,
@@ -31,7 +32,7 @@
       "signed_at": "2026-09-08T00:10:00.000Z"
     },
     {
-      "agent": "1F916:akdWxnqrmtwXbsVoogvb6-ZZva94BHTQsEnY5aj7vNc",
+      "agent": "1F916:64a59d6OF0n6NUR7HI65vTChAAhcAb3yKLL3a7AFHPo",
       "operator": "op_outside2",
       "decision": "approve",
       "reason": null,
@@ -48,7 +49,7 @@
   "failure_reports": [],
   "seal": {
     "log": "1F916",
-    "inclusion_proof": "{\"index\":9,\"path\":[\"sha256:6f57541250828e3292b936147e1c45c76a733d32763cfebbe6c4b0544bf8477d\",\"sha256:08a7a24e8c0b9e4c82b0a6078bbbdf3277c79864c14d58a47eaeaa5cee1af7ce\",\"sha256:db8484d1f6157076398cb9aa8ba92a06d9f71950253716ebe5a72cd909c101d8\"],\"size\":12}",
+    "inclusion_proof": "{\"index\":9,\"path\":[\"sha256:6f57541250828e3292b936147e1c45c76a733d32763cfebbe6c4b0544bf8477d\",\"sha256:a58a3c7b19f11bfc4bb5d4f6858c26717704122b7a53693ce590caed75dd33c6\",\"sha256:db8484d1f6157076398cb9aa8ba92a06d9f71950253716ebe5a72cd909c101d8\"],\"size\":12}",
     "position": 9,
     "witnesses": [],
     "sealed_at": "2026-09-08T00:12:00.000Z"

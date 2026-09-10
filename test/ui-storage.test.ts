@@ -15,6 +15,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { extractCore, type Core } from "../src/core.js";
+import { DEFAULT_DOMAIN } from "../src/policy.js";
 import {
   appendEvent,
   type ApproverRecord,
@@ -374,6 +375,35 @@ describe("the browsing reads", () => {
       await ids({ limit: 10, category: "pricing", status: "verified", stale: true }),
     ).toEqual(["nmk_e5"]);
     expect(await ids({ limit: 10, category: "outage" })).toEqual([]);
+  });
+
+  it("narrows the listing and the counts by domain, the page's own filter", async () => {
+    // The fixtures are v0.6-shaped cores, so `entryStatement` stored each one
+    // under the domain the log reads a domainless core as (decision D-071): a
+    // filter on it holds every row, and a slug nothing was filed under holds
+    // none. That is the whole promise the chip group makes.
+    {
+      const ids = async (query: Parameters<typeof listEntriesPage>[1]) =>
+        (await listEntriesPage(db, query)).map((row) => row.entry["id"]);
+
+      expect(await ids({ limit: 10, domain: DEFAULT_DOMAIN })).toEqual([
+        "nmk_e5",
+        "nmk_e4",
+        "nmk_e3",
+        "nmk_e2",
+        "nmk_e1",
+      ]);
+      expect(await ids({ limit: 10, domain: "no-such-domain" })).toEqual([]);
+      expect(
+        await ids({ limit: 10, domain: DEFAULT_DOMAIN, status: "verified" }),
+      ).toEqual(["nmk_e5", "nmk_e2", "nmk_e1"]);
+
+      expect(await countEntries(db, { domain: DEFAULT_DOMAIN })).toBe(5);
+      expect(await countEntries(db, { domain: "no-such-domain" })).toBe(0);
+      expect(
+        await countEntries(db, { domain: DEFAULT_DOMAIN, status: "verified" }),
+      ).toBe(3);
+    }
   });
 
   it("pages backward by keyset, strictly before the position it was given", async () => {

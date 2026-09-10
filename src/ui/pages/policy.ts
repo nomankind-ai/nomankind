@@ -13,7 +13,7 @@
  * it a row, and the test holds that promise.
  */
 
-import type { POLICY } from "../../policy.js";
+import type { DomainPolicy, POLICY } from "../../policy.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
 import type { PageContext } from "../types.js";
@@ -92,6 +92,102 @@ function listRows(name: string, values: readonly string[]): Safe[] {
 }
 
 /**
+ * One registered domain's published tables (decision D-071).
+ *
+ * Everything that used to be a category-keyed global — the staleness windows,
+ * the transcript categories, the excluded-party list — is a field of a domain
+ * now, so it is published per domain and named by the path it actually lives
+ * at: `DOMAINS.<slug>.staleness_window_days.<category>` and not a global a
+ * reader would have to guess applies everywhere. Whitepaper Section 3: the
+ * mechanism does not care about the domain, and what is domain-shaped is the
+ * tables. Every value is read off the frozen object; the page holds none.
+ */
+function domainPanel(slug: string, domain: DomainPolicy): Safe {
+  const path = `DOMAINS.${slug}`;
+  const rows: Row[] = [
+    {
+      name: `${path}.name`,
+      value: domain.name,
+      means: "What this domain is called where a domain is named in words.",
+    },
+    {
+      name: `${path}.categories`,
+      value: domain.categories.join(", "),
+      means:
+        "Every category this domain admits. The schema's category enum is the union of every registered domain's categories; which of them a domain admits is enforced from this table, so a category filed in a domain that does not admit it is refused at submission.",
+    },
+    ...domain.categories.map((category) => {
+      const days = domain.staleness_window_days[category];
+      return {
+        name: `${path}.staleness_window_days.${category}`,
+        value: days === null ? "no window (event category)" : `${days} days`,
+        means:
+          days === null
+            ? `An entry in the ${category} category of this domain carries no freshness window: once it happened it stays true, so it never goes stale.`
+            : `A ${category} entry in this domain expires ${days} days after its last confirmation, and reads on it are marked stale until a trusted operator reconfirms it.`,
+      };
+    }),
+    {
+      name: `${path}.transcript_categories`,
+      value: domain.transcript_categories.join(", "),
+      means:
+        "The categories of this domain whose evidence is a transcript rather than a document, which is what decides the shape a validator's reproduction has to take.",
+    },
+    {
+      name: `${path}.excluded_parties.rule`,
+      value: domain.excluded_parties.rule,
+      means:
+        "Section 10, in this domain's own words: no party whose products or conduct the record checks may control, fund, or validate it in that domain. The list below is the cheap first check and never the whole enforcement — the signed attestation is what binds.",
+    },
+    {
+      name: `${path}.attestation.version`,
+      value: domain.attestation.version,
+      means:
+        "The version of the independence attestation an operator signs to join this domain. The sentence itself is published verbatim on the genesis page, because a paraphrase of a signed string is not the signed string.",
+    },
+    {
+      name: `${path}.subject_convention`,
+      value: domain.subject_convention,
+      means:
+        "How a subject is named in this domain, so two entries about the same thing are about the same subject.",
+    },
+  ];
+  return html`<section class="panel">
+        <h2 class="panel-title">Domains · ${slug}</h2>
+        <p class="note">
+          One registered domain's published tables. Nothing category-shaped is
+          global any more: a window, a transcript rule and an excluded party all
+          belong to a domain, and an entry is read under the domain its own
+          signed core names.
+        </p>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>name</th>
+                <th>value</th>
+                <th>what it fixes</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${tableRows(rows)}
+            </tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <tbody>
+              ${listRows(
+                `${path}.excluded_parties.domains`,
+                domain.excluded_parties.domains,
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+}
+
+/**
  * The page.
  *
  * `policy` is the whole frozen object rather than the individual constants: a
@@ -99,17 +195,6 @@ function listRows(name: string, values: readonly string[]): Safe[] {
  * the last block can enumerate it.
  */
 export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
-  const staleness = Object.entries(policy.STALENESS_WINDOW_DAYS).map(
-    ([category, days]) => ({
-      name: `STALENESS_WINDOW_DAYS.${category}`,
-      value: days === null ? "no window (event category)" : `${days} days`,
-      means:
-        days === null
-          ? `An entry in the ${category} category carries no freshness window: once it happened it stays true, so it never goes stale.`
-          : `A ${category} entry expires ${days} days after its last confirmation, and reads on it are marked stale until a trusted operator reconfirms it.`,
-    }),
-  );
-
   const validation: Row[] = [
     {
       name: "TRUSTED_POOL_SWITCH",
@@ -194,6 +279,12 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       value: policy.NORM_VERSION,
       means:
         "The snapshot normalization rule in force at submission. Every hash on an entry is computed under the version the entry was signed with, never a later one.",
+    },
+    {
+      name: "SCHEMA_VERSION",
+      value: policy.SCHEMA_VERSION,
+      means:
+        "The entry schema version in force: what a new entry is written and checked against, and what the offline verifier names when it meets a core sealed under an older one. A core carrying no domain key was sealed under v0.6 and is read as the default domain rather than rewritten.",
     },
     {
       name: "FETCH_MAX_REDIRECTS",
@@ -488,7 +579,10 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       </p>
 
       ${group("Validation", validation)} ${group("Evidence", evidence)}
-      ${group("Freshness", staleness)} ${group("Money and standing", money)}
+      ${Object.entries(policy.DOMAINS).map(([slug, domain]) =>
+        domainPanel(slug, domain),
+      )}
+      ${group("Money and standing", money)}
       ${group("Standing", standing)} ${group("Disputes and reports", disputes)}
       ${group("Attestation", attestation)}
 
@@ -564,24 +658,6 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       </section>
 
       ${group("Requests", requests)}
-
-      <section class="panel">
-        <h2 class="panel-title">MODEL_PROVIDER_DOMAINS</h2>
-        <p class="note">
-          The published list of model providers' registrable domains. A
-          registration on one of them, or on any subdomain of one, is refused at
-          the door. It is the cheap first check and never the whole enforcement:
-          the signed independence attestation and the public record behind it are
-          what actually bind (Section 10).
-        </p>
-        <div class="table-wrap">
-          <table class="table">
-            <tbody>
-              ${listRows("MODEL_PROVIDER_DOMAINS", policy.MODEL_PROVIDER_DOMAINS)}
-            </tbody>
-          </table>
-        </div>
-      </section>
 
       <section class="panel">
         <h2 class="panel-title">All keys</h2>

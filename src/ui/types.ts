@@ -76,12 +76,26 @@ export interface HomeCounters {
 export interface HomeData {
   counters: HomeCounters;
   latest: EntryRow[];
+  /**
+   * The registered domain `?domain=` narrowed the page to, or null for every
+   * domain (decision D-071). The counters and the latest rows were gathered
+   * under it; the page says which, because a filtered four is otherwise
+   * indistinguishable from the whole log's four.
+   */
+  domain: string | null;
 }
 
 /** What an entries listing was narrowed by; null in a field means "not asked". */
 export interface EntriesFilter {
   category: string | null;
   status: string | null;
+  /**
+   * The registered domain the listing was narrowed to, null for all of them
+   * (decision D-071). A field of the filter rather than a parameter beside it,
+   * so the chip group, the "all" links and the keyset pager all carry it the
+   * same way every other filter is carried.
+   */
+  domain: string | null;
   tier: string | null;
   fresh: "fresh" | "stale" | null;
 }
@@ -223,10 +237,26 @@ export interface OperatorsData {
   rows: OperatorRow[];
 }
 
+/**
+ * One domain an operator is attested in (decision D-071), carried verbatim from
+ * `operatorDomains`: the slug, and the version of the attestation it signed for
+ * that domain. The version is null when the stored row carries no attestation,
+ * which is not the same as a domain nobody attested for.
+ */
+export interface OperatorDomainRow {
+  domain: string;
+  attestationVersion: string | null;
+}
+
 export interface OperatorData {
   row: OperatorRow;
   /** The agent ids bound to the operator (Section 5). */
   agents: string[];
+  /**
+   * The domains this operator is attested in, registration first and then every
+   * join, in the order the log put them in.
+   */
+  domains: OperatorDomainRow[];
   /** The signed independence attestation, null when the row carries none. */
   attestation: Record<string, unknown> | null;
   /** The agent that named this operator at genesis, null otherwise. */

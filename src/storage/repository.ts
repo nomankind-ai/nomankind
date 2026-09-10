@@ -20,6 +20,8 @@
 
 import { utcDay, type Anchor, type AnchorExternal } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
+import { domainOf } from "../core.js";
+import { DEFAULT_DOMAIN } from "../policy.js";
 import type { DerivedAttestation } from "../attest.js";
 import type { BountyAccrual } from "../bounty.js";
 import type { Sidecar } from "../derive.js";
@@ -27,6 +29,7 @@ import type { LedgerRow } from "../ledger.js";
 import type { ProbeAnswer } from "../probe.js";
 import {
   appendEvent,
+  type Attestation,
   type AttestationScorer,
   type Event,
   type EventInput,
@@ -440,13 +443,14 @@ function entryStatement(
   return db
     .prepare(
       `INSERT INTO entries (
-         id, subject, category, status, submitted_at, submitted_seq, author,
-         stale, expires_at, supersedes,
+         id, subject, category, domain, status, submitted_at, submitted_seq,
+         author, stale, expires_at, supersedes,
          entry_json, sidecar_json, derived_through_seq
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          subject = excluded.subject,
          category = excluded.category,
+         domain = excluded.domain,
          status = excluded.status,
          submitted_at = excluded.submitted_at,
          submitted_seq = excluded.submitted_seq,
@@ -462,6 +466,9 @@ function entryStatement(
       entryField(entry, "id"),
       entryField(entry, "subject"),
       entryField(entry, "category"),
+      // The signed core's own eighteenth key, or ai-ecosystem for a legacy v0.6
+      // entry that carries none: `domainOf` is the one place that reads it.
+      domainOf(entry),
       entryField(entry, "status"),
       entryField(entry, "submitted_at"),
       submittedSeq,
@@ -491,6 +498,8 @@ export async function getEntry(
 export interface ListEntriesQuery {
   readonly subject?: string;
   readonly category?: string;
+  /** The registered domain (decision D-071); omit for every domain. */
+  readonly domain?: string;
   readonly status?: string;
   /** The caller's own page size. There is no default. */
   readonly limit: number;
@@ -519,6 +528,10 @@ export async function listEntries(
   if (query.category !== undefined) {
     conditions.push("category = ?");
     bindings.push(query.category);
+  }
+  if (query.domain !== undefined) {
+    conditions.push("domain = ?");
+    bindings.push(query.domain);
   }
   if (query.status !== undefined) {
     conditions.push("status = ?");
@@ -900,6 +913,99 @@ export async function listOperators(
   return rows.results.map(toOperator);
 }
 
+/**
+ * One (operator, domain) row: the operator is attested in that domain, from the
+ * position of the event that said so.
+ *
+ * Decision D-071: registration binds an operator to its first domain's
+ * attestation and a join carries a later domain's. This row is the index into
+ * those two events and never a second source of truth -- `operatorDomainsAt`
+ * (src/derive.ts) folds the same answer out of the log.
+ */
+export interface OperatorDomainRecord {
+  readonly operator: string;
+  readonly domain: string;
+  readonly seq: number;
+  /** The signed attestation exactly as the event carried it; null when unknown. */
+  readonly attestation: Attestation | null;
+}
+
+const OPERATOR_DOMAIN_COLUMNS = `operator, domain, seq, attestation_json`;
+
+function toOperatorDomain(row: Row): OperatorDomainRecord {
+  const attestation = readNullableText(row, "attestation_json");
+  return {
+    operator: readText(row, "operator"),
+    domain: readText(row, "domain"),
+    seq: readInteger(row, "seq"),
+    attestation:
+      attestation === null ? null : (JSON.parse(attestation) as Attestation),
+  };
+}
+
+/** The upsert that stores one (operator, domain) row. */
+function operatorDomainStatement(
+  db: D1Like,
+  record: OperatorDomainRecord,
+): D1LikeStatement {
+  return db
+    .prepare(
+      `INSERT INTO operator_domains (${OPERATOR_DOMAIN_COLUMNS}) VALUES (?, ?, ?, ?)
+       ON CONFLICT (operator, domain) DO UPDATE SET
+         seq = excluded.seq,
+         attestation_json = excluded.attestation_json`,
+    )
+    .bind(
+      record.operator,
+      record.domain,
+      record.seq,
+      record.attestation === null ? null : writeJson(record.attestation),
+    );
+}
+
+/**
+ * The domains one operator is attested in, in the order it took them on.
+ *
+ * Registration first, then every join by the position of its event, which is
+ * the order the log put them in and the order the operator page shows them.
+ */
+export async function operatorDomains(
+  db: D1Like,
+  operator: string,
+): Promise<OperatorDomainRecord[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${OPERATOR_DOMAIN_COLUMNS} FROM operator_domains
+       WHERE operator = ? ORDER BY seq`,
+    )
+    .bind(operator)
+    .all<Row>();
+  return rows.results.map(toOperatorDomain);
+}
+
+/**
+ * The operators attested in one domain, in id order.
+ *
+ * What the caller builds a draw's exclusion list from: the draw itself stays
+ * domain-blind (src/assign.ts), so the Worker passes it every pool operator that
+ * is not in here. The caller's limit is explicit and there is no default: this
+ * module holds no page size. Served by the (domain, operator) index from 0012.
+ */
+export async function operatorsInDomain(
+  db: D1Like,
+  domain: string,
+  limit: number,
+): Promise<string[]> {
+  const rows = await db
+    .prepare(
+      `SELECT operator FROM operator_domains
+       WHERE domain = ? ORDER BY operator LIMIT ?`,
+    )
+    .bind(domain, limit)
+    .all<Row>();
+  return rows.results.map((row) => readText(row, "operator"));
+}
+
 /** An agent: a key, and the operator that answers for it. */
 export interface AgentRecord {
   readonly agentId: string;
@@ -1000,12 +1106,52 @@ export async function registerOperator(
     readonly events: readonly Event[];
     readonly operator: OperatorRecord;
     readonly agent: AgentRecord;
+    /**
+     * The domain the registration attested to, and the attestation itself
+     * (decision D-071). Omitted, the operator is recorded in the default domain
+     * with no attestation on the row -- which is exactly what a registration
+     * sealed before v0.7 meant.
+     */
+    readonly domain?: { readonly domain: string; readonly attestation: Attestation | null };
   },
 ): Promise<void> {
   const statements = eventStatements(db, input.events, await head(db));
   statements.push(operatorStatement(db, input.operator));
   statements.push(agentStatement(db, input.agent));
+  statements.push(
+    operatorDomainStatement(db, {
+      operator: input.operator.id,
+      domain: input.domain?.domain ?? DEFAULT_DOMAIN,
+      seq: input.operator.registeredSeq,
+      attestation: input.domain?.attestation ?? null,
+    }),
+  );
   await db.batch(statements);
+}
+
+/**
+ * Record a domain join: append the `operator_joined_domain` event and write its
+ * row, atomically, for the reason `registerOperator` is atomic. The event is the
+ * record and the row is the index into it: a row without its event would be an
+ * attestation nobody can verify offline, and an event without its row would be
+ * an attestation the Worker cannot see when it builds a draw's exclusions.
+ */
+export async function recordDomainJoin(
+  db: D1Like,
+  input: EventInput<"operator_joined_domain">,
+): Promise<Event<"operator_joined_domain">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  const joined = event as Event<"operator_joined_domain">;
+  statements.push(
+    operatorDomainStatement(db, {
+      operator: joined.payload.operator,
+      domain: joined.payload.domain,
+      seq: joined.seq,
+      attestation: joined.payload.attestation,
+    }),
+  );
+  await db.batch(statements);
+  return joined;
 }
 
 /**
@@ -3701,6 +3847,8 @@ export async function earliestReadReceiptDay(
 export interface ReadCandidatesQuery {
   readonly subject: string;
   readonly category: string;
+  /** The registered domain (decision D-071); omit for every domain. */
+  readonly domain?: string;
   /** The caller's own page size. There is no default. */
   readonly limit: number;
   /** Resume strictly before this submitted_seq; omit for the first page. */
@@ -3725,6 +3873,11 @@ export async function readCandidates(
   query: ReadCandidatesQuery,
 ): Promise<StoredEntry[]> {
   const bindings: unknown[] = [query.subject, query.category];
+  let domain = "";
+  if (query.domain !== undefined) {
+    domain = "AND domain = ? ";
+    bindings.push(query.domain);
+  }
   let before = "";
   if (query.beforeSubmittedSeq !== undefined) {
     before = "AND submitted_seq < ? ";
@@ -3735,7 +3888,7 @@ export async function readCandidates(
   const rows = await db
     .prepare(
       `SELECT ${ENTRY_COLUMNS} FROM entries
-       WHERE subject = ? AND category = ? ${before}AND status = 'verified'
+       WHERE subject = ? AND category = ? ${domain}${before}AND status = 'verified'
        ORDER BY submitted_seq DESC LIMIT ?`,
     )
     .bind(...bindings)
@@ -3778,10 +3931,19 @@ export async function latestEventOfType(
  */
 export async function countEntries(
   db: D1Like,
-  query: { readonly status?: string; readonly stale?: boolean },
+  query: {
+    readonly status?: string;
+    readonly stale?: boolean;
+    /** The registered domain (decision D-071); omit for every domain. */
+    readonly domain?: string;
+  },
 ): Promise<number> {
   const conditions: string[] = [];
   const bindings: unknown[] = [];
+  if (query.domain !== undefined) {
+    conditions.push("domain = ?");
+    bindings.push(query.domain);
+  }
   if (query.status !== undefined) {
     conditions.push("status = ?");
     bindings.push(query.status);
@@ -3802,6 +3964,8 @@ export async function countEntries(
 /** What the browsing listing may narrow by, and where it resumes. */
 export interface ListEntriesPageQuery {
   readonly category?: string;
+  /** The registered domain (decision D-071); omit for every domain. */
+  readonly domain?: string;
   readonly status?: string;
   /** The sidecar's `effective_tier`, which is the tier a reader is shown. */
   readonly tier?: string;
@@ -3835,6 +3999,10 @@ export async function listEntriesPage(
   if (query.category !== undefined) {
     conditions.push("category = ?");
     bindings.push(query.category);
+  }
+  if (query.domain !== undefined) {
+    conditions.push("domain = ?");
+    bindings.push(query.domain);
   }
   if (query.status !== undefined) {
     conditions.push("status = ?");
@@ -3876,12 +4044,29 @@ export async function listEntriesPage(
  * stored `false` as false, and an operator whose row never carried the field at
  * all extracts as null and is not counted.
  */
-export async function countTrustedOperators(db: D1Like): Promise<number> {
+export async function countTrustedOperators(
+  db: D1Like,
+  domain?: string,
+): Promise<number> {
+  if (domain === undefined) {
+    const row = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM operators
+         WHERE json_extract(operator_json, '$.trusted')`,
+      )
+      .first<Row>();
+    return row === null ? 0 : readInteger(row, "n");
+  }
+  // Trusted *and* attested in that domain (decision D-071): the trusted pool is
+  // global, but who may judge an entry is not, so a count offered beside a
+  // domain has to mean the operators that could actually judge in it.
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM operators
-       WHERE json_extract(operator_json, '$.trusted')`,
+        WHERE json_extract(operator_json, '$.trusted')
+          AND id IN (SELECT operator FROM operator_domains WHERE domain = ?)`,
     )
+    .bind(domain)
     .first<Row>();
   return row === null ? 0 : readInteger(row, "n");
 }
@@ -4108,6 +4293,12 @@ export interface ProbeCandidatesQuery {
   readonly limit: number;
   /** Resume strictly after this id; omit for the first page. */
   readonly afterId?: string;
+  /**
+   * The registered domain the probes are drawn from (decision D-071); omit for
+   * every domain. An attestation is about a model in a domain, so the set it is
+   * scored against is that domain's facts and not the whole log's.
+   */
+  readonly domain?: string;
 }
 
 /**
@@ -4132,6 +4323,11 @@ export async function probeCandidates(
   query: ProbeCandidatesQuery,
 ): Promise<StoredEntry[]> {
   const bindings: unknown[] = [];
+  let domain = "";
+  if (query.domain !== undefined) {
+    domain = "AND domain = ? ";
+    bindings.push(query.domain);
+  }
   let after = "";
   if (query.afterId !== undefined) {
     after = "AND id > ? ";
@@ -4142,7 +4338,7 @@ export async function probeCandidates(
   const rows = await db
     .prepare(
       `SELECT ${ENTRY_COLUMNS} FROM entries
-       WHERE status = 'verified' AND stale = 0 ${after}
+       WHERE status = 'verified' AND stale = 0 ${domain}${after}
          AND json_extract(sidecar_json, '$.effective_tier') = 'observed'
        ORDER BY id LIMIT ?`,
     )

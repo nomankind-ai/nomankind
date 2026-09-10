@@ -37,7 +37,11 @@ import {
   runScore,
   type AttestDeps,
 } from "../src/cli/attest.js";
-import { runSubmit, type SubmitRun } from "../src/cli/submit.js";
+import {
+  parseSubmitArgs,
+  runSubmit,
+  type SubmitRun,
+} from "../src/cli/submit.js";
 import type {
   HttpClient,
   ValidatorIo,
@@ -51,6 +55,7 @@ import {
 } from "../src/identity.js";
 import {
   ATTESTATION_SCORERS,
+  DEFAULT_DOMAIN,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
 } from "../src/policy.js";
@@ -352,6 +357,8 @@ beforeAll(async () => {
     fields: {
       subject: SUBJECT,
       category: "pricing",
+      // Decision D-071: the fields file names the domain the author signs.
+      domain: DEFAULT_DOMAIN,
       claim: CLAIM,
       before: "$35 per seat per month",
       after: "$40 per seat per month",
@@ -449,6 +456,49 @@ describe("the submit command's receipt", () => {
     });
     expect([run.code, run.status, run.error]).toEqual([2, null, "receipt_shape"]);
   }, 600_000);
+
+  it("reads a plain call's three paths, with no receipt flag anywhere", () => {
+    // The flag is optional, so the common call is the one without it, and the
+    // parser has to leave all three positional arguments standing: a filter
+    // that dropped the argument after `--receipt` by index would drop the key
+    // path itself when there is no flag to find.
+    expect(parseSubmitArgs(["k.json", TEST_ORIGIN, "fields.json"])).toEqual({
+      keyPath: "k.json",
+      baseUrl: TEST_ORIGIN,
+      fieldsPath: "fields.json",
+    });
+  });
+
+  it("takes the receipt file out of the positional arguments", () => {
+    const withFlag = ["k.json", TEST_ORIGIN, "fields.json", "--receipt", "r.json"];
+    expect(parseSubmitArgs(withFlag)).toEqual({
+      keyPath: "k.json",
+      baseUrl: TEST_ORIGIN,
+      fieldsPath: "fields.json",
+      receiptPath: "r.json",
+    });
+    // The flag may come first, and the file after it is still not positional.
+    expect(
+      parseSubmitArgs(["--receipt", "r.json", "k.json", TEST_ORIGIN, "fields.json"]),
+    ).toEqual({
+      keyPath: "k.json",
+      baseUrl: TEST_ORIGIN,
+      fieldsPath: "fields.json",
+      receiptPath: "r.json",
+    });
+  });
+
+  it("asks for the usage line when the call is not one", () => {
+    expect(parseSubmitArgs([])).toBeNull();
+    expect(parseSubmitArgs(["k.json", TEST_ORIGIN])).toBeNull();
+    expect(
+      parseSubmitArgs(["k.json", TEST_ORIGIN, "fields.json", "extra.json"]),
+    ).toBeNull();
+    // A flag with nothing after it names no file.
+    expect(
+      parseSubmitArgs(["k.json", TEST_ORIGIN, "fields.json", "--receipt"]),
+    ).toBeNull();
+  });
 });
 
 describe("the attest command", () => {

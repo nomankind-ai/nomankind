@@ -17,7 +17,10 @@
 
 import { describe, expect, it } from "vitest";
 import { ANSWER_REFUSALS, SCORE_REFUSALS } from "../src/attest.js";
+import { CORE_KEYS } from "../src/core.js";
 import {
+  DEFAULT_DOMAIN,
+  DOMAINS,
   LIST_PAGE_LIMIT,
   POLICY,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
@@ -25,8 +28,12 @@ import {
 import {
   ATTESTATION_TEXT,
   ATTESTATION_VERSION,
+  JOIN_REFUSALS,
   TXT_RECORD_PREFIX,
 } from "../src/registry.js";
+import { READ_QUERY_REFUSALS } from "../src/read.js";
+import { SUBMISSION_REFUSALS } from "../src/submit.js";
+import { SYNC_QUERY_REFUSALS } from "../src/sync.js";
 import { renderApi } from "../src/ui/pages/api.js";
 import { VALIDATION_REFUSALS } from "../src/validate.js";
 import { renderGenesis } from "../src/ui/pages/genesis.js";
@@ -64,17 +71,73 @@ describe("renderPolicy", () => {
     expect(page).toContain(POLICY.NORM_VERSION);
   });
 
-  it("gives every staleness category a row, window or no window", () => {
-    for (const [category, days] of Object.entries(
-      POLICY.STALENESS_WINDOW_DAYS,
-    )) {
-      expect(page).toContain(`STALENESS_WINDOW_DAYS.${category}`);
-      if (days === null) {
-        expect(page).toContain("no window (event category)");
-      } else {
-        expect(page).toContain(`${days} days`);
+  it("gives every registered domain its own group, read from POLICY", () => {
+    // Nothing category-shaped is global any more (decision D-071): a window, a
+    // transcript rule and an excluded party belong to a domain, and the page
+    // publishes them under the path they actually live at.
+    for (const [slug, domain] of Object.entries(POLICY.DOMAINS)) {
+      const path = `DOMAINS.${slug}`;
+      expect(page, `${slug} has no group`).toContain(`Domains · ${slug}`);
+      expect(page).toContain(`<td class="mono">${path}.name</td>`);
+      expect(page).toContain(`<td class="mono">${domain.name}</td>`);
+      expect(page).toContain(`<td class="mono">${path}.categories</td>`);
+      expect(page).toContain(
+        `<td class="mono">${domain.categories.join(", ")}</td>`,
+      );
+      expect(page).toContain(
+        `<td class="mono">${path}.transcript_categories</td>`,
+      );
+      expect(page).toContain(
+        `<td class="mono">${domain.transcript_categories.join(", ")}</td>`,
+      );
+      expect(page).toContain(
+        `<td class="mono">${path}.excluded_parties.rule</td>`,
+      );
+      expect(page).toContain(`<td class="mono">${domain.excluded_parties.rule}</td>`);
+      expect(page).toContain(
+        `<td class="mono">${path}.attestation.version</td>`,
+      );
+      expect(page).toContain(
+        `<td class="mono">${domain.attestation.version}</td>`,
+      );
+      expect(page).toContain(`<td class="mono">${path}.subject_convention</td>`);
+
+      // Every window of every category the domain admits, named by its path.
+      for (const category of domain.categories) {
+        const days = domain.staleness_window_days[category];
+        expect(page, `${path}.${category} has no window row`).toContain(
+          `<td class="mono">${path}.staleness_window_days.${category}</td>`,
+        );
+        expect(page).toContain(
+          days === null
+            ? `<td class="mono">no window (event category)</td>`
+            : `<td class="mono">${days} days</td>`,
+        );
       }
+
+      // And the excluded parties themselves, one row each, in order.
+      domain.excluded_parties.domains.forEach((party, index) => {
+        expect(page, `${party} is not published`).toContain(
+          `<td class="mono">${path}.excluded_parties.domains[${index}]</td>`,
+        );
+        expect(page).toContain(`<td class="mono">${party}</td>`);
+      });
     }
+  });
+
+  it("no longer names the globals a domain replaced", () => {
+    // The three names left src/policy.ts and src/evidence.ts, so a page still
+    // publishing one would be publishing a table that no longer exists.
+    expect(page).not.toContain("STALENESS_WINDOW_DAYS");
+    expect(page).not.toContain("MODEL_PROVIDER_DOMAINS");
+    expect(page).not.toContain("TRANSCRIPT_CATEGORIES");
+  });
+
+  it("publishes the schema version beside the normalization version", () => {
+    expect(page).toContain(`<td class="mono">SCHEMA_VERSION</td>`);
+    expect(page).toContain(`<td class="mono">${POLICY.SCHEMA_VERSION}</td>`);
+    expect(page).toContain(`<td class="mono">NORM_VERSION</td>`);
+    expect(page).toContain(`<td class="mono">${POLICY.NORM_VERSION}</td>`);
   });
 
   it("names every pinned witness by operator", () => {
@@ -582,6 +645,109 @@ describe("renderApi", () => {
     expect([...new Set(bounds)]).toEqual([LIST_PAGE_LIMIT]);
   });
 
+  it("documents domain= on every door that takes it", () => {
+    // Four doors take it: the two JSON readers and the two browsing pages.
+    // A parameter a route accepts and the page does not name is a filter no
+    // caller knows exists.
+    for (const marker of [
+      "subject=<s>, category=<c>, domain=<slug>",
+      "min_tier=stated|observed, domain=<slug>",
+      "category=<c>, status=<s>, domain=<slug>",
+    ]) {
+      expect(page, `${marker} is not documented`).toContain(
+        marker.replaceAll("<", "&lt;").replaceAll(">", "&gt;"),
+      );
+    }
+    // Each names unknown_domain where its own parser raises it.
+    const inOrder = (label: string, reasons: readonly string[]): void => {
+      let at = page.indexOf(label);
+      expect(at, `${label} is not on the page`).toBeGreaterThan(-1);
+      for (const reason of reasons) {
+        const next = page.indexOf(reason, at);
+        expect(next, `${label}: ${reason} is out of order`).toBeGreaterThan(at);
+        at = next;
+      }
+    };
+    inOrder('<td class="mono">/read</td>', READ_QUERY_REFUSALS);
+    inOrder('<td class="mono">/sync</td>', SYNC_QUERY_REFUSALS);
+    // The listing's own refusals, in src/ui/query.ts's order.
+    inOrder('<td class="mono">/entries</td>', [
+      "unknown_parameter",
+      "repeated_parameter",
+      "bad_category",
+      "bad_status",
+      "unknown_domain",
+      "bad_tier",
+      "bad_fresh",
+      "bad_before",
+    ]);
+    // The home page refuses a slug nobody registered rather than counting the
+    // whole log under a name the reader mistyped.
+    inOrder('<td class="mono">/</td>', ["domain=&lt;slug&gt;", "unknown_domain"]);
+  });
+
+  it("documents the join route with JOIN_REFUSALS in the kernel's order", () => {
+    expect(page).toContain("/operators/{id}/domains");
+    let at = page.indexOf("/operators/{id}/domains");
+    for (const reason of [
+      "bad_id",
+      "bad_body",
+      "the request verdicts",
+      "not_found",
+      "agent_mismatch",
+      ...JOIN_REFUSALS,
+    ]) {
+      const next = page.indexOf(reason, at);
+      expect(next, `${reason} is out of order`).toBeGreaterThan(at);
+      at = next;
+    }
+    // The body it takes, and what registration itself now names.
+    expect(page).toContain("attestation { version, domain, signed_at, signature }");
+    expect(page).toContain("unregistered_domain");
+    expect(page).toContain("attestation_domain_mismatch");
+  });
+
+  it("names the submission's three domain refusals where the door checks them", () => {
+    // src/submit.ts puts them straight after bad_norm_version, so the page does
+    // too: a caller told the first thing that was wrong can fix it.
+    const three = SUBMISSION_REFUSALS.slice(
+      SUBMISSION_REFUSALS.indexOf("bad_norm_version"),
+      SUBMISSION_REFUSALS.indexOf("bad_submitted_at"),
+    );
+    expect([...three]).toEqual([
+      "bad_norm_version",
+      "missing_domain",
+      "unregistered_domain",
+      "category_not_in_domain",
+    ]);
+    let at = page.indexOf('<td class="mono">/entries</td>', page.indexOf("Write path"));
+    expect(at).toBeGreaterThan(-1);
+    for (const reason of three) {
+      const next = page.indexOf(reason, at);
+      expect(next, `${reason} is out of order`).toBeGreaterThan(at);
+      at = next;
+    }
+  });
+
+  it("counts the signed core keys rather than spelling the number out", () => {
+    expect(page).toContain(`the ${CORE_KEYS.length} signed core keys`);
+    expect(page).toContain(`${CORE_KEYS.length}-key core`);
+  });
+
+  it("names the verifier's schema refusal and the version it checks against", () => {
+    expect(page).toContain("unsupported_schema_version");
+    expect(page).toContain(POLICY.SCHEMA_VERSION);
+  });
+
+  it("gives register its domain and join switches, and submit its domain field", () => {
+    expect(page).toContain("--domain &lt;slug&gt;");
+    expect(page).toContain("--join &lt;slug&gt;");
+    expect(page).toContain("npm run register --");
+    // The fields file names the domain the author signs; a missing one is
+    // bad_fields before any I/O rather than a default nobody chose.
+    expect(page).toContain("bad_fields");
+  });
+
   it("carries no script and no inline style", () => {
     expect(page).not.toContain("<script");
     expect(page).not.toContain(' style="');
@@ -638,8 +804,35 @@ describe("renderGenesis", () => {
   it("names all three joining steps", () => {
     expect(page).toContain("Prove a domain");
     expect(page).toContain("Complete payout onboarding");
-    expect(page).toContain("Sign the independence attestation");
+    expect(page).toContain("Name a domain and sign its independence attestation");
     expect(page).toContain("mock-verified-");
+  });
+
+  it("shows every registered domain's attestation sentence and version", () => {
+    // The attestation is per domain (decision D-071): a page showing one
+    // sentence for a log that holds two domains would be showing an operator
+    // the wrong string to sign.
+    for (const [slug, domain] of Object.entries(DOMAINS)) {
+      expect(page, `${slug} has no attestation block`).toContain(slug);
+      expect(page, `${slug}'s sentence is not verbatim`).toContain(
+        domain.attestation.text,
+      );
+      expect(page, `${slug}'s version is missing`).toContain(
+        domain.attestation.version,
+      );
+      expect(page, `${slug}'s name is missing`).toContain(domain.name);
+      expect(page, `${slug}'s exclusion rule is missing`).toContain(
+        domain.excluded_parties.rule,
+      );
+    }
+  });
+
+  it("names the domain in the joining steps and in the register body", () => {
+    expect(page).toContain("Name a domain and sign its independence attestation");
+    expect(page).toContain(`"domain": "${DEFAULT_DOMAIN}"`);
+    expect(page).toContain("POST /operators/{id}/domains");
+    // The signed object gained the key, and a pre-v0.7 attestation did not.
+    expect(page).toContain("agent, domain, operator, signed_at, text");
   });
 
   it("shows the register body and points at the API page", () => {

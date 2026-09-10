@@ -58,6 +58,7 @@ import {
   FakeWitnessAdapter,
   pinnedSet,
 } from "./helpers/witness.js";
+import { DEFAULT_DOMAIN } from "../src/policy.js";
 
 const NOW = SUBMIT_NOW;
 const AT = NOW.toISOString();
@@ -157,6 +158,7 @@ function proposal(): Omit<SubmissionProposal, "author"> {
     author_operator: author.operator,
     subject: "kestrel/kestrel-1",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim: "Kestrel-1 seat pricing is $40 per seat per month",
     before: "$35 per seat per month",
     after: "$40 per seat per month",

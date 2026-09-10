@@ -39,6 +39,7 @@
  */
 
 import { CORE_KEYS, type CoreKey } from "../../core.js";
+import { DEFAULT_DOMAIN } from "../../policy.js";
 import {
   badge,
   fmtDate,
@@ -98,6 +99,15 @@ function entryLink(id: string): Safe {
  */
 function coreValue(entry: Record_, key: CoreKey): Safe {
   const value = entry[key];
+  // A legacy v0.6 core carries seventeen keys and no `domain` at all
+  // (decision D-071). Absent is not a dash and never a null: the key was not in
+  // the bytes the author signed, and the page says so and says what the log
+  // reads it as, because a dash here would look like a field left empty.
+  if (key === "domain" && value === undefined) {
+    return html`<span class="muted"
+      >absent (v0.6 record, read as ${DEFAULT_DOMAIN})</span
+    >`;
+  }
   if (value === null || value === undefined) return html`${EM_DASH}`;
 
   if (key === "citation") {

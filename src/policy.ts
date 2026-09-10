@@ -51,22 +51,201 @@ export type Category =
   | "correction";
 
 /**
- * Freshness and decay. Volatile categories carry a staleness window from the
- * last-confirmed date: ninety days for pricing and rate limits, thirty for
- * behavior. Event categories (release, deprecation, outage, misbehavior,
- * correction) carry no window, because once they happened they stay true.
+ * A registered domain's published tables: everything about a domain that is not
+ * the mechanism.
+ *
+ * Whitepaper Section 3, "The log": the mechanism does not care about the domain.
+ * A fact is a claim, a citation, a snapshot hash and a set of signatures, and
+ * none of those is AI-shaped. What is domain-shaped is the tables -- which
+ * categories exist, how long each stays fresh, which carry a transcript, who is
+ * too close to judge, how a subject is named -- so those live here, per domain,
+ * and nothing category-shaped is global any more.
+ *
+ * The prose form of every field is schema/nomankind-domain-registry-v1.md; this
+ * is the same content in the one place code may read it from.
  */
-export const STALENESS_WINDOW_DAYS: Readonly<Record<Category, number | null>> =
-  Object.freeze({
-    release: null,
-    deprecation: null,
-    pricing: 90,
-    limit: 90,
-    behavior: 30,
-    outage: null,
-    misbehavior: null,
-    correction: null,
-  });
+export interface DomainPolicy {
+  readonly name: string;
+  readonly categories: readonly Category[];
+  readonly staleness_window_days: Readonly<Record<Category, number | null>>;
+  readonly transcript_categories: readonly Category[];
+  readonly excluded_parties: {
+    readonly rule: string;
+    readonly domains: readonly string[];
+  };
+  readonly attestation: { readonly version: string; readonly text: string };
+  readonly subject_convention: string;
+}
+
+/**
+ * Every registered domain, keyed by slug. The key set is exactly the schema's
+ * `domain` enum, and test/domains.test.ts pins that the two never drift.
+ *
+ * ai-ecosystem is the only domain at launch: the field exists so the log can
+ * hold a second one without a fork, not because a second one is planned.
+ *
+ * The windows are the whitepaper's ("Freshness and decay": volatile categories
+ * carry a staleness window from the last-confirmed date -- ninety days for
+ * pricing and rate limits, thirty for behavior; event categories carry none,
+ * because once they happened they stay true). The excluded-party list and the
+ * attestation sentence are Section 10's, published policy and not the paper's
+ * own list: both move only by a later decision.
+ */
+export const DOMAINS: Readonly<Record<string, DomainPolicy>> = Object.freeze({
+  "ai-ecosystem": Object.freeze({
+    name: "The AI ecosystem",
+    categories: Object.freeze([
+      "release",
+      "deprecation",
+      "pricing",
+      "limit",
+      "behavior",
+      "outage",
+      "misbehavior",
+      "correction",
+    ] as const),
+    staleness_window_days: Object.freeze({
+      release: null,
+      deprecation: null,
+      pricing: 90,
+      limit: 90,
+      behavior: 30,
+      outage: null,
+      misbehavior: null,
+      correction: null,
+    }),
+    transcript_categories: Object.freeze(["behavior", "misbehavior"] as const),
+    excluded_parties: Object.freeze({
+      rule:
+        "No lab or model provider may be a maintainer, funder, or trusted operator.",
+      domains: Object.freeze([
+        "openai.com",
+        "anthropic.com",
+        "google.com",
+        "deepmind.google",
+        "meta.com",
+        "microsoft.com",
+        "x.ai",
+        "mistral.ai",
+        "cohere.com",
+        "amazon.com",
+        "deepseek.com",
+        "alibaba.com",
+        "alibabacloud.com",
+        "moonshot.cn",
+        "01.ai",
+        "ai21.com",
+        "nvidia.com",
+        "ibm.com",
+        "baidu.com",
+        "tencent.com",
+        "bytedance.com",
+        "zhipuai.cn",
+      ]),
+    }),
+    attestation: Object.freeze({
+      version: "nomankind-independence-v1",
+      text: "No model provider holds control of, or a beneficial stake in, this operator.",
+    }),
+    subject_convention: "<provider>/<model or product>",
+  }),
+});
+
+/** Every registered slug, in the order DOMAINS declares them. */
+export const DOMAIN_SLUGS: readonly string[] = Object.freeze(
+  Object.keys(DOMAINS),
+);
+
+/**
+ * The domain a record that names none belongs to.
+ *
+ * Not a default in the sense of a fallback anybody may lean on: it is what a
+ * legacy v0.6 core, and a registration sealed before v0.7, actually meant --
+ * ai-ecosystem was the only domain there was. New records name their domain.
+ */
+export const DEFAULT_DOMAIN = "ai-ecosystem";
+
+/** Whether a slug names a registered domain. */
+export function isRegisteredDomain(slug: unknown): slug is string {
+  return (
+    typeof slug === "string" &&
+    Object.prototype.hasOwnProperty.call(DOMAINS, slug)
+  );
+}
+
+/**
+ * One domain's tables. Throws on an unregistered slug rather than returning a
+ * blank: a caller that has not checked `isRegisteredDomain` first is asking a
+ * question about a domain that does not exist, and answering it with defaults
+ * would apply the wrong windows under a name nobody registered.
+ */
+export function domainPolicy(domain: string): DomainPolicy {
+  const policy = isRegisteredDomain(domain) ? DOMAINS[domain] : undefined;
+  if (policy === undefined) {
+    throw new Error(`domainPolicy: unregistered domain: ${String(domain)}`);
+  }
+  return policy;
+}
+
+/**
+ * The staleness window for one category of one domain, in days, or null when
+ * the category carries none. A category the domain does not admit carries no
+ * window either: there is no such fact to go stale, and neither does anything
+ * in a domain nobody registered.
+ *
+ * The three accessors below answer rather than throw, unlike `domainPolicy`:
+ * each is a question about one category, and the honest answer for a domain or
+ * a category that does not exist is no window, no transcript, no such category
+ * -- which is what keeps a stranger's malformed file answerable with a verdict
+ * instead of a stack trace (src/verify.ts).
+ */
+export function stalenessWindowDays(
+  domain: string,
+  category: unknown,
+): number | null {
+  if (!isRegisteredDomain(domain) || typeof category !== "string") return null;
+  const table = domainPolicy(domain).staleness_window_days as Readonly<
+    Record<string, number | null>
+  >;
+  return table[category] ?? null;
+}
+
+/** Whether this category of this domain carries its evidence as a transcript. */
+export function isTranscriptCategory(
+  domain: string,
+  category: unknown,
+): boolean {
+  if (!isRegisteredDomain(domain) || typeof category !== "string") return false;
+  return (domainPolicy(domain).transcript_categories as readonly string[]).includes(
+    category,
+  );
+}
+
+/** Whether this category is one the domain admits at all. */
+export function isDomainCategory(domain: string, category: unknown): boolean {
+  if (!isRegisteredDomain(domain) || typeof category !== "string") return false;
+  return (domainPolicy(domain).categories as readonly string[]).includes(category);
+}
+
+/**
+ * The registrable domains of the parties excluded from this record's domain --
+ * the AI ecosystem's model providers, and whatever a later domain publishes.
+ *
+ * The neutral rule (Section 10, read without the labs): no party whose products
+ * or conduct the record checks may control, fund, or validate it in that domain.
+ * The list is the cheap first check and never the whole enforcement; the signed
+ * attestation is what binds.
+ */
+export function excludedPartyDomains(domain: string): readonly string[] {
+  return domainPolicy(domain).excluded_parties.domains;
+}
+
+/** The independence attestation of one domain: the version, and the sentence. */
+export function attestationFor(
+  domain: string,
+): { readonly version: string; readonly text: string } {
+  return domainPolicy(domain).attestation;
+}
 
 /**
  * Incentives / Money. Accrued fees are held for thirty days before payout so an
@@ -286,6 +465,18 @@ export const ANCHOR_CALENDARS: readonly string[] = Object.freeze([
 export const NORM_VERSION = "norm-v1.2";
 
 /**
+ * The entry schema version in force: what a new entry is written and checked
+ * against, and what the offline verifier names when it meets a core sealed under
+ * an older one. v0.7 is the version that carries `domain` in the signed core
+ * (schema/nomankind-entry-schema.json, decision D-071).
+ *
+ * A format version and not a policy number, held here for the same reason
+ * NORM_VERSION is: one place says which rules are in force, and every reader
+ * asks that place rather than a string spelt out beside a check.
+ */
+export const SCHEMA_VERSION = "v0.7";
+
+/**
  * Snapshot normalization, step 1 (Fetch). One HTTP GET follows at most five
  * redirects; a chain longer than that is not pinned, it is chased.
  */
@@ -331,49 +522,13 @@ export const REQUEST_CLOCK_SKEW_SECONDS = 300;
 export const NONCE_RETENTION_SECONDS = 600;
 
 /**
- * Governance and legal posture. "No lab or model provider may be a maintainer,
- * funder, or trusted operator": this is the maintainer's published list of
- * model providers' registrable domains, and a registration on one of them, or
- * on any subdomain of one, is refused at the door.
- *
- * Not a whitepaper list. The paper names the exclusion and says it is enforced
- * honestly rather than airtightly, so the list is the maintainer's published
- * policy and moves only by a later decision. It is the cheap first check and
- * never the whole enforcement: the signed independence attestation and the
- * public record behind it are what actually bind.
- */
-export const MODEL_PROVIDER_DOMAINS: readonly string[] = Object.freeze([
-  "openai.com",
-  "anthropic.com",
-  "google.com",
-  "deepmind.google",
-  "meta.com",
-  "microsoft.com",
-  "x.ai",
-  "mistral.ai",
-  "cohere.com",
-  "amazon.com",
-  "deepseek.com",
-  "alibaba.com",
-  "alibabacloud.com",
-  "moonshot.cn",
-  "01.ai",
-  "ai21.com",
-  "nvidia.com",
-  "ibm.com",
-  "baidu.com",
-  "tencent.com",
-  "bytedance.com",
-  "zhipuai.cn",
-]);
-
-/**
  * Lifecycle of an entry, Validate: "The draw is a deterministic function of a
  * public randomness beacon's output (a beacon like drand [5]), the entry id,
  * and a published snapshot of the eligible pool."
  *
  * The paper names drand and stops there, so which drand chain the draw reads is
- * the maintainer's published choice, exactly as MODEL_PROVIDER_DOMAINS is: it
+ * the maintainer's published choice, exactly as a domain's excluded-party
+ * list is (`DOMAINS`, above): it
  * moves only by a later decision, and it is pinned here rather than in the
  * adapter so an offline reader can recompute a draw years later from the same
  * chain the draw used. `chain_hash` is quicknet's, `genesis_time` its first
@@ -565,7 +720,7 @@ export const POLICY = Object.freeze({
   ASSIGNMENT_WINDOW_HOURS,
   REPRODUCTION_RUNS,
   REPRODUCTION_HOLDS,
-  STALENESS_WINDOW_DAYS,
+  DOMAINS,
   HOLDBACK_DAYS,
   READ_SHARE_SPLIT,
   SLOT_COUNT,
@@ -596,12 +751,12 @@ export const POLICY = Object.freeze({
   PAYOUT_MINIMUM_MICROS,
   PAYOUT_CYCLE,
   NORM_VERSION,
+  SCHEMA_VERSION,
   FETCH_MAX_REDIRECTS,
   FETCH_TIMEOUT_MS,
   CAPTURE_MAX_BYTES,
   REQUEST_CLOCK_SKEW_SECONDS,
   NONCE_RETENTION_SECONDS,
-  MODEL_PROVIDER_DOMAINS,
   PROBE_SET_SIZE,
   PROBE_SET_MIN_CANDIDATES,
   ATTESTATION_SCORERS,

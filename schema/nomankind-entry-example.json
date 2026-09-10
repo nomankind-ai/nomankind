@@ -2,6 +2,7 @@
   "id": "nmk_01J8ZQ2K7",
   "subject": "openai/gpt-5",
   "category": "deprecation",
+  "domain": "ai-ecosystem",
   "claim": "GPT-5 API marked deprecated on the OpenAI deprecations page",
   "before": "available",
   "after": "deprecated",
@@ -19,9 +20,9 @@
   "snapshot_hash": "sha256:9f2c4b1a7e0d3c8f6b5a2e1d0c9b8a7f6e5d4c3b2a1908070605040302010009",
   "norm_version": "norm-v1.1",
   "supersedes": null,
-  "author": "1F916:JpFo4VI5q9AZ62i23W5AOx_m5J7eOwrPmaUFeScS-gY",
+  "author": "1F916:JYvwdUKJZ40NN6KDPNlTDBRWgUx3FvW7p5DZXLlQMTo",
   "author_operator": "op_brightloop",
-  "signature": "7DrXYYABpKoGvBW07FX6kqGmLBNkpuJ1/U+9pMgtJLDcjQlQKkI7eg40rXqQjjGA6Jzt4DOrwViDwtC3qtaPAw==",
+  "signature": "zAKTosncw/zVbtTHy6pPT2Juv6IVzaP78S2KgvS5fCaGLMmF78B3ll8RGFWLV5R2L0Fn0ITQA4kHeNKEh2+GCw==",
   "submitted_at": "2026-09-01T14:05:00Z",
   "approvers": [
     {

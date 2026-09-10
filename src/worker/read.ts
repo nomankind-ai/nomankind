@@ -279,6 +279,10 @@ async function bySubject(
     const page = await readCandidates(db, {
       subject: query.subject,
       category: query.category,
+      // The reader's own domain filter (decision D-071). Absent, every domain's
+      // entries about that subject are candidates, which is what a reader
+      // written before v0.7 asks for and gets.
+      ...(query.domain === undefined ? {} : { domain: query.domain }),
       limit: LIST_PAGE_LIMIT,
       ...(beforeSubmittedSeq === undefined ? {} : { beforeSubmittedSeq }),
     });

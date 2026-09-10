@@ -79,6 +79,10 @@ export const BAD_FIELDS = "bad_fields";
 export const AUTHOR_FIELDS: readonly string[] = Object.freeze([
   "subject",
   "category",
+  // The registered domain the fact is filed in (decision D-071). The author's
+  // to choose and the author's to sign: `domain` is a key of the frozen core,
+  // so an entry can never be re-homed after the fact.
+  "domain",
   "claim",
   "before",
   "after",
@@ -93,6 +97,9 @@ export const AUTHOR_FIELDS: readonly string[] = Object.freeze([
 const REQUIRED_FIELDS: readonly string[] = Object.freeze([
   "subject",
   "category",
+  // Required and with no default: the author names the domain they sign, and a
+  // fields file without one is refused `bad_fields` before any I/O.
+  "domain",
   "claim",
   "before",
   "after",
@@ -258,6 +265,7 @@ export async function buildAuthoredCore(input: {
     {
       subject: fields["subject"] as string,
       category: fields["category"] as string,
+      domain: fields["domain"] as string,
       claim: fields["claim"] as string,
       before: fields["before"] as string,
       after: fields["after"] as string,
@@ -428,17 +436,30 @@ export async function runSubmit(input: {
   };
 }
 
-/* c8 ignore start -- the process entry point, exercised by running the CLI. */
-if (
-  process.argv[1] !== undefined &&
-  import.meta.filename === resolve(process.argv[1])
-) {
-  const argv = process.argv.slice(2);
+/** The three paths the command needs, and the optional receipt file. */
+export interface SubmitArgs {
+  readonly keyPath: string;
+  readonly baseUrl: string;
+  readonly fieldsPath: string;
+  readonly receiptPath?: string;
+}
+
+/**
+ * The command line, parsed. `null` is "print the usage line": a pure function so
+ * the argument shapes can be checked without a process.
+ *
+ * `--receipt` takes the argument after it, and that argument is the only
+ * non-flag word that is not positional. It is dropped by its index, and only
+ * when the flag is actually there: without it `indexOf` returns -1, and a filter
+ * that dropped index `-1 + 1` would eat the key path out of every plain call.
+ */
+export function parseSubmitArgs(argv: readonly string[]): SubmitArgs | null {
   const receiptAt = argv.indexOf("--receipt");
   const receiptPath = receiptAt === -1 ? undefined : argv[receiptAt + 1];
   const positional = argv.filter(
     (argument, index) =>
-      index !== receiptAt && index !== receiptAt + 1 && !argument.startsWith("--"),
+      (receiptAt === -1 || index !== receiptAt + 1) &&
+      !argument.startsWith("--"),
   );
   const [keyPath, baseUrl, fieldsPath] = positional;
   if (
@@ -448,9 +469,27 @@ if (
     positional.length > 3 ||
     (receiptAt !== -1 && receiptPath === undefined)
   ) {
+    return null;
+  }
+  return {
+    keyPath,
+    baseUrl,
+    fieldsPath,
+    ...(receiptPath === undefined ? {} : { receiptPath }),
+  };
+}
+
+/* c8 ignore start -- the process entry point, exercised by running the CLI. */
+if (
+  process.argv[1] !== undefined &&
+  import.meta.filename === resolve(process.argv[1])
+) {
+  const parsed = parseSubmitArgs(process.argv.slice(2));
+  if (parsed === null) {
     console.error(USAGE);
     process.exit(2);
   }
+  const { keyPath, baseUrl, fieldsPath, receiptPath } = parsed;
 
   const io: ValidatorIo = {
     stdout: (line: string) => console.log(line),

@@ -31,6 +31,7 @@
 import { resolve } from "node:path";
 
 import { MOCK_VERIFIED_PREFIX } from "../adapters/payout.js";
+import { DEFAULT_DOMAIN } from "../policy.js";
 import { signAttestation, txtRecordName } from "../registry.js";
 import {
   errorOf,
@@ -44,7 +45,8 @@ import {
 } from "./validator.js";
 
 const USAGE =
-  "usage: register <key.json> <base-url> <domain> [--genesis <maintainer-key.json>]";
+  "usage: register <key.json> <base-url> <operator-domain> [--domain <slug>] [--genesis <maintainer-key.json>]\n" +
+  "       register <key.json> <base-url> <operator-domain> --join <slug>";
 
 /** Exit codes, named where they are decided rather than spelt at each return. */
 const OK = 0;
@@ -69,7 +71,19 @@ export function payoutReferenceFor(domain: string): string {
 export interface RegisterPlan {
   readonly keyPath: string;
   readonly baseUrl: string;
+  /** The operator's own domain, which is also its id (Section 5). */
   readonly domain: string;
+  /**
+   * The registered domain the operator joins, and whose attestation it signs
+   * (decision D-071). `--domain`, defaulting to ai-ecosystem: the only domain
+   * there was before v0.7, so a command written then means the same thing.
+   */
+  readonly recordDomain: string;
+  /**
+   * `--join <slug>`: this run takes on a further domain instead of
+   * registering. Null on an ordinary registration.
+   */
+  readonly join: string | null;
   /** The maintainer's key file, or null when this run only registers. */
   readonly genesisKeyPath: string | null;
 }
@@ -80,7 +94,7 @@ export interface RegisterPlan {
  */
 export function registerPlan(args: readonly string[]): RegisterPlan | null {
   const positional: string[] = [];
-  let genesisKeyPath: string | undefined;
+  const flags = new Map<string, string>();
   for (let index = 0; index < args.length; ) {
     const argument = args[index];
     if (argument === undefined) return null;
@@ -89,11 +103,13 @@ export function registerPlan(args: readonly string[]): RegisterPlan | null {
       index += 1;
       continue;
     }
-    if (argument !== "--genesis") return null;
-    if (genesisKeyPath !== undefined) return null;
+    if (argument !== "--genesis" && argument !== "--domain" && argument !== "--join") {
+      return null;
+    }
+    if (flags.has(argument)) return null;
     const value = args[index + 1];
     if (value === undefined || value.startsWith("--")) return null;
-    genesisKeyPath = value;
+    flags.set(argument, value);
     index += 2;
   }
 
@@ -106,7 +122,23 @@ export function registerPlan(args: readonly string[]): RegisterPlan | null {
   ) {
     return null;
   }
-  return { keyPath, baseUrl, domain, genesisKeyPath: genesisKeyPath ?? null };
+
+  // A join is the whole run: the operator is registered already, so there is no
+  // registration for `--domain` to name and no first membership for `--genesis`
+  // to follow. Asking for both is asking for two different runs at once.
+  const join = flags.get("--join") ?? null;
+  if (join !== null && (flags.has("--domain") || flags.has("--genesis"))) {
+    return null;
+  }
+
+  return {
+    keyPath,
+    baseUrl,
+    domain,
+    recordDomain: flags.get("--domain") ?? DEFAULT_DOMAIN,
+    join,
+    genesisKeyPath: flags.get("--genesis") ?? null,
+  };
 }
 
 /** Everything a run needs besides its arguments. All of it injected. */
@@ -130,6 +162,15 @@ export interface RegisterRun {
   readonly genesisStatus: number | null;
   /** The genesis refusal, or null. */
   readonly genesisError: string | null;
+}
+
+/** What one join run did: the route's status, and the refusal it named. */
+export interface JoinRun {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly error: string | null;
+  /** Whether the operator was already in that domain, which is not a failure. */
+  readonly already: boolean;
 }
 
 /** One signed POST, with its status and whatever JSON came back. */
@@ -162,20 +203,30 @@ export async function runRegister(input: {
   readonly key: ValidatorKey;
   readonly baseUrl: string;
   readonly domain: string;
+  /**
+   * The registered domain to join and attest to (decision D-071). Absent is
+   * ai-ecosystem, which is what a client written before v0.7 meant.
+   */
+  readonly recordDomain?: string;
   readonly genesisKey?: ValidatorKey | null;
   readonly deps: RegisterDeps;
 }): Promise<RegisterRun> {
   const { deps } = input;
   const at = deps.now.toISOString();
+  const recordDomain = input.recordDomain ?? DEFAULT_DOMAIN;
 
   // Step one, and it is not ours to make: the record the operator publishes.
   deps.io.stdout(
     `txt ${txtRecordName(input.domain)} TXT ${input.key.agentId}`,
   );
 
+  // The attestation is that domain's own sentence under that domain's version
+  // (decision D-071): src/registry.ts reads both out of the registry document's
+  // table, so this command never spells either.
   const attestation = await signAttestation(input.key.privateKey, {
     operator: input.domain,
     agent: input.key.agentId,
+    domain: recordDomain,
     signed_at: at,
   });
   const registered = await post(
@@ -184,6 +235,7 @@ export async function runRegister(input: {
     "/operators",
     {
       operator: input.domain,
+      domain: recordDomain,
       attestation,
       payout: { reference: payoutReferenceFor(input.domain) },
     },
@@ -196,7 +248,7 @@ export async function runRegister(input: {
   const joined = registered.status === 201 || already;
 
   deps.io.stdout(
-    `register ${input.domain} ${registered.status}${error === null ? "" : ` ${error}`}`,
+    `register ${input.domain} ${recordDomain} ${registered.status}${error === null ? "" : ` ${error}`}`,
   );
   if (!joined) {
     return {
@@ -250,6 +302,49 @@ export async function runRegister(input: {
   };
 }
 
+/**
+ * Take on a further domain: sign that domain's attestation and post the join.
+ *
+ * Decision D-071: registration binds an operator to its first domain, and every
+ * later one is a separate signed act at its own door. The operator id is the
+ * same domain the operator already registered under; what is new is the record
+ * domain it is attesting to.
+ *
+ * A domain the operator already holds is not a failure, for the reason a repeat
+ * registration is not: the command is idempotent so an operator can rerun it.
+ */
+export async function runJoin(input: {
+  readonly key: ValidatorKey;
+  readonly baseUrl: string;
+  readonly domain: string;
+  /** The registered domain being joined. */
+  readonly join: string;
+  readonly deps: RegisterDeps;
+}): Promise<JoinRun> {
+  const { deps } = input;
+  const attestation = await signAttestation(input.key.privateKey, {
+    operator: input.domain,
+    agent: input.key.agentId,
+    domain: input.join,
+    signed_at: deps.now.toISOString(),
+  });
+  const joined = await post(
+    deps,
+    input.baseUrl,
+    `/operators/${encodeURIComponent(input.domain)}/domains`,
+    { domain: input.join, attestation },
+    input.key,
+  );
+  const error = errorOf(joined.body);
+  const already = joined.status === 409 && error === "already_joined";
+  deps.io.stdout(
+    `join ${input.domain} ${input.join} ${joined.status}${error === null ? "" : ` ${error}`}`,
+  );
+  const ok = joined.status === 201 || already;
+  if (!ok) deps.io.stderr(`join: ${error ?? "unknown error"}`);
+  return { ok, status: joined.status, error, already };
+}
+
 /* c8 ignore start -- the process entry point, exercised by running the CLI. */
 if (
   process.argv[1] !== undefined &&
@@ -267,16 +362,27 @@ if (
   };
   let code: number = FAILED;
   try {
-    const run = await runRegister({
-      key: await readKeyFile(plan.keyPath),
-      baseUrl: plan.baseUrl,
-      domain: plan.domain,
-      genesisKey:
-        plan.genesisKeyPath === null
-          ? null
-          : await readKeyFile(plan.genesisKeyPath),
-      deps: { http: new WebHttpClient(), now: new Date(), io },
-    });
+    const deps = { http: new WebHttpClient(), now: new Date(), io };
+    const run =
+      plan.join === null
+        ? await runRegister({
+            key: await readKeyFile(plan.keyPath),
+            baseUrl: plan.baseUrl,
+            domain: plan.domain,
+            recordDomain: plan.recordDomain,
+            genesisKey:
+              plan.genesisKeyPath === null
+                ? null
+                : await readKeyFile(plan.genesisKeyPath),
+            deps,
+          })
+        : await runJoin({
+            key: await readKeyFile(plan.keyPath),
+            baseUrl: plan.baseUrl,
+            domain: plan.domain,
+            join: plan.join,
+            deps,
+          });
     code = run.ok ? OK : FAILED;
   } catch (error) {
     io.stderr(`register: ${reasonOf(error)}`);

@@ -41,7 +41,7 @@ import { buildExport } from "../src/cli/export.js";
 import type { Core } from "../src/core.js";
 import type { ApproverRecord, Event } from "../src/events.js";
 import { decodeProof, verifyInclusion } from "../src/merkle.js";
-import { LIST_PAGE_LIMIT, WITNESSES_REQUIRED } from "../src/policy.js";
+import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT, WITNESSES_REQUIRED } from "../src/policy.js";
 import { signRecord } from "../src/records.js";
 import { txtRecordName } from "../src/registry.js";
 import { validateEntry } from "../src/schema.js";
@@ -228,6 +228,7 @@ function pricing(claim: string): Omit<SubmissionProposal, "author"> {
   return {
     subject: "kestrel/kestrel-1",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim,
     before: "$35 per seat per month",
     after: "$40 per seat per month",

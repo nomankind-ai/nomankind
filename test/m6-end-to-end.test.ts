@@ -24,7 +24,8 @@ import {
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   SLOT_COUNT,
-  STALENESS_WINDOW_DAYS,
+  DEFAULT_DOMAIN,
+  stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
   appendEvent,
   checkReconfirmation,
@@ -535,7 +536,9 @@ describe("M6 end to end: supersession and reconfirmation over one sealed log", (
     // reconfirmation is for.
     const stale = deriveEntry(events, STALE_ID, CLOCK).derived;
     expect(stale.status).toBe("verified");
-    expect(stale.staleness_window_days).toBe(STALENESS_WINDOW_DAYS.pricing);
+    expect(stale.staleness_window_days).toBe(
+      stalenessWindowDays(DEFAULT_DOMAIN, "pricing"),
+    );
     expect(stale.stale).toBe(true);
 
     // An agent under the submitter's own operator: Section 6's one exception.

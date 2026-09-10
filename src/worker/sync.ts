@@ -33,7 +33,7 @@
  * `parseSyncQuery`.
  */
 
-import { extractCore } from "../core.js";
+import { domainOf, extractCore } from "../core.js";
 import type { EntryStatus, Sidecar } from "../derive.js";
 import type { Event } from "../events.js";
 import type { EvidenceTier } from "../evidence.js";
@@ -85,6 +85,8 @@ interface EntryState {
   readonly entry_hash: string;
   readonly status: EntryStatus;
   readonly effective_tier: EvidenceTier | null;
+  /** The entry's own domain, off its signed core (decision D-071). */
+  readonly domain: string;
 }
 
 /** One event of the page, with everything a trainer is handed about it. */
@@ -162,6 +164,7 @@ class Entries {
       entry_hash: await entryHash(extractCore(entry)),
       status: derived.status,
       effective_tier: sidecar.effective_tier,
+      domain: domainOf(entry),
     };
   }
 }
@@ -335,6 +338,7 @@ async function page(
         : {
             status: item.state.status,
             effective_tier: item.state.effective_tier,
+            domain: item.state.domain,
           },
       query,
     ),

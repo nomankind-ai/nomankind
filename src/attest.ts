@@ -24,6 +24,7 @@ import { canonicalize, taggedSha256Hex } from "./hash.js";
 import {
   ATTESTATION_SCORERS,
   ATTESTATION_WINDOW_HOURS,
+  DEFAULT_DOMAIN,
 } from "./policy.js";
 import type { Beacon, PoolSnapshot } from "./assign.js";
 import type { Clock } from "./derive.js";
@@ -135,7 +136,8 @@ function canonicalPool(operators: readonly string[]): string[] {
  * judgement nomankind signs about a model is not a judgement "by parties its lab
  * does not control" if nomankind is one of the parties. A model provider cannot
  * appear at all: the snapshot is the TRUSTED pool, and Section 10's door refuses
- * a provider registration outright (src/policy.ts, `MODEL_PROVIDER_DOMAINS`), so
+ * a registration by an excluded party outright (src/policy.ts, the domain's
+ * `excluded_parties`), so
  * no provider is ever in a pool snapshot to be drawn from.
  *
  * The draw is sequential and without replacement: each round digests the model,
@@ -226,6 +228,8 @@ export interface AttestationScoreValue {
 /** One attestation, folded from the four events that carry its id. */
 export interface DerivedAttestation {
   readonly id: string;
+  /** The domain the probes were drawn from and the scorers are attested in. */
+  readonly domain: string;
   readonly model: string;
   readonly model_operator: string | null;
   readonly probes: readonly Probe[];
@@ -384,6 +388,7 @@ export function deriveAttestation(
 
   return {
     id,
+    domain: opened.domain ?? DEFAULT_DOMAIN,
     model: opened.model,
     model_operator: opened.model_operator,
     probes: opened.probes,
@@ -460,6 +465,7 @@ export type ScoreRefusal =
   | "not_a_scorer"
   | "operator_mismatch"
   | "model_operator"
+  | "operator_not_in_domain"
   | "duplicate_scorer"
   | "probe_hash_mismatch"
   | "answers_hash_mismatch"
@@ -471,6 +477,7 @@ export const SCORE_REFUSALS: readonly ScoreRefusal[] = Object.freeze([
   "not_a_scorer",
   "operator_mismatch",
   "model_operator",
+  "operator_not_in_domain",
   "duplicate_scorer",
   "probe_hash_mismatch",
   "answers_hash_mismatch",
@@ -504,6 +511,11 @@ export function checkScore(input: {
   attestation: DerivedAttestation;
   record: AttestationScoreRecord;
   scorerOperator: string | null;
+  /**
+   * The domains the scorer's operator is attested in (src/derive.ts,
+   * `operatorDomainsAt`). Absent reads as the default domain.
+   */
+  scorerDomains?: readonly string[];
   now: string;
 }): ScoreVerdict {
   const { attestation, record } = input;
@@ -531,6 +543,14 @@ export function checkScore(input: {
     record.operator === attestation.model_operator
   ) {
     return { ok: false, reason: "model_operator" };
+  }
+  // Decision D-071: the attestation belongs to a domain, and a scorer signs
+  // about it only in a domain it has attested in. The draw is domain-blind by
+  // construction (the caller excludes the rest of the pool), so this is the
+  // check that says so out loud on the record itself.
+  const scorerDomains = input.scorerDomains ?? [DEFAULT_DOMAIN];
+  if (!scorerDomains.includes(attestation.domain)) {
+    return { ok: false, reason: "operator_not_in_domain" };
   }
   if (attestation.scores.some((score) => score.operator === record.operator)) {
     return { ok: false, reason: "duplicate_scorer" };

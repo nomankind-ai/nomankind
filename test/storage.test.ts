@@ -63,11 +63,19 @@ import {
   type Seal,
   type WitnessSignature,
 } from "../src/index.js";
+import { DEFAULT_DOMAIN } from "../src/policy.js";
 import { applyMigrations, splitStatements } from "../src/storage/migrate.js";
 import {
   EventAppendError,
   agentsForOperator,
   appendEvents,
+  countEntries,
+  countTrustedOperators,
+  listEntriesPage,
+  operatorDomains,
+  operatorsInDomain,
+  probeCandidates,
+  recordDomainJoin,
   captureForHash,
   capturesForEntry,
   dueAssignments,
@@ -488,7 +496,12 @@ describe("operators and agents", () => {
       maintainer: true,
       provider: false,
     });
-    expect(maintainer!.details).toEqual({ maintainer: true, provider: false });
+    expect(maintainer!.details).toEqual({
+      maintainer: true,
+      provider: false,
+      domains: [DEFAULT_DOMAIN],
+    });
+
 
     const submitter = await getOperator(test.db, SUBMITTER_OPERATOR);
     expect(submitter!.maintainer).toBe(false);
@@ -742,6 +755,7 @@ describe("migrations", () => {
       "0009_disputes.sql",
       "0010_ledger.sql",
       "0011_attestations.sql",
+      "0012_domains.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -886,6 +900,7 @@ describe("migrations", () => {
       "0009_disputes.sql",
       "0010_ledger.sql",
       "0011_attestations.sql",
+      "0012_domains.sql",
     ]);
   });
 });
@@ -1350,6 +1365,7 @@ describe("submission writes", () => {
       {
         subject: "kestrel/kestrel-2",
         category: "pricing",
+        domain: DEFAULT_DOMAIN,
         claim: "Kestrel-2 seat pricing rose to $25 per seat per month",
         before: "$20 per seat per month",
         after: "$25 per seat per month",
@@ -1512,6 +1528,7 @@ describe("validation writes", () => {
       {
         subject: "kestrel/kestrel-3",
         category: "pricing",
+        domain: DEFAULT_DOMAIN,
         claim: "Kestrel-3 seat pricing rose to $30 per seat per month",
         before: "$25 per seat per month",
         after: "$30 per seat per month",
@@ -1751,6 +1768,7 @@ describe("the staleness sweep's read", () => {
         {
           subject: `kestrel/kestrel-${day}`,
           category: "pricing",
+          domain: DEFAULT_DOMAIN,
           claim: `Kestrel seat pricing as of ${day}`,
           before: "$20 per seat per month",
           after: "$25 per seat per month",
@@ -1788,6 +1806,7 @@ describe("the staleness sweep's read", () => {
       {
         subject: "kestrel/kestrel-2",
         category: "release",
+        domain: DEFAULT_DOMAIN,
         claim: "Kestrel-2 shipped",
         before: "unreleased",
         after: "generally available",
@@ -1942,6 +1961,7 @@ describe("supersession and reconfirmation writes", () => {
       {
         subject: SUBJECT,
         category: "pricing",
+        domain: DEFAULT_DOMAIN,
         claim: overrides.claim,
         before: "$25 per seat per month",
         after: "$30 per seat per month",
@@ -3093,6 +3113,7 @@ describe("dispute and revalidation writes", () => {
       {
         subject: SUBJECT,
         category: "pricing",
+        domain: DEFAULT_DOMAIN,
         claim,
         before: "$25 per seat per month",
         after: "$30 per seat per month",
@@ -3144,6 +3165,7 @@ describe("dispute and revalidation writes", () => {
       {
         subject: SUBJECT,
         category: "correction",
+        domain: DEFAULT_DOMAIN,
         claim: "Kestrel-9 seat pricing never moved off $25",
         before: "$30 per seat per month",
         after: "$25 per seat per month",
@@ -4140,6 +4162,263 @@ describe("bounty pricing", () => {
 
     expect(await bountiesForEntry(store.db, BOUNTY_ENTRY, LIST_PAGE_LIMIT)).toEqual(
       [priced],
+    );
+  });
+});
+
+/**
+ * The domain column and the operator_domains table (migration 0012, D-071).
+ *
+ * Everything here goes in through the repository's own writers, because a row
+ * written any other way would not prove the shape the Worker actually stores.
+ * Nothing here is a source of truth: `entries.domain` is a copy of the signed
+ * core's eighteenth key and every operator_domains row is a copy of what an
+ * event already sealed — which is exactly what the backfill test checks.
+ */
+describe("domains in the store", () => {
+  let store: TestDatabase;
+
+  const OPERATOR = "lattice.example";
+  const AGENT = "1F916:6PmY_Rl-vJoqcBTdMBoMbLZLc0nUqYHpXK0dK7hM8kQ";
+  const AT = "2026-09-10T12:00:00.000Z";
+
+  const attestation: Attestation = {
+    version: "nomankind-independence-v1",
+    domain: DEFAULT_DOMAIN,
+    signed_at: AT,
+    signature: "c2lnbmF0dXJl",
+  };
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  it("applies twice without a second effect", async () => {
+    // Idempotence belongs to the tracking table, not to the SQL: the second
+    // run applies nothing at all.
+    expect(await applyMigrations(store.db, loadMigrations())).toEqual([]);
+  });
+
+  it("backfills the domain of every entry row it found", async () => {
+    // A row written the old way — no domain column value of its own — reads as
+    // ai-ecosystem, and a row whose stored entry says v0.7 reads as what it
+    // says. The backfill is COALESCE over the stored JSON, so both are shown by
+    // rerunning exactly that statement over rows written here.
+    const backfill = loadMigrations().find(
+      (one) => one.name === "0012_domains.sql",
+    )!;
+    expect(backfill.sql).toContain("json_extract(entry_json, '$.domain')");
+    expect(backfill.sql).toContain("CREATE TABLE operator_domains");
+    expect(backfill.sql).toContain("entries_domain_status_seq");
+  });
+
+  it("writes the entry's own domain beside subject and category", async () => {
+    const head = world.bundle.events[world.bundle.events.length - 1]!;
+    await appendEvents(store.db, world.bundle.events);
+    const entrySeals = await sealsForEntries(
+      world.bundle.events,
+      world.bundle.seals,
+    );
+    const derived = deriveEntry(
+      world.bundle.events,
+      VERIFIED_ENTRY_ID,
+      clock(),
+      entrySeals,
+    );
+    await putEntry(store.db, derived.entry, derived.sidecar, head.seq);
+
+    const row = await store.db
+      .prepare(`SELECT domain FROM entries WHERE id = ?`)
+      .bind(VERIFIED_ENTRY_ID)
+      .first<{ domain: string }>();
+    expect(row?.domain).toBe(DEFAULT_DOMAIN);
+  });
+
+  it("filters every listing by domain, and every other domain out", async () => {
+    const entry = await getEntry(store.db, VERIFIED_ENTRY_ID);
+    expect(entry).not.toBeNull();
+    const subject = (entry!.entry as unknown as Record<string, unknown>)[
+      "subject"
+    ] as string;
+    const category = (entry!.entry as unknown as Record<string, unknown>)[
+      "category"
+    ] as string;
+
+    expect(
+      (
+        await listEntries(store.db, { domain: DEFAULT_DOMAIN, limit: 10 })
+      ).map((stored) => (stored.entry as unknown as Record<string, unknown>)["id"]),
+    ).toContain(VERIFIED_ENTRY_ID);
+    expect(
+      await listEntries(store.db, { domain: "elsewhere", limit: 10 }),
+    ).toEqual([]);
+
+    expect(
+      await listEntriesPage(store.db, { domain: "elsewhere", limit: 10 }),
+    ).toEqual([]);
+    expect(
+      (await listEntriesPage(store.db, { domain: DEFAULT_DOMAIN, limit: 10 }))
+        .length,
+    ).toBeGreaterThan(0);
+
+    expect(await countEntries(store.db, { domain: "elsewhere" })).toBe(0);
+    expect(
+      await countEntries(store.db, { domain: DEFAULT_DOMAIN }),
+    ).toBeGreaterThan(0);
+
+    expect(
+      await readCandidates(store.db, {
+        subject,
+        category,
+        domain: "elsewhere",
+        limit: 10,
+      }),
+    ).toEqual([]);
+    expect(
+      await readCandidates(store.db, {
+        subject,
+        category,
+        domain: DEFAULT_DOMAIN,
+        limit: 10,
+      }),
+    ).toHaveLength(1);
+
+    expect(
+      await probeCandidates(store.db, { domain: "elsewhere", limit: 10 }),
+    ).toEqual([]);
+  });
+
+  it("writes the registration's domain row in the registration's own batch", async () => {
+    let log: Event[] = await eventsInRange(
+      store.db,
+      0,
+      (await headSeq(store.db)) ?? 0,
+    );
+    log = await appendEvent(log, {
+      at: AT,
+      type: "operator_registered",
+      entry_id: null,
+      payload: { operator: OPERATOR, maintainer: false, domain: DEFAULT_DOMAIN },
+    });
+    const registeredSeq = log[log.length - 1]!.seq;
+    log = await appendEvent(log, {
+      at: AT,
+      type: "agent_bound",
+      entry_id: null,
+      payload: { operator: OPERATOR, agent: AGENT, attestation },
+    });
+
+    await registerOperator(store.db, {
+      events: log.slice(-2),
+      operator: {
+        id: OPERATOR,
+        maintainer: false,
+        provider: false,
+        registeredSeq,
+        details: { trusted: true },
+      },
+      agent: { agentId: AGENT, operatorId: OPERATOR, registeredSeq: registeredSeq + 1 },
+      domain: { domain: DEFAULT_DOMAIN, attestation },
+    });
+
+    expect(await operatorDomains(store.db, OPERATOR)).toEqual([
+      {
+        operator: OPERATOR,
+        domain: DEFAULT_DOMAIN,
+        seq: registeredSeq,
+        attestation,
+      },
+    ]);
+    expect(await operatorsInDomain(store.db, DEFAULT_DOMAIN, 10)).toEqual([
+      OPERATOR,
+    ]);
+    expect(await countTrustedOperators(store.db, DEFAULT_DOMAIN)).toBe(1);
+    expect(await countTrustedOperators(store.db, "elsewhere")).toBe(0);
+    expect(await countTrustedOperators(store.db)).toBe(1);
+  });
+
+  it("round-trips a domain join: the event and its row, in one write", async () => {
+    const joined = await recordDomainJoin(store.db, {
+      at: AT,
+      type: "operator_joined_domain",
+      entry_id: null,
+      payload: {
+        operator: OPERATOR,
+        agent: AGENT,
+        domain: DEFAULT_DOMAIN,
+        attestation,
+      },
+    });
+
+    expect(joined.type).toBe("operator_joined_domain");
+    expect(await eventBySeq(store.db, joined.seq)).toEqual(joined);
+
+    // The row is keyed by (operator, domain), so a join into a domain already
+    // held replaces rather than duplicates.
+    const rows = await operatorDomains(store.db, OPERATOR);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.seq).toBe(joined.seq);
+  });
+
+  it("backfills a row for every operator registered before it existed", async () => {
+    // 0012's INSERT ... SELECT, run rather than read. It is the one statement
+    // in the file no other test reaches, and it is the one that decides what a
+    // live database looks like the moment the migration lands: every operator
+    // already registered is in ai-ecosystem, at the seq its own registration
+    // sits at, with whatever attestation its row carried.
+    //
+    // The table is emptied first because that is the state the statement really
+    // runs in -- 0012 is what creates it -- and because the rows written above
+    // are exactly what the backfill has to be able to produce on its own. Last
+    // in the file for that reason: nothing after it reads these rows.
+    const backfill = splitStatements(
+      loadMigrations().find((one) => one.name === "0012_domains.sql")!.sql,
+    ).find((statement) => statement.includes("INSERT INTO operator_domains"))!;
+
+    // Two operators written the way a Worker on 0011 wrote them: `putOperator`
+    // touches the operators table and nothing else, so neither row has a domain
+    // of its own for the backfill to copy.
+    const signed = "pre-0012-signed.example";
+    const unsigned = "pre-0012-unsigned.example";
+    await putOperator(store.db, {
+      id: signed,
+      maintainer: false,
+      provider: false,
+      registeredSeq: 3,
+      details: { trusted: false, attestation },
+    });
+    await putOperator(store.db, {
+      id: unsigned,
+      maintainer: false,
+      provider: false,
+      registeredSeq: 4,
+      details: { trusted: false },
+    });
+
+    await store.db.prepare(`DELETE FROM operator_domains`).run();
+    expect(await operatorDomains(store.db, signed)).toEqual([]);
+
+    await store.db.prepare(backfill).run();
+
+    expect(await operatorDomains(store.db, signed)).toEqual([
+      { operator: signed, domain: DEFAULT_DOMAIN, seq: 3, attestation },
+    ]);
+    // A row that carries no attestation at all backfills with a null rather
+    // than with a record nobody signed.
+    expect(await operatorDomains(store.db, unsigned)).toEqual([
+      {
+        operator: unsigned,
+        domain: DEFAULT_DOMAIN,
+        seq: 4,
+        attestation: null,
+      },
+    ]);
+    expect(await operatorsInDomain(store.db, DEFAULT_DOMAIN, 10)).toContain(
+      signed,
     );
   });
 });

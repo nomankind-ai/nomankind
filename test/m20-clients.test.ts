@@ -31,7 +31,7 @@ import type {
   ValidatorIo,
   ValidatorKey,
 } from "../src/cli/validator.js";
-import { NORM_VERSION } from "../src/policy.js";
+import { DEFAULT_DOMAIN, NORM_VERSION } from "../src/policy.js";
 import { txtRecordName } from "../src/registry.js";
 import { makeAgent } from "./helpers/registry.js";
 import { FixtureFetcher, pageHash, type FixturePage } from "./helpers/submit.js";
@@ -220,6 +220,9 @@ describe("dispute: the fields a challenger may set", () => {
       ...FIELDS,
       subject: SUBJECT,
       category: "correction",
+      // Decision D-071: the challenge is filed in the target's own domain, and
+      // the challenger has no say in it.
+      domain: DEFAULT_DOMAIN,
     });
   });
 
@@ -643,6 +646,10 @@ describe("register: arguments", () => {
       keyPath: "key.json",
       baseUrl: BASE,
       domain: OPERATOR,
+      // Decision D-071: `--domain` defaults to the one domain there was, and
+      // `--join` is absent on an ordinary registration.
+      recordDomain: DEFAULT_DOMAIN,
+      join: null,
       genesisKeyPath: null,
     });
   });

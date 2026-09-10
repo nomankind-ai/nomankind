@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Core } from "../src/core.js";
 import { deriveEntry, type Clock } from "../src/derive.js";
+import { DEFAULT_DOMAIN } from "../src/policy.js";
 import { validateEntry } from "../src/schema.js";
 import {
   DISPUTE_REFUSALS,
@@ -58,12 +59,13 @@ const ARTIFACT = `sha256:${"d".repeat(64)}`;
 const SIGNATURE = "c2lnbmF0dXJl";
 const AUTHOR_OPERATOR = "op_author";
 
-/** The challenge's own frozen core: the seventeen keys, as the schema names them. */
+/** The challenge's own frozen core: the eighteen keys, as the schema names them. */
 function correctionCore(overrides: Record<string, unknown> = {}): Core {
   return {
     id: CORRECTION,
     subject: SUBJECT,
     category: "correction",
+    domain: DEFAULT_DOMAIN,
     claim: "the price never moved",
     before: "$2.50",
     after: "$3.00",
@@ -243,13 +245,18 @@ describe("lockedStanding", () => {
 });
 
 describe("checkRevalidationRequest", () => {
-  const fresh = { status: "verified" as const, stale: false };
+  const fresh = {
+    status: "verified" as const,
+    stale: false,
+    domain: DEFAULT_DOMAIN,
+  };
 
   function context(overrides: Record<string, unknown> = {}) {
     return {
       requesterOperator: "op_asker" as string | null,
       requestsThisWindow: 0,
       openRequest: false,
+      operatorDomains: [DEFAULT_DOMAIN] as readonly string[],
       ...overrides,
     };
   }
@@ -279,6 +286,12 @@ describe("checkRevalidationRequest", () => {
       reason: "bare_key",
       target: fresh,
       context: context({ requesterOperator: null }),
+    },
+    {
+      // Decision D-071: standing staked in one domain buys no check in another.
+      reason: "operator_not_in_domain",
+      target: fresh,
+      context: context({ operatorDomains: ["elsewhere"] }),
     },
     {
       reason: "cap_exceeded",
@@ -655,6 +668,7 @@ function targetLog(extra: readonly Event[]): Event[] {
     id: TARGET,
     subject: SUBJECT,
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim: "gpt-5 input price is $2.50 per million tokens",
     before: "$3.00",
     after: "$2.50",

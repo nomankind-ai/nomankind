@@ -19,6 +19,7 @@
 
 import {
   APPROVALS_TO_VERIFY_SMALL_POOL,
+  DEFAULT_DOMAIN,
   NORM_VERSION,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
   agentIdFromPublicKey,
@@ -40,6 +41,14 @@ import {
 } from "../../src/index.js";
 import { signRecord } from "../../src/records.js";
 import type { LogBundle, Registry } from "../../src/verify.js";
+
+/**
+ * Every operator in this world is attested in the entry's domain: the world is
+ * about the exclusions and the seals, not about domains, and an operator that
+ * was attested nowhere would be refused for a reason no test here is asking
+ * about (decision D-071).
+ */
+const DOMAINS: readonly string[] = Object.freeze([DEFAULT_DOMAIN]);
 
 /** The maintainer's own operator: registered, never an outside validator. */
 export const MAINTAINER_OPERATOR = "nomankind";
@@ -143,7 +152,7 @@ function append(
   });
 }
 
-/** The seventeen core keys, in the schema's own names. */
+/** The eighteen core keys, in the schema's own names. */
 function makeCore(
   overrides: Record<string, unknown>,
   submitter: Party,
@@ -154,6 +163,7 @@ function makeCore(
     id: VERIFIED_ENTRY_ID,
     subject: "openai/gpt-5",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim: "gpt-5 input price is $2.50 per million tokens",
     before: "$3.00 per million input tokens",
     after: "$2.50 per million input tokens",
@@ -349,17 +359,23 @@ export async function buildVerifyWorld(options?: {
       ),
     ),
     operators: {
-      [MAINTAINER_OPERATOR]: { maintainer: true, provider: false },
-      [SUBMITTER_OPERATOR]: { maintainer: false, provider: false },
+      [MAINTAINER_OPERATOR]: { maintainer: true, provider: false, domains: DOMAINS },
+      [SUBMITTER_OPERATOR]: { maintainer: false, provider: false, domains: DOMAINS },
       ...Object.fromEntries(
         OUTSIDE_OPERATORS.map((operator) => [
           operator,
-          { maintainer: false, provider: false },
+          { maintainer: false, provider: false, domains: DOMAINS },
         ]),
       ),
       ...(provider === null
         ? {}
-        : { [PROVIDER_OPERATOR]: { maintainer: false, provider: true } }),
+        : {
+            [PROVIDER_OPERATOR]: {
+              maintainer: false,
+              provider: true,
+              domains: DOMAINS,
+            },
+          }),
     },
   };
 
