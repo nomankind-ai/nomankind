@@ -29,14 +29,17 @@ import type { Seal } from "../src/seal.js";
 import type { Anchor } from "../src/anchor.js";
 import {
   MIRROR_FORMAT,
+  MIRROR_FORMATS,
   MirrorError,
   buildMirror,
   gitBlobSha,
   mirrorAttestations,
   mirrorDiff,
+  mirrorFormatOf,
   mirrorLedgerRows,
   mirrorStanding,
   mirrorUrls,
+  v1Sidecar,
   type MirrorAttestationAnswers,
   type MirrorEntryRecord,
   type MirrorFile,
@@ -225,6 +228,41 @@ describe("the layout", () => {
     });
     // The license is policy's and never a literal typed beside the manifest.
     expect(manifest["license"]).toBe(MIRROR.license);
+  });
+
+  it("names the layout it writes and the older one it still knows", () => {
+    // Two formats rather than one moving one. A mirror is CC0 and already
+    // cloned: the copies pulled before the three families and the sidecar's
+    // source class joined the export are somebody's exit, and the reader that
+    // refused them for being old would be taking that exit back.
+    expect(MIRROR_FORMAT).toBe("nomankind-mirror-v2");
+    expect(MIRROR_FORMATS).toEqual([
+      "nomankind-mirror-v1",
+      "nomankind-mirror-v2",
+    ]);
+    expect(jsonOf(buildMirror(input()), "mirror.json")).toMatchObject({
+      format: "nomankind-mirror-v2",
+    });
+    expect(mirrorFormatOf("nomankind-mirror-v1")).toBe("v1");
+    expect(mirrorFormatOf("nomankind-mirror-v2")).toBe("v2");
+    expect(mirrorFormatOf("nomankind-mirror-v3")).toBeNull();
+    expect(mirrorFormatOf(null)).toBeNull();
+  });
+
+  it("reads a v1 sidecar as every key but the one v1 never had", () => {
+    const sidecar = {
+      effective_tier: "stated",
+      revalidations: [],
+      source: { class: "official", matched_host: null, provider: null },
+    };
+    expect(v1Sidecar(sidecar)).toEqual({
+      effective_tier: "stated",
+      revalidations: [],
+    });
+    // Over a value that is not a sidecar at all it is the value: a malformed
+    // file is the caller's difference to name, never this function's.
+    expect(v1Sidecar(null)).toBeNull();
+    expect(v1Sidecar([1])).toEqual([1]);
   });
 
   it("splits the events by seal, each file holding exactly its own range", async () => {

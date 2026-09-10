@@ -24,6 +24,15 @@
  * named diff on that entry, never a crash: an archive that has withdrawn a page
  * is a fact about the archive, and the reader is told which entry it touched.
  *
+ * Two layouts are accepted, and each directory is checked as the one it claims.
+ * `nomankind-mirror-v2` is what the export writes now and is checked whole. A
+ * `nomankind-mirror-v1` directory — a copy somebody pulled before the
+ * attestations, the standing, the ledger and the sidecar's source class joined
+ * the export — is checked as what v1 was: the seven files it has, and its entry
+ * sidecars on the keys a v1 sidecar carried. A copy already in a stranger's
+ * hands is their exit, and a verifier that refused it for being old would be
+ * taking that exit back. Any other format string is `unsupported_format`.
+ *
  * A legacy v0.6 record is never passed off as ok, and it is never waved
  * through either. It was sealed before the domain key existed and v0.7's rules
  * cannot be applied to bytes that never claimed them — but every rule that is
@@ -69,12 +78,14 @@ import { verifyChain, type Event } from "../events.js";
 import { canonicalize, entryHash } from "../hash.js";
 import type { LedgerRow } from "../ledger.js";
 import {
-  MIRROR_FORMAT,
   mirrorAttestations,
+  mirrorFormatOf,
   mirrorLedgerRows,
   mirrorStanding,
   sealFileName,
+  v1Sidecar,
   type MirrorAttestationRecord,
+  type MirrorFormat,
   type MirrorStanding,
 } from "../mirror.js";
 import {
@@ -342,6 +353,14 @@ async function capturesFor(
 /** Everything one directory holds, read once. */
 interface Mirror {
   readonly manifest: Record<string, unknown>;
+  /**
+   * The layout the manifest claims, or null when it claims one nobody knows.
+   *
+   * An unknown format is a named failure on `mirror.json` and never a different
+   * run: the directory is then checked as the current layout, which is the
+   * strictest reading of it there is.
+   */
+  readonly format: MirrorFormat | null;
   readonly seals: Seal[];
   readonly anchors: Anchor[];
   readonly events: Event[];
@@ -413,6 +432,7 @@ async function readMirror(dir: string): Promise<Mirror> {
 
   return {
     manifest,
+    format: mirrorFormatOf(manifest["format"]),
     seals: ordered,
     anchors,
     events,
@@ -447,11 +467,27 @@ function fail(
 }
 
 /**
+ * Whether this directory is the older layout, and so carries three files fewer.
+ *
+ * A format nobody knows reads as the current layout: it has already failed on
+ * `/format`, and the strictest reading of a directory nobody can place is the
+ * one that asks it for everything.
+ */
+function isV1(mirror: Mirror): boolean {
+  return mirror.format === "v1";
+}
+
+/**
  * The manifest, against the directory it describes.
  *
  * The counts are the point: a mirror whose `entries` does not equal the number
  * of entry files is a directory somebody edited, and every later check would
  * pass on the part that was left.
+ *
+ * The three counts v1 does not carry are not asked of a v1 manifest — there is
+ * no attestations directory, no `standing.json` and no `ledger.jsonl` under it
+ * to count — and every count that is about the log rather than about the newer
+ * files is asked of both.
  */
 function checkManifest(
   io: ValidatorIo,
@@ -466,9 +502,7 @@ function checkManifest(
     fail(io, tally, "mirror.json", "mirror", field, reason);
   };
 
-  if (manifest["format"] !== MIRROR_FORMAT) {
-    wrong("/format", "unexpected_format");
-  }
+  if (mirror.format === null) wrong("/format", "unsupported_format");
   if (typeof manifest["environment"] !== "string") {
     wrong("/environment", "missing");
   }
@@ -478,14 +512,16 @@ function checkManifest(
     wrong("/operators", "count");
   }
   if (manifest["entries"] !== mirror.index.length) wrong("/entries", "count");
-  if (manifest["attestations"] !== recomputed.attestations.length) {
-    wrong("/attestations", "count");
-  }
-  if (manifest["ledger_rows"] !== recomputed.ledger.length) {
-    wrong("/ledger_rows", "count");
-  }
-  if (manifest["standing_position"] !== recomputed.standing.position) {
-    wrong("/standing_position", "mismatch");
+  if (!isV1(mirror)) {
+    if (manifest["attestations"] !== recomputed.attestations.length) {
+      wrong("/attestations", "count");
+    }
+    if (manifest["ledger_rows"] !== recomputed.ledger.length) {
+      wrong("/ledger_rows", "count");
+    }
+    if (manifest["standing_position"] !== recomputed.standing.position) {
+      wrong("/standing_position", "mismatch");
+    }
   }
 
   const newest = mirror.seals[mirror.seals.length - 1];
@@ -719,6 +755,15 @@ async function checkRecord(
     fail(io, tally, id, "derived", "/entry", "underivable");
   }
   if (derived !== null) {
+    // A v1 sidecar is compared on the keys a v1 sidecar had: `source` was
+    // derived into it after that layout was written, so a v1 file is right to
+    // carry none and the re-derivation is right to have one.
+    const expectedSidecar = isV1(mirror)
+      ? v1Sidecar(derived.sidecar)
+      : derived.sidecar;
+    const actualSidecar = isV1(mirror)
+      ? v1Sidecar(file["sidecar"])
+      : file["sidecar"];
     const difference =
       firstDifference(
         derived.entry as unknown as Record<string, unknown>,
@@ -726,8 +771,8 @@ async function checkRecord(
         "/entry",
       ) ??
       firstDifference(
-        derived.sidecar as unknown as Record<string, unknown>,
-        file["sidecar"],
+        expectedSidecar as Record<string, unknown>,
+        actualSidecar,
         "/sidecar",
       );
     if (difference !== null) {
@@ -1091,9 +1136,13 @@ export async function verifyMirror(
     await checkSeals(io, tally, mirror);
     await checkAnchors(io, tally, mirror);
     await checkEntries(io, tally, mirror, dir, plan, http);
-    await checkAttestations(io, tally, mirror, dir, recomputed);
-    await checkStanding(io, tally, dir, recomputed);
-    await checkLedger(io, tally, dir, recomputed);
+    // The three families a v1 directory does not carry are not asked of one:
+    // the layout it claims is the layout it is checked as.
+    if (!isV1(mirror)) {
+      await checkAttestations(io, tally, mirror, dir, recomputed);
+      await checkStanding(io, tally, dir, recomputed);
+      await checkLedger(io, tally, dir, recomputed);
+    }
   } catch (error) {
     io.stderr(
       error instanceof MirrorUnreadable

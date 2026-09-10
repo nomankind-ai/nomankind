@@ -393,7 +393,7 @@ describe("the day's export", () => {
     ]);
     const manifest = JSON.parse(fileAt("mirror.json")!) as Record<string, unknown>;
     expect(manifest).toMatchObject({
-      format: "nomankind-mirror-v1",
+      format: "nomankind-mirror-v2",
       environment: ENVIRONMENT,
       exported_at: EXPORT_AT.toISOString(),
       head: first.sealed!.last_seq,

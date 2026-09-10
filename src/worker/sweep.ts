@@ -1471,8 +1471,15 @@ async function mirrorStep(
 // (i), (j), (k): the ledger, standing, and the payout cycle
 // ---------------------------------------------------------------------------
 
-/** The ledger step's cursor, named in `ledger_state` by the step itself. */
-const LEDGER_CURSOR = "ledger";
+/**
+ * The ledger step's cursor, named in `ledger_state` by the step itself.
+ *
+ * Exported because a replay has to leave it where a sweep would have: `npm run
+ * import-mirror` writes the mirror's ledger rows and then sets this to the
+ * imported sealed head, so the fork's first sweep carries on from there rather
+ * than pricing the whole log again.
+ */
+export const LEDGER_CURSOR = "ledger";
 
 /** Narrow one event to its own type, the way the kernel does it. */
 function isEvent<T extends EventType>(event: Event, type: T): event is Event<T> {

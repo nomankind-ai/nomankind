@@ -36,7 +36,7 @@ Each directory is a complete, self-contained export of that log's sealed state.
 
 | Path | What it holds |
 | --- | --- |
-| `mirror.json` | The manifest: format, environment, `exported_at`, `as_of`, `head`, `seal_seq`, the counts, the schema and norm versions, the registered domains, where the captures are served from, and the verify command. |
+| `mirror.json` | The manifest: `format` (`nomankind-mirror-v2`), environment, `exported_at`, `as_of`, `head`, `seal_seq`, the counts, the schema and norm versions, the registered domains, where the captures are served from, and the verify command. |
 | `events/<seal seq, 8 digits>.jsonl` | The events one seal covers, in seq order, hash chain and all. A seal's range never moves, so a seal's file never changes once written. |
 | `seals.jsonl` | Every seal in seq order, with its Merkle root, its chain link, its witnesses and its registry receipt. |
 | `anchors.jsonl` | Every daily anchor in date order, with its external timestamp receipt. |
@@ -46,6 +46,10 @@ Each directory is a complete, self-contained export of that log's sealed state.
 | `attestations/<attestation id>.json` | One drift attestation as the sealed events fold it — the probes, the scorers, the scores, the status and the date — with the model's answers beside it. Only attestations the seals cover. |
 | `standing.json` | Every operator's standing at the sealed head, with the published formula's own term names beside it, sorted by operator id. Recomputed from the events, never copied off a table. |
 | `ledger.jsonl` | Every ledger row the log itself proves, in the order the events produced them: read shares, the halves a stale entry withheld, the daily reconciliation, clawbacks, reconfirmation bounties, and the stakes a dispute or a revalidation put up with their refunds, forfeits and rewards. No payouts: money leaving through a payment provider is not a function of the log. |
+
+A clone pulled before the last three rows existed is still good: a directory
+whose manifest says `nomankind-mirror-v1` is checked and replayed as what v1
+was — the first seven rows, and entry sidecars without the derived `source`.
 
 Every JSON document is two-space indented with a trailing newline; every
 `.jsonl` file is one compact document per line. Two exports of the same sealed

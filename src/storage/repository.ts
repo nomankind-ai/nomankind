@@ -994,6 +994,23 @@ function operatorDomainStatement(
 }
 
 /**
+ * Store one (operator, domain) row, replacing whatever was there.
+ *
+ * The registration and the join both write this row inside the batch that
+ * appends their event (`registerOperator`, `recordDomainJoin`), because an
+ * attestation without its event would be one nobody can verify offline. A replay
+ * has the events already — `npm run import-mirror` appends the whole sealed log
+ * before it writes a single row — so it needs the row on its own, and it writes
+ * exactly the row those two writers write.
+ */
+export async function putOperatorDomain(
+  db: D1Like,
+  record: OperatorDomainRecord,
+): Promise<void> {
+  await operatorDomainStatement(db, record).run();
+}
+
+/**
  * The domains one operator is attested in, in the order it took them on.
  *
  * Registration first, then every join by the position of its event, which is
@@ -4562,6 +4579,55 @@ export async function recordAttestationExpired(
   );
   await db.batch(statements);
   return expired;
+}
+
+/**
+ * Store one attestation and its scorer rows, replacing whatever was there.
+ *
+ * The four writers above each write this row inside the batch that appends the
+ * event that changed it, because a row without its event would be an attestation
+ * nobody can recompute offline. A replay has the events already — `npm run
+ * import-mirror` appends the whole sealed log first, and the record it stores is
+ * `deriveAttestation`'s fold over exactly those events — so it needs the row on
+ * its own, and it writes exactly the row those four write. The scorers come off
+ * the derived record, each closed at the position of the score it signed, which
+ * is what `recordAttestationScore` writes as it lands.
+ *
+ * The answers are the one thing that is not in the log (Section 8 seals "the
+ * score and the probe hash"), so they are passed beside the record exactly as
+ * they are to every other writer here.
+ */
+export async function putAttestation(
+  db: D1Like,
+  input: {
+    readonly attestation: DerivedAttestation;
+    readonly answers: readonly ProbeAnswer[] | null;
+  },
+): Promise<void> {
+  const scoredAt = new Map<string, number>();
+  for (const score of input.attestation.scores) {
+    scoredAt.set(score.operator, score.seq);
+  }
+  const statements = [
+    attestationStatement(db, input.attestation, input.answers),
+    ...input.attestation.scorers.map((scorer) =>
+      db
+        .prepare(
+          `INSERT INTO attestation_scorers (attestation, operator, agent, scored_seq)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT (attestation, operator) DO UPDATE SET
+             agent = excluded.agent,
+             scored_seq = excluded.scored_seq`,
+        )
+        .bind(
+          input.attestation.id,
+          scorer.operator,
+          scorer.agent,
+          scoredAt.get(scorer.operator) ?? null,
+        ),
+    ),
+  ];
+  await db.batch(statements);
 }
 
 /** One attestation by id, with the model's answers, or null. */

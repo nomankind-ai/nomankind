@@ -14,6 +14,7 @@
     "dispute": "npm run build --silent && node dist/cli/dispute.js",
     "export": "npm run build --silent && node dist/cli/export.js",
     "gen:validator": "npm run build --silent && node dist/cli/gen-validator.js",
+    "import-mirror": "npm run build --silent && node dist/cli/import-mirror.js",
     "keygen": "npm run build --silent && node dist/cli/keygen.js",
     "mirror": "npm run build --silent && node dist/cli/mirror.js",
     "read": "npm run build --silent && node dist/cli/read.js",

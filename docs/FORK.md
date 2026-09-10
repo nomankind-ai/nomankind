@@ -40,7 +40,7 @@ re-serialization.
 
 | Path | What it holds |
 | --- | --- |
-| `mirror.json` | The manifest: format, environment, `exported_at`, `as_of` (the newest seal's `sealed_at`), `head` (its `last_seq`), `seal_seq`, the counts of seals, events, entries, operators, attestations and ledger rows, the position standing was computed at, the schema and norm versions, the registered domains, `captures_base`, the code repository, the verify command, and the license. |
+| `mirror.json` | The manifest: `format` (`nomankind-mirror-v2`), environment, `exported_at`, `as_of` (the newest seal's `sealed_at`), `head` (its `last_seq`), `seal_seq`, the counts of seals, events, entries, operators, attestations and ledger rows, the position standing was computed at, the schema and norm versions, the registered domains, `captures_base`, the code repository, the verify command, and the license. |
 | `events/<seal seq, 8 digits>.jsonl` | The events that seal covers, exactly as `GET /events` serves them. A seal's range never moves, so a seal's file never changes once written. |
 | `seals.jsonl` | Every seal in seq order, exactly as `GET /seals/{seq}` serves it — witnesses and registry receipt included. Rewritten as countersignatures arrive. |
 | `anchors.jsonl` | Every daily anchor in date order, exactly as `GET /anchors/{date}` serves it, external timestamp receipt included. |
@@ -50,6 +50,13 @@ re-serialization.
 | `attestations/<attestation id>.json` | `{attestation, answers}` — the drift attestation folded from the sealed events exactly as `GET /attestations/{id}` serves it, and the model's answers beside it. Only attestations whose request the seals cover. The answers are the one field here the log does not carry: it seals their hash. |
 | `standing.json` | `{position, formula, operators}` — the body of `GET /standing` computed at the sealed head, operators sorted by id. Not a table: `standingAt` over the sealed events, which is what "anyone can recompute anyone's standing from the log" means. |
 | `ledger.jsonl` | Every ledger row that is a pure function of the log, in the order the events produced them: read shares and the halves a stale entry withheld, the day's reconciliation, clawbacks, reconfirmation bounties, and dispute and revalidation stakes with their refunds, forfeits and rewards. Recomputed from the sealed events, never read from the ledger table, so your fork recomputes the same file. Payouts are not here: a payout records money leaving through a provider, which no replay of the log reproduces. |
+
+An older copy is still an exit: a directory whose manifest says
+`nomankind-mirror-v1` — pulled before the attestations, the standing, the ledger
+and the sidecar's `source` joined the export — is verified and imported as what
+v1 was: the first seven rows of the table above, with no attestations directory,
+no `standing.json` and no `ledger.jsonl` asked of it, and its entry sidecars
+compared on the keys a v1 sidecar carried.
 
 Nothing unsealed is ever exported. The mirror is the sealed record: an entry
 whose submission event no seal covers is not in it, and neither are the events
@@ -166,7 +173,67 @@ npm run verify -- ./out/entry.json ./out/log.json
 ## Keeping going without nomankind
 
 If nomankind stops, nothing you hold stops working. The clone verifies offline,
-forever, with no server anywhere.
+forever, with no server anywhere — and it also starts a running instance. The two
+clones above, and two commands, on a laptop, with no accounts anywhere:
+
+```sh
+cd nomankind
+npm run import-mirror -- ../log/production
+npm run dev
+```
+
+`npm run import-mirror -- <mirror-dir>/<env>` replays one environment's export
+into the local D1 database `npm run dev` serves from — miniflare's, under
+`.wrangler/state` in the clone, with the migrations applied first — and
+`--persist-to <dir>` names another one. The path is the same path `wrangler dev
+--persist-to <dir>` and `wrangler d1 ... --local --persist-to <dir>` take, so
+whatever you import into is what the server then reads, and leaving the flag off
+on both is the default `.wrangler/state`. Then
+`npm run dev` is that record: `/entries/{id}`, `/operators`, `/seals/{seq}`,
+`/anchors/{date}`, `/attestations/{id}`, `/standing` and `/read/{id}` answer what
+the instance you left answered, and the sweep goes on sealing from the imported
+head. The first new event on your side is sealed by the seal after nomankind's
+last one, with its `prev_hash`: the log continues rather than restarting.
+
+Nothing is taken on trust. The command runs `verify-mirror`'s own checks first
+and refuses the directory if any of them fail, before it writes a single row; the
+events go in through the same chain rule every door writes under; the registry
+rows are folded out of the events and held against `operators.json`; and every
+entry is re-derived by the kernel over the events just imported and compared with
+the mirror's own file, so a difference is a refusal rather than a row. The seals,
+the anchors and the model's answers are stored as they stand, because a
+signature, an external timestamp and a thing a model said are not functions of
+the log. It prints one summary line and exits 0, or names its refusal and exits
+1 — `verify_failed`, `entry_differs`, `operators_differ`, `not_a_prefix`,
+`database_not_empty` and the rest — and never a stack trace.
+
+Three flags and one rule about them. `--captures <url-or-dir>` is passed straight
+to the verification, so a fork with no network at all imports from a local
+capture archive — one file per capture named by the hex of its hash, as above —
+rather than fetching the cited pages from the environment that is going away;
+take the archive while you still can. `--force` allows importing into a database
+that already holds a log, and is not an escape from the checks: it still refuses
+unless the stored log is a prefix of the mirror, same events and same hashes, and
+then imports only what is after it, so tomorrow's export catches your instance up
+instead of starting it again.
+
+What the import writes, and what your first sweep writes. The import puts back
+the events, the registry rows, the entries, the seals, the anchors, the
+attestations with their answers, the ledger rows the log proves and the standing
+columns, and leaves both cursors at the imported head. Your first sweep makes the
+rest for itself: the assignments, the read receipts, the sweep's own status rows,
+and your first daily export. Two things nobody rebuilds, and neither is a gap:
+the payout references, which belong to a payment provider rather than to the log,
+so you onboard your own operators before you pay any; and which agent exercised
+a genesis naming, which the event does not name.
+
+To move the imported database from your laptop to a remote D1, wrangler does it
+and this command does not:
+
+```sh
+npx wrangler d1 export nomankind-local --local --output ./nomankind.sql
+npx wrangler d1 execute <your-database> --remote --file ./nomankind.sql
+```
 
 To run your own instance, deploy this code to your own Cloudflare account with
 your own keys, exactly as the README describes: your own D1 database and R2
@@ -201,14 +268,6 @@ move from one to the other: set the App secrets, watch one export land, then
 delete the token. Neither credential is ever logged, returned, or put in a
 refusal's detail — a mirror that named its own token in an error message would
 publish it.
-
-**Replaying a mirror into a fresh database is not part of this milestone, and we
-would rather say so than imply it.** The export is complete — every event, every
-seal, every anchor and every derived entry are in it — but the importer that
-loads one into a new instance's D1 does not exist yet. What you can do today is
-verify a mirror end to end, keep it, serve it as files, and start a new log of
-your own with this code. What you cannot do today is press a button and resume
-nomankind's log inside your own Worker.
 
 ## The legal posture
 
