@@ -531,6 +531,21 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
     },
   ];
 
+  const status: Row[] = [
+    {
+      name: "STATUS_ATTENTION_AFTER_INTERVALS",
+      value: `${policy.STATUS_ATTENTION_AFTER_INTERVALS} intervals`,
+      means:
+        "How many of its own intervals a periodic stage may go without a success before the status page calls for attention. Its own intervals and not a fixed number of minutes, so a stage that runs every five minutes and a stage that runs once a day are judged by the same rule.",
+    },
+    {
+      name: "STATUS_FAILING_AFTER_MINUTES",
+      value: `${policy.STATUS_FAILING_AFTER_MINUTES} minutes`,
+      means:
+        "How long a broken rule stays attention before the status page calls it failing. Two readings and not one, because a step that skipped once and a step that has been down half an hour are not the same fact, and a page that showed them the same way would be a page nobody could act on.",
+    },
+  ];
+
   const requests: Row[] = [
     {
       name: "REQUEST_CLOCK_SKEW_SECONDS",
@@ -656,6 +671,17 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
           </table>
         </div>
       </section>
+
+      ${group("Status", status)}
+
+      <p class="note">
+        Those two are the whole of the status page's judgement: every light on
+        <a href="/status">the status page</a> is one of the published rules
+        beside it applied to the log and to the sweep's stored report, and these
+        are the only numbers that decide when a rule that has been broken stops
+        being a hiccup. They are operational and they move by decision like every
+        other number here.
+      </p>
 
       ${group("Requests", requests)}
 

@@ -75,6 +75,7 @@ import { handleRegistry, json } from "./registry.js";
 import { handleRevalidate } from "./revalidate.js";
 import { handleSeals } from "./seals.js";
 import { handleStanding } from "./standing.js";
+import { handleStatus } from "./status.js";
 import { handleSubmit } from "./submit.js";
 import { runSweep } from "./sweep.js";
 import {
@@ -220,6 +221,12 @@ export async function handleRequest(
   const standing = await handleStanding(request, env, { now });
   if (standing !== null) return standing;
 
+  // M23's one read, Section 11's "Deployment and status": whether the clockwork
+  // is running, as JSON. A browser asking for the same path never gets here —
+  // src/worker/pages.ts answered it with the page above.
+  const status = await handleStatus(request, env, { now });
+  if (status !== null) return status;
+
   // M22's three doors and four reads, Section 8's "Drift attestation" and "The
   // confidence field": a model asks for a probe set drawn by public randomness,
   // answers it, and three drawn operators sign what they made of the answers;
@@ -316,6 +323,10 @@ export default {
         // D-053): a mock on demo and local, the stub that refuses on
         // production, and never a fixture — the same rule the beacon follows.
         payout: payoutAdapterFor(env.ENVIRONMENT),
+        // Which door ran it, for the status board's own row (D-076). The Sweeper
+        // Durable Object says nothing and is read as `alarm`, which is what it
+        // is: the sweep's own timer, with this cron trigger as the repair.
+        trigger: "cron",
       },
     );
   },

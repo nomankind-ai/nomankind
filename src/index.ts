@@ -32,6 +32,7 @@ export * from "./seal.js";
 export * from "./sign.js";
 export * from "./standing.js";
 export * from "./stake.js";
+export * from "./status.js";
 export * from "./submit.js";
 export * from "./supersede.js";
 export * from "./sync.js";

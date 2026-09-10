@@ -158,6 +158,7 @@ describe("wrangler d1 migrations apply", () => {
         "0010_ledger.sql",
         "0011_attestations.sql",
         "0012_domains.sql",
+        "0013_status.sql",
       ]);
       expect(oursApplied.results.map((row) => row.name)).toEqual(
         applied.results.map((row) => row.name),

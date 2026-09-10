@@ -41,12 +41,15 @@ import {
   POLICY,
   WITNESS_PIN,
 } from "../policy.js";
+import { exercisedStages, stageStates, statusCounters } from "../status.js";
 import type { D1Like } from "../storage/d1.js";
 import {
   agentCountsByOperator,
   agentsForOperator,
   attestationsForOperator,
+  capturesForEntry,
   countEntries,
+  countOperators,
   countSeals,
   countTrustedOperators,
   disputeOf,
@@ -54,17 +57,22 @@ import {
   eventsForEntry,
   getEntry,
   getOperator,
+  latestAnchor,
+  latestEventOfType,
   latestSeal,
   ledgerRowsForEntry,
   ledgerRowsForOperator,
+  listAttestations,
   listEntriesPage,
   listOperators,
   operatorDomains,
   operatorStanding,
   overturnedCountsByOperator,
   payoutRows,
+  reconciliationRows,
   sealCovering,
   sealsAfter,
+  standingByOperator,
   standingForOperators,
   supersedersOf,
   validationCountsByOperator,
@@ -84,10 +92,12 @@ import {
 } from "../ui/pages/errors.js";
 import { renderGenesis } from "../ui/pages/genesis.js";
 import { renderHome } from "../ui/pages/home.js";
+import { renderHowItWorks } from "../ui/pages/how-it-works.js";
 import { LANDING_CSS, renderLanding } from "../ui/pages/landing.js";
 import { renderOperator } from "../ui/pages/operator.js";
 import { renderOperators } from "../ui/pages/operators.js";
 import { renderPolicy } from "../ui/pages/policy.js";
+import { renderStatus } from "../ui/pages/status.js";
 import { ENTRY_DOMAINS, parseEntriesQuery } from "../ui/query.js";
 import { APP_CSS } from "../ui/styles.js";
 import type {
@@ -95,12 +105,15 @@ import type {
   EntriesFilter,
   EntryRow,
   GenesisRow,
+  HowItWorksData,
   LandingData,
   OperatorRow,
   PageContext,
+  StatusData,
 } from "../ui/types.js";
 import type { Env } from "./env.js";
 import { StorageUnreachable, guardDatabase, json, refuse } from "./registry.js";
+import { statusInput } from "./status.js";
 
 /**
  * The ids nomankind mints, exactly as src/worker/read.ts narrows the schema's
@@ -641,6 +654,275 @@ async function genesis(
   );
 }
 
+/**
+ * The one row a "what is the newest" question wants.
+ *
+ * Not a page size and so not a policy number: every read below that asks for the
+ * latest of something asks for exactly one, and the constant is here so the
+ * limit is a word rather than a bare 1 in nine call sites.
+ */
+const NEWEST = 1;
+
+/** How many standings the How it works page names. Four fits its one line. */
+const HOW_IT_WORKS_STANDINGS = 4;
+
+/**
+ * The scan for the newest scored attestation.
+ *
+ * An attestation is scored days after it is requested, so the newest request is
+ * often not the newest score: the page asks for one keyset page of them, newest
+ * request first, and takes the first that carries a score. One page and never
+ * the table, which is what keeps this read's cost fixed as the log grows.
+ */
+const HOW_IT_WORKS_ATTESTATION_SCAN = LIST_PAGE_LIMIT;
+
+/** A field off a record, by the schema's own name, or null when it is not text. */
+function textField(
+  source: Record<string, unknown>,
+  name: string,
+): string | null {
+  const value = source[name];
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * How it works (D-076): the pipeline, with this environment's own log under it.
+ *
+ * Fifteen reads, every one of them a single newest row, a count, or one keyset
+ * page at an explicit limit. Nothing is derived on the way: the tier is the
+ * sidecar's effective one, the reconciliation's totals are the ones the ledger
+ * row states, and the citation's host is parsed here rather than on the page
+ * because a page that parsed a URL would be a page doing derivation.
+ *
+ * Every value is nullable and the page says so in words. Production holds no
+ * entries the day it opens, and this page has to be honest on that day too.
+ */
+async function howItWorks(
+  db: D1Like,
+  ctx: PageContext,
+  env: Env,
+): Promise<Response> {
+  const newest = (await listEntriesPage(db, { limit: NEWEST }))[0] ?? null;
+  const record =
+    newest === null
+      ? null
+      : (newest.entry as unknown as Record<string, unknown>);
+
+  // The entry's snapshot capture, which is the frozen source the whole record
+  // rests on. `capturesForEntry` returns every role; the snapshot is the one.
+  const captures =
+    record === null
+      ? []
+      : await capturesForEntry(db, field(record, "id"), LIST_PAGE_LIMIT);
+  const snapshot = captures.find((each) => each.role === "snapshot") ?? null;
+  // The host of the source the entry cites, for the line beside the hash. A URL
+  // the store already accepted, so a parse failure is "no host to name" and not
+  // a refusal: the page is not the place a bad citation is caught.
+  let citationHost: string | null = null;
+  if (record !== null) {
+    const citation = textField(record, "citation");
+    if (citation !== null) {
+      try {
+        citationHost = new URL(citation).hostname;
+      } catch {
+        citationHost = null;
+      }
+    }
+  }
+
+  // The names come from a page of operators; the counts come from the counts. A
+  // page is a page — on a pool past LIST_PAGE_LIMIT its length would say how many
+  // rows were read, not how many operators there are, and the two numbers this
+  // page shows are counts of the pool.
+  const operators = await listOperators(db, { limit: LIST_PAGE_LIMIT });
+  const trusted = operators.filter(
+    (operator) => operator.details["trusted"] === true,
+  );
+  const trustedCount = await countTrustedOperators(db);
+  const registeredCount = await countOperators(db);
+
+  const validation = await latestEventOfType(db, "validation");
+  const validationRecord =
+    validation === null
+      ? null
+      : (validation as Event<"validation">).payload.record;
+
+  const seal = await latestSeal(db);
+  const anchor = await latestAnchor(db);
+  const readCount = await latestEventOfType(db, "read_count");
+  const readCountPayload =
+    readCount === null
+      ? null
+      : (readCount as Event<"read_count">).payload;
+
+  const overturned =
+    (await listEntriesPage(db, { status: "overturned", limit: NEWEST }))[0] ??
+    null;
+  const overturnedRecord =
+    overturned === null
+      ? null
+      : (overturned.entry as unknown as Record<string, unknown>);
+
+  const stale = await countEntries(db, { stale: true });
+
+  const standings = await standingByOperator(db, HOW_IT_WORKS_STANDINGS);
+  const standingRows = [...standings.entries()].map(([operator, cached]) => ({
+    operator,
+    standing: cached.standing,
+  }));
+  const standingPosition = [...standings.values()][0]?.seq ?? null;
+
+  const reconciliation = (await reconciliationRows(db, NEWEST))[0] ?? null;
+  const reconciliationRef = reconciliation?.ref ?? {};
+
+  const attestations = await listAttestations(db, {
+    limit: HOW_IT_WORKS_ATTESTATION_SCAN,
+  });
+  const scored =
+    attestations.find((each) => each.attestation.score !== null) ?? null;
+
+  const expires = record === null ? null : record["expires_at"];
+
+  const data: HowItWorksData = {
+    entry:
+      newest === null || record === null
+        ? null
+        : {
+            id: field(record, "id"),
+            status: field(record, "status"),
+            tier: newest.sidecar.effective_tier,
+            domain: field(record, "domain"),
+          },
+    capture:
+      snapshot === null
+        ? null
+        : {
+            hash: snapshot.contentHash,
+            host: citationHost ?? "the cited source",
+            normVersion: snapshot.normVersion,
+          },
+    pool: {
+      names: trusted.map((operator) => operator.id),
+      trusted: trustedCount,
+      registered: registeredCount,
+    },
+    validation:
+      validation === null || validationRecord === null
+        ? null
+        : {
+            seq: validation.seq,
+            decision: validationRecord.decision,
+            operator: validationRecord.operator,
+          },
+    seal:
+      seal === null
+        ? null
+        : {
+            seq: seal.seq,
+            firstSeq: seal.first_seq,
+            lastSeq: seal.last_seq,
+            witnesses: seal.witnesses.length,
+            sealedAt: seal.sealed_at,
+          },
+    anchor:
+      anchor === null
+        ? null
+        : {
+            date: anchor.date,
+            seals: anchor.roots.length,
+            external:
+              anchor.external === null
+                ? `local on ${env.ENVIRONMENT}`
+                : `${anchor.external.kind} · ${anchor.external.calendar}`,
+          },
+    readCount:
+      readCount === null || readCountPayload === null
+        ? null
+        : {
+            seq: readCount.seq,
+            date: readCountPayload.date,
+            total: readCountPayload.total,
+            counterFirst: readCountPayload.counter_first,
+            counterLast: readCountPayload.counter_last,
+          },
+    overturned:
+      overturnedRecord === null
+        ? null
+        : {
+            id: field(overturnedRecord, "id"),
+            correction: textField(overturnedRecord, "overturned_by"),
+          },
+    stale,
+    nextWindowEnds: typeof expires === "string" ? expires.slice(0, 10) : null,
+    standing: { position: standingPosition, rows: standingRows },
+    reconciliation:
+      reconciliation === null
+        ? null
+        : {
+            date: reconciliation.date ?? "no date",
+            published:
+              typeof reconciliationRef["published_total"] === "number"
+                ? reconciliationRef["published_total"]
+                : 0,
+            accrued:
+              typeof reconciliationRef["accrued_total"] === "number"
+                ? reconciliationRef["accrued_total"]
+                : 0,
+            ok: reconciliationRef["ok"] === true,
+          },
+    attestation:
+      scored === null
+        ? null
+        : {
+            id: scored.attestation.id,
+            status: scored.attestation.status,
+            score:
+              scored.attestation.score === null
+                ? null
+                : `${scored.attestation.score.agreed} / ${scored.attestation.score.probe_count}`,
+            date: scored.attestation.date,
+            scorers: scored.attestation.scorers.map(
+              (scorer) => scorer.operator,
+            ),
+          },
+    syncFrom: seal === null ? 0 : seal.last_seq,
+  };
+
+  return htmlResponse(renderHowItWorks(ctx, data));
+}
+
+/**
+ * Status (D-076): the page form of `GET /status`.
+ *
+ * One gatherer and one set of rules for both doors — `statusInput` reads the
+ * sweep's stored report and the log, `stageStates`, `exercisedStages` and
+ * `statusCounters` decide every light — so the reader who curls the path and the
+ * reader who opens it cannot be shown different answers. The JSON form is
+ * src/worker/status.ts's own route, which this one leaves alone: a request that
+ * did not ask for HTML falls through to it.
+ */
+async function status(
+  db: D1Like,
+  ctx: PageContext,
+  env: Env,
+  now: Date,
+): Promise<Response> {
+  const at = now.toISOString();
+  const input = await statusInput(db, env, at);
+  const stages = stageStates(input, at);
+
+  const data: StatusData = {
+    // As of the record and never as of the request: every light is a reading of
+    // the last sweep, so the page is dated by that run and not by this one.
+    asOf: input.steps.find((step) => step.step === "sweep")?.last_run_at ?? null,
+    counters: statusCounters(stages, input),
+    stages,
+    exercised: exercisedStages(input),
+  };
+
+  return htmlResponse(renderStatus(ctx, data));
+}
+
 // ---------------------------------------------------------------------------
 // The router
 // ---------------------------------------------------------------------------
@@ -700,6 +982,13 @@ async function route(
 
   if (path === "/api") return htmlResponse(renderApi(ctx));
   if (path === "/genesis") return genesis(db, ctx, env);
+  if (path === "/how-it-works") return howItWorks(db, ctx, env);
+
+  // The status page and `GET /status` are one reading served two ways, exactly
+  // as /policy is: a browser gets the page, and everything else falls through to
+  // the JSON route in src/worker/status.ts rather than being answered here, so
+  // there is one implementation of the rules and one of the endpoint.
+  if (path === "/status") return wants ? status(db, ctx, env, now) : null;
 
   return null;
 }
