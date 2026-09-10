@@ -1082,6 +1082,29 @@ describe("renderLanding", () => {
     expect(page).toContain(`href="https://1f916.org"`);
   });
 
+  /**
+   * The top bar's first link is the one page on this site the reader has not
+   * seen yet, and it is the only link in that nav that stays on this origin: on
+   * the apex every path but `/` is the app, so /how-it-works is nomankind.ai's
+   * own page, and on demo the same relative href is demo's. Being same-origin
+   * is what it means for it to carry no `rel` where the four outbound links
+   * carry `rel="noopener"` — a relative href with a rel would be the tell that
+   * someone had copied one of the outbound anchors without reading it.
+   */
+  it("leads the top bar with How it works, before the whitepaper", () => {
+    const nav = page.slice(
+      page.indexOf(`<nav class="topnav">`),
+      page.indexOf("</nav>"),
+    );
+    expect(nav).toContain(`<a href="/how-it-works">How it works</a>`);
+    expect(nav.indexOf("/how-it-works")).toBeLessThan(nav.indexOf("Whitepaper"));
+    expect(nav).not.toMatch(/<a href="\/how-it-works"[^>]*rel=/);
+    // And it is a link out of the page, not a script or a style that the
+    // content-security-policy would drop on the floor.
+    expect(page).not.toContain("<script");
+    expect(page).not.toContain("style=");
+  });
+
   it("draws the proof pipeline inline, from the source to the learner", () => {
     expect(page).toContain("<svg");
     const svg = page.slice(page.indexOf("<svg"), page.indexOf("</svg>"));
