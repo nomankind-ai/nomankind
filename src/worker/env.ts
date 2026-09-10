@@ -107,6 +107,31 @@ export type Env = {
    * a refusal the sweep counts and the status page shows rather than a failure:
    * a mirror that claimed an export with no repository behind it would put a
    * link on the page that goes nowhere.
+   *
+   * The fallback credential now: a token expires, and the two secrets below do
+   * not. Set them and this one is not read.
    */
   MIRROR_TOKEN?: string;
+  /**
+   * The id of the GitHub App that writes the daily log mirror: the number the
+   * App's own settings page shows. Read only together with the private key
+   * below, and when both are set they are the credential the mirror adapter
+   * uses in place of MIRROR_TOKEN.
+   *
+   * An id is not itself a secret, but it is set as one beside the key it is
+   * useless without (D-016), so a maintainer configures the mirror in one place.
+   */
+  MIRROR_APP_ID?: string;
+  /**
+   * The private key of that App, the PEM GitHub hands over once when the key is
+   * created — PKCS#1 or PKCS#8, with its newlines, without them, or with them
+   * spelt `\n`, all of which the adapter reads.
+   *
+   * A Worker secret (D-016) and the credential that replaces the expiring
+   * token: the adapter signs a short-lived JWT with it and mints an
+   * installation token per push, so nothing here ever needs renewing. Never in
+   * this repository, never in wrangler.jsonc, and never logged or returned —
+   * neither the key nor the token it mints appears in any refusal detail.
+   */
+  MIRROR_APP_PRIVATE_KEY?: string;
 };

@@ -164,9 +164,35 @@ To run your own instance, deploy this code to your own Cloudflare account with
 your own keys, exactly as the README describes: your own D1 database and R2
 bucket from `wrangler.jsonc`, the migrations under `migrations/` applied in name
 order, and your own `SEALING_AGENT_KEY`, `MAINTAINER_AGENT_ID` and — if you want
-your own daily export — your own `MIRROR_TOKEN` and mirror repository. Your
-operators register against your instance, your sweep seals and anchors, and your
-mirror is your archive.
+your own daily export — your own mirror repository and a credential that can
+write to it. Your operators register against your instance, your sweep seals and
+anchors, and your mirror is your archive.
+
+The credential is a GitHub App, and it is a GitHub App rather than a token
+because it does not expire: an export that stops because nobody renewed a secret
+is an outage with nothing wrong behind it, on a date nobody wrote down. Create a
+GitHub App under your account or organisation, give it **Contents: read and
+write** on the log repository and no other permission, install it on that
+repository alone, generate a private key, and set two Worker secrets:
+
+```sh
+npx wrangler secret put MIRROR_APP_ID          # the App's id, from its settings page
+npx wrangler secret put MIRROR_APP_PRIVATE_KEY # the .pem GitHub downloaded once
+```
+
+The key is read as GitHub writes it — PKCS#1 (`-----BEGIN RSA PRIVATE KEY-----`)
+or PKCS#8, with its newlines, with them flattened into one line, or with them
+spelt `\n` — because a credential that has to be pasted in exactly one shape is
+a credential that gets pasted wrong. The Worker signs a short-lived JWT with it
+and mints an installation token scoped to that one repository at the start of
+each push; the token lives for the push and no longer.
+
+`MIRROR_TOKEN`, a personal access token with push access to the same repository,
+is the fallback, and is read only when the two App secrets are not both set. To
+move from one to the other: set the App secrets, watch one export land, then
+delete the token. Neither credential is ever logged, returned, or put in a
+refusal's detail — a mirror that named its own token in an error message would
+publish it.
 
 **Replaying a mirror into a fresh database is not part of this milestone, and we
 would rather say so than imply it.** The export is complete — every event, every
