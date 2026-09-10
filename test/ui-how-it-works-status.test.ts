@@ -50,6 +50,12 @@ const ENTRY_ID = "nmk_4d7c5efb907732f6a54de4d958078663";
 const CORRECTION_ID = "nmk_aa3ce28b0b1d4d6e9d0b6a6f0c9b515d";
 const CAPTURE_HASH =
   "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c";
+/** The exported directory at the commit the sweep pushed, as pages.ts builds it. */
+const TREE_URL =
+  "https://github.com/nomankind-ai/log/tree/9c1f0b2ad4e6f8a0b1c2d3e4f5a60718293a4b5c/demo";
+/** The fork document, where the Mirror page and this one both point. */
+const FORK_DOC_URL =
+  "https://github.com/nomankind-ai/nomankind/blob/main/docs/FORK.md";
 
 /** A log with something in it at every stage: what demo looks like. */
 const LIVE: HowItWorksData = {
@@ -104,6 +110,12 @@ const LIVE: HowItWorksData = {
     scorers: ["fixture-e", "fixture-c"],
   },
   syncFrom: 43,
+  mirror: {
+    date: "2026-09-09",
+    head: 54,
+    entries: 3,
+    treeUrl: TREE_URL,
+  },
 };
 
 /** A log holding nothing at all: what production is on the day it opens. */
@@ -122,9 +134,10 @@ const EMPTY: HowItWorksData = {
   reconciliation: null,
   attestation: null,
   syncFrom: 0,
+  mirror: null,
 };
 
-/** The eight panels, as the artboard heads them. */
+/** The nine panels, as the artboard heads them. */
 const PANELS: readonly { readonly id: string; readonly number: string; readonly title: string; readonly label: string }[] =
   [
     { id: "s1", number: "01", title: "Submit and snapshot", label: "SECTION 6 · SUBMIT" },
@@ -140,12 +153,18 @@ const PANELS: readonly { readonly id: string; readonly number: string; readonly 
     { id: "s6", number: "06", title: "Standing and the ledger", label: "SECTION 9 · INCENTIVES" },
     { id: "s7", number: "07", title: "Attest a model", label: "SECTION 8 · DRIFT ATTESTATION" },
     { id: "s8", number: "08", title: "Verify offline", label: "GOAL 4 · TWO FILES AND ONE SCRIPT" },
+    {
+      id: "s9",
+      number: "09",
+      title: "Mirror and fork",
+      label: "SECTION 11 · EXIT AS A PROTOCOL RIGHT",
+    },
   ];
 
 describe("renderHowItWorks", () => {
   const page = renderHowItWorks(ctx, LIVE);
 
-  it("carries the eight panels, each with its heading and its section label", () => {
+  it("carries the nine panels, each with its heading and its section label", () => {
     for (const panel of PANELS) {
       expect(page, `${panel.title} has no panel`).toContain(
         `id="${panel.id}"`,
@@ -160,13 +179,19 @@ describe("renderHowItWorks", () => {
     }
   });
 
-  it("puts the eight steps across the top, each anchored at its panel", () => {
+  it("puts the nine steps across the top, each anchored at its panel, and counts nine", () => {
     expect(page).toContain('class="steps"');
     for (const panel of PANELS) {
       expect(page, `no step for ${panel.title}`).toContain(
         `class="step" href="#${panel.id}"`,
       );
     }
+    // The strip is the page's own table of contents: a stage added to the stack
+    // and left out of the strip is a stage a reader never learns is there. So
+    // the count is checked and not merely the presence of each one.
+    expect(PANELS).toHaveLength(9);
+    expect(page.match(/class="step" href="#/g) ?? []).toHaveLength(9);
+    expect(page.match(/class="panel" id="s/g) ?? []).toHaveLength(9);
   });
 
   it("styles the strip through the selector the markup actually uses", () => {
@@ -194,6 +219,62 @@ describe("renderHowItWorks", () => {
       'href="/attestations/att_ce8252943fd4611e759c43d57f04318b"',
     );
     expect(page).toContain(`href="/entries/${ENTRY_ID}/confidence-inputs"`);
+    expect(page).toContain('href="/mirror/latest"');
+  });
+
+  it("names the mirror stage's export, its tree, and the fork document", () => {
+    expect(page).toContain(`href="${TREE_URL}"`);
+    expect(page).toContain(`href="${FORK_DOC_URL}"`);
+    // The two links off this site are the only ones on the page, and they carry
+    // the same rel the rest of the UI puts on an outbound link.
+    expect(page).toContain('rel="noopener noreferrer nofollow"');
+    expect(flat(page)).toContain("head 54 · 3 entries");
+    expect(page).toContain(
+      `npm run verify-mirror -- ./log/${ctx.environment}`,
+    );
+  });
+
+  // The tree URL is the one value on this page that arrives from outside it:
+  // the sweep writes it from the mirror repository's own configuration, and it
+  // lands in a href, which is the one position where escaping alone is not
+  // enough. So the three cases are pinned here rather than left to the helper's
+  // own tests: a scheme that must not be linked, a URL that must not be able to
+  // end the attribute, and the ordinary one, which must still carry the rel the
+  // rest of the UI puts on a link off this site.
+  /** The live fixture with one tree URL swapped for another. */
+  function withTreeUrl(treeUrl: string): string {
+    return renderHowItWorks(ctx, {
+      ...LIVE,
+      mirror: { ...LIVE.mirror!, treeUrl },
+    });
+  }
+
+  it("refuses a tree URL that is not http or https and keeps the label as text", () => {
+    const hostile = withTreeUrl("javascript:alert(1)");
+    expect(hostile).not.toContain("javascript:");
+    expect(hostile).not.toContain('href="javascript:alert(1)"');
+    // A href safeHref refuses is plain text on every page of this UI, so the
+    // row still names the export and simply does not link it.
+    expect(hostile).toContain("the exported tree");
+    expect(hostile).not.toContain(`>the exported tree</a>`);
+  });
+
+  it("escapes a tree URL that would otherwise end the attribute", () => {
+    const hostile = withTreeUrl(
+      `https://example.com/tree?a=1&b=2"><script>x</script>`,
+    );
+    expect(hostile).toContain(
+      `href="https://example.com/tree?a=1&amp;b=2&quot;&gt;&lt;script&gt;x&lt;/script&gt;"`,
+    );
+    expect(hostile).not.toContain("<script>x</script>");
+    expect(hostile).not.toContain(`b=2"><script>`);
+  });
+
+  it("renders an https tree URL as the href, with the rel an outbound link carries", () => {
+    const other = "https://github.com/nomankind-ai/log/tree/abc1234/demo";
+    expect(withTreeUrl(other)).toContain(
+      `<a href="${other}" target="_blank" rel="noopener noreferrer nofollow">the exported tree</a>`,
+    );
   });
 
   it("names the versions and the policy numbers it read rather than its own", () => {
@@ -226,18 +307,25 @@ describe("renderHowItWorks", () => {
       "no standing computed yet",
       "no reconciliation yet",
       "no attestation yet",
+      "no export yet",
     ]) {
       expect(empty, `the empty page never says "${words}"`).toContain(words);
     }
-    // And the eight panels are still all there: an empty log is a log, and the
+    // And the nine panels are still all there: an empty log is a log, and the
     // page explains the machine either way.
     for (const panel of PANELS) {
       expect(empty, `${panel.title} vanished on an empty log`).toContain(
         panel.title,
       );
     }
-    // Nothing is dashed out and nothing pretends there is a record to read.
+    // Nothing is dashed out and nothing pretends there is a record to read: no
+    // export means no commit, so the tree link is not drawn at all.
     expect(empty).not.toContain("nmk_");
+    expect(empty).not.toContain("/tree/");
+    // The fork document and the verify command are not readings of the log and
+    // stand on an empty one too.
+    expect(empty).toContain(FORK_DOC_URL);
+    expect(empty).toContain("npm run verify-mirror");
   });
 
   it("carries no script and no inline style", () => {

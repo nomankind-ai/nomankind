@@ -78,7 +78,7 @@ const ENV_MOVE_REF = `${MIRROR.api}/repos/${MIRROR.repository}/git/refs/heads/${
 
 const encoder = new TextEncoder();
 
-/* One key, generated once and shared: 2048 bits costs real time. */
+/* The keys, generated once each and shared: RSA keygen costs real time. */
 
 interface Key {
   readonly publicKey: CryptoKey;
@@ -138,14 +138,28 @@ function pkcs1From(pkcs8: Uint8Array): Uint8Array {
   return pkcs8.slice(key.start, key.end);
 }
 
-let generated: Promise<Key> | null = null;
+const generated = new Map<number, Promise<Key>>();
 
-function key(): Promise<Key> {
-  generated ??= (async () => {
-    const pair = (await globalThis.crypto.subtle.generateKey(RSA, true, [
-      "sign",
-      "verify",
-    ])) as CryptoKeyPair;
+/**
+ * A key of a given size, generated once and shared.
+ *
+ * Both sizes GitHub hands out are here. A 2048-bit key is the default an App
+ * downloads; a 4096-bit one is what an organisation that sets its own policy
+ * gets, and its DER is over two kilobytes — long enough that the wrapper has to
+ * write the outer sequence and the octet string in DER's three-byte long form
+ * (0x82 and two bytes), which is the case a 2048-bit key alone never reaches
+ * far enough into to prove. Generating one costs real time, so the map holds it
+ * for the whole file.
+ */
+function keyOf(bits: number): Promise<Key> {
+  const existing = generated.get(bits);
+  if (existing !== undefined) return existing;
+  const making = (async () => {
+    const pair = (await globalThis.crypto.subtle.generateKey(
+      { ...RSA, modulusLength: bits },
+      true,
+      ["sign", "verify"],
+    )) as CryptoKeyPair;
     const pkcs8 = new Uint8Array(
       await globalThis.crypto.subtle.exportKey("pkcs8", pair.privateKey),
     );
@@ -156,8 +170,20 @@ function key(): Promise<Key> {
       pkcs1: pkcs1From(pkcs8),
     };
   })();
-  return generated;
+  generated.set(bits, making);
+  return making;
 }
+
+/** The 2048-bit key: what the rest of this file means by "the key". */
+function key(): Promise<Key> {
+  return keyOf(KEY_SIZES[0]);
+}
+
+/** Both sizes, for the two checks that have to hold for either. */
+const KEY_SIZES = [2048, 4096] as const;
+
+/** Generating a 4096-bit key is seconds, not milliseconds. */
+const KEYGEN_TIMEOUT_MS = 120_000;
 
 /** A PEM, wrapped at 64 characters the way every tool writes one. */
 function pem(label: string, der: Uint8Array): string {
@@ -165,8 +191,15 @@ function pem(label: string, der: Uint8Array): string {
   return `-----BEGIN ${label}-----\n${body}\n-----END ${label}-----\n`;
 }
 
+async function credentialsOf(bits: number): Promise<GitHubAppCredentials> {
+  return {
+    app_id: APP_ID,
+    private_key: pem("RSA PRIVATE KEY", (await keyOf(bits)).pkcs1),
+  };
+}
+
 async function credentials(): Promise<GitHubAppCredentials> {
-  return { app_id: APP_ID, private_key: pem("RSA PRIVATE KEY", (await key()).pkcs1) };
+  return credentialsOf(KEY_SIZES[0]);
 }
 
 interface Call {
@@ -342,22 +375,31 @@ describe("wrapping a PKCS#1 key as PKCS#8", () => {
     ]);
   });
 
-  it("encodes a length no single byte could hold", async () => {
-    // A 2048-bit key's DER is over a kilobyte, so both the outer sequence and
-    // the octet string are written in DER's long form here.
-    const { pkcs1 } = await key();
-    const wrapped = pkcs1ToPkcs8(pkcs1);
-    const outer = derRead(wrapped, 0);
-    expect(wrapped[1]! >= 0x80).toBe(true);
-    expect(outer.end).toBe(wrapped.length);
-    const version = derRead(wrapped, outer.start);
-    const algorithm = derRead(wrapped, version.end);
-    const inner = derRead(wrapped, algorithm.end);
-    expect([...wrapped.slice(inner.start, inner.end)]).toEqual([...pkcs1]);
-  });
+  it.each(KEY_SIZES)(
+    "encodes a length no single byte could hold, for a %i-bit key",
+    async (bits) => {
+      // A 2048-bit key's DER is over a kilobyte and a 4096-bit key's is over
+      // two, so both the outer sequence and the octet string are written in
+      // DER's long form here: 0x82 and two bytes of length, three bytes in all.
+      const { pkcs1 } = await keyOf(bits);
+      const wrapped = pkcs1ToPkcs8(pkcs1);
+      const outer = derRead(wrapped, 0);
+      expect(wrapped[1]).toBe(0x82);
+      expect(outer.start).toBe(4);
+      expect(outer.end).toBe(wrapped.length);
+      const version = derRead(wrapped, outer.start);
+      const algorithm = derRead(wrapped, version.end);
+      const inner = derRead(wrapped, algorithm.end);
+      expect(wrapped[algorithm.end + 1]).toBe(0x82);
+      expect([...wrapped.slice(inner.start, inner.end)]).toEqual([...pkcs1]);
+    },
+    KEYGEN_TIMEOUT_MS,
+  );
 
-  it("round trips: the wrapped key imports and signs exactly as the original", async () => {
-    const { pkcs1, privateKey, publicKey } = await key();
+  it.each(KEY_SIZES)(
+    "round trips a %i-bit key: the wrapped key imports and signs exactly as the original",
+    async (bits) => {
+    const { pkcs1, privateKey, publicKey } = await keyOf(bits);
     const imported = await globalThis.crypto.subtle.importKey(
       "pkcs8",
       pkcs1ToPkcs8(pkcs1) as unknown as BufferSource,
@@ -392,7 +434,9 @@ describe("wrapping a PKCS#1 key as PKCS#8", () => {
         bytes as unknown as BufferSource,
       ),
     ).toBe(true);
-  });
+    },
+    KEYGEN_TIMEOUT_MS,
+  );
 });
 
 describe("the pasted PEM", () => {
@@ -424,26 +468,33 @@ describe("the pasted PEM", () => {
 });
 
 describe("the App JWT", () => {
-  it("carries the header, the claims and a signature the public half checks", async () => {
-    const jwt = await appJwt(await credentials(), NOW);
-    const seconds = Math.floor(NOW.getTime() / 1000);
-    expect(segment(jwt, 0)).toEqual({ alg: "RS256", typ: "JWT" });
-    expect(segment(jwt, 1)).toEqual({
-      iat: seconds - 60,
-      exp: seconds + 9 * 60,
-      iss: APP_ID,
-    });
+  it.each(KEY_SIZES)(
+    "carries the header, the claims and a signature the %i-bit key's public half checks",
+    async (bits) => {
+      const jwt = await appJwt(await credentialsOf(bits), NOW);
+      const seconds = Math.floor(NOW.getTime() / 1000);
+      expect(segment(jwt, 0)).toEqual({ alg: "RS256", typ: "JWT" });
+      expect(segment(jwt, 1)).toEqual({
+        iat: seconds - 60,
+        exp: seconds + 9 * 60,
+        iss: APP_ID,
+      });
 
-    const [header, claims, signature] = jwt.split(".");
-    expect(
-      await globalThis.crypto.subtle.verify(
-        "RSASSA-PKCS1-v1_5",
-        (await key()).publicKey,
-        base64urlDecode(signature!) as unknown as BufferSource,
-        encoder.encode(`${header}.${claims}`) as unknown as BufferSource,
-      ),
-    ).toBe(true);
-  });
+      const [header, claims, signature] = jwt.split(".");
+      expect(
+        await globalThis.crypto.subtle.verify(
+          "RSASSA-PKCS1-v1_5",
+          (await keyOf(bits)).publicKey,
+          base64urlDecode(signature!) as unknown as BufferSource,
+          encoder.encode(`${header}.${claims}`) as unknown as BufferSource,
+        ),
+      ).toBe(true);
+      // The signature is the key's own size: a 4096-bit key that had been read
+      // as anything smaller could not have made these bytes.
+      expect(base64urlDecode(signature!).length).toBe(bits / 8);
+    },
+    KEYGEN_TIMEOUT_MS,
+  );
 
   it("is unpadded base64url in all three segments", async () => {
     const jwt = await appJwt(await credentials(), NOW);

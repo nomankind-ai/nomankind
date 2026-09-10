@@ -27,6 +27,18 @@
  * an event the log has not committed to has no business in an archive somebody
  * may still be reading in ten years.
  *
+ * Three of the families are not read from anywhere at all — they are recomputed
+ * here, out of the sealed events, at the sealed head: the attestations
+ * (`deriveAttestation`, exactly as `GET /attestations/{id}` folds one), standing
+ * (`standingAt`, exactly the body of `GET /standing`), and the ledger rows that
+ * are a pure function of the log. Recomputed rather than copied because the
+ * point of the mirror is that a fork gets the same answers from the same events:
+ * a file taken off a table would be this Worker's word for it, and a file this
+ * module derives is something the reader can derive again. The model's answers
+ * to a probe set are the one thing in these three that the log does not carry —
+ * they are hashed into it, not written into it — so they are the one thing the
+ * caller hands over.
+ *
  * WebCrypto only (`globalThis.crypto.subtle`), never `node:crypto`, so this runs
  * unchanged on Cloudflare Workers — SHA-1 included, which is here because git
  * names a blob by one and the adapter has to know which files actually changed.
@@ -41,9 +53,32 @@
  */
 
 import { DOMAIN_SLUGS, MIRROR, NORM_VERSION, SCHEMA_VERSION } from "./policy.js";
+import { deriveAttestation, type DerivedAttestation } from "./attest.js";
+import { bountyAccrual } from "./bounty.js";
+import { deriveEntry, type Sidecar } from "./derive.js";
+import {
+  bountyAccrualRow,
+  clawbackRows,
+  readShareRows,
+  reconciliationRow,
+  type EntryShareState,
+  type LedgerRow,
+} from "./ledger.js";
+import {
+  STANDING_FORMULA,
+  standingAt,
+  type Standing,
+} from "./standing.js";
+import {
+  disputeOutcomeStakes,
+  disputeStake,
+  revalidationOutcomeStakes,
+  revalidationStake,
+  type StakeRecord,
+} from "./stake.js";
 import type { Anchor } from "./anchor.js";
-import type { Sidecar } from "./derive.js";
-import type { Event } from "./events.js";
+import type { Event, EventType } from "./events.js";
+import type { ProbeAnswer } from "./probe.js";
 import type { Entry } from "./schema.js";
 import type { Seal } from "./seal.js";
 
@@ -121,6 +156,32 @@ export interface MirrorOperator {
   readonly agents: readonly string[];
 }
 
+/**
+ * What one model actually said, for one attestation.
+ *
+ * The one input to the three recomputed families that the log does not carry:
+ * Section 8 seals "the score and the probe hash", and the answers themselves are
+ * hashed into `attestation_answered` and kept beside the record. Null when the
+ * model never answered, which is what an open or expired attestation looks like.
+ */
+export interface MirrorAttestationAnswers {
+  readonly attestation: string;
+  readonly answers: readonly ProbeAnswer[] | null;
+}
+
+/** One attestation file: the derived record, and the answers beside it. */
+export interface MirrorAttestationRecord {
+  readonly attestation: DerivedAttestation;
+  readonly answers: readonly ProbeAnswer[] | null;
+}
+
+/** `standing.json`: the body of `GET /standing`, at the sealed head. */
+export interface MirrorStanding {
+  readonly position: number;
+  readonly formula: readonly string[];
+  readonly operators: readonly Standing[];
+}
+
 /** Everything one export is built from, gathered at one sealed head. */
 export interface MirrorInput {
   /** `local`, `demo` or `production`: the directory this export lives under. */
@@ -137,6 +198,12 @@ export interface MirrorInput {
   readonly entries: readonly MirrorEntryRecord[];
   /** Every registered operator, in id order. */
   readonly operators: readonly MirrorOperator[];
+  /**
+   * The model's answers, per attestation the sealed events opened. An
+   * attestation the caller hands no entry for is exported with `answers: null`,
+   * which is what the log alone can say about it.
+   */
+  readonly attestations: readonly MirrorAttestationAnswers[];
 }
 
 /** One JSON document, in the mirror's own two-space form with a final newline. */
@@ -257,6 +324,345 @@ function indexRow(
  */
 const DEFAULT_DOMAIN_SLUG = DOMAIN_SLUGS[0]!;
 
+// ---------------------------------------------------------------------------
+// The three families the export recomputes rather than reads
+// ---------------------------------------------------------------------------
+
+/** Narrow one event to its own type, the way the kernel does it. */
+function isType<T extends EventType>(event: Event, type: T): event is Event<T> {
+  return event.type === type;
+}
+
+/** Events by seq, without mutating the caller's array (as derivation does). */
+function inSeqOrder(events: readonly Event[]): Event[] {
+  return [...events].sort((left, right) => left.seq - right.seq);
+}
+
+/**
+ * The four event types one attestation's story is told in, which is the same
+ * list `eventsForAttestation` reads by. Named rather than sniffed for the key,
+ * because a registration's payload carries an `attestation` of its own and it
+ * is a domain attestation, not this one.
+ */
+const ATTESTATION_EVENT_TYPES: readonly EventType[] = Object.freeze([
+  "attestation_requested",
+  "attestation_answered",
+  "attestation_scored",
+  "attestation_expired",
+]);
+
+/** The attestation id one of those four events names, or null. */
+function attestationOf(event: Event): string | null {
+  if (!ATTESTATION_EVENT_TYPES.includes(event.type)) return null;
+  const payload = event.payload as unknown;
+  if (typeof payload !== "object" || payload === null) return null;
+  const id = (payload as Record<string, unknown>)["attestation"];
+  return typeof id === "string" ? id : null;
+}
+
+/**
+ * Every attestation the sealed events opened, folded exactly as
+ * `GET /attestations/{id}` folds one.
+ *
+ * In the order they were requested in, and only the ones whose
+ * `attestation_requested` is among these events: an attestation opened above
+ * the sealed head is not part of the sealed record, and one whose request is
+ * sealed is described by whatever of its story the seals have caught up with —
+ * open today, scored tomorrow, and the file says which.
+ *
+ * `asOf` is the clock the fold is handed. `deriveAttestation` decides nothing
+ * with it — an expiry is an event, never a wall clock — and it is passed for the
+ * same reason that fold takes one at all.
+ */
+export function mirrorAttestations(
+  events: readonly Event[],
+  answers: readonly MirrorAttestationAnswers[],
+  asOf: string,
+): MirrorAttestationRecord[] {
+  const held = new Map<string, readonly ProbeAnswer[] | null>();
+  for (const one of answers) held.set(one.attestation, one.answers);
+
+  const byId = new Map<string, Event[]>();
+  const opened: string[] = [];
+  for (const event of inSeqOrder(events)) {
+    const id = attestationOf(event);
+    if (id === null) continue;
+    const bucket = byId.get(id);
+    if (bucket === undefined) byId.set(id, [event]);
+    else bucket.push(event);
+    // An id is requested once — `attestationId` is a hash of what opened it —
+    // so the first request is the one that puts it in the export.
+    if (event.type === "attestation_requested" && !opened.includes(id)) {
+      opened.push(id);
+    }
+  }
+
+  return opened.map((id) => ({
+    attestation: deriveAttestation(byId.get(id) ?? [], { now: asOf }),
+    answers: held.get(id) ?? null,
+  }));
+}
+
+/**
+ * Standing at the sealed head: the body of `GET /standing`, by the published
+ * formula, over the sealed events and nothing else.
+ *
+ * Sorted by operator id rather than by the number, unlike the route. The route
+ * is a leaderboard a person reads; this is a file two exports have to agree on
+ * byte for byte, and an order that moves when a number moves would rewrite the
+ * whole file on a day one validation landed.
+ */
+export function mirrorStanding(
+  events: readonly Event[],
+  head: number,
+): MirrorStanding {
+  const standings = standingAt(events, head);
+  return {
+    position: head,
+    formula: STANDING_FORMULA,
+    operators: [...standings.values()].sort((left, right) =>
+      left.operator < right.operator ? -1 : left.operator > right.operator ? 1 : 0,
+    ),
+  };
+}
+
+/** What pricing needs about an entry, held once per entry across the fold. */
+interface PricingState {
+  readonly author_operator: string | null;
+  readonly read_share_slots: Sidecar["read_share_slots"];
+  readonly expires_at: string | null;
+  readonly verified: boolean;
+}
+
+/** The `dispute_filed` an outcome settles, or null when the range holds none. */
+function disputeFiling(
+  events: readonly Event[],
+  entryId: string | null,
+  correctionEntryId: string,
+): Event<"dispute_filed"> | null {
+  if (entryId === null) return null;
+  for (const event of events) {
+    if (!isType(event, "dispute_filed")) continue;
+    if (event.entry_id !== entryId) continue;
+    if (event.payload.correction_entry_id !== correctionEntryId) continue;
+    return event;
+  }
+  return null;
+}
+
+/** The `revalidation_requested` a resolution answers, or null. */
+function revalidationRequest(
+  events: readonly Event[],
+  requestSeq: number,
+): Event<"revalidation_requested"> | null {
+  for (const event of events) {
+    if (!isType(event, "revalidation_requested")) continue;
+    if (event.seq !== requestSeq) continue;
+    return event.entry_id === null ? null : event;
+  }
+  return null;
+}
+
+/**
+ * A stake row as the `ledger` table holds one and `GET /operators/{id}/ledger`
+ * serves it: the record itself under `ref`, and the columns beside it.
+ *
+ * A stake predates `LedgerRow` (decision D-064: a stake was a ledger row before
+ * there was any money), so this is the same presentation `toLedgerRow` makes of
+ * a stake row read back out of storage — including a reward, whose amount
+ * Section 9's pricing never gave, reading as zero with the null it actually
+ * carries under `ref`.
+ */
+function stakeLedgerRow(record: StakeRecord): LedgerRow {
+  return {
+    id: `${record.kind}:${record.seq}`,
+    kind: record.kind,
+    entry_id: record.entry_id,
+    operator: record.operator,
+    role: null,
+    date: null,
+    reads: null,
+    unit: record.unit ?? "standing",
+    amount: record.amount ?? 0,
+    available_at: null,
+    seq: record.seq,
+    at: record.at,
+    ref: { ...record },
+  };
+}
+
+/**
+ * Every ledger row that is a pure function of the log, recomputed from the
+ * sealed events.
+ *
+ * Section 9: "any operator can reconcile their payout against the log". This is
+ * that sentence made into a file — one fold over the sealed events in seq order,
+ * emitting at each event the rows that event is worth, with src/stake.ts's rows
+ * (which the doors write as the event lands) before src/ledger.ts's (which the
+ * sweep's ledger step prices afterwards). Read one way: the ledger table is a
+ * cache of this, and a row of it that disagrees is wrong.
+ *
+ * Payouts are not here and never can be: a payout records money leaving through
+ * a provider under a reference, which no amount of replaying events reproduces.
+ * Two smaller consequences of the same fact are worth saying out loud. A
+ * clawback is computed against every read share this fold has already emitted
+ * for the entry, because "already paid out" is a fact about a payout and not
+ * about the log; and the entry state a day is priced against is the entry as the
+ * sealed head derives it, because the row the sweep read was derived at whatever
+ * position its last writer reached.
+ */
+export function mirrorLedgerRows(
+  events: readonly Event[],
+  asOf: string,
+): LedgerRow[] {
+  const ordered = inSeqOrder(events);
+  const rows: LedgerRow[] = [];
+  const states = new Map<string, PricingState | null>();
+
+  const stateOf = (entryId: string): PricingState | null => {
+    const held = states.get(entryId);
+    if (held !== undefined) return held;
+    let state: PricingState | null = null;
+    try {
+      const derived = deriveEntry(ordered, entryId, { now: asOf });
+      const entry = derived.entry as unknown as Record<string, unknown>;
+      const author = entry["author_operator"];
+      const expires = entry["expires_at"];
+      state = {
+        author_operator: typeof author === "string" ? author : null,
+        read_share_slots: derived.sidecar.read_share_slots,
+        expires_at: typeof expires === "string" ? expires : null,
+        verified: typeof entry["verified_at"] === "string",
+      };
+    } catch {
+      // An entry the sealed events carry no submission for is not part of the
+      // sealed record, and the sweep's own pricing skips it for the same reason.
+      state = null;
+    }
+    states.set(entryId, state);
+    return state;
+  };
+
+  for (const event of ordered) {
+    if (isType(event, "read_count")) {
+      const { date } = event.payload;
+      const priced = readShareRows(event, (entryId): EntryShareState | null => {
+        const state = stateOf(entryId);
+        if (state === null) return null;
+        return {
+          author_operator: state.author_operator,
+          read_share_slots: state.read_share_slots,
+          // Stale on the day being priced, not today: the day is what is being
+          // paid for, and an entry that went stale since must not turn a fresh
+          // day's reads into half a day's.
+          stale: state.expires_at !== null && state.expires_at < date,
+          verified: state.verified,
+        };
+      });
+      // Every share row of one entry carries that entry's published count, so
+      // the map holds it once: the reconciliation asks what the ledger accrued
+      // for the entry, not what each holder was paid.
+      const accrued = new Map<string, number>();
+      for (const row of priced) {
+        if (row.kind !== "read_share") continue;
+        if (row.entry_id === null || row.reads === null) continue;
+        accrued.set(row.entry_id, row.reads);
+      }
+      rows.push(...priced, reconciliationRow(event, accrued));
+      continue;
+    }
+
+    if (isType(event, "dispute_filed")) {
+      if (event.entry_id !== null) rows.push(stakeLedgerRow(disputeStake(event)));
+      continue;
+    }
+
+    if (isType(event, "dispute_failed")) {
+      const filed = disputeFiling(
+        ordered,
+        event.entry_id,
+        event.payload.correction_entry_id,
+      );
+      if (filed === null) continue;
+      for (const stake of disputeOutcomeStakes(filed, event)) {
+        rows.push(stakeLedgerRow(stake));
+      }
+      continue;
+    }
+
+    if (isType(event, "dispute_upheld")) {
+      const filed = disputeFiling(
+        ordered,
+        event.entry_id,
+        event.payload.correction_entry_id,
+      );
+      if (filed !== null) {
+        for (const stake of disputeOutcomeStakes(filed, event)) {
+          rows.push(stakeLedgerRow(stake));
+        }
+      }
+      const held = rows.filter(
+        (row) =>
+          row.kind === "read_share" &&
+          row.entry_id === event.entry_id &&
+          row.available_at !== null &&
+          row.available_at > event.at,
+      );
+      rows.push(...clawbackRows(event, held));
+      continue;
+    }
+
+    if (isType(event, "revalidation_requested")) {
+      if (event.entry_id === null) continue;
+      const staked = revalidationStake(event);
+      if (staked !== null) rows.push(stakeLedgerRow(staked));
+      continue;
+    }
+
+    if (isType(event, "revalidation_resolved")) {
+      const requested = revalidationRequest(ordered, event.payload.request_seq);
+      if (requested === null) continue;
+      for (const stake of revalidationOutcomeStakes(requested, event)) {
+        rows.push(stakeLedgerRow(stake));
+      }
+      continue;
+    }
+
+    if (isType(event, "reconfirmation")) {
+      const entryId = event.entry_id;
+      if (entryId === null) continue;
+      // The entry as it stood BEFORE this reconfirmation, which is what the
+      // door measured the bounty against: deriving after the fact would find
+      // the window already reopened and would never see a bounty at all.
+      let before: { expires_at: string | null; stale: boolean } | null = null;
+      try {
+        const derived = deriveEntry(
+          ordered.filter((one) => one.seq < event.seq),
+          entryId,
+          { now: event.at },
+        );
+        before = {
+          expires_at: derived.derived.expires_at,
+          stale: derived.derived.stale,
+        };
+      } catch {
+        before = null;
+      }
+      if (before === null) continue;
+      const accrual = bountyAccrual(before, event);
+      const row = bountyAccrualRow(
+        event,
+        accrual,
+        rows.filter((one) => one.kind === "bounty_pool"),
+      );
+      if (row !== null) rows.push(row);
+      continue;
+    }
+  }
+
+  return rows;
+}
+
 /**
  * Build one export's files.
  *
@@ -353,6 +759,38 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
     content: document(indexed.map((one) => one.row)),
   });
 
+  // The three families nothing is read for: recomputed here, at the sealed
+  // head, out of the events the seals cover.
+  const sealedEvents: Event[] = [];
+  for (const seal of seals) {
+    for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
+      sealedEvents.push(bySeq.get(seq)!);
+    }
+  }
+
+  const attestations = mirrorAttestations(
+    sealedEvents,
+    input.attestations,
+    newest.sealed_at,
+  );
+  for (const record of attestations) {
+    files.push({
+      path: `attestations/${record.attestation.id}.json`,
+      content: document({
+        attestation: record.attestation,
+        answers: record.answers,
+      }),
+    });
+  }
+
+  files.push({
+    path: "standing.json",
+    content: document(mirrorStanding(sealedEvents, newest.last_seq)),
+  });
+
+  const ledger = mirrorLedgerRows(sealedEvents, newest.sealed_at);
+  files.push({ path: "ledger.jsonl", content: lines(ledger) });
+
   let eventCount = 0;
   for (const seal of seals) eventCount += seal.last_seq - seal.first_seq + 1;
 
@@ -369,6 +807,9 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
       events: eventCount,
       entries: indexed.length,
       operators: operators.length,
+      attestations: attestations.length,
+      standing_position: newest.last_seq,
+      ledger_rows: ledger.length,
       schema_version: SCHEMA_VERSION,
       norm_version: NORM_VERSION,
       domains: [...DOMAIN_SLUGS],

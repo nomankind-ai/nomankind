@@ -37,17 +37,44 @@ export interface SealLike {
 }
 
 /**
+ * The completed timestamp, once a calendar has folded the commitment into a
+ * Bitcoin block.
+ *
+ * A pending proof says only "a calendar promises to timestamp this"; the
+ * upgrade is the part that stands on its own — a chain of operations from the
+ * anchor hash to a block header, checkable by anyone holding a copy of the
+ * chain and nothing of ours. `proof` is the complete .ots file (the magic
+ * header, the digest, and the operations through to the block attestation) as
+ * standard base64, so it can be written to disk and handed to any
+ * OpenTimestamps client unchanged.
+ */
+export interface AnchorUpgrade {
+  /** The completed .ots proof, standard base64. */
+  proof: string;
+  /** The height its BitcoinBlockHeaderAttestation names. */
+  block_height: number;
+  /** The sweep's clock when the upgrade was recorded. */
+  upgraded_at: string;
+}
+
+/**
  * The external timestamp receipt, or null until one exists.
  *
  * One kind for now, named rather than left open: OpenTimestamps, the calendar
  * the hash was submitted to, when it was submitted, and the proof it returned.
  * A second chain later is a second member of this union, not a reshaping of it.
+ *
+ * `upgraded` is null from the moment the pending proof is stored until a later
+ * sweep asks the calendar again and gets a proof that reaches a block. Rows
+ * written before the key existed read as null (src/storage/repository.ts), so
+ * the field is total everywhere it is served.
  */
 export type AnchorExternal = {
   kind: "opentimestamps";
   calendar: string;
   submitted_at: string;
   proof: string;
+  upgraded: AnchorUpgrade | null;
 } | null;
 
 /**
@@ -57,7 +84,41 @@ export type AnchorExternal = {
  */
 export interface AnchorAdapter {
   anchor(anchor: Anchor): Promise<AnchorExternal>;
+  /**
+   * Ask the calendar whether the pending proof has reached a block yet.
+   *
+   * Optional, because an adapter that posts nowhere has nothing to upgrade: the
+   * local adapter leaves it out and the sweep's upgrade step does not run at
+   * all rather than counting a refusal every night on a laptop.
+   *
+   * The whole anchor rather than its receipt alone, symmetrically with
+   * `anchor`, and because the receipt is not enough: what a calendar took was
+   * the anchor's 32 digest bytes, and the pending proof it gave back is the
+   * operations *from* those bytes onward, carrying no copy of them. Reading the
+   * commitment out of that proof means starting from `anchor.hash`.
+   */
+  upgrade?(anchor: Anchor): Promise<AnchorUpgradeResult>;
 }
+
+/** What an upgrade attempt came back with. Never an exception. */
+export type AnchorUpgradeResult =
+  | { ok: true; proof: string; block_height: number }
+  | { ok: false; reason: AnchorUpgradeRefusal };
+
+/**
+ * Every reason an upgrade can be refused.
+ *
+ * `pending` is the ordinary one and means "ask again tomorrow": a calendar
+ * folds commitments into a block on its own schedule, and there is nothing to
+ * do about it but wait.
+ */
+export const ANCHOR_UPGRADE_REFUSALS = [
+  "pending",
+  "unavailable",
+  "bad_proof",
+] as const;
+
+export type AnchorUpgradeRefusal = (typeof ANCHOR_UPGRADE_REFUSALS)[number];
 
 /** One day's anchor record. */
 export interface Anchor {

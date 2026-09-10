@@ -120,6 +120,7 @@ describe("buildAnchor", () => {
         calendar: "https://alice.btc.calendar.opentimestamps.org",
         submitted_at: "2026-09-08T23:59:00Z",
         proof: "AE9wZW5UaW1lc3RhbXBz",
+        upgraded: null,
       },
     };
     expect(timestamped.hash).toBe(await anchorHash("2026-09-08", anchor.roots));

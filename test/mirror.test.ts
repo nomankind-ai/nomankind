@@ -21,7 +21,9 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { buildSeal, deriveEntry, entryHash, extractCore } from "../src/index.js";
+import { appendEvent, buildSeal, deriveEntry, entryHash, extractCore } from "../src/index.js";
+import type { LedgerRow } from "../src/ledger.js";
+import { STANDING_FORMULA, standingAt } from "../src/standing.js";
 import type { Event } from "../src/events.js";
 import type { Seal } from "../src/seal.js";
 import type { Anchor } from "../src/anchor.js";
@@ -30,8 +32,12 @@ import {
   MirrorError,
   buildMirror,
   gitBlobSha,
+  mirrorAttestations,
   mirrorDiff,
+  mirrorLedgerRows,
+  mirrorStanding,
   mirrorUrls,
+  type MirrorAttestationAnswers,
   type MirrorEntryRecord,
   type MirrorFile,
   type MirrorInput,
@@ -52,6 +58,7 @@ import {
 } from "../src/storage/repository.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
+  CORRECTION_ENTRY_ID,
   VERIFIED_ENTRY_ID,
   DRAFT_ENTRY_ID,
   buildVerifyWorld,
@@ -82,9 +89,9 @@ async function record(
   };
 }
 
-/** The operators of the world, as the layout takes them. */
-function operators(): MirrorOperator[] {
-  const registry = world.bundle.registry;
+/** The operators of one world, as the layout takes them. */
+function operatorsOf(one: VerifyWorld): MirrorOperator[] {
+  const registry = one.bundle.registry;
   const byOperator = new Map<string, string[]>();
   for (const [agent, operator] of Object.entries(registry.agents)) {
     byOperator.set(operator, [...(byOperator.get(operator) ?? []), agent]);
@@ -99,6 +106,11 @@ function operators(): MirrorOperator[] {
   }));
 }
 
+/** The operators of the file's own world. */
+function operators(): MirrorOperator[] {
+  return operatorsOf(world);
+}
+
 /** The whole input, at the world's one seal. */
 function input(over: Partial<MirrorInput> = {}): MirrorInput {
   return {
@@ -109,6 +121,7 @@ function input(over: Partial<MirrorInput> = {}): MirrorInput {
     events: sealedEvents,
     entries,
     operators: operators(),
+    attestations: [],
     ...over,
   };
 }
@@ -156,9 +169,11 @@ describe("the layout", () => {
       `entries/${VERIFIED_ENTRY_ID}.json`,
       `events/${String(firstSeal.seq).padStart(8, "0")}.jsonl`,
       "index.json",
+      "ledger.jsonl",
       "mirror.json",
       "operators.json",
       "seals.jsonl",
+      "standing.json",
     ]);
   });
 
@@ -197,6 +212,9 @@ describe("the layout", () => {
       events: firstSeal.size,
       entries: 1,
       operators: operators().length,
+      attestations: 0,
+      standing_position: firstSeal.last_seq,
+      ledger_rows: 0,
       schema_version: SCHEMA_VERSION,
       norm_version: NORM_VERSION,
       domains: [...DOMAIN_SLUGS],
@@ -511,5 +529,209 @@ describe("the mirrors table (migration 0014)", () => {
     expect(
       await entryIdsThrough(store.db, { throughSeq: 100, limit: 10 }),
     ).toEqual([]);
+  });
+});
+
+/**
+ * The three families the export recomputes rather than reads.
+ *
+ * A richer world than the file's own: the verifier's, with the reconfirmation,
+ * the challenge and the drift attestation it can be built with, plus one day of
+ * published read counts appended to it — and a second seal over all of that, so
+ * everything the fold is about is inside the sealed record rather than above it.
+ *
+ * Nothing here is asserted against a hand-written expectation of what the money
+ * or the standing should be. What is pinned is that the files are what the
+ * kernel's own folds say (`standingAt`, `deriveAttestation`, src/ledger.ts), in
+ * the order the log put the events in, and that two builds are the same bytes.
+ */
+describe("attestations, standing and the ledger", () => {
+  /** The day the read counts were published for. */
+  const READ_DAY = "2026-09-09";
+  const READS = 10_000;
+  const RICH_SEALED_AT = "2026-09-10T02:00:00.000Z";
+
+  let rich: VerifyWorld;
+  let richEvents: Event[];
+  let richSeals: Seal[];
+  let files: MirrorFile[];
+  let answers: MirrorAttestationAnswers[];
+  let attestationId = "";
+  let head = 0;
+
+  /** The whole input, at the second seal. */
+  function richInput(over: Partial<MirrorInput> = {}): MirrorInput {
+    return {
+      environment: ENVIRONMENT,
+      exported_at: EXPORTED_AT,
+      seals: richSeals,
+      anchors: [],
+      events: richEvents,
+      entries: richEntries,
+      operators: operatorsOf(rich),
+      attestations: answers,
+      ...over,
+    };
+  }
+
+  let richEntries: MirrorEntryRecord[] = [];
+
+  beforeAll(async () => {
+    rich = await buildVerifyWorld({
+      withAttestation: true,
+      withDispute: "outsider",
+      withReconfirmation: true,
+    });
+    attestationId = rich.attestation!.id;
+
+    // One published day of reads on the verified entry, so the ledger fold has
+    // money to price rather than only stakes.
+    richEvents = await appendEvent(rich.bundle.events, {
+      at: "2026-09-10T00:30:00.000Z",
+      type: "read_count",
+      entry_id: null,
+      payload: {
+        date: READ_DAY,
+        reads: [{ entry_id: VERIFIED_ENTRY_ID, count: READS }],
+        total: READS,
+        counter_first: 1,
+        counter_last: READS,
+      },
+    });
+
+    const first = rich.bundle.seals[0]!;
+    const built = await buildSeal(richEvents, first, { now: RICH_SEALED_AT });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    richSeals = [first, built.seal];
+    head = built.seal.last_seq;
+
+    richEntries = [
+      await record(richEvents, VERIFIED_ENTRY_ID, built.seal.sealed_at),
+      await record(richEvents, DRAFT_ENTRY_ID, built.seal.sealed_at),
+      await record(richEvents, CORRECTION_ENTRY_ID, built.seal.sealed_at),
+    ];
+    answers = [
+      {
+        attestation: attestationId,
+        answers: [{ entry_id: VERIFIED_ENTRY_ID, answer: "the claim" }],
+      },
+    ];
+    files = buildMirror(richInput());
+  }, 120_000);
+
+  it("writes one file per attestation the sealed events opened", () => {
+    expect(files.map((file) => file.path)).toContain(
+      `attestations/${attestationId}.json`,
+    );
+    const written = jsonOf(files, `attestations/${attestationId}.json`) as {
+      attestation: Record<string, unknown>;
+      answers: unknown;
+    };
+    // The record is the fold's, not a copy of anything: the same one
+    // `GET /attestations/{id}` serves, recomputed at the sealed head.
+    expect(written.attestation).toEqual(
+      JSON.parse(
+        JSON.stringify(
+          mirrorAttestations(richEvents, answers, richSeals[1]!.sealed_at)[0]!
+            .attestation,
+        ),
+      ),
+    );
+    expect(written.attestation["id"]).toBe(attestationId);
+    expect(written.attestation["status"]).toBe("scored");
+    // The answers are the one thing the log does not carry, so they travel from
+    // the caller and nowhere else.
+    expect(written.answers).toEqual([
+      { entry_id: VERIFIED_ENTRY_ID, answer: "the claim" },
+    ]);
+  });
+
+  it("leaves out an attestation whose request the seals do not cover", () => {
+    // The first seal alone covers only the registry and the decisions, so the
+    // attestation opened after it is not part of that sealed record.
+    const only = buildMirror(
+      richInput({
+        seals: [rich.bundle.seals[0]!],
+        entries: [richEntries[0]!],
+      }),
+    );
+    expect(only.map((file) => file.path)).not.toContain(
+      `attestations/${attestationId}.json`,
+    );
+    expect(
+      (jsonOf(only, "mirror.json") as Record<string, unknown>)["attestations"],
+    ).toBe(0);
+  });
+
+  it("writes standing as GET /standing computes it, sorted by operator id", () => {
+    const written = jsonOf(files, "standing.json") as {
+      position: number;
+      formula: string[];
+      operators: { operator: string; standing: number }[];
+    };
+    expect(written.position).toBe(head);
+    expect(written.formula).toEqual([...STANDING_FORMULA]);
+
+    const expected = standingAt(richEvents, head);
+    expect(written.operators.map((one) => one.operator)).toEqual(
+      [...expected.keys()].sort(),
+    );
+    for (const row of written.operators) {
+      expect([row.operator, row.standing]).toEqual([
+        row.operator,
+        expected.get(row.operator)!.standing,
+      ]);
+    }
+    expect(mirrorStanding(richEvents, head)).toEqual({
+      position: head,
+      formula: STANDING_FORMULA,
+      operators: written.operators,
+    });
+  });
+
+  it("prices the published day and carries the stake the challenge put up", () => {
+    const rows = linesOf(files, "ledger.jsonl") as LedgerRow[];
+    expect(rows.length).toBeGreaterThan(0);
+
+    // In log order: the challenge was filed before the day was published.
+    const kinds = rows.map((row) => row.kind);
+    expect(kinds).toContain("dispute_stake");
+    expect(kinds).toContain("read_share");
+    expect(kinds.indexOf("dispute_stake")).toBeLessThan(
+      kinds.indexOf("read_share"),
+    );
+    // The reconciliation closes the day it reconciles.
+    expect(kinds[kinds.length - 1]).toBe("reconciliation");
+
+    const shares = rows.filter((row) => row.kind === "read_share");
+    expect(shares.every((row) => row.entry_id === VERIFIED_ENTRY_ID)).toBe(true);
+    expect(shares.every((row) => row.date === READ_DAY)).toBe(true);
+    expect(shares.some((row) => row.role === "submitter")).toBe(true);
+    expect(shares.every((row) => row.reads === READS)).toBe(true);
+
+    const stake = rows.find((row) => row.kind === "dispute_stake")!;
+    expect(stake.unit).toBe("standing");
+    expect(stake.entry_id).toBe(VERIFIED_ENTRY_ID);
+    expect(stake.id).toBe(`dispute_stake:${stake.seq}`);
+
+    // No payout is ever derivable, so none is ever written.
+    expect(kinds).not.toContain("payout");
+  });
+
+  it("counts all three families in the manifest", () => {
+    const manifest = jsonOf(files, "mirror.json") as Record<string, unknown>;
+    expect(manifest["attestations"]).toBe(1);
+    expect(manifest["standing_position"]).toBe(head);
+    expect(manifest["ledger_rows"]).toBe(
+      linesOf(files, "ledger.jsonl").length,
+    );
+    expect(manifest["ledger_rows"]).toBe(
+      mirrorLedgerRows(richEvents, richSeals[1]!.sealed_at).length,
+    );
+  });
+
+  it("builds the same bytes twice with all three families in it", () => {
+    expect(buildMirror(richInput())).toEqual(files);
   });
 });

@@ -129,6 +129,9 @@ describe("OpenTimestampsAdapter", () => {
       calendar: "https://first.test",
       submitted_at: NOW.toISOString(),
       proof: base64Encode(PENDING_PROOF),
+      // Pending by construction: `/digest` answers a promise, and the block it
+      // will be folded into does not exist yet.
+      upgraded: null,
     });
   });
 

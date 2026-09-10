@@ -43,6 +43,7 @@ import type { Event } from "../events.js";
 import {
   buildMirror,
   MirrorError,
+  type MirrorAttestationAnswers,
   type MirrorEntryRecord,
   type MirrorFile,
   type MirrorInput,
@@ -269,6 +270,63 @@ export async function readMirrorEntries(
   return [...byId.values()];
 }
 
+/**
+ * The model's answers, per attestation the instance has opened at or below the
+ * sealed head.
+ *
+ * `GET /attestations` paged for the ids and `GET /attestations/{id}` for each
+ * one's answers, because the listing serves the derived record and the answers
+ * only travel beside a single record. The attestations themselves are never
+ * taken from either: the layout folds them out of the sealed events, so what
+ * this reads is the one field the log does not carry.
+ *
+ * Keyset downward by `requested_seq`, exactly as the route pages, and trimmed to
+ * the head this export was pinned at.
+ */
+export async function readMirrorAnswers(
+  http: HttpClient,
+  baseUrl: string,
+  head: number,
+): Promise<MirrorAttestationAnswers[]> {
+  const answers: MirrorAttestationAnswers[] = [];
+  let before: number | undefined;
+  for (;;) {
+    const query =
+      before === undefined
+        ? `/attestations?limit=${LIST_PAGE_LIMIT}`
+        : `/attestations?before=${before}&limit=${LIST_PAGE_LIMIT}`;
+    const body = (await read(http, baseUrl, query)) as { attestations?: unknown };
+    const page = Array.isArray(body.attestations) ? body.attestations : [];
+    if (page.length === 0) break;
+
+    let oldest: number | null = null;
+    for (const row of page) {
+      if (!isRecord(row)) continue;
+      const id = row["id"];
+      const requestedSeq = row["requested_seq"];
+      if (typeof id !== "string" || typeof requestedSeq !== "number") continue;
+      if (oldest === null || requestedSeq < oldest) oldest = requestedSeq;
+      if (requestedSeq > head) continue;
+      const one = await read(
+        http,
+        baseUrl,
+        `/attestations/${encodeURIComponent(id)}`,
+      );
+      const served = isRecord(one) ? one["answers"] : null;
+      answers.push({
+        attestation: id,
+        answers: Array.isArray(served)
+          ? (served as MirrorAttestationAnswers["answers"])
+          : null,
+      });
+    }
+
+    if (page.length < LIST_PAGE_LIMIT || oldest === null) break;
+    before = oldest;
+  }
+  return answers;
+}
+
 /** What one export is: which directory it lands in, and the files in it. */
 export interface MirrorBuild {
   readonly environment: string;
@@ -335,6 +393,7 @@ export async function buildMirrorFromApi(input: {
       newest.sealed_at,
     ),
     operators: await readMirrorOperators(input.http, input.baseUrl),
+    attestations: await readMirrorAnswers(input.http, input.baseUrl, head),
   };
 
   return {

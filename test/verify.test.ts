@@ -501,6 +501,49 @@ describe("verifyOffline: the two rules only a wider world can show", () => {
     expect(diffs[0]!.reason).toBe("provider_operator");
   });
 
+  it("names a correction approved by an operator that signed the original", async () => {
+    // Whitepaper Section 6, "Dispute": a challenge "passes through the same
+    // validation process with one extra exclusion: no operator that signed the
+    // original, submitter or validator, may validate the challenge against it."
+    // The verifier replays that exclusion off the bundle's own events, exactly
+    // as the door builds it from the target's `dispute_filed` and its signers.
+    const source = await buildVerifyWorld({ withDispute: "signer" });
+    const report = await verifyOffline(
+      clone(source.correctionEntry) as Json,
+      clone(source.bundle),
+    );
+    expectWellFormed(report);
+    const diffs = find(report, "exclusions", "/approvers/0");
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0]!.reason).toBe("original_signer");
+    expect(report.ok).toBe(false);
+  });
+
+  it("takes the same correction from an operator that signed nothing of the target's", async () => {
+    const source = await buildVerifyWorld({ withDispute: "outsider" });
+    const report = await verifyOffline(
+      clone(source.correctionEntry) as Json,
+      clone(source.bundle),
+    );
+    expectWellFormed(report);
+    expect(report.diffs).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
+
+  it("leaves the challenged entry itself verifying as it always did", async () => {
+    // The exclusion is about the challenge's decisions, not the target's: an
+    // entry with a dispute open on it is still checked against its own rules.
+    const source = await buildVerifyWorld({ withDispute: "outsider" });
+    expect((source.entry["disputes"] as unknown[]).length).toBe(1);
+
+    const report = await verifyOffline(
+      clone(source.entry) as Json,
+      clone(source.bundle),
+    );
+    expectWellFormed(report);
+    expect(report.diffs).toEqual([]);
+  });
+
   it("verifies a world whose entry carries a reconfirmation", async () => {
     const source = await buildVerifyWorld({ withReconfirmation: true });
     expect((source.entry["reconfirmations"] as unknown[]).length).toBe(1);

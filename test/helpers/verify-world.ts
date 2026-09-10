@@ -23,19 +23,27 @@ import {
   NORM_VERSION,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
   agentIdFromPublicKey,
+  answersHash,
   appendEvent,
+  attestationDeadline,
+  attestationId,
   base64Encode,
   buildSeal,
   deriveEntry,
+  entryHash,
   exportPublicKeyRaw,
   generateKeypair,
+  probeSetHash,
   sealsForEntries,
   signCore,
   snapshotHash,
   type ApproverRecord,
+  type AttestationScoreRecord,
+  type AttestationScorer,
   type Core,
   type Entry,
   type Event,
+  type Probe,
   type ReconfirmationRecord,
   type Seal,
 } from "../../src/index.js";
@@ -63,6 +71,16 @@ export const SUBMITTER_OPERATOR = "op_lattice";
  * carry it.
  */
 export const PROVIDER_OPERATOR = "op_provider";
+
+/**
+ * The operator that files a challenge against the verified entry. Its own, so
+ * the correction's submitter is never one of the target's signers and the
+ * exclusion the tests are about is the only rule in play.
+ */
+export const CHALLENGER_OPERATOR = "op_challenger";
+
+/** The operator the attested model answers for. */
+export const MODEL_OPERATOR = "op_model";
 
 /**
  * The outside operators the preconditions ask for: verification needs
@@ -120,7 +138,18 @@ async function makeParty(operator: string): Promise<Party> {
   return { agent, operator, keys };
 }
 
-/** The world the verifier is handed: the two entries, the bundle, and the keys. */
+/** The attestation the world carries, when it was asked for one. */
+export interface WorldAttestation {
+  id: string;
+  /** The model's agent id. */
+  model: string;
+  /** The operator the model answers for. */
+  modelOperator: string;
+  /** The scorers the request drew, in draw order. */
+  scorers: readonly AttestationScorer[];
+}
+
+/** The world the verifier is handed: the entries, the bundle, and the keys. */
 export interface VerifyWorld {
   entryId: string;
   draftEntryId: string;
@@ -129,6 +158,11 @@ export interface VerifyWorld {
   bundle: LogBundle;
   /** The provider's agent id, or null when the world was built without one. */
   providerAgent: string | null;
+  /** The challenge, when the world was built with one. */
+  correctionEntryId: string | null;
+  correctionEntry: Entry | null;
+  /** The attestation, when the world was built with one. */
+  attestation: WorldAttestation | null;
   /** Keyed by agent id, so a test can forge a signature from the wrong key. */
   keys: Record<string, CryptoKeyPair>;
   /** The raw capture bytes, so a test can edit the archived page. */
@@ -137,6 +171,7 @@ export interface VerifyWorld {
 
 export const VERIFIED_ENTRY_ID = "nmk_01M9VERIFIED";
 export const DRAFT_ENTRY_ID = "nmk_01M9DRAFT";
+export const CORRECTION_ENTRY_ID = "nmk_01M9CORRECTION";
 
 function append(
   events: readonly Event[],
@@ -238,10 +273,24 @@ export async function buildVerifyWorld(options?: {
   withProvider?: boolean;
   /** Append a reconfirmation by a trusted outside operator after the seal. */
   withReconfirmation?: boolean;
+  /**
+   * File a correction entry as a challenge against the verified entry, and
+   * approve it — either by one of the target's own signers, which Section 6
+   * bars, or by an operator that signed nothing of the target's.
+   */
+  withDispute?: "signer" | "outsider";
+  /**
+   * Draw, answer and score an attestation over the verified entry. `model`
+   * seats the model's own operator as the first scorer, which no live draw can
+   * produce and Section 8 forbids.
+   */
+  withAttestation?: true | "model";
 }): Promise<VerifyWorld> {
   const now = options?.now ?? DEFAULT_NOW;
   const withProvider = options?.withProvider === true;
   const withReconfirmation = options?.withReconfirmation === true;
+  const withDispute = options?.withDispute;
+  const withAttestation = options?.withAttestation;
 
   const captureBytes = new TextEncoder().encode(CAPTURE_HTML);
   const captured = await snapshotHash(captureBytes, CAPTURE_CONTENT_TYPE);
@@ -252,6 +301,10 @@ export async function buildVerifyWorld(options?: {
 
   const submitter = await makeParty(SUBMITTER_OPERATOR);
   const provider = withProvider ? await makeParty(PROVIDER_OPERATOR) : null;
+  const challenger =
+    withDispute === undefined ? null : await makeParty(CHALLENGER_OPERATOR);
+  const model =
+    withAttestation === undefined ? null : await makeParty(MODEL_OPERATOR);
   const outside: Party[] = [];
   for (const operator of OUTSIDE_OPERATORS) {
     outside.push(await makeParty(operator));
@@ -280,12 +333,25 @@ export async function buildVerifyWorld(options?: {
       maintainer: false,
     });
   }
+  if (challenger !== null) {
+    events = await append(events, "operator_registered", null, {
+      operator: CHALLENGER_OPERATOR,
+      maintainer: false,
+    });
+  }
+  if (model !== null) {
+    events = await append(events, "operator_registered", null, {
+      operator: MODEL_OPERATOR,
+      maintainer: false,
+    });
+  }
   for (const operator of OUTSIDE_OPERATORS) {
     events = await append(events, "operator_trusted", null, { operator });
   }
   events = await append(events, "pool_snapshot", null, {
     operators: [...OUTSIDE_OPERATORS],
   });
+  const poolSnapshotSeq = events[events.length - 1]!.seq;
 
   // The entry the pool decides on.
   const submittedAt = at(events.length);
@@ -347,16 +413,157 @@ export async function buildVerifyWorld(options?: {
     });
   }
 
+  // Section 6, "Dispute": the challenge is itself an entry, in the correction
+  // category, with a citation and the same subject, and the target's own
+  // `dispute_filed` names it. Its one decision is the whole point: the door
+  // bars every operator that signed the original from taking it.
+  if (challenger !== null && withDispute !== undefined) {
+    const correctionSubmittedAt = at(events.length);
+    const correctionCore = makeCore(
+      {
+        id: CORRECTION_ENTRY_ID,
+        category: "correction",
+        claim: "gpt-5 input price is $2.75 per million tokens",
+        before: "$2.50 per million input tokens",
+        after: "$2.75 per million input tokens",
+        author: challenger.agent,
+        author_operator: challenger.operator,
+      },
+      challenger,
+      snapshot,
+      correctionSubmittedAt,
+    );
+    events = await append(events, "entry_submitted", CORRECTION_ENTRY_ID, {
+      core: correctionCore,
+      signature: await signCore(correctionCore, challenger.keys.privateKey),
+    });
+    // Scoped to the DISPUTED entry and naming the correction, exactly as the
+    // door files it: the correction's own events say nothing about the filing.
+    events = await append(events, "dispute_filed", VERIFIED_ENTRY_ID, {
+      correction_entry_id: CORRECTION_ENTRY_ID,
+      challenger: challenger.agent,
+      operator: challenger.operator,
+      citation: correctionCore["citation"] as string,
+      snapshot_hash: snapshot,
+      from_report_seq: null,
+      from_revalidation_seq: null,
+    });
+
+    // The signer approved the target; the outsider signed nothing of its.
+    const party = withDispute === "signer" ? outside[0]! : outside[2]!;
+    const record = approval(party, snapshot, at(events.length));
+    events = await append(events, "validation", CORRECTION_ENTRY_ID, {
+      record,
+      signature: await signRecord(
+        CORRECTION_ENTRY_ID,
+        "validation",
+        record,
+        party.keys.privateKey,
+      ),
+    });
+  }
+
+  // Section 8, "Drift attestation": the probes are drawn from the verified
+  // entry, the model answers them, and the drawn scorers sign what they scored.
+  let attestation: WorldAttestation | null = null;
+  if (model !== null && withAttestation !== undefined) {
+    const probes: readonly Probe[] = [
+      { entry_id: VERIFIED_ENTRY_ID, entry_hash: await entryHash(core) },
+    ];
+    const probeHash = await probeSetHash(probes);
+    const beaconRound = 4_242;
+    const id = await attestationId({
+      model: model.agent,
+      pool_snapshot_seq: poolSnapshotSeq,
+      beacon_round: beaconRound,
+      probe_hash: probeHash,
+    });
+    // The draw excludes the model's own operator, so `model` seats one anyway:
+    // the state the rule is about, which no honest draw can produce.
+    const scorerParties =
+      withAttestation === "model"
+        ? [model, outside[1]!, outside[2]!]
+        : [outside[0]!, outside[1]!, outside[2]!];
+    const scorers: readonly AttestationScorer[] = scorerParties.map((party) => ({
+      operator: party.operator,
+      agent: party.agent,
+    }));
+
+    const requestedAt = at(events.length);
+    events = await append(events, "attestation_requested", null, {
+      attestation: id,
+      domain: DEFAULT_DOMAIN,
+      model: model.agent,
+      model_operator: model.operator,
+      probes,
+      probe_hash: probeHash,
+      probe_count: probes.length,
+      pool_snapshot_seq: poolSnapshotSeq,
+      beacon_round: beaconRound,
+      beacon_randomness: "ab".repeat(32),
+      scorers,
+      deadline: attestationDeadline(requestedAt),
+    });
+
+    const answers = [
+      { entry_id: VERIFIED_ENTRY_ID, answer: core["claim"] as string },
+    ];
+    const answered = await answersHash(answers);
+    events = await append(events, "attestation_answered", null, {
+      attestation: id,
+      answers_hash: answered,
+    });
+
+    for (const party of scorerParties) {
+      const record: AttestationScoreRecord = {
+        agent: party.agent,
+        operator: party.operator,
+        agreed: probes.length,
+        probe_hash: probeHash,
+        answers_hash: answered,
+        signed_at: at(events.length),
+      };
+      events = await append(events, "attestation_scored", null, {
+        attestation: id,
+        record,
+        signature: await signRecord(
+          id,
+          "attestation_score",
+          record,
+          party.keys.privateKey,
+        ),
+      });
+    }
+
+    attestation = {
+      id,
+      model: model.agent,
+      modelOperator: model.operator,
+      scorers,
+    };
+  }
+
   const entrySeals = await sealsForEntries(events, seals);
   const entry = deriveEntry(events, VERIFIED_ENTRY_ID, { now }, entrySeals).entry;
+  const correctionEntry =
+    withDispute === undefined
+      ? null
+      : deriveEntry(events, CORRECTION_ENTRY_ID, { now }, entrySeals).entry;
   const draftEntry = deriveEntry(events, DRAFT_ENTRY_ID, { now }, entrySeals)
     .entry;
 
+  /** Every party the registry knows, in one list: agents and keys read off it. */
+  const parties: Party[] = [
+    submitter,
+    ...outside,
+    ...(provider === null ? [] : [provider]),
+    ...(challenger === null ? [] : [challenger]),
+    ...(model === null ? [] : [model]),
+  ];
+
   const registry: Registry = {
     agents: Object.fromEntries(
-      [submitter, ...outside, ...(provider === null ? [] : [provider])].map(
-        (party) => [party.agent, party.operator],
-      ),
+      parties.map((party) => [party.agent, party.operator]),
     ),
     operators: {
       [MAINTAINER_OPERATOR]: { maintainer: true, provider: false, domains: DOMAINS },
@@ -373,6 +580,24 @@ export async function buildVerifyWorld(options?: {
             [PROVIDER_OPERATOR]: {
               maintainer: false,
               provider: true,
+              domains: DOMAINS,
+            },
+          }),
+      ...(challenger === null
+        ? {}
+        : {
+            [CHALLENGER_OPERATOR]: {
+              maintainer: false,
+              provider: false,
+              domains: DOMAINS,
+            },
+          }),
+      ...(model === null
+        ? {}
+        : {
+            [MODEL_OPERATOR]: {
+              maintainer: false,
+              provider: false,
               domains: DOMAINS,
             },
           }),
@@ -393,9 +618,7 @@ export async function buildVerifyWorld(options?: {
   };
 
   const keys: Record<string, CryptoKeyPair> = Object.fromEntries(
-    [submitter, ...outside, ...(provider === null ? [] : [provider])].map(
-      (party) => [party.agent, party.keys],
-    ),
+    parties.map((party) => [party.agent, party.keys]),
   );
 
   return {
@@ -405,6 +628,9 @@ export async function buildVerifyWorld(options?: {
     draftEntry,
     bundle,
     providerAgent: provider === null ? null : provider.agent,
+    correctionEntryId: withDispute === undefined ? null : CORRECTION_ENTRY_ID,
+    correctionEntry,
+    attestation,
     keys,
     captureBytes,
   };

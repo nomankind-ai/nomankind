@@ -40,13 +40,16 @@ re-serialization.
 
 | Path | What it holds |
 | --- | --- |
-| `mirror.json` | The manifest: format, environment, `exported_at`, `as_of` (the newest seal's `sealed_at`), `head` (its `last_seq`), `seal_seq`, the counts of seals, events, entries and operators, the schema and norm versions, the registered domains, `captures_base`, the code repository, the verify command, and the license. |
+| `mirror.json` | The manifest: format, environment, `exported_at`, `as_of` (the newest seal's `sealed_at`), `head` (its `last_seq`), `seal_seq`, the counts of seals, events, entries, operators, attestations and ledger rows, the position standing was computed at, the schema and norm versions, the registered domains, `captures_base`, the code repository, the verify command, and the license. |
 | `events/<seal seq, 8 digits>.jsonl` | The events that seal covers, exactly as `GET /events` serves them. A seal's range never moves, so a seal's file never changes once written. |
 | `seals.jsonl` | Every seal in seq order, exactly as `GET /seals/{seq}` serves it — witnesses and registry receipt included. Rewritten as countersignatures arrive. |
 | `anchors.jsonl` | Every daily anchor in date order, exactly as `GET /anchors/{date}` serves it, external timestamp receipt included. |
 | `operators.json` | `{operators: [{operator, maintainer, provider, trusted, domains, agents}], agents: {agent id: operator id}}` — everything the offline verifier's registry needs, so you can build a bundle without asking anybody. |
 | `entries/<entry id>.json` | `{entry, sidecar, entry_hash}`, the entry derived at the sealed head with its own seal object, exactly as `GET /sync` produces one. |
 | `index.json` | One row per entry in submission order: id, domain, subject, category, status, tier, effective tier, submitted_at, position, covering seal, stale, superseded_by, entry hash. |
+| `attestations/<attestation id>.json` | `{attestation, answers}` — the drift attestation folded from the sealed events exactly as `GET /attestations/{id}` serves it, and the model's answers beside it. Only attestations whose request the seals cover. The answers are the one field here the log does not carry: it seals their hash. |
+| `standing.json` | `{position, formula, operators}` — the body of `GET /standing` computed at the sealed head, operators sorted by id. Not a table: `standingAt` over the sealed events, which is what "anyone can recompute anyone's standing from the log" means. |
+| `ledger.jsonl` | Every ledger row that is a pure function of the log, in the order the events produced them: read shares and the halves a stale entry withheld, the day's reconciliation, clawbacks, reconfirmation bounties, and dispute and revalidation stakes with their refunds, forfeits and rewards. Recomputed from the sealed events, never read from the ledger table, so your fork recomputes the same file. Payouts are not here: a payout records money leaving through a provider, which no replay of the log reproduces. |
 
 Nothing unsealed is ever exported. The mirror is the sealed record: an entry
 whose submission event no seal covers is not in it, and neither are the events
@@ -84,7 +87,12 @@ It checks, in this order, and prints one line per item:
 6. and then, for a v0.7 entry, the same `verifyOffline` the paper's one script
    runs: schema, chain, author signature, the core against the core the log
    sealed, every record signature, the exclusions replayed at each decision's
-   position, every derived field, the snapshot hash, and the inclusion proof.
+   position, every derived field, the snapshot hash, and the inclusion proof;
+7. every attestation file, re-derived from the mirror's own events and diffed,
+   and then the whole set through `verifyAttestations` — the id over the request,
+   each score's signature and signer, the probe and answers hashes, and the fold;
+8. `standing.json`, recomputed through `standingAt` at the sealed head;
+9. `ledger.jsonl`, recomputed from the sealed events and diffed line by line.
 
 `ok <id>` is a check that held. `FAIL <id> <check> <field> <reason>` is one that
 did not, and there is one line per difference. `legacy <id>` is a record sealed

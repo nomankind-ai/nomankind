@@ -36,7 +36,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { MockPayoutAdapter } from "../src/adapters/payout.js";
-import { utcDay } from "../src/anchor.js";
+import {
+  utcDay,
+  verifyAnchor,
+  type Anchor,
+  type AnchorUpgradeResult,
+} from "../src/anchor.js";
 import { buildExport } from "../src/cli/export.js";
 import type { Core } from "../src/core.js";
 import type { ApproverRecord, Event } from "../src/events.js";
@@ -57,7 +62,11 @@ import {
   getEntry,
   headSeq,
   latestSeal,
+  pendingAnchorsAfter,
+  putAnchor,
   putSeal,
+  sealsSealedOn,
+  setAnchorExternal,
 } from "../src/storage/repository.js";
 import type { SubmissionProposal } from "../src/submit.js";
 import { verifyOffline } from "../src/verify.js";
@@ -110,6 +119,7 @@ const OTS_RECEIPT = {
   calendar: "https://calendar.example/",
   submitted_at: day(1).toISOString(),
   proof: "AAAA",
+  upgraded: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -849,4 +859,196 @@ describe("the daily anchor", () => {
     expect(one.status).toBe(200);
     expect(one.body["hash"]).toBe((await getAnchor(world.store.db, date))!.hash);
   });
+});
+
+// ---------------------------------------------------------------------------
+// (h1) The upgrade: a calendar's promise turning into a block
+// ---------------------------------------------------------------------------
+
+/**
+ * A calendar that finishes proofs on command.
+ *
+ * `answer` is what it will say next, and `asked` records which days it was
+ * asked about, in order — which is how "one a run, oldest first" is checked
+ * without the test having to know how the step reads its rows.
+ */
+class UpgradingAnchorAdapter extends FakeAnchorAdapter {
+  answer: AnchorUpgradeResult = { ok: false, reason: "pending" };
+  readonly upgradesAsked: string[] = [];
+
+  constructor(answer?: AnchorUpgradeResult) {
+    super(OTS_RECEIPT);
+    if (answer !== undefined) this.answer = answer;
+  }
+
+  async upgrade(anchor: Anchor): Promise<AnchorUpgradeResult> {
+    this.upgradesAsked.push(anchor.date);
+    return this.answer;
+  }
+}
+
+/** A finished proof for a day, with the day in it so two are told apart. */
+function upgradeFor(date: string): AnchorUpgradeResult {
+  return { ok: true, proof: `ots-${date}`, block_height: 966_287 };
+}
+
+describe("the anchor upgrade", () => {
+  const date = utcDay(AT);
+  /** An older day, anchored and pending, so "oldest first" has two to choose from. */
+  const older = "2020-01-01";
+
+  it("takes the oldest pending day, one a run", async () => {
+    // The day the world anchored above is pending; this one is older and also
+    // pending, and the run has to reach for this one.
+    await putAnchor(world.store.db, {
+      date: older,
+      first_seal_seq: null,
+      last_seal_seq: null,
+      roots: [],
+      hash: `sha256:${"22".repeat(32)}`,
+      external: { ...OTS_RECEIPT, proof: "older" },
+    });
+    expect(
+      (await pendingAnchorsAfter(world.store.db, "", 10)).map((row) => row.date),
+    ).toEqual([older, date]);
+
+    const calendar = new UpgradingAnchorAdapter(upgradeFor(older));
+    const report = await sweep({
+      at: day(1),
+      witness: new FakeWitnessAdapter(),
+      anchor: calendar,
+    });
+
+    expect(calendar.upgradesAsked).toEqual([older]);
+    expect(report.upgraded).toEqual({ date: older, block_height: 966_287 });
+    // And the newer day was not touched: one a run, and this was not its turn.
+    expect((await getAnchor(world.store.db, date))!.external!.upgraded).toBeNull();
+  }, 120_000);
+
+  it("moves the receipt and nothing else, and the day still verifies", async () => {
+    const before = (await getAnchor(world.store.db, date))!;
+    const calendar = new UpgradingAnchorAdapter(upgradeFor(date));
+
+    const report = await sweep({
+      at: day(1),
+      witness: new FakeWitnessAdapter(),
+      anchor: calendar,
+    });
+
+    expect(calendar.upgradesAsked).toEqual([date]);
+    expect(report.upgraded).toEqual({ date, block_height: 966_287 });
+
+    const after = (await getAnchor(world.store.db, date))!;
+    expect(after.external!.upgraded).toEqual({
+      proof: `ots-${date}`,
+      block_height: 966_287,
+      upgraded_at: day(1).toISOString(),
+    });
+    // Everything the anchor hash covers, and the receipt around it, unmoved.
+    expect(after.hash).toBe(before.hash);
+    expect(after.roots).toEqual(before.roots);
+    expect(after.first_seal_seq).toBe(before.first_seal_seq);
+    expect(after.last_seal_seq).toBe(before.last_seal_seq);
+    expect(after.external!.calendar).toBe(before.external!.calendar);
+    expect(after.external!.proof).toBe(before.external!.proof);
+    expect(after.external!.submitted_at).toBe(before.external!.submitted_at);
+
+    // D-037, item 5: the receipt was never in the hash, so an upgraded day
+    // verifies against the same seals it verified against before.
+    const seals = await sealsSealedOn(world.store.db, date);
+    expect(await verifyAnchor(after, seals)).toBe(true);
+  }, 120_000);
+
+  it("says upgrade_current once nothing is pending", async () => {
+    const calendar = new UpgradingAnchorAdapter(upgradeFor(date));
+    const report = await sweep({
+      at: day(1),
+      witness: new FakeWitnessAdapter(),
+      anchor: calendar,
+    });
+
+    expect(calendar.upgradesAsked).toEqual([]);
+    expect(report.upgraded).toBeNull();
+    expect(report.skipped["upgrade_current"]).toBe(1);
+  }, 120_000);
+
+  it("names every refusal, and leaves the receipt where it was", async () => {
+    for (const reason of ["pending", "unavailable", "bad_proof"] as const) {
+      // Back to pending, so there is something for the run to ask about.
+      await setAnchorExternal(world.store.db, date, { ...OTS_RECEIPT, upgraded: null });
+      const calendar = new UpgradingAnchorAdapter({ ok: false, reason });
+
+      const report = await sweep({
+        at: day(1),
+        witness: new FakeWitnessAdapter(),
+        anchor: calendar,
+      });
+
+      expect(calendar.upgradesAsked).toEqual([date]);
+      expect(report.upgraded).toBeNull();
+      expect(report.skipped[`upgrade_${reason}`]).toBe(1);
+      expect((await getAnchor(world.store.db, date))!.external!.upgraded).toBeNull();
+    }
+  }, 120_000);
+
+  it("counts a calendar that threw as unavailable rather than falling over", async () => {
+    const calendar = new UpgradingAnchorAdapter();
+    calendar.upgrade = async (): Promise<AnchorUpgradeResult> => {
+      throw new Error("network");
+    };
+
+    const report = await sweep({
+      at: day(1),
+      witness: new FakeWitnessAdapter(),
+      anchor: calendar,
+    });
+
+    expect(report.upgraded).toBeNull();
+    expect(report.skipped["upgrade_unavailable"]).toBe(1);
+  }, 120_000);
+
+  it("does not run at all for an adapter that posts nowhere", async () => {
+    // The local adapter has no `upgrade`: there is nothing it could ask about,
+    // and a laptop should not count a refusal every night for that.
+    const report = await sweep({
+      at: day(1),
+      witness: new FakeWitnessAdapter(),
+      anchor: new FakeAnchorAdapter(OTS_RECEIPT),
+    });
+
+    expect(report.upgraded).toBeNull();
+    for (const reason of ["upgrade_current", "upgrade_pending", "upgrade_unavailable"]) {
+      expect(report.skipped[reason]).toBeUndefined();
+    }
+  }, 120_000);
+
+  it("serves the upgraded proof over both anchor routes", async () => {
+    const calendar = new UpgradingAnchorAdapter(upgradeFor(date));
+    await sweep({ at: day(1), witness: new FakeWitnessAdapter(), anchor: calendar });
+
+    const one = await read(`/anchors/${date}`);
+    expect(one.status).toBe(200);
+    const external = one.body["external"] as Record<string, unknown>;
+    expect(external["upgraded"]).toEqual({
+      proof: `ots-${date}`,
+      block_height: 966_287,
+      upgraded_at: day(1).toISOString(),
+    });
+
+    const listed = await read("/anchors");
+    expect(listed.status).toBe(200);
+    const anchors = listed.body["anchors"] as {
+      date: string;
+      external: { upgraded: unknown } | null;
+    }[];
+    const served = anchors.find((row) => row.date === date);
+    expect(served!.external!.upgraded).toEqual(external["upgraded"]);
+    // And the older day, upgraded runs ago, still reads back the same way: the
+    // field is on the row, not something the last run put in the answer.
+    expect(anchors.find((row) => row.date === older)!.external!.upgraded).toEqual({
+      proof: `ots-${older}`,
+      block_height: 966_287,
+      upgraded_at: day(1).toISOString(),
+    });
+  }, 120_000);
 });

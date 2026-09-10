@@ -385,9 +385,11 @@ describe("the day's export", () => {
       `${ENVIRONMENT}/entries/${entryId}.json`,
       `${ENVIRONMENT}/events/00000000.jsonl`,
       `${ENVIRONMENT}/index.json`,
+      `${ENVIRONMENT}/ledger.jsonl`,
       `${ENVIRONMENT}/mirror.json`,
       `${ENVIRONMENT}/operators.json`,
       `${ENVIRONMENT}/seals.jsonl`,
+      `${ENVIRONMENT}/standing.json`,
     ]);
     const manifest = JSON.parse(fileAt("mirror.json")!) as Record<string, unknown>;
     expect(manifest).toMatchObject({
@@ -419,6 +421,32 @@ describe("the day's export", () => {
       seal_seq: first.sealed!.seq,
       entry_hash: written.entry_hash,
     });
+  }, 240_000);
+
+  it("recomputes standing and the ledger at the sealed head", async () => {
+    // Neither file is read from a table: standing is `standingAt` over the
+    // sealed events and the ledger is the rows the log itself proves, so an
+    // environment that has published no read counts has an empty ledger and a
+    // standing for every operator the log has registered.
+    const standing = JSON.parse(fileAt("standing.json")!) as {
+      position: number;
+      formula: string[];
+      operators: { operator: string }[];
+    };
+    expect(standing.position).toBe(first.sealed!.last_seq);
+    expect(standing.formula.length).toBeGreaterThan(0);
+    expect(standing.operators.map((one) => one.operator)).toEqual([
+      "first.example",
+      "maintainer.example",
+      "second.example",
+      "third.example",
+    ]);
+
+    expect(fileAt("ledger.jsonl")).toBe("");
+    const manifest = JSON.parse(fileAt("mirror.json")!) as Record<string, unknown>;
+    expect(manifest["attestations"]).toBe(0);
+    expect(manifest["ledger_rows"]).toBe(0);
+    expect(manifest["standing_position"]).toBe(first.sealed!.last_seq);
   }, 240_000);
 
   it("carries every operator the registry knows, with its agents", async () => {
