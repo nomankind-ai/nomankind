@@ -92,6 +92,12 @@ export interface AnchorFact {
   readonly date: string;
   /** The external receipt's kind, or null when nothing has posted the hash. */
   readonly external: string | null;
+  /**
+   * Whether that receipt has been upgraded: the calendar's promise replaced by
+   * a proof that reaches a Bitcoin block. Optional, and absent reads as false —
+   * a receipt is pending until something says otherwise.
+   */
+  readonly upgraded?: boolean;
 }
 
 /** The newest daily reconciliation the ledger wrote. */
@@ -734,6 +740,11 @@ function anchoring(input: StatusInput, now: string): Stage {
     last: line(
       anchor.date,
       anchor.external === null ? "no external record" : anchor.external,
+      // Named rather than counted: the difference between a calendar's promise
+      // and a block that holds the commitment is the whole point of anchoring,
+      // and a board that showed both as "opentimestamps" would hide it. Not a
+      // state change — a pending proof is not a fault, only unfinished.
+      anchor.external !== null && anchor.upgraded === true ? "upgraded" : "",
     ),
     rule,
     evidence,

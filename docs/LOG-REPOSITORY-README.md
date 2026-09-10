@@ -43,6 +43,9 @@ Each directory is a complete, self-contained export of that log's sealed state.
 | `operators.json` | Every operator — maintainer, provider and trusted flags, the domains it is attested in, the agents bound to it — and the agent-to-operator map. |
 | `entries/<entry id>.json` | One entry as it stood at the sealed head: the derived entry with its seal object, its sidecar, and its core hash. |
 | `index.json` | One row per entry in submission order, for finding things without opening every file. |
+| `attestations/<attestation id>.json` | One drift attestation as the sealed events fold it — the probes, the scorers, the scores, the status and the date — with the model's answers beside it. Only attestations the seals cover. |
+| `standing.json` | Every operator's standing at the sealed head, with the published formula's own term names beside it, sorted by operator id. Recomputed from the events, never copied off a table. |
+| `ledger.jsonl` | Every ledger row the log itself proves, in the order the events produced them: read shares, the halves a stale entry withheld, the daily reconciliation, clawbacks, reconfirmation bounties, and the stakes a dispute or a revalidation put up with their refunds, forfeits and rewards. No payouts: money leaving through a payment provider is not a function of the log. |
 
 Every JSON document is two-space indented with a trailing newline; every
 `.jsonl` file is one compact document per line. Two exports of the same sealed
@@ -82,8 +85,12 @@ re-derived from these very events and diffed field by field, its `entry_hash`,
 its row in `index.json`, its core against the core the log sealed, and the
 author's signature over that core — followed, for an entry sealed under schema
 v0.7, by the same offline verifier the whitepaper's "two files and one script"
-promise rests on. One line per item, one summary line, and the exit code is the
-answer: 0 when nothing failed, 1 when something did.
+promise rests on. Then the three files nothing was read for: every attestation
+re-derived and put through the attestation verifier — the id, the score
+signatures, the scorers, the hashes — `standing.json` recomputed at the sealed
+head, and `ledger.jsonl` recomputed and diffed line by line. One line per item,
+one summary line, and the exit code is the answer: 0 when nothing failed, 1 when
+something did.
 
 A record sealed under the older schema v0.6 is reported as `legacy` rather than
 `ok`: everything in the paragraph above is checked over it, and only the last

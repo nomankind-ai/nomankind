@@ -37,22 +37,43 @@ import { join, relative } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
+import {
+  attestationDeadline,
+  attestationId,
+  deriveAttestation,
+} from "../src/attest.js";
 import { MockMirrorAdapter } from "../src/adapters/mirror.js";
 import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { type Core } from "../src/core.js";
 import { deriveEntry } from "../src/derive.js";
 import { base64urlEncode } from "../src/encoding.js";
-import { appendEvent, type ApproverRecord, type Event } from "../src/events.js";
+import {
+  appendEvent,
+  type ApproverRecord,
+  type AttestationScoreRecord,
+  type AttestationScorer,
+  type Event,
+  type Probe,
+} from "../src/events.js";
+import { entryHash } from "../src/hash.js";
+import { answersHash, probeSetHash, type ProbeAnswer } from "../src/probe.js";
 import { exportPrivateKeyPkcs8, generateKeypair } from "../src/identity.js";
 import { runMirror } from "../src/cli/mirror.js";
 import { mirrorVerifyPlan, verifyMirror } from "../src/cli/verify-mirror.js";
 import type { HttpClient, ValidatorIo } from "../src/cli/validator.js";
-import { LIST_PAGE_LIMIT, NORM_VERSION } from "../src/policy.js";
+import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT, NORM_VERSION } from "../src/policy.js";
 import { signRecord } from "../src/records.js";
 import type { Entry } from "../src/schema.js";
 import { signCore } from "../src/sign.js";
 import { entryIdFor } from "../src/submit.js";
-import { appendEvents, putEntry } from "../src/storage/repository.js";
+import {
+  appendEvents,
+  headSeq,
+  putEntry,
+  recordAttestationAnswers,
+  recordAttestationRequest,
+  recordAttestationScore,
+} from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
 import { runSweep } from "../src/worker/sweep.js";
@@ -122,6 +143,8 @@ let k3: Party;
 let pageHashValue = "";
 let entryId = "";
 let legacyId = "";
+/** The v0.7 core the door took, which the seeded probe set asks about. */
+let entryCore: Core;
 
 /** The mirror the sweep pushed to: the bytes the command has to reproduce. */
 let mirror: MockMirrorAdapter;
@@ -292,6 +315,120 @@ async function copyOfMirror(name: string): Promise<string> {
   return target;
 }
 
+/** The day the seeded read counts are published for, and how many. */
+const READ_DAY = "2026-09-09";
+const READS = 10_000;
+
+/** The seeded attestation's id, and what the model answered. */
+let attestation = "";
+const MODEL_ANSWER = "kestrel/kestrel-1 seat pricing is $40 per seat per month";
+
+/**
+ * One whole drift attestation, written through the repository's own writers:
+ * the request, the model's answers, and one signed score per scorer.
+ *
+ * Through the writers rather than through the doors because the doors want a
+ * pool snapshot committed before a beacon round and a probe set drawn from the
+ * observed tier, which is M22's subject and not this file's. What matters here
+ * is that the log holds a real attestation — real ids, real signatures over the
+ * real canonical bytes — and that the store holds the answers the log only
+ * hashed, because those two are exactly what the export has to put in a file.
+ */
+async function seedAttestation(): Promise<void> {
+  const probes: readonly Probe[] = [
+    { entry_id: entryId, entry_hash: await entryHash(entryCore) },
+  ];
+  const probeHash = await probeSetHash(probes);
+  const beaconRound = 4_242;
+  const snapshotSeq = (await headSeq(store.db)) ?? 0;
+  attestation = await attestationId({
+    model: k1.agent.agentId,
+    pool_snapshot_seq: snapshotSeq,
+    beacon_round: beaconRound,
+    probe_hash: probeHash,
+  });
+  const scorers: readonly AttestationScorer[] = [k2, k3].map((party) => ({
+    operator: party.operator,
+    agent: party.agent.agentId,
+  }));
+
+  const events: Event[] = [];
+  const requested = await recordAttestationRequest(store.db, {
+    event: {
+      at: AT,
+      type: "attestation_requested",
+      entry_id: null,
+      payload: {
+        attestation,
+        domain: DEFAULT_DOMAIN,
+        model: k1.agent.agentId,
+        model_operator: k1.operator,
+        probes,
+        probe_hash: probeHash,
+        probe_count: probes.length,
+        pool_snapshot_seq: snapshotSeq,
+        beacon_round: beaconRound,
+        beacon_randomness: "ab".repeat(32),
+        scorers,
+        deadline: attestationDeadline(AT),
+      },
+    },
+    row: (event) => deriveAttestation([event], { now: AT }),
+    scorers,
+  });
+  events.push(requested);
+
+  const answers: readonly ProbeAnswer[] = [
+    { entry_id: entryId, answer: MODEL_ANSWER },
+  ];
+  const hashed = await answersHash(answers);
+  const answered = await recordAttestationAnswers(store.db, {
+    event: {
+      at: AT,
+      type: "attestation_answered",
+      entry_id: null,
+      payload: { attestation, answers_hash: hashed },
+    },
+    id: attestation,
+    answers,
+    attestation: (event) => deriveAttestation([...events, event], { now: AT }),
+  });
+  events.push(answered);
+
+  for (const party of [k2, k3]) {
+    const record: AttestationScoreRecord = {
+      agent: party.agent.agentId,
+      operator: party.operator,
+      agreed: probes.length,
+      probe_hash: probeHash,
+      answers_hash: hashed,
+      signed_at: AT,
+    };
+    const scored = await recordAttestationScore(store.db, {
+      event: {
+        at: AT,
+        type: "attestation_scored",
+        entry_id: null,
+        payload: {
+          attestation,
+          record,
+          signature: await signRecord(
+            attestation,
+            "attestation_score",
+            record,
+            party.agent.privateKey,
+          ),
+        },
+      },
+      id: attestation,
+      operator: party.operator,
+      answers,
+      attestation: (event) => deriveAttestation([...events, event], { now: AT }),
+    });
+    events.push(scored);
+  }
+}
+
 beforeAll(async () => {
   pageHashValue = await pageHash(PAGE);
 
@@ -351,6 +488,7 @@ beforeAll(async () => {
     evidence_tier: "stated",
   });
   entryId = core["id"] as string;
+  entryCore = core;
   const submitted = await send(
     await signedPost(k1.agent, {
       path: "/entries",
@@ -376,6 +514,29 @@ beforeAll(async () => {
   await appendEvents(store.db, [event]);
   const derived = deriveEntry([event], legacyId, { now: AT });
   await putEntry(store.db, derived.entry as Entry, derived.sidecar, event.seq);
+
+  // One published day of reads on the verified entry, seeded the same way the
+  // legacy record is: `read_count` is the publish step's own event, and what
+  // this file is about is the export of a log that holds one, not the step that
+  // writes it. It gives the ledger something to be.
+  const counted = await appendEvent(await allEvents(), {
+    at: AT,
+    type: "read_count",
+    entry_id: null,
+    payload: {
+      date: READ_DAY,
+      reads: [{ entry_id: entryId, count: READS }],
+      total: READS,
+      counter_first: 1,
+      counter_last: READS,
+    },
+  });
+  await appendEvents(store.db, [counted[counted.length - 1] as Event]);
+
+  // And one drift attestation, through the store's own writers, so the export
+  // has an attestation file with the model's answers beside it. k1's key is the
+  // model and k2 and k3 score it: Section 8's "none under the model's operator".
+  await seedAttestation();
 
   // The sweep seals both records and exports the day, which is the directory
   // the command below has to reproduce byte for byte.
@@ -438,6 +599,62 @@ describe("the mirror command rebuilds the export from the public doors", () => {
     }
   }, 600_000);
 
+  it("carries the three families the layout recomputes, with their counts", async () => {
+    const written = await filesUnder(join(pristine, ENVIRONMENT));
+    expect([...written.keys()]).toContain(`attestations/${attestation}.json`);
+    expect([...written.keys()]).toContain("standing.json");
+    expect([...written.keys()]).toContain("ledger.jsonl");
+
+    // The attestation is the fold's, and the answers are the ones the store
+    // holds: the log carries only their hash, so the command had to ask for
+    // them through `GET /attestations/{id}` and get the same set the sweep read
+    // out of its own database.
+    const record = JSON.parse(written.get(`attestations/${attestation}.json`)!) as {
+      attestation: Record<string, unknown>;
+      answers: { entry_id: string; answer: string }[];
+    };
+    expect(record.attestation["id"]).toBe(attestation);
+    expect(record.attestation["status"]).toBe("scored");
+    expect(record.attestation["score"]).toEqual({ agreed: 1, probe_count: 1 });
+    expect(record.answers).toEqual([{ entry_id: entryId, answer: MODEL_ANSWER }]);
+
+    const standing = JSON.parse(written.get("standing.json")!) as {
+      position: number;
+      operators: { operator: string }[];
+    };
+    expect(standing.operators.map((one) => one.operator)).toEqual([
+      "k1.example",
+      "k2.example",
+      "k3.example",
+      "maintainer.example",
+    ]);
+
+    const ledger = written
+      .get("ledger.jsonl")!
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(ledger.length).toBeGreaterThan(0);
+    // The day is reconciled and nothing is priced: this world's entry is a
+    // draft — three operators outside the submitter's own are what verify one,
+    // and there are two here — and Section 9 pays for verified entries, so the
+    // reconciliation names it under `unpriced` rather than passing over it.
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]!["kind"]).toBe("reconciliation");
+    expect(ledger[0]!["date"]).toBe(READ_DAY);
+    expect((ledger[0]!["ref"] as Record<string, unknown>)["unpriced"]).toEqual([
+      entryId,
+    ]);
+
+    const manifest = JSON.parse(written.get("mirror.json")!) as Record<
+      string,
+      unknown
+    >;
+    expect(manifest["attestations"]).toBe(1);
+    expect(manifest["ledger_rows"]).toBe(ledger.length);
+    expect(manifest["standing_position"]).toBe(standing.position);
+  }, 600_000);
+
   it("refuses a call that is not one, before any read", async () => {
     const io = recorder();
     const http = new InProcessHttp();
@@ -467,6 +684,85 @@ describe("verify-mirror checks a fresh clone end to end", () => {
     expect(io.out[io.out.length - 1]).toMatch(
       /^summary demo head \d+ seals 1 anchors \d+ entries 2 ok 1 legacy 1 failed 0$/,
     );
+  }, 600_000);
+
+  it("re-derives the attestations, standing and the ledger from the events", async () => {
+    const io = recorder();
+    const code = await verifyMirror(
+      [join(pristine, ENVIRONMENT)],
+      io.io,
+      new InProcessHttp(),
+    );
+    expect([code, io.out.join("\n")]).toEqual([0, io.out.join("\n")]);
+    expect(io.out).toContain(`ok attestation/${attestation}`);
+    expect(io.out).toContain("ok standing");
+    expect(io.out).toContain("ok ledger");
+  }, 600_000);
+
+  it("exits 1 and names the check when the attestation file is edited", async () => {
+    const dir = join(await copyOfMirror("edited-attestation"), ENVIRONMENT);
+    const path = join(dir, "attestations", `${attestation}.json`);
+    const file = JSON.parse(await readFile(path, "utf8")) as {
+      attestation: Record<string, unknown>;
+    };
+    expect(file.attestation["score"]).toEqual({ agreed: 1, probe_count: 1 });
+    file.attestation["score"] = { agreed: 0, probe_count: 1 };
+    await writeFile(path, `${JSON.stringify(file, null, 2)}\n`, "utf8");
+
+    const io = recorder();
+    const code = await verifyMirror([dir], io.io, new InProcessHttp());
+    expect(code).toBe(1);
+    expect(io.out).toContain(
+      `FAIL attestation/${attestation} attestation /attestation/score mismatch`,
+    );
+    // The rest of the layout is untouched, and says so.
+    expect(io.out).toContain("ok standing");
+    expect(io.out).toContain("ok ledger");
+  }, 600_000);
+
+  it("exits 1 and names the check when a standing row is edited", async () => {
+    const dir = join(await copyOfMirror("edited-standing"), ENVIRONMENT);
+    const path = join(dir, "standing.json");
+    const file = JSON.parse(await readFile(path, "utf8")) as {
+      operators: Record<string, unknown>[];
+    };
+    const index = file.operators.findIndex(
+      (one) => one["operator"] === "k2.example",
+    );
+    expect(index).toBeGreaterThanOrEqual(0);
+    file.operators[index]!["standing"] =
+      (file.operators[index]!["standing"] as number) + 1_000;
+    await writeFile(path, `${JSON.stringify(file, null, 2)}\n`, "utf8");
+
+    const io = recorder();
+    const code = await verifyMirror([dir], io.io, new InProcessHttp());
+    expect(code).toBe(1);
+    expect(io.out).toContain(
+      `FAIL standing standing /operators/${index}/standing mismatch`,
+    );
+    expect(io.out).toContain("ok ledger");
+  }, 600_000);
+
+  it("exits 1 and names the check when a ledger line is edited", async () => {
+    const dir = join(await copyOfMirror("edited-ledger"), ENVIRONMENT);
+    const path = join(dir, "ledger.jsonl");
+    const lines = (await readFile(path, "utf8"))
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines.length).toBeGreaterThan(0);
+    lines[0]!["reads"] = 1;
+    await writeFile(
+      path,
+      `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+      "utf8",
+    );
+
+    const io = recorder();
+    const code = await verifyMirror([dir], io.io, new InProcessHttp());
+    expect(code).toBe(1);
+    expect(io.out).toContain("FAIL ledger ledger /0/reads mismatch");
+    expect(io.out).toContain("ok standing");
   }, 600_000);
 
   it("reports the v0.6 record as legacy and does not fail it", async () => {

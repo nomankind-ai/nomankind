@@ -87,6 +87,7 @@ import {
   type Anchor,
   type AnchorAdapter,
   type AnchorExternal,
+  type AnchorUpgradeResult,
 } from "../anchor.js";
 import {
   assignmentDeadline,
@@ -138,6 +139,7 @@ import {
 import {
   MirrorError,
   buildMirror,
+  type MirrorAttestationAnswers,
   type MirrorEntryRecord,
   type MirrorOperator,
 } from "../mirror.js";
@@ -178,6 +180,7 @@ import {
   latestEventOfType,
   latestSeal,
   ledgerCursor,
+  listAttestations,
   listEntries,
   listOperators,
   mirrorOn,
@@ -185,6 +188,7 @@ import {
   operatorDomains,
   payoutRows,
   priceBountyRow,
+  pendingAnchorsAfter,
   putAnchor,
   putEntry,
   putLedgerRows,
@@ -435,6 +439,19 @@ export interface SweepReport {
     readonly seals: number;
     /** The receipt's kind, or null when nothing has posted the hash yet. */
     readonly external: string | null;
+  } | null;
+  /**
+   * The day this run upgraded, or null when it upgraded none.
+   *
+   * Separate from `anchored` rather than inside it: the day whose pending proof
+   * finally reached a block is almost never the day this run anchored — a
+   * calendar takes hours, and the oldest still-pending day is the one asked
+   * about. A run that anchored nothing can still finish a proof.
+   */
+  readonly upgraded: {
+    readonly date: string;
+    /** The Bitcoin block height the completed proof attests to. */
+    readonly block_height: number;
   } | null;
   /**
    * The day this run exported to the mirror, or null when it exported nothing.
@@ -1108,6 +1125,70 @@ async function anchorStep(
   };
 }
 
+/**
+ * (h1) Finish one pending proof, if a calendar has one to finish.
+ *
+ * At most one a run, and the oldest first. A calendar is a stranger doing this
+ * for nothing; a sweep that walked every pending day every night would be
+ * asking it for a favour once per day per anchor forever. One a run clears a
+ * backlog at one day per day, which is the rate the backlog was made at.
+ *
+ * Only where the adapter can upgrade at all — production's OpenTimestamps one.
+ * A local adapter has posted nothing, so it has nothing to ask about, and the
+ * step does not run rather than counting a refusal on every laptop run.
+ *
+ * The proof is the only thing that moves. The anchor hash never covered the
+ * receipt (D-037, item 5), so the day that verified before the upgrade is the
+ * same day that verifies after it.
+ */
+async function upgradeStep(
+  db: D1Like,
+  deps: SealingDeps,
+  skip: Skip,
+): Promise<SweepReport["upgraded"]> {
+  if (deps.anchor.upgrade === undefined) return null;
+
+  // The empty string for the same reason `allAnchors` uses it: the read is
+  // strictly after a day, and every real "YYYY-MM-DD" sorts above it.
+  const [oldest] = await pendingAnchorsAfter(db, "", 1);
+  if (oldest === undefined) {
+    skip("upgrade_current");
+    return null;
+  }
+
+  let result: AnchorUpgradeResult;
+  try {
+    result = await deps.anchor.upgrade(oldest);
+  } catch (error) {
+    console.error(
+      `sweep: anchor upgrade failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    skip("upgrade_unavailable");
+    return null;
+  }
+
+  if (!result.ok) {
+    skip(`upgrade_${result.reason}`);
+    return null;
+  }
+
+  const external = oldest.external;
+  if (external === null) {
+    // Unreachable: `pendingAnchorsAfter` reads only rows that hold a receipt.
+    skip("upgrade_bad_proof");
+    return null;
+  }
+  await setAnchorExternal(db, oldest.date, {
+    ...external,
+    upgraded: {
+      proof: result.proof,
+      block_height: result.block_height,
+      upgraded_at: deps.now.toISOString(),
+    },
+  });
+  return { date: oldest.date, block_height: result.block_height };
+}
+
 /** Post one day's hash. Null on anything the adapter could not do. */
 async function postAnchor(
   deps: SealingDeps,
@@ -1246,6 +1327,46 @@ async function mirrorEntries(
 }
 
 /**
+ * The model's answers, per attestation, for every attestation requested at or
+ * below the sealed head.
+ *
+ * The one input to the export's attestation files that the log does not carry:
+ * the attestations themselves are recomputed from the sealed events
+ * (src/mirror.ts, `mirrorAttestations`), and the answers are hashed into the log
+ * rather than written into it, so this is the one thing the export has to read.
+ *
+ * Keyset downward by `requested_seq`, the way `GET /attestations` pages, and
+ * trimmed to the head: an attestation opened above the seal is not part of the
+ * sealed record and the layout would drop it anyway.
+ */
+async function mirrorAnswers(
+  db: D1Like,
+  head: number,
+): Promise<MirrorAttestationAnswers[]> {
+  const answers: MirrorAttestationAnswers[] = [];
+  let beforeSeq: number | undefined;
+  for (;;) {
+    const page = await listAttestations(
+      db,
+      beforeSeq === undefined
+        ? { limit: LIST_PAGE_LIMIT }
+        : { limit: LIST_PAGE_LIMIT, beforeSeq },
+    );
+    if (page.length === 0) break;
+    for (const row of page) {
+      if (row.attestation.requested_seq > head) continue;
+      answers.push({
+        attestation: row.attestation.id,
+        answers: row.answers,
+      });
+    }
+    if (page.length < LIST_PAGE_LIMIT) break;
+    beforeSeq = page[page.length - 1]!.attestation.requested_seq;
+  }
+  return answers;
+}
+
+/**
  * (h2) The day's export.
  *
  * Whitepaper Section 11: the sealed log goes out daily to a public repository
@@ -1298,6 +1419,7 @@ async function mirrorStep(
       events: await sealedLog(db, head),
       entries: await mirrorEntries(db, head, new Date(newest.sealed_at)),
       operators: await allOperators(db),
+      attestations: await mirrorAnswers(db, head),
     });
   } catch (error) {
     // The layout's own two refusals, in its own words. Anything else is a
@@ -2237,6 +2359,7 @@ export async function runSweep(
     let sealed: SweepReport["sealed"] = null;
     let witnessed: SweepReport["witnessed"] = [];
     let anchored: SweepReport["anchored"] = null;
+    let upgraded: SweepReport["upgraded"] = null;
     const sealing = sealingDeps(deps);
     inStep = "seal";
     if (sealing === null) {
@@ -2258,6 +2381,10 @@ export async function runSweep(
       witnessed = await witnessStep(db, sealing, maintainers, skip);
       inStep = "anchor";
       anchored = await anchorStep(db, sealing, skip);
+      // (h1) And, in the same step, one pending proof finished if a calendar
+      // has finished one. After the day's anchor, because a day that was just
+      // posted is never the day that is ready.
+      upgraded = await upgradeStep(db, sealing, skip);
     }
 
     // (h2) The day's export to the public mirror. After the anchor, because the
@@ -2313,6 +2440,7 @@ export async function runSweep(
       sealed,
       witnessed,
       anchored,
+      upgraded,
       mirror: mirrored.report,
       ledger,
       standing,

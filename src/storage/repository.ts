@@ -3338,6 +3338,20 @@ export async function setSealWitnesses(
 
 const ANCHOR_COLUMNS = `"date", first_seal_seq, last_seal_seq, roots_json, hash, external`;
 
+/**
+ * The stored receipt, with `upgraded` made total.
+ *
+ * Every row written before M23b carries no `upgraded` key at all, and the
+ * routes, the mirror and the status page all read the field rather than ask
+ * whether it is there. Filling it in on the way out costs one comparison and
+ * saves the rest of the system from knowing the column has a history.
+ */
+function toExternal(json: string): AnchorExternal {
+  const external = JSON.parse(json) as AnchorExternal;
+  if (external === null) return null;
+  return { ...external, upgraded: external.upgraded ?? null };
+}
+
 function toAnchor(row: Row): Anchor {
   // The column held nothing but null until M16; now it holds the external
   // timestamp receipt as JSON, and reading one back is no longer an error.
@@ -3348,7 +3362,7 @@ function toAnchor(row: Row): Anchor {
     last_seal_seq: readNullableInteger(row, "last_seal_seq"),
     roots: readJson<string[]>(row, "roots_json"),
     hash: readText(row, "hash"),
-    external: external === null ? null : (JSON.parse(external) as AnchorExternal),
+    external: external === null ? null : toExternal(external),
   };
 }
 
@@ -3413,6 +3427,35 @@ export async function anchorsAfter(
   const rows = await db
     .prepare(
       `SELECT ${ANCHOR_COLUMNS} FROM anchors WHERE "date" > ? ORDER BY "date" LIMIT ?`,
+    )
+    .bind(afterDate, limit)
+    .all<Row>();
+  return rows.results.map(toAnchor);
+}
+
+/**
+ * The next page of anchors that hold a receipt still waiting on a block, in day
+ * order — oldest first, which is the order they will upgrade in.
+ *
+ * The filter is in SQL rather than in the caller so that a log with years of
+ * anchors behind it does not read them all to find the two that are pending.
+ * `json_extract` over the receipt is the same shape the ledger reads its rows
+ * by; the column is small and there is one row per day, so no index is owed.
+ * The limit is the caller's own, like every other page here.
+ */
+export async function pendingAnchorsAfter(
+  db: D1Like,
+  afterDate: string,
+  limit: number,
+): Promise<Anchor[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${ANCHOR_COLUMNS} FROM anchors
+        WHERE "date" > ?
+          AND external IS NOT NULL
+          AND json_extract(external, '$.kind') = 'opentimestamps'
+          AND json_extract(external, '$.upgraded') IS NULL
+        ORDER BY "date" LIMIT ?`,
     )
     .bind(afterDate, limit)
     .all<Row>();

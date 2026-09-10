@@ -1,0 +1,12 @@
+{
+  "request": {
+    "method": "GET",
+    "url": "https://a.pool.opentimestamps.org/timestamp/6aa1f3476dbb13ac82e5e673fa16dd08fc239afdfa890ccfd8a3ae42d6c19cdb386441334f1a3ae73a744392",
+    "accept": "application/vnd.opentimestamps.v1"
+  },
+  "captured_at": "2026-09-10T21:27:23Z",
+  "status": 404,
+  "content_type": "text/plain",
+  "body_base64": "Tm90IGZvdW5kCg==",
+  "body_text": "Not found\n"
+}

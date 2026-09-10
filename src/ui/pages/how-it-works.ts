@@ -4,7 +4,7 @@
  *
  * The page a reader is sent to when they ask what nomankind actually does, and
  * the reason it is not a diagram is in its own lede: every stage links to the
- * record rather than to a description of the record. So each of the eight panels
+ * record rather than to a description of the record. So each of the nine panels
  * carries the paper's sentences, the policy numbers that stage runs under, and
  * one or two live values read out of this environment — the newest entry, the
  * trusted pool, the newest seal, yesterday's read count — every one of them a
@@ -47,6 +47,7 @@ import {
   fmtTimeUtc,
   html,
   layout,
+  link,
   shortHash,
   statusClass,
   type Safe,
@@ -63,6 +64,16 @@ import type { HowItWorksData, PageContext } from "../types.js";
  * paper move together.
  */
 const WHITEPAPER_VERSION = "v1.5";
+
+/**
+ * The fork documentation, in the code repository beside the code it describes.
+ *
+ * The same address the Mirror page names, spelt here too rather than imported
+ * from it: these are two pages and not one, and a page that reached into
+ * another page for a constant would make them one.
+ */
+const FORK_DOC_URL =
+  "https://github.com/nomankind-ai/nomankind/blob/main/docs/FORK.md";
 
 /** An id shown short: the first twelve characters and the last four. */
 function shortId(id: string): string {
@@ -429,10 +440,50 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
       )}
     </dl>`;
 
+  const mirror = html`<p class="prose">
+      Once a day the sealed log is exported whole to a public repository under
+      CC0: every entry, every event with its inclusion proof, every seal and
+      anchor and index, with both environments side by side under their own
+      directories. A clone and the offline verifier are the record — the same
+      commands that check one entry here check a fresh clone of the export — and
+      a fork that takes the repository takes the whole history with it. Leaving
+      is a protocol right rather than a favour, and nothing on this site is
+      needed to read what it has already published.
+    </p>
+    <dl class="kv">
+      ${row(
+        "latest export",
+        data.mirror === null
+          ? html`<a href="/mirror/latest">GET /mirror/latest</a>${aside(
+              "no export yet",
+            )}`
+          : html`<a href="/mirror/latest">GET /mirror/latest</a> ·
+              ${link(data.mirror.treeUrl, "the exported tree", true)}${aside(
+                `${data.mirror.date} · head ${data.mirror.head} · ${plural(
+                  data.mirror.entries,
+                  "entry",
+                  "entries",
+                )}`,
+              )}`,
+      )}
+      ${row(
+        "fork it",
+        html`${link(FORK_DOC_URL, "docs/FORK.md", true)}${aside(
+          "what to clone, how to check it, how to run it on your own keys",
+        )}`,
+      )}
+      ${row(
+        "verify a clone",
+        html`<span class="mono"
+            >npm run verify-mirror -- ./log/${ctx.environment}</span
+          >${aside("the whole export at once, entry by entry")}`,
+      )}
+    </dl>`;
+
   return layout(ctx, {
     title: "How it works",
     description:
-      "Every stage of the pipeline, with this environment's own log under it: submit, validate, seal, read, keep true, standing, attest, verify.",
+      "Every stage of the pipeline, with this environment's own log under it: submit, validate, seal, read, keep true, standing, attest, verify, mirror.",
     body: html`
       <div class="page-head">
         <h1>How it works</h1>
@@ -466,6 +517,7 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
           "08",
           "Verify offline",
         )}
+        ${step("s9", "09", "Mirror and fork")}
       </div>
 
       <div class="stack">
@@ -506,6 +558,13 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
           "Verify offline",
           "GOAL 4 · TWO FILES AND ONE SCRIPT",
           verify,
+        )}
+        ${panel(
+          "s9",
+          "09",
+          "Mirror and fork",
+          "SECTION 11 · EXIT AS A PROTOCOL RIGHT",
+          mirror,
         )}
       </div>
     `,

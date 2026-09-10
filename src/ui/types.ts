@@ -454,6 +454,22 @@ export interface HowItWorksData {
   } | null;
   /** The position a sync example resumes from: the sealed head, or 0. */
   syncFrom: number;
+  /**
+   * The newest daily export of the sealed log, null before the first one.
+   *
+   * The row the sweep wrote when it pushed, exactly as the Mirror page reads
+   * it: what this instance exported, and never what the repository looks like
+   * at this instant. `treeUrl` is the exported directory as a reader can open
+   * it at that commit, built where every other URL on this page is built — in
+   * the gathering, because a page that assembled one would be deriving.
+   */
+  mirror: {
+    date: string;
+    /** The sealed position the export was built at. */
+    head: number;
+    entries: number;
+    treeUrl: string;
+  } | null;
 }
 
 /**

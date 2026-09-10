@@ -35,6 +35,15 @@
  * left off, and the line says so in words. A failed check on a legacy record is
  * a FAIL line and exit 1 like any other.
  *
+ * After the entries come the three families the export recomputes rather than
+ * reads: every `attestations/<id>.json` re-derived from the clone's own events
+ * and then the whole set put through `verifyAttestations` — the ids, the score
+ * signatures, the scorers, the hashes, the fold — then `standing.json`
+ * recomputed through `standingAt` at the sealed head, then `ledger.jsonl`
+ * recomputed and diffed line by line. Nothing in those three is anybody's word
+ * for anything: they are functions of the events in the same clone, so an edited
+ * file is a named pointer and a clean one needs no trust at all.
+ *
  * Which is the point of the whole per-entry pass: the file's `entry` and
  * `sidecar` are re-derived from the mirror's own events at `as_of` with the
  * same kernel the export derived them with, so a clean clone matches byte for
@@ -58,7 +67,16 @@ import { deriveEntry, type DerivedEntry } from "../derive.js";
 import { base64Encode } from "../encoding.js";
 import { verifyChain, type Event } from "../events.js";
 import { canonicalize, entryHash } from "../hash.js";
-import { MIRROR_FORMAT, sealFileName } from "../mirror.js";
+import type { LedgerRow } from "../ledger.js";
+import {
+  MIRROR_FORMAT,
+  mirrorAttestations,
+  mirrorLedgerRows,
+  mirrorStanding,
+  sealFileName,
+  type MirrorAttestationRecord,
+  type MirrorStanding,
+} from "../mirror.js";
 import {
   sealsForEntries,
   verifySeal,
@@ -66,7 +84,13 @@ import {
   type Seal,
 } from "../seal.js";
 import { verifyEntrySignature } from "../sign.js";
-import { verifyOffline, type Capture, type LogBundle, type Registry } from "../verify.js";
+import {
+  verifyAttestations,
+  verifyOffline,
+  type Capture,
+  type LogBundle,
+  type Registry,
+} from "../verify.js";
 import { captureHashes } from "./export.js";
 import {
   getJson,
@@ -429,7 +453,12 @@ function fail(
  * of entry files is a directory somebody edited, and every later check would
  * pass on the part that was left.
  */
-function checkManifest(io: ValidatorIo, tally: Tally, mirror: Mirror): void {
+function checkManifest(
+  io: ValidatorIo,
+  tally: Tally,
+  mirror: Mirror,
+  recomputed: Recomputed,
+): void {
   const manifest = mirror.manifest;
   let failures = 0;
   const wrong = (field: string, reason: string): void => {
@@ -449,6 +478,15 @@ function checkManifest(io: ValidatorIo, tally: Tally, mirror: Mirror): void {
     wrong("/operators", "count");
   }
   if (manifest["entries"] !== mirror.index.length) wrong("/entries", "count");
+  if (manifest["attestations"] !== recomputed.attestations.length) {
+    wrong("/attestations", "count");
+  }
+  if (manifest["ledger_rows"] !== recomputed.ledger.length) {
+    wrong("/ledger_rows", "count");
+  }
+  if (manifest["standing_position"] !== recomputed.standing.position) {
+    wrong("/standing_position", "mismatch");
+  }
 
   const newest = mirror.seals[mirror.seals.length - 1];
   if (newest === undefined) {
@@ -828,6 +866,193 @@ async function checkEntries(
   }
 }
 
+// ---------------------------------------------------------------------------
+// The attestations, standing, and the ledger
+// ---------------------------------------------------------------------------
+
+/**
+ * The three families the export recomputes rather than reads, recomputed again
+ * here from the clone's own events. A file that does not match is a file
+ * somebody edited: nothing in these three is anybody's word for anything.
+ */
+interface Recomputed {
+  readonly attestations: MirrorAttestationRecord[];
+  readonly standing: MirrorStanding;
+  readonly ledger: LedgerRow[];
+}
+
+/**
+ * The sealed head the clone's own seal chain ends at, and the instant every
+ * derivation in it was taken at.
+ *
+ * Read off the newest seal rather than off the manifest, which is the thing
+ * being checked: `checkManifest` holds the manifest's `head` and `as_of` against
+ * these two, so a manifest edited to agree with an edited file still fails.
+ */
+function headOf(mirror: Mirror): { head: number; asOf: string } {
+  const newest = mirror.seals[mirror.seals.length - 1];
+  return newest === undefined
+    ? { head: -1, asOf: "" }
+    : { head: newest.last_seq, asOf: newest.sealed_at };
+}
+
+/** Everything the three families come to for one clone. */
+function recompute(mirror: Mirror): Recomputed {
+  const { head, asOf } = headOf(mirror);
+  return {
+    // No answers: the model's answers are not in the log, so what is recomputed
+    // is the derived attestation and never the answers beside it.
+    attestations: mirrorAttestations(mirror.events, [], asOf),
+    standing: mirrorStanding(mirror.events, head),
+    ledger: mirrorLedgerRows(mirror.events, asOf),
+  };
+}
+
+/**
+ * Every attestation file, re-derived from the clone's own events and diffed,
+ * and then the whole set through `verifyAttestations`.
+ *
+ * Two different questions. The first is whether the file says what the events
+ * say — an edited status, score or scorer list is a named field. The second is
+ * whether the events themselves hold up: the id over its request, each score's
+ * signature, each scorer's standing to sign, the hashes, the fold. The first is
+ * about the copy and the second is about the log, and a clone can fail either.
+ */
+async function checkAttestations(
+  io: ValidatorIo,
+  tally: Tally,
+  mirror: Mirror,
+  dir: string,
+  recomputed: Recomputed,
+): Promise<void> {
+  for (const record of recomputed.attestations) {
+    const id = record.attestation.id;
+    const name = `attestation/${id}`;
+    const file = await readJson(join(dir, "attestations", `${id}.json`));
+    if (!isRecord(file)) {
+      fail(io, tally, name, "attestation", "/attestation", "malformed");
+      continue;
+    }
+    const difference = firstDifference(
+      record.attestation as unknown as Record<string, unknown>,
+      file["attestation"],
+      "/attestation",
+    );
+    if (difference !== null) {
+      fail(io, tally, name, "attestation", difference.field, difference.reason);
+      continue;
+    }
+    // The answers are the one thing the log does not carry, so the file is only
+    // held to carrying the key: what they hash to is the score records' problem,
+    // and `verifyAttestations` below is what asks that question.
+    if (!Object.prototype.hasOwnProperty.call(file, "answers")) {
+      fail(io, tally, name, "attestation", "/answers", "missing");
+      continue;
+    }
+    io.stdout(`ok ${name}`);
+  }
+
+  const { asOf } = headOf(mirror);
+  const report = await verifyAttestations({
+    as_of: asOf,
+    events: mirror.events,
+    registry: mirror.registry,
+    seals: mirror.seals,
+    // The attestation checks are about signatures, scorers and hashes; no
+    // capture is named by any of them.
+    captures: {},
+  });
+  if (report.ok) {
+    io.stdout(`ok attestations ${report.attestations.length}`);
+    return;
+  }
+  for (const one of report.attestations) {
+    for (const diff of one.diffs) {
+      fail(io, tally, `attestation/${one.id}`, diff.check, diff.field, diff.reason);
+    }
+  }
+}
+
+/** `standing.json`, recomputed through `standingAt` over the clone's events. */
+async function checkStanding(
+  io: ValidatorIo,
+  tally: Tally,
+  dir: string,
+  recomputed: Recomputed,
+): Promise<void> {
+  const actual = await readJson(join(dir, "standing.json"));
+  const expected = recomputed.standing as unknown as Record<string, unknown>;
+  if (!isRecord(actual)) {
+    fail(io, tally, "standing", "standing", "/standing", "malformed");
+    return;
+  }
+
+  // The operators row by row before the document as a whole, so an edited
+  // number names the operator it was edited on rather than the whole list.
+  const rows = actual["operators"];
+  if (Array.isArray(rows)) {
+    for (let index = 0; index < recomputed.standing.operators.length; index += 1) {
+      const one = recomputed.standing.operators[index]!;
+      const difference = firstDifference(
+        one as unknown as Record<string, unknown>,
+        rows[index],
+        `/operators/${index}`,
+      );
+      if (difference === null) continue;
+      fail(io, tally, "standing", "standing", difference.field, difference.reason);
+      return;
+    }
+    if (rows.length !== recomputed.standing.operators.length) {
+      fail(io, tally, "standing", "standing", "/operators", "count");
+      return;
+    }
+  }
+
+  const difference = firstDifference(expected, actual, "");
+  if (difference !== null) {
+    fail(io, tally, "standing", "standing", difference.field, difference.reason);
+    return;
+  }
+  io.stdout("ok standing");
+}
+
+/** `ledger.jsonl`, recomputed from the clone's events and diffed line by line. */
+async function checkLedger(
+  io: ValidatorIo,
+  tally: Tally,
+  dir: string,
+  recomputed: Recomputed,
+): Promise<void> {
+  const actual = await readLines(join(dir, "ledger.jsonl"));
+  for (let index = 0; index < recomputed.ledger.length; index += 1) {
+    const row = recomputed.ledger[index]!;
+    if (index >= actual.length) {
+      fail(io, tally, "ledger", "ledger", `/${index}`, "missing");
+      return;
+    }
+    const difference = firstDifference(
+      row as unknown as Record<string, unknown>,
+      actual[index],
+      `/${index}`,
+    );
+    if (difference === null) continue;
+    fail(io, tally, "ledger", "ledger", difference.field, difference.reason);
+    return;
+  }
+  if (actual.length > recomputed.ledger.length) {
+    fail(
+      io,
+      tally,
+      "ledger",
+      "ledger",
+      `/${recomputed.ledger.length}`,
+      "unexpected",
+    );
+    return;
+  }
+  io.stdout("ok ledger");
+}
+
 /**
  * Check one mirror directory.
  *
@@ -860,11 +1085,15 @@ export async function verifyMirror(
 
   const tally: Tally = { ok: 0, legacy: 0, failed: 0 };
   try {
-    checkManifest(io, tally, mirror);
+    const recomputed = recompute(mirror);
+    checkManifest(io, tally, mirror, recomputed);
     await checkChain(io, tally, mirror);
     await checkSeals(io, tally, mirror);
     await checkAnchors(io, tally, mirror);
     await checkEntries(io, tally, mirror, dir, plan, http);
+    await checkAttestations(io, tally, mirror, dir, recomputed);
+    await checkStanding(io, tally, dir, recomputed);
+    await checkLedger(io, tally, dir, recomputed);
   } catch (error) {
     io.stderr(
       error instanceof MirrorUnreadable

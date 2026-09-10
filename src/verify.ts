@@ -23,11 +23,23 @@
 
 import { openAssignment } from "./assign.js";
 import { buildTranscriptArtifact, transcriptArtifactHash } from "./artifact.js";
+import {
+  attestationId,
+  deriveAttestation,
+  type AttestationStatus,
+  type DerivedAttestation,
+} from "./attest.js";
 import { CORE_KEYS, coreVersion, domainOf, extractCore } from "./core.js";
 import { deriveEntry, registeredOperatorsAt } from "./derive.js";
+import { disputeExclusions } from "./dispute.js";
 import { base64Decode } from "./encoding.js";
 import { isTranscriptCategory } from "./evidence.js";
-import { verifyChain, type ApproverRecord, type Event } from "./events.js";
+import {
+  verifyChain,
+  type ApproverRecord,
+  type AttestationScorer,
+  type Event,
+} from "./events.js";
 import { canonicalize } from "./hash.js";
 import { decodeProof, verifyInclusion } from "./merkle.js";
 import { snapshotHash } from "./normalize.js";
@@ -76,8 +88,8 @@ export interface LogBundle {
   captures: Record<string, Capture>;
 }
 
-/** The checks, in the order they run. */
-export type Check =
+/** An entry's checks, in the order they run. */
+export type EntryCheck =
   | "bundle"
   | "schema"
   | "chain"
@@ -90,8 +102,26 @@ export type Check =
   | "seals"
   | "seal";
 
-/** Every check, in run order. */
-export const CHECKS: readonly Check[] = Object.freeze([
+/**
+ * An attestation's checks, in the order they run (`verifyAttestations`).
+ *
+ * Separate names rather than a reuse of the entry's, because an attestation is
+ * not an entry: it has no core, no seal of its own and no snapshot, and a
+ * report that said `records` for a score signature would send a reader looking
+ * for an approver that does not exist.
+ */
+export type AttestationCheck =
+  | "attestation_id"
+  | "attestation_signature"
+  | "attestation_scorer"
+  | "attestation_hashes"
+  | "attestation_derived";
+
+/** Every check either verifier can name. */
+export type Check = EntryCheck | AttestationCheck;
+
+/** Every entry check, in run order. */
+export const CHECKS: readonly EntryCheck[] = Object.freeze([
   "bundle",
   "schema",
   "chain",
@@ -103,6 +133,15 @@ export const CHECKS: readonly Check[] = Object.freeze([
   "snapshot",
   "seals",
   "seal",
+] as const);
+
+/** Every attestation check, in run order. */
+export const ATTESTATION_CHECKS: readonly AttestationCheck[] = Object.freeze([
+  "attestation_id",
+  "attestation_signature",
+  "attestation_scorer",
+  "attestation_hashes",
+  "attestation_derived",
 ] as const);
 
 /**
@@ -429,13 +468,99 @@ async function checkRecords(
 }
 
 /**
+ * The dispute this entry was filed as, as it stood before `seq`, or null.
+ *
+ * The mirror of src/worker/validate.ts's `disputedTarget`, read off the events
+ * instead of off the `dispute_of` column the door has: the filing is scoped to
+ * the TARGET entry and names the correction, so the correction's own events say
+ * nothing about it and the whole log has to be asked. Null three ways, exactly
+ * as the door's is: no filing names this entry, the filing has already been
+ * settled, or the target it names is not an entry.
+ *
+ * Settled is measured before `seq` and not at the head, because a dispute is
+ * settled BY the decisions this replays: at the moment each decision was taken
+ * the filing was still open, which is the position the door judged it from.
+ */
+function disputeFilingFor(
+  events: readonly Event[],
+  correctionId: string,
+): Event<"dispute_filed"> | null {
+  const settled = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "dispute_upheld" && event.type !== "dispute_failed") {
+      continue;
+    }
+    const payload = isRecord(event.payload) ? (event.payload as Json) : {};
+    const id = payload["correction_entry_id"];
+    if (typeof id === "string") settled.add(id);
+  }
+  if (settled.has(correctionId)) return null;
+
+  let filed: Event<"dispute_filed"> | null = null;
+  for (const event of inSeqOrder(events)) {
+    if (event.type !== "dispute_filed") continue;
+    const payload = isRecord(event.payload) ? (event.payload as Json) : {};
+    if (payload["correction_entry_id"] !== correctionId) continue;
+    filed = event as Event<"dispute_filed">;
+  }
+  return filed;
+}
+
+/**
+ * The operators barred from validating this entry beyond the standing rules.
+ *
+ * Whitepaper Section 6, "Dispute": a challenge "passes through the same
+ * validation process with one extra exclusion: no operator that signed the
+ * original, submitter or validator, may validate the challenge against it."
+ * Empty for an ordinary entry, which is why every entry that is not a challenge
+ * replays exactly as it always did.
+ *
+ * The target is derived at the filing's own position, so who "signed the
+ * original" is who had signed it when the challenge was filed — the same
+ * answer the door reaches, since a challenged entry is verified and closed and
+ * gains no further approver after it.
+ */
+function disputeExclusionsFor(
+  bundle: LogBundle,
+  entryId: string,
+  seq: number,
+): readonly string[] {
+  const before = bundle.events.filter((event) => event.seq < seq);
+  const filed = disputeFilingFor(before, entryId);
+  if (filed === null) return [];
+  const targetId = filed.entry_id;
+  if (typeof targetId !== "string") return [];
+
+  try {
+    const target = deriveEntry(
+      before.filter((event) => event.seq <= filed.seq),
+      targetId,
+      { now: bundle.as_of },
+    ).entry as unknown as Json;
+    const approvers = target["approvers"];
+    return disputeExclusions({
+      author_operator: (target["author_operator"] as string | null) ?? null,
+      approvers: (Array.isArray(approvers)
+        ? approvers
+        : []) as readonly ApproverRecord[],
+    });
+  } catch {
+    // A target the bundle does not carry, or carries unusably: the derived
+    // check is what names a missing entry, and inventing an exclusion list out
+    // of nothing would refuse decisions the log gives no reason to refuse.
+    return [];
+  }
+}
+
+/**
  * g. The exclusions, replayed.
  *
  * Each validation is put back through the door it came in at (src/validate.ts)
  * with the context as it stood at that event's position: who was registered
- * then, which decisions were already on the entry, and which assignment was
- * still open. A record the door would have refused is named by its index among
- * the entry's decisions.
+ * then, which decisions were already on the entry, which assignment was still
+ * open, and — where the entry is a challenge — which operators signed the entry
+ * it challenges. A record the door would have refused is named by its index
+ * among the entry's decisions.
  */
 function checkExclusions(
   bundle: LogBundle,
@@ -483,6 +608,7 @@ function checkExclusions(
       domain: domainOf(logCore),
       priorRecords,
       openAssignment: open === null ? null : { operator: open.operator },
+      excludedOperators: disputeExclusionsFor(bundle, entryId, event.seq),
     });
     if (!verdict.ok) {
       report.add(
@@ -875,4 +1001,400 @@ async function runChecks(
   await checkEntrySeal(log, entry, seals, submission, report);
 
   return report.finish(entryId);
+}
+
+// ---------------------------------------------------------------------------
+// The attestations
+// ---------------------------------------------------------------------------
+
+/**
+ * One attestation's verdict: what the log derives it as, and every difference
+ * between what its events claim and what they prove.
+ *
+ * `status` is the derived status (src/attest.ts), or null where the events left
+ * nothing to derive — so a reader can tell "this attestation is expired" from
+ * "this attestation could not be read at all", which a bare diff list cannot.
+ */
+export interface AttestationVerdict {
+  id: string;
+  status: AttestationStatus | null;
+  diffs: Diff[];
+}
+
+/** The verdict over every attestation the bundle carries. */
+export interface AttestationReport {
+  ok: boolean;
+  attestations: AttestationVerdict[];
+}
+
+/** The four event types an attestation's whole story is told in. */
+const ATTESTATION_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "attestation_requested",
+  "attestation_answered",
+  "attestation_scored",
+  "attestation_expired",
+]);
+
+/** The attestation id an event carries, or null for an event that carries none. */
+function attestationOf(event: Event): string | null {
+  const payload = isRecord(event.payload) ? (event.payload as Json) : {};
+  const id = payload["attestation"];
+  return typeof id === "string" ? id : null;
+}
+
+/**
+ * The median of the scorers' counts, as src/attest.ts's fold takes it: the
+ * middle of three, and the LOWER of the two middle values for an even count,
+ * because a score is a count of probes and half a probe is not a thing that can
+ * have been agreed with.
+ *
+ * Recomputed here rather than read off the fold, because "the score is the
+ * median" is exactly what this check is checking.
+ */
+function medianOf(values: readonly number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.floor((sorted.length - 1) / 2)] as number;
+}
+
+function own(record: Readonly<Record<string, unknown>>, key: unknown): boolean {
+  return (
+    typeof key === "string" &&
+    Object.prototype.hasOwnProperty.call(record, key)
+  );
+}
+
+/**
+ * Check one attestation's events against each other and against the registry.
+ *
+ * The order is the order of the checks: the id the events are filed under, then
+ * each score's signature, its signer, and the hashes it pins, and last the
+ * derived status and score. Everything runs; a bad signature does not hide a
+ * scorer under the model's own operator.
+ */
+async function checkAttestation(
+  bundle: LogBundle,
+  id: string,
+  request: Event<"attestation_requested">,
+  related: readonly Event[],
+): Promise<AttestationVerdict> {
+  const report = new Report();
+  let derived: DerivedAttestation | null = null;
+
+  try {
+    derived = deriveAttestation(related, { now: bundle.as_of });
+    const opened = request.payload;
+
+    // 1. The id is a fact about the request and not a name somebody chose: one
+    // model, one snapshot, one beacon round and one probe set hash to exactly
+    // one id (src/attest.ts, `attestationId`).
+    const expected = await attestationId({
+      model: opened.model,
+      pool_snapshot_seq: opened.pool_snapshot_seq,
+      beacon_round: opened.beacon_round,
+      probe_hash: opened.probe_hash,
+    });
+    if (expected !== id) {
+      report.add("attestation_id", "/id", "mismatch", expected, id);
+    }
+
+    const scorers: readonly AttestationScorer[] = Array.isArray(opened.scorers)
+      ? opened.scorers.filter(
+          (scorer): scorer is AttestationScorer =>
+            isRecord(scorer) &&
+            typeof scorer["operator"] === "string" &&
+            typeof scorer["agent"] === "string",
+        )
+      : [];
+    const drawn = new Set(scorers.map((scorer) => scorer.operator));
+    const scored = inSeqOrder(related).filter(
+      (event) => event.type === "attestation_scored",
+    ) as Event<"attestation_scored">[];
+
+    // The counts, by operator and last one wins, exactly as the fold reads
+    // them: two agents under one scoring operator are one score and not two.
+    const agreedByOperator = new Map<string, number>();
+
+    for (let index = 0; index < scored.length; index += 1) {
+      const event = scored[index]!;
+      const payload = isRecord(event.payload) ? (event.payload as Json) : {};
+      const record = payload["record"];
+      if (!isRecord(record)) {
+        report.add(
+          "attestation_signature",
+          `/scores/${index}/record`,
+          "shape",
+          "object",
+          shapeOf(record),
+        );
+        continue;
+      }
+
+      // 2. The signature, over the `attestation_score` kind with the
+      // attestation id in the entry id's slot (src/records.ts), so a score
+      // signed for one attestation cannot be moved onto another.
+      const signed = await verifyRecordSignature(
+        id,
+        "attestation_score",
+        record,
+        payload["signature"] as string,
+      );
+      if (!signed) {
+        report.add(
+          "attestation_signature",
+          `/scores/${index}/signature`,
+          "bad_signature",
+        );
+      }
+
+      // 3. Who signed it. The first refusal wins, as the door's own check does
+      // (src/attest.ts, `checkScore`): a record that breaks several rules
+      // always reports the same one.
+      const agent = record["agent"];
+      const operator = record["operator"];
+      const seat = scorers.find((scorer) => scorer.agent === agent);
+      const registered = own(bundle.registry.agents, agent)
+        ? bundle.registry.agents[agent as string]
+        : undefined;
+      const info = own(bundle.registry.operators, operator)
+        ? bundle.registry.operators[operator as string]
+        : undefined;
+      if (seat === undefined) {
+        report.add(
+          "attestation_scorer",
+          `/scores/${index}/agent`,
+          "not_a_scorer",
+          null,
+          briefValue(agent),
+        );
+      } else if (operator !== seat.operator) {
+        report.add(
+          "attestation_scorer",
+          `/scores/${index}/operator`,
+          "operator_mismatch",
+          seat.operator,
+          briefValue(operator),
+        );
+      } else if (registered === undefined) {
+        report.add(
+          "attestation_scorer",
+          `/scores/${index}/agent`,
+          "unregistered_agent",
+          null,
+          briefValue(agent),
+        );
+      } else if (registered !== operator) {
+        report.add(
+          "attestation_scorer",
+          `/scores/${index}/operator`,
+          "operator_mismatch",
+          registered,
+          briefValue(operator),
+        );
+      } else if (info === undefined) {
+        report.add(
+          "attestation_scorer",
+          `/scores/${index}/operator`,
+          "unregistered_operator",
+          null,
+          briefValue(operator),
+        );
+      } else if (info.maintainer === true) {
+        // Section 8: the score is "judged by parties its lab does not control",
+        // and a judgment nomankind signs about a model is nomankind's own.
+        report.add(
+          "attestation_scorer",
+          `/scores/${index}/operator`,
+          "maintainer_operator",
+          null,
+          briefValue(operator),
+        );
+      } else if (
+        opened.model_operator !== null &&
+        operator === opened.model_operator
+      ) {
+        report.add(
+          "attestation_scorer",
+          `/scores/${index}/operator`,
+          "model_operator",
+          null,
+          briefValue(operator),
+        );
+      }
+
+      // 4. What was scored: the probe set the request drew and the answers the
+      // model gave, so a score can never be moved onto other questions or
+      // other answers.
+      if (record["probe_hash"] !== opened.probe_hash) {
+        report.add(
+          "attestation_hashes",
+          `/scores/${index}/probe_hash`,
+          "mismatch",
+          briefValue(opened.probe_hash),
+          briefValue(record["probe_hash"]),
+        );
+      }
+      if (record["answers_hash"] !== derived.answers_hash) {
+        report.add(
+          "attestation_hashes",
+          `/scores/${index}/answers_hash`,
+          "mismatch",
+          briefValue(derived.answers_hash),
+          briefValue(record["answers_hash"]),
+        );
+      }
+
+      if (typeof operator === "string" && drawn.has(operator)) {
+        agreedByOperator.set(operator, record["agreed"] as number);
+      }
+    }
+
+    // 5. The status and the score, recomputed from the events rather than
+    // taken from the fold. An expiry over a full score is the tamper this
+    // catches: the sweep appends one only to an attestation still open or
+    // answered, so an `expired` sitting on top of every drawn scorer's
+    // signature is a claim the events themselves contradict.
+    const answered = related.some(
+      (event) =>
+        event.type === "attestation_answered" && event.seq > request.seq,
+    );
+    const expired = related.some(
+      (event) => event.type === "attestation_expired" && event.seq > request.seq,
+    );
+    const complete =
+      scorers.length > 0 && agreedByOperator.size === scorers.length;
+    const status: AttestationStatus = complete
+      ? "scored"
+      : expired
+        ? "expired"
+        : answered
+          ? "answered"
+          : "open";
+    if (status !== derived.status) {
+      report.add("attestation_derived", "/status", "mismatch", status, derived.status);
+    }
+
+    const counts = scorers
+      .map((scorer) => agreedByOperator.get(scorer.operator))
+      .filter((agreed): agreed is number => typeof agreed === "number");
+    const score = complete
+      ? { agreed: medianOf(counts), probe_count: opened.probe_count }
+      : null;
+    if (safeCanonical(score) !== safeCanonical(derived.score)) {
+      report.add(
+        "attestation_derived",
+        "/score",
+        "mismatch",
+        briefValue(score),
+        briefValue(derived.score),
+      );
+    }
+  } catch (error) {
+    // As verifyOffline's: a stranger's file is always answered with a verdict.
+    report.add(
+      "attestation_derived",
+      "/",
+      "internal_error",
+      null,
+      truncate(error instanceof Error ? error.message : String(error)),
+    );
+  }
+
+  return { id, status: derived === null ? null : derived.status, diffs: report.diffs };
+}
+
+/**
+ * Check every attestation the bundle carries, offline.
+ *
+ * Whitepaper Section 8, "Drift attestation": "Three operators from the trusted
+ * pool, none under the model's operator, score its answers against the log and
+ * sign the result, and the score and the probe hash are sealed with a date."
+ * Every clause of that is checkable from the log alone, and this is the check:
+ * the id the request hashes to, each score's signature and signer, the probe
+ * and answers hashes it pins, and the status and score the four events fold to.
+ *
+ * Pure and total, exactly as `verifyOffline` is: no I/O, no clock beyond the
+ * bundle's own `as_of`, and never a throw — an unforeseen one becomes a single
+ * `internal_error` diff on the attestation it happened under.
+ */
+export async function verifyAttestations(
+  bundle: LogBundle,
+): Promise<AttestationReport> {
+  try {
+    return await runAttestations(bundle);
+  } catch (error) {
+    return {
+      ok: false,
+      attestations: [
+        {
+          id: "",
+          status: null,
+          diffs: [
+            {
+              check: "attestation_derived",
+              field: "/",
+              expected: null,
+              actual: truncate(
+                error instanceof Error ? error.message : String(error),
+              ),
+              reason: "internal_error",
+            },
+          ],
+        },
+      ],
+    };
+  }
+}
+
+async function runAttestations(bundle: LogBundle): Promise<AttestationReport> {
+  const events = Array.isArray(bundle?.events)
+    ? bundle.events.filter((event) => isEventShape(event))
+    : [];
+
+  // Every attestation's events, grouped by the id they carry: an attestation's
+  // whole story is a sub-sequence of the log, exactly as an entry's is.
+  const byId = new Map<string, Event[]>();
+  const requests = new Map<string, Event<"attestation_requested">>();
+  for (const event of inSeqOrder(events)) {
+    if (!ATTESTATION_EVENT_TYPES.has(event.type)) continue;
+    const id = attestationOf(event);
+    if (id === null) continue;
+    const bucket = byId.get(id);
+    if (bucket === undefined) byId.set(id, [event]);
+    else bucket.push(event);
+    if (event.type === "attestation_requested" && !requests.has(id)) {
+      requests.set(id, event as Event<"attestation_requested">);
+    }
+  }
+
+  const attestations: AttestationVerdict[] = [];
+  for (const [id, related] of byId) {
+    const request = requests.get(id);
+    if (request === undefined) {
+      // Scores or an expiry for an attestation nobody opened: there is nothing
+      // to derive them against, and every check here is a check against the
+      // request. Saying so is the answer; deriving an empty attestation to hang
+      // them on would be inventing one.
+      attestations.push({
+        id,
+        status: null,
+        diffs: [
+          {
+            check: "attestation_derived",
+            field: "/",
+            expected: null,
+            actual: related.length,
+            reason: "not_requested",
+          },
+        ],
+      });
+      continue;
+    }
+    attestations.push(await checkAttestation(bundle, id, request, related));
+  }
+
+  return {
+    ok: attestations.every((one) => one.diffs.length === 0),
+    attestations,
+  };
 }

@@ -205,6 +205,7 @@ export async function statusInput(
         : {
             date: anchor.date,
             external: anchor.external === null ? null : anchor.external.kind,
+            upgraded: anchor.external !== null && anchor.external.upgraded !== null,
           },
     seals_yesterday: await countSealsSealedOn(db, yesterday),
     reconciliation:

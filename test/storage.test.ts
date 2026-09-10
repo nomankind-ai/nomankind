@@ -2498,6 +2498,7 @@ describe("sealing writes", () => {
       calendar: "https://alice.btc.calendar.opentimestamps.org",
       submitted_at: "2026-09-10T00:10:00.000Z",
       proof: "AE9wZW5UaW1lc3RhbXBz",
+      upgraded: null,
     };
     await setAnchorExternal(sealing.db, day, external);
     const stored = await getAnchor(sealing.db, day);

@@ -694,7 +694,7 @@ function textField(
 /**
  * How it works (D-076): the pipeline, with this environment's own log under it.
  *
- * Fifteen reads, every one of them a single newest row, a count, or one keyset
+ * Sixteen reads, every one of them a single newest row, a count, or one keyset
  * page at an explicit limit. Nothing is derived on the way: the tier is the
  * sidecar's effective one, the reconciliation's totals are the ones the ledger
  * row states, and the citation's host is parsed here rather than on the page
@@ -788,6 +788,12 @@ async function howItWorks(
     attestations.find((each) => each.attestation.score !== null) ?? null;
 
   const expires = record === null ? null : record["expires_at"];
+
+  // The newest export, read the same way the Mirror page and the JSON route
+  // read it: the row the sweep wrote when it pushed, and never a question put
+  // to the repository. The tree URL is built here rather than on the page
+  // because a page that assembled a URL would be a page deriving one.
+  const exported = await latestMirror(db);
 
   const data: HowItWorksData = {
     entry:
@@ -892,6 +898,15 @@ async function howItWorks(
             ),
           },
     syncFrom: seal === null ? 0 : seal.last_seq,
+    mirror:
+      exported === null
+        ? null
+        : {
+            date: exported.date,
+            head: exported.head,
+            entries: exported.entries,
+            treeUrl: `${MIRROR.web}/${MIRROR.repository}/tree/${exported.commit}/${env.ENVIRONMENT}`,
+          },
   };
 
   return htmlResponse(renderHowItWorks(ctx, data));
