@@ -3,7 +3,7 @@
  *
  * Whitepaper Section 11, Deployment and status: nomankind publishes what it is
  * running and whether it is working. This module is the second half of that
- * sentence — twelve stages of the machine, each with a state, the last thing
+ * sentence — thirteen stages of the machine, each with a state, the last thing
  * that happened in it, the rule that decides the state, and a link a reader can
  * follow to check the answer for themselves.
  *
@@ -27,6 +27,7 @@
  * cadences and the witness bar all come from src/policy.ts.
  */
 
+import type { MirrorKind } from "./adapters/mirror.js";
 import { utcDay } from "./anchor.js";
 import {
   POLICY,
@@ -166,6 +167,23 @@ export interface StatusInput {
   /** The position the standing step last recomputed at, or null. */
   readonly standing_position: number | null;
   readonly attestations: { readonly due: number; readonly total: number };
+  /**
+   * The daily log mirror (M23): which track this environment runs, and the
+   * newest export if there is one.
+   *
+   * `kind` is asked of the same `mirrorKindFor` the sweep asks, so the page
+   * cannot claim a repository the sweep is not pushing to.
+   */
+  readonly mirror: {
+    readonly kind: MirrorKind;
+    readonly newest: {
+      readonly date: string;
+      readonly exported_at: string;
+      readonly commit: string;
+      readonly head: number;
+      readonly url: string;
+    } | null;
+  };
   readonly exercised: ExercisedFacts;
 }
 
@@ -232,7 +250,8 @@ export interface Counter {
   /**
    * Stages reading ok, with idle counted among them: a stage that is owed
    * nothing is not behind on anything, and a page that called an empty log
-   * one-twelfth working would be reporting the traffic rather than the machine.
+   * one-thirteenth working would be reporting the traffic rather than the
+   * machine.
    */
   readonly stagesOk: number;
   readonly stagesTotal: number;
@@ -343,7 +362,7 @@ function detailNumber(step: SweepStep | null, key: string): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// The twelve rules
+// The thirteen rules
 // ---------------------------------------------------------------------------
 
 /**
@@ -812,7 +831,81 @@ function attestations(input: StatusInput): Stage {
 }
 
 /**
- * The twelve stages, in the page's order, read against one instant.
+ * (13) The day's export to the public mirror.
+ *
+ * Whitepaper Section 11: the sealed log goes out daily to a public repository
+ * under CC0, and the Conclusion makes it the exit right — "the exit is not a
+ * promise, it is a copy". So the question is exactly "is today's copy there",
+ * and the two ways it can be no are different: an environment with no token is
+ * not configured to mirror at all, and an environment that has not reached
+ * today's export yet is owed one rather than behind on one.
+ *
+ * The grace is STATUS_FAILING_AFTER_MINUTES from today's 00:00 UTC, reused
+ * rather than given a number of its own: the export is owed once a day and the
+ * page already has one bar for how long a broken rule may stand.
+ */
+function mirrorExport(input: StatusInput, now: string): Stage {
+  const rule = "today's export committed to the mirror repository";
+  const newest = input.mirror.newest;
+  const evidence: StageEvidence[] = [
+    { label: "/mirror/latest", href: "/mirror/latest" },
+    ...(newest === null ? [] : [{ label: "commit", href: newest.url }]),
+  ];
+
+  if (input.mirror.kind === "unavailable") {
+    return {
+      stage: "mirror export",
+      state: "idle",
+      last: "not configured",
+      rule,
+      evidence,
+    };
+  }
+  if (input.seal === null) {
+    // The mirror is the sealed record, so a log with nothing sealed is owed no
+    // export at all.
+    return {
+      stage: "mirror export",
+      state: "idle",
+      last: "nothing sealed",
+      rule,
+      evidence,
+    };
+  }
+
+  const today = utcDay(now);
+  if (newest !== null && newest.date === today) {
+    return {
+      stage: "mirror export",
+      state: "ok",
+      last: line(newest.date, stamp(newest.exported_at, now), `head ${newest.head}`),
+      rule,
+      evidence,
+    };
+  }
+
+  // Owed, and not there. Whether that is worth saying depends on how far into
+  // the day it is: the first half hour of a UTC day is a run that has not come
+  // round yet rather than one that is missing.
+  const sinceMidnight = secondsBetween(`${today}T00:00:00.000Z`, now);
+  const reason = freshSkip(stepOf(input, "mirror"));
+  return {
+    stage: "mirror export",
+    state: sinceMidnight <= FAILING_AFTER_SECONDS ? "attention" : "failing",
+    last: line(
+      today,
+      sinceMidnight <= FAILING_AFTER_SECONDS
+        ? "owed, not yet"
+        : (reason ?? "not exported"),
+      newest === null ? "no export yet" : `last ${newest.date}`,
+    ),
+    rule,
+    evidence,
+  };
+}
+
+/**
+ * The thirteen stages, in the page's order, read against one instant.
  *
  * The order is the machine's own — the timer, then what the timer does, then
  * what the log owes at the end of the day — and it is fixed, because a status
@@ -832,11 +925,12 @@ export function stageStates(input: StatusInput, now: string): Stage[] {
     ledger(input, now),
     standing(input, now),
     attestations(input),
+    mirrorExport(input, now),
   ];
 }
 
 /** How many stages there are, for a fraction that cannot drift from the list. */
-export const STAGE_COUNT = 12;
+export const STAGE_COUNT = 13;
 
 // ---------------------------------------------------------------------------
 // Exercised, not probed

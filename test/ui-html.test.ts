@@ -197,12 +197,19 @@ describe("layout", () => {
     expect(document).not.toContain(" onclick=");
   });
 
-  it("links the repository and the paper in the footer", () => {
+  it("links the repository, the mirror and the paper in the footer", () => {
     expect(document).toContain("https://github.com/nomankind-ai/nomankind");
     expect(document).toContain(
       "https://github.com/nomankind-ai/nomankind/blob/main/paper/WHITEPAPER.md",
     );
     expect(document).toContain("Apache-2.0");
+    // The daily CC0 export (Section 11), between the two repositories a reader
+    // can leave with. Ours and internal, so it is a plain link: no new tab and
+    // no nofollow, which are for somebody else's URL.
+    expect(document).toContain(`<a href="/mirror/latest">Mirror</a>`);
+    const footer = document.slice(document.indexOf("<footer"));
+    expect(footer.indexOf("Repository")).toBeLessThan(footer.indexOf(">Mirror<"));
+    expect(footer.indexOf(">Mirror<")).toBeLessThan(footer.indexOf("Whitepaper"));
   });
 
   it("starts with a doctype and declares the language", () => {

@@ -546,6 +546,45 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
     },
   ];
 
+  const mirror: Row[] = [
+    {
+      name: "MIRROR.repository",
+      value: policy.MIRROR.repository,
+      means:
+        "The public repository the sealed log is exported to once per UTC day (Section 11). Each environment writes its own top-level directory there and touches nothing else, so demo and production share one mirror without either overwriting the other.",
+    },
+    {
+      name: "MIRROR.branch",
+      value: policy.MIRROR.branch,
+      means:
+        "The branch each export commits to. One branch and no history rewriting: an export is a commit on top of what is there, so the repository is itself an append-only record of the exports.",
+    },
+    {
+      name: "MIRROR.license",
+      value: policy.MIRROR.license,
+      means:
+        "The licence the mirrored log is published under. The data was under it before there was a mirror: the export is a convenience, not the licence, and a fork that clones it owes nomankind nothing.",
+    },
+    {
+      name: "MIRROR.api",
+      value: policy.MIRROR.api,
+      means:
+        "The API host the export pushes through. Pinned like every other endpoint the code calls, so a mirror that moved moves by a recorded decision rather than by configuration nobody published.",
+    },
+    {
+      name: "MIRROR.web",
+      value: policy.MIRROR.web,
+      means:
+        "Where a commit is linked for a reader: the host the mirror page's commit link and the API's url field are built from.",
+    },
+    {
+      name: "MIRROR.raw",
+      value: policy.MIRROR.raw,
+      means:
+        "Where an export's own files are fetched from unrendered: the host the raw mirror.json link is built from, which is what a verifier reads rather than a web page about it.",
+    },
+  ];
+
   const requests: Row[] = [
     {
       name: "REQUEST_CLOCK_SKEW_SECONDS",
@@ -681,6 +720,18 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         are the only numbers that decide when a rule that has been broken stops
         being a hiccup. They are operational and they move by decision like every
         other number here.
+      </p>
+
+      ${group("Mirror", mirror)}
+
+      <p class="note">
+        The mirror is the exit (Section 11): the sealed log is exported daily to
+        that repository under that licence, and
+        <a href="/mirror/latest">the mirror page</a> says what this environment
+        last pushed. Nothing here decides what is exported — the sealed record
+        does — and no number is needed for it: the export is owed once per UTC
+        day, and how long it may be owed is the status page's
+        STATUS_FAILING_AFTER_MINUTES above.
       </p>
 
       ${group("Requests", requests)}

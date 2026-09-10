@@ -37,6 +37,7 @@
 
 import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
 import { anchorAdapterFor } from "../adapters/anchor.js";
+import { mirrorAdapterFor, type MirrorAdapter } from "../adapters/mirror.js";
 import {
   pinnedWitnessesFor,
   sealingAgentIdFor,
@@ -107,6 +108,7 @@ export interface SweeperDeps {
   readonly ineligibleAgents?: ReadonlySet<string>;
   readonly anchor?: AnchorAdapter;
   readonly payout?: PayoutAdapter;
+  readonly mirror?: MirrorAdapter;
 }
 
 /**
@@ -147,6 +149,12 @@ export async function sweepDepsFor(
     // like any other — a cycle that pays through the cron door and skips
     // `payout_unconfigured` through the alarm would be two different sweeps.
     payout: deps?.payout ?? payoutAdapterFor(env.ENVIRONMENT),
+    // Where the day's export goes (M23). Built here for the reason the payout
+    // adapter is: the alarm is a sweep like any other, and an environment that
+    // mirrored through the cron door and skipped `mirror_unavailable` through
+    // the alarm would be two different sweeps. The secret decides the track, so
+    // an environment without one says so rather than failing a call a day.
+    mirror: deps?.mirror ?? mirrorAdapterFor(env),
   };
 }
 

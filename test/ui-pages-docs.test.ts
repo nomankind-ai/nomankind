@@ -302,6 +302,32 @@ describe("renderPolicy", () => {
     expect(page).toContain("Accept: application/json");
   });
 
+  it("publishes the mirror as a group, read from the object it was handed", () => {
+    // Section 11: the daily CC0 export. Every value is POLICY's own — the page
+    // is handed a policy whose MIRROR is nothing like the real one, and it has
+    // to print that one, because a page holding its own repository name could
+    // point a fork somewhere the code never pushes.
+    const other = renderPolicy(ctx, {
+      ...POLICY,
+      MIRROR: {
+        repository: "test-owner/test-log",
+        branch: "trunk",
+        api: "https://api.test.invalid",
+        web: "https://web.test.invalid",
+        raw: "https://raw.test.invalid",
+        license: "TEST-1.0",
+      },
+    } as unknown as typeof POLICY);
+    for (const key of ["repository", "branch", "api", "web", "raw", "license"]) {
+      expect(other, `MIRROR.${key} has no row`).toContain(`MIRROR.${key}`);
+    }
+    expect(other).toContain("test-owner/test-log");
+    expect(other).toContain("trunk");
+    expect(other).toContain("TEST-1.0");
+    expect(other).toContain("https://raw.test.invalid");
+    expect(other).not.toContain("nomankind-ai/log");
+  });
+
   it("carries no script and no inline style", () => {
     expect(page).not.toContain("<script");
     expect(page).not.toContain(' style="');
@@ -329,6 +355,7 @@ describe("renderApi", () => {
       "/operators/{id}/ledger",
       "/ledger",
       "/status",
+      "/mirror/latest",
       "/how-it-works",
     ];
     for (const path of paths) {
@@ -421,8 +448,11 @@ describe("renderApi", () => {
   });
 
   it("names what is not built yet with its milestone", () => {
-    expect(page).toContain("M23");
     expect(page).toContain("M24");
+    // M23 built the mirror, so the row is gone: a path that exists listed as
+    // unbuilt is the same lie as a documented path that answers 404.
+    expect(page).not.toContain("The log mirror");
+    expect(page).not.toContain(`<td class="mono">M23</td>`);
     // M21 built standing and the ledger, so the row is gone: a path that exists
     // listed as unbuilt is the same lie as a documented path that answers 404.
     expect(page).not.toContain("Standing and the ledger endpoints");
@@ -778,6 +808,42 @@ describe("renderApi", () => {
     // The fields file names the domain the author signs; a missing one is
     // bad_fields before any I/O rather than a default nobody chose.
     expect(page).toContain("bad_fields");
+  });
+
+  it("documents the mirror endpoint in both of its shapes", () => {
+    // Section 11: the daily CC0 export, and the two 404 reasons a caller has to
+    // be able to tell apart — an environment that pushes nothing, and one whose
+    // first export is still owed.
+    expect(page).toContain("The mirror and the fork kit");
+    expect(page).toContain('"error": "no_export"');
+    expect(page).toContain("mirror_not_configured");
+    expect(page).toContain("no_export_yet");
+    for (const field of [
+      "exported_at",
+      "commit",
+      "tree",
+      "head",
+      "seal_seq",
+      "files_changed",
+      "raw_url",
+    ]) {
+      expect(page, `${field} is not in the mirror shape`).toContain(field);
+    }
+  });
+
+  it("gives the mirror and verify-mirror commands their whole signatures", () => {
+    expect(page).toContain(`npm run mirror -- ${ctx.origin} ./mirror`);
+    expect(page).toContain(
+      "npm run verify-mirror -- ./mirror/&lt;env&gt; [--captures &lt;url-or-dir&gt;] [--entry &lt;id&gt;]",
+    );
+  });
+
+  it("counts the status stages as the status rules count them", () => {
+    // The mirror export is a stage of the pipeline now, so the endpoint's own
+    // description says thirteen: a page naming twelve would be documenting a
+    // shape the route no longer answers.
+    expect(page).toContain("thirteen of them");
+    expect(page).not.toContain("twelve of them");
   });
 
   it("carries no script and no inline style", () => {

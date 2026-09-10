@@ -10,7 +10,8 @@
  * other doors nothing.
  *
  * Content negotiation is one function, `wantsHtml`: an Accept header naming
- * text/html. `/entries/{id}`, `/operators`, `/operators/{id}` and `/policy` are
+ * text/html. `/entries/{id}`, `/operators`, `/operators/{id}`, `/policy` and
+ * `/mirror/latest` are
  * shared with the JSON doors and answer HTML only to a browser; `/entries`,
  * `/api`, `/genesis` and `/landing` are pages and nothing else. Every HTML
  * response carries `Vary: Accept` (src/ui/html.ts), because a shared cache that
@@ -26,6 +27,7 @@
  * from src/policy.ts. No wall clock either — `deps.now` is the instant the router read once.
  */
 
+import { mirrorKindFor } from "../adapters/mirror.js";
 import { confidenceInputs } from "../confidence.js";
 import type { Event } from "../events.js";
 import { ledgerBalance } from "../ledger.js";
@@ -38,6 +40,7 @@ import {
   HOME_LATEST_ENTRIES,
   LANDING_BAND_SEALS,
   LIST_PAGE_LIMIT,
+  MIRROR,
   POLICY,
   WITNESS_PIN,
 } from "../policy.js";
@@ -59,6 +62,7 @@ import {
   getOperator,
   latestAnchor,
   latestEventOfType,
+  latestMirror,
   latestSeal,
   ledgerRowsForEntry,
   ledgerRowsForOperator,
@@ -93,6 +97,7 @@ import {
 import { renderGenesis } from "../ui/pages/genesis.js";
 import { renderHome } from "../ui/pages/home.js";
 import { renderHowItWorks } from "../ui/pages/how-it-works.js";
+import { renderMirror } from "../ui/pages/mirror.js";
 import { LANDING_CSS, renderLanding } from "../ui/pages/landing.js";
 import { renderOperator } from "../ui/pages/operator.js";
 import { renderOperators } from "../ui/pages/operators.js";
@@ -107,6 +112,7 @@ import type {
   GenesisRow,
   HowItWorksData,
   LandingData,
+  MirrorData,
   OperatorRow,
   PageContext,
   StatusData,
@@ -923,6 +929,36 @@ async function status(
   return htmlResponse(renderStatus(ctx, data));
 }
 
+/**
+ * Mirror (Section 11): the page form of `GET /mirror/latest`.
+ *
+ * The same two readings the JSON route makes and no third: the row the sweep
+ * wrote when it last pushed, and which adapter this environment pushes through.
+ * Nothing is fetched from the mirror to draw the page — a page that asked GitHub
+ * how the repository looks would be reporting the repository and not the export,
+ * and the export is the thing this instance can be held to.
+ */
+async function mirror(
+  db: D1Like,
+  ctx: PageContext,
+  env: Env,
+): Promise<Response> {
+  const kind = mirrorKindFor(env);
+  const data: MirrorData = {
+    configured: kind !== "unavailable",
+    kind,
+    // The repository as a reader can open it, built from policy exactly as the
+    // JSON route builds it, so the page and the object name one place.
+    repository: `${MIRROR.web}/${MIRROR.repository}`,
+    branch: MIRROR.branch,
+    // The environment's own top-level directory in the mirror: the export
+    // writes under it and nowhere else.
+    path: env.ENVIRONMENT,
+    latest: await latestMirror(db),
+  };
+  return htmlResponse(renderMirror(ctx, data));
+}
+
 // ---------------------------------------------------------------------------
 // The router
 // ---------------------------------------------------------------------------
@@ -989,6 +1025,11 @@ async function route(
   // the JSON route in src/worker/status.ts rather than being answered here, so
   // there is one implementation of the rules and one of the endpoint.
   if (path === "/status") return wants ? status(db, ctx, env, now) : null;
+
+  // The mirror splits the same way (Section 11): a browser gets the page, and
+  // everything else falls through to the JSON route in src/worker/mirror.ts,
+  // which is the one place the 404 shapes and the Allow header are decided.
+  if (path === "/mirror/latest") return wants ? mirror(db, ctx, env) : null;
 
   return null;
 }

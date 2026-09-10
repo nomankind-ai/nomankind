@@ -154,7 +154,7 @@ function counters(c: Counter, sweepDegraded: boolean): Safe {
  *
  * One line saying how many, and one sentence naming which. The names are the
  * rules module's own stage names rather than a paraphrase, so a reader who reads
- * the band and then the table is reading the same twelve words twice.
+ * the band and then the table is reading the same words twice.
  */
 function band(data: StatusData): Safe | null {
   const failing = data.stages

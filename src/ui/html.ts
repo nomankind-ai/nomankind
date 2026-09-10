@@ -246,6 +246,14 @@ const PAPER_URL =
   "https://github.com/nomankind-ai/nomankind/blob/main/paper/WHITEPAPER.md";
 
 /**
+ * The daily CC0 export of the sealed log (Section 11), linked from the footer
+ * beside the two repositories a reader can leave with. Ours and internal, so it
+ * is a plain link: `link` refuses a relative href on purpose, and an external
+ * tab and a `nofollow` would both be wrong for a page of this site.
+ */
+const MIRROR_PATH = "/mirror/latest";
+
+/**
  * The nav, in the order the prototype shows it. Paper is external because the
  * paper is the record of what this thing claims to be and it lives with the
  * code, not in a page that could paraphrase it.
@@ -326,6 +334,7 @@ export function layout(
       <span class="dim">Apache-2.0. The log and the code are the record.</span>
       <span class="footer-links">
         ${link(REPOSITORY_URL, "Repository", true)}
+        <a href="${MIRROR_PATH}">Mirror</a>
         ${link(PAPER_URL, "Whitepaper", true)}
       </span>
     </footer>

@@ -93,4 +93,20 @@ export type Env = {
    * door.
    */
   APEX_HOST?: string;
+  /**
+   * The credential that writes the daily log mirror (M23, Section 11's "the
+   * exit is not a promise, it is a copy"): a token with push access to the
+   * repository policy `MIRROR` names.
+   *
+   * A Worker secret the maintainer sets (D-016). Never in this repository,
+   * never in wrangler.jsonc, and never logged or returned — the mirror adapter
+   * keeps it out of every refusal detail for the same reason the registry
+   * adapter keeps the bearer credential out of its errors.
+   *
+   * Absent means the mirror track is unavailable on this environment, which is
+   * a refusal the sweep counts and the status page shows rather than a failure:
+   * a mirror that claimed an export with no repository behind it would put a
+   * link on the page that goes nowhere.
+   */
+  MIRROR_TOKEN?: string;
 };

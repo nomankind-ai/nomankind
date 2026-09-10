@@ -738,6 +738,38 @@ export const PAYOUT_MINIMUM_MICROS = 5_000_000;
  */
 export const PAYOUT_CYCLE = "monthly";
 
+/**
+ * Section 11, "Deployment and status": the sealed log is exported daily to a
+ * public repository under CC0, so a fork does not have to ask nomankind for the
+ * record — "the exit is not a promise, it is a copy".
+ *
+ * Which repository, on which branch, through which API, and under which
+ * license. Pinned here rather than in the mirror adapter for the same reason
+ * REGISTRY and WITNESS_PIN are: a reader holding a clone years from now has to
+ * be able to say which repository it came from and what it was published under
+ * without running the Worker.
+ *
+ * Not a whitepaper list, and no number: the paper names the daily export and the
+ * CC0 posture and stops there, so the addresses are the maintainer's published
+ * choice (M23) and move only by a later decision. The credential that writes to
+ * it is never here — it is the MIRROR_TOKEN secret (D-016).
+ */
+export const MIRROR: Readonly<{
+  repository: string;
+  branch: string;
+  api: string;
+  web: string;
+  raw: string;
+  license: string;
+}> = Object.freeze({
+  repository: "nomankind-ai/log",
+  branch: "main",
+  api: "https://api.github.com",
+  web: "https://github.com",
+  raw: "https://raw.githubusercontent.com",
+  license: "CC0-1.0",
+});
+
 /** Every policy number, collected and frozen. */
 export const POLICY = Object.freeze({
   TRUSTED_POOL_SWITCH,
@@ -780,6 +812,7 @@ export const POLICY = Object.freeze({
   READ_PRICE_MICROS_PER_READ,
   PAYOUT_MINIMUM_MICROS,
   PAYOUT_CYCLE,
+  MIRROR,
   NORM_VERSION,
   SCHEMA_VERSION,
   FETCH_MAX_REDIRECTS,

@@ -78,11 +78,13 @@
  */
 
 import type { BeaconReader } from "../adapters/beacon.js";
+import type { MirrorAdapter } from "../adapters/mirror.js";
 import type { PayoutAdapter } from "../adapters/payout.js";
 import type { EnvironmentWitnessAdapter } from "../adapters/witness.js";
 import {
   buildAnchor,
   utcDay,
+  type Anchor,
   type AnchorAdapter,
   type AnchorExternal,
 } from "../anchor.js";
@@ -101,7 +103,7 @@ import {
   type Beacon,
 } from "../assign.js";
 import { attestationDue, deriveAttestation } from "../attest.js";
-import { coreVersion, domainOf } from "../core.js";
+import { coreVersion, domainOf, extractCore } from "../core.js";
 import type { BountyAccrual } from "../bounty.js";
 import {
   deriveEntry,
@@ -133,6 +135,13 @@ import {
   SEAL_MAX_EVENTS,
   WITNESSES_REQUIRED,
 } from "../policy.js";
+import {
+  MirrorError,
+  buildMirror,
+  type MirrorEntryRecord,
+  type MirrorOperator,
+} from "../mirror.js";
+import { entryHash } from "../hash.js";
 import { buildReadCountPayload } from "../receipt.js";
 import { validateEntry, type Entry } from "../schema.js";
 import {
@@ -148,6 +157,7 @@ import {
   EventAppendError,
   SealConflictError,
   agentsForOperator,
+  anchorsAfter,
   appendEvents,
   bountiesForEntry,
   bountyPoolRows,
@@ -155,6 +165,7 @@ import {
   dueAttestations,
   dueRevalidationAssignments,
   earliestReadReceiptDay,
+  entryIdsThrough,
   eventsAfter,
   eventsForAttestation,
   eventsForEntry,
@@ -169,12 +180,15 @@ import {
   ledgerCursor,
   listEntries,
   listOperators,
+  mirrorOn,
   openRevalidationAssignment,
+  operatorDomains,
   payoutRows,
   priceBountyRow,
   putAnchor,
   putEntry,
   putLedgerRows,
+  putMirror,
   putSweepSteps,
   readCounterRangeOn,
   readCountsOn,
@@ -188,6 +202,7 @@ import {
   recordSeal,
   recordTrustChange,
   releasedUnpaidRows,
+  sealsAfter,
   sealsSealedOn,
   setAnchorExternal,
   setLedgerCursor,
@@ -204,7 +219,7 @@ import {
 } from "../storage/repository.js";
 import { checkWitnesses, witnessedCount, type Witness } from "../witness.js";
 import type { Env } from "./env.js";
-import { entryWorld, rederive, registryEvents } from "./world.js";
+import { entryWorld, rederive, registryEvents, worldAt } from "./world.js";
 
 /**
  * The pinned witness set an environment judges countersignatures against:
@@ -242,6 +257,13 @@ export interface SweepDeps {
    */
   readonly payout?: PayoutAdapter;
   /**
+   * Where the day's export goes (M23, Section 11's daily log mirror). Optional
+   * like the payout adapter and for the same reason: a caller that asks for the
+   * sweep without one gets every other step and a mirror step that counts
+   * `mirror_unavailable` rather than one that pretends to have exported.
+   */
+  readonly mirror?: MirrorAdapter;
+  /**
    * Which door ran this sweep (M23, decision D-076): `cron` from the scheduled
    * handler in src/worker/index.ts, `alarm` from the Sweeper Durable Object.
    *
@@ -276,6 +298,7 @@ export const SWEEP_STEPS: readonly string[] = Object.freeze([
   "seal",
   "witness",
   "anchor",
+  "mirror",
   "ledger",
   "standing",
   "payout",
@@ -412,6 +435,20 @@ export interface SweepReport {
     readonly seals: number;
     /** The receipt's kind, or null when nothing has posted the hash yet. */
     readonly external: string | null;
+  } | null;
+  /**
+   * The day this run exported to the mirror, or null when it exported nothing.
+   *
+   * `unchanged` is a real export: the day's bytes were already in the
+   * repository, so nothing was committed and the day is still current.
+   */
+  readonly mirror: {
+    readonly date: string;
+    readonly commit: string;
+    readonly changed: number;
+    readonly head: number;
+    readonly seal_seq: number;
+    readonly unchanged: boolean;
   } | null;
   /**
    * What the ledger step priced, and how far it has read. Null before the first
@@ -1087,6 +1124,228 @@ async function postAnchor(
 }
 
 // ---------------------------------------------------------------------------
+// (h2): the day's mirror
+// ---------------------------------------------------------------------------
+
+/** What one refused push left behind, for the step row's detail. */
+interface MirrorOutcome {
+  readonly report: SweepReport["mirror"];
+  /** The push's own detail, or null when nothing refused. */
+  readonly detail: string | null;
+}
+
+/**
+ * Every seal, in seq order, paged.
+ *
+ * -1 because `sealsAfter` reads strictly after and seq 0 is a real seal.
+ */
+async function allSeals(db: D1Like): Promise<Seal[]> {
+  const seals: Seal[] = [];
+  let after = -1;
+  for (;;) {
+    const page = await sealsAfter(db, after, LIST_PAGE_LIMIT);
+    seals.push(...page);
+    if (page.length < LIST_PAGE_LIMIT) break;
+    after = page[page.length - 1]!.seq;
+  }
+  return seals;
+}
+
+/**
+ * Every anchor, in date order, paged.
+ *
+ * The empty string because `anchorsAfter` reads strictly after a day and every
+ * real day sorts above it.
+ */
+async function allAnchors(db: D1Like): Promise<Anchor[]> {
+  const anchors: Anchor[] = [];
+  let after = "";
+  for (;;) {
+    const page = await anchorsAfter(db, after, LIST_PAGE_LIMIT);
+    anchors.push(...page);
+    if (page.length < LIST_PAGE_LIMIT) break;
+    after = page[page.length - 1]!.date;
+  }
+  return anchors;
+}
+
+/**
+ * Every operator, with its agents and its domains, in id order, paged.
+ *
+ * Everything the offline verifier's Registry needs, plus trusted, so a forker
+ * holding the mirror can build a bundle without asking this Worker anything.
+ * `trusted` is read off the stored operator record, which is where the standing
+ * step caches what the log says — the same place `trustedOperatorIds` reads it.
+ */
+async function allOperators(db: D1Like): Promise<MirrorOperator[]> {
+  const operators: MirrorOperator[] = [];
+  let afterId: string | undefined;
+  for (;;) {
+    const page = await listOperators(
+      db,
+      afterId === undefined
+        ? { limit: LIST_PAGE_LIMIT }
+        : { limit: LIST_PAGE_LIMIT, afterId },
+    );
+    if (page.length === 0) break;
+    for (const record of page) {
+      const agents = await agentsForOperator(db, record.id, LIST_PAGE_LIMIT);
+      const domains = await operatorDomains(db, record.id);
+      operators.push({
+        operator: record.id,
+        maintainer: record.maintainer,
+        provider: record.provider,
+        trusted: record.details["trusted"] === true,
+        domains: domains.map((row) => row.domain),
+        agents: agents.map((row) => row.agentId),
+      });
+    }
+    if (page.length < LIST_PAGE_LIMIT) break;
+    afterId = page[page.length - 1]!.id;
+  }
+  return operators;
+}
+
+/**
+ * Every entry at or below the sealed head, derived there.
+ *
+ * Exactly the way `GET /sync` produces an entry record — `worldAt` to the sealed
+ * head, then `rederive` at the newest seal's `sealed_at` — because the mirror
+ * and the delta stream must not be able to describe the same entry at the same
+ * position two different ways. The stored row is not read: it was derived at
+ * whatever position its last writer reached, which is not the sealed head.
+ */
+async function mirrorEntries(
+  db: D1Like,
+  head: number,
+  asOf: Date,
+): Promise<MirrorEntryRecord[]> {
+  const records: MirrorEntryRecord[] = [];
+  let afterSubmittedSeq: number | undefined;
+  for (;;) {
+    const page = await entryIdsThrough(
+      db,
+      afterSubmittedSeq === undefined
+        ? { throughSeq: head, limit: LIST_PAGE_LIMIT }
+        : { throughSeq: head, limit: LIST_PAGE_LIMIT, afterSubmittedSeq },
+    );
+    if (page.length === 0) break;
+    for (const row of page) {
+      const world = worldAt(await entryWorld(db, row.id), head);
+      const derived = rederive(world, row.id, asOf);
+      records.push({
+        entry: derived.entry,
+        sidecar: derived.sidecar,
+        entry_hash: await entryHash(extractCore(derived.entry)),
+      });
+    }
+    if (page.length < LIST_PAGE_LIMIT) break;
+    afterSubmittedSeq = page[page.length - 1]!.submittedSeq;
+  }
+  return records;
+}
+
+/**
+ * (h2) The day's export.
+ *
+ * Whitepaper Section 11: the sealed log goes out daily to a public repository
+ * under CC0, which is the Conclusion's exit right made into files. Once per UTC
+ * day, right after the anchor and before the money: the anchor is the last thing
+ * that changes what a day's sealed record says, and the ledger reads the same
+ * sealed head this export was built at.
+ *
+ * Nothing unsealed is ever exported. Every refusal is counted in the same words
+ * the report and the status page use, and a refused push is a day that is not
+ * mirrored yet rather than a run that failed — the sweep goes on to the ledger.
+ */
+async function mirrorStep(
+  db: D1Like,
+  environment: string,
+  adapter: MirrorAdapter | undefined,
+  now: Date,
+  at: string,
+  skip: Skip,
+): Promise<MirrorOutcome> {
+  const none: MirrorOutcome = { report: null, detail: null };
+
+  if (adapter === undefined || adapter.kind === "unavailable") {
+    skip("mirror_unavailable");
+    return none;
+  }
+
+  const newest = await latestSeal(db);
+  if (newest === null) {
+    // The mirror is the sealed record, so a log with no seal has nothing to
+    // mirror. Not a fault: it is the first minutes of a new environment.
+    skip("no_seal");
+    return none;
+  }
+
+  const date = utcDay(now.toISOString());
+  if ((await mirrorOn(db, date)) !== null) {
+    skip("mirror_current");
+    return none;
+  }
+
+  const head = newest.last_seq;
+  let files;
+  try {
+    files = buildMirror({
+      environment,
+      exported_at: at,
+      seals: await allSeals(db),
+      anchors: await allAnchors(db),
+      events: await sealedLog(db, head),
+      entries: await mirrorEntries(db, head, new Date(newest.sealed_at)),
+      operators: await allOperators(db),
+    });
+  } catch (error) {
+    // The layout's own two refusals, in its own words. Anything else is a
+    // storage failure and belongs to the run's own try/catch.
+    if (!(error instanceof MirrorError)) throw error;
+    skip(error.reason);
+    return none;
+  }
+
+  const pushed = await adapter.push({
+    prefix: environment,
+    files,
+    message: `mirror ${environment} ${date}: head ${head}, seal ${newest.seq}`,
+  });
+  if (!pushed.ok) {
+    skip(pushed.reason);
+    return { report: null, detail: pushed.detail };
+  }
+
+  // An unchanged push still writes the row: the day's bytes are in the
+  // repository, so the day is current and the next run must not push again.
+  await putMirror(db, {
+    date,
+    exported_at: at,
+    commit: pushed.commit,
+    tree: pushed.tree,
+    head,
+    seal_seq: newest.seq,
+    entries: files.filter((file) => file.path.startsWith("entries/")).length,
+    files_changed: pushed.changed,
+    url: pushed.url,
+    raw_url: pushed.raw_url,
+  });
+
+  return {
+    report: {
+      date,
+      commit: pushed.commit,
+      changed: pushed.changed,
+      head,
+      seal_seq: newest.seq,
+      unchanged: pushed.unchanged,
+    },
+    detail: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // (i), (j), (k): the ledger, standing, and the payout cycle
 // ---------------------------------------------------------------------------
 
@@ -1524,6 +1783,8 @@ export async function runSweep(
   let beacon: Beacon | null = null;
   let beaconRefusal: string | null = null;
   let report: SweepReport | null = null;
+  /** What a refused mirror push said, or null while none has refused. */
+  let mirrorDetail: string | null = null;
   /** The step the run threw in, or null while nothing has thrown. */
   let failedStep: string | null = null;
 
@@ -1999,6 +2260,22 @@ export async function runSweep(
       anchored = await anchorStep(db, sealing, skip);
     }
 
+    // (h2) The day's export to the public mirror. After the anchor, because the
+    // anchor is the last thing that changes what a day's sealed record says, and
+    // before the money, because the ledger reads the same sealed head this
+    // export was built at. It never throws past this try/catch for a rule: every
+    // refusal is counted like every step above it.
+    inStep = "mirror";
+    const mirrored = await mirrorStep(
+      db,
+      env.ENVIRONMENT,
+      deps.mirror,
+      deps.now,
+      at,
+      skip,
+    );
+    mirrorDetail = mirrored.detail;
+
     // (i), (j) and (k). The money and the standing, read off what the log has
     // sealed — this run's own seal included, which is why they come after the
     // seal step and not before it. A log with no seal at all has nothing any of
@@ -2036,6 +2313,7 @@ export async function runSweep(
       sealed,
       witnessed,
       anchored,
+      mirror: mirrored.report,
       ledger,
       standing,
       payouts,
@@ -2085,6 +2363,7 @@ export async function runSweep(
         stepSkip,
         beacon,
         beaconRefusal,
+        mirrorDetail,
         failedStep,
       }),
     );
@@ -2126,12 +2405,14 @@ interface Board {
   readonly stepSkip: ReadonlyMap<string, string>;
   readonly beacon: Beacon | null;
   readonly beaconRefusal: string | null;
+  /** What a refused push said, which no report field carries. */
+  readonly mirrorDetail: string | null;
   /** The step the run threw in, or null when it finished. */
   readonly failedStep: string | null;
 }
 
 /**
- * One run's fourteen step rows.
+ * One run's fifteen step rows.
  *
  * The details are each step's own slice of the report, plus the three facts no
  * report field carries and the status rules need: the round the beacon read (or
@@ -2197,6 +2478,10 @@ function stepRows(
             operators: report.witnessed.flatMap((one) => [...one.operators]),
           },
           anchor: report.anchored === null ? { date: null } : { ...report.anchored },
+          mirror:
+            report.mirror === null
+              ? { date: null, detail: board.mirrorDetail }
+              : { ...report.mirror },
           ledger: report.ledger === null ? { through: null } : { ...report.ledger },
           standing:
             report.standing === null

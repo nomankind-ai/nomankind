@@ -206,9 +206,18 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/status",
     parameters: "—",
     answers:
-      "Every stage of the pipeline as the last sweep left it: as_of, environment, counters (last sweep, stages, sealed head, witnessed), stages — twelve of them, each with stage, state (ok, attention, failing, idle), last, rule and evidence — exercised (the five stages that run only when someone asks), and thresholds (STATUS_ATTENTION_AFTER_INTERVALS, STATUS_FAILING_AFTER_MINUTES). Nothing is probed to answer it: every reading is a published rule applied to the log and to the report the sweep stored at the end of its last run, so the answer cannot be warmed by asking for it. A browser gets the same object as the status page.",
+      "Every stage of the pipeline as the last sweep left it: as_of, environment, counters (last sweep, stages, sealed head, witnessed), stages — thirteen of them, each with stage, state (ok, attention, failing, idle), last, rule and evidence — exercised (the five stages that run only when someone asks), and thresholds (STATUS_ATTENTION_AFTER_INTERVALS, STATUS_FAILING_AFTER_MINUTES). Nothing is probed to answer it: every reading is a published rule applied to the log and to the report the sweep stored at the end of its last run, so the answer cannot be warmed by asking for it. A browser gets the same object as the status page.",
     refusals:
       "None of its own: a stage that is failing is an answer and not a refusal. 503 storage_unreachable; 405 with Allow: GET.",
+  },
+  {
+    method: "GET",
+    path: "/mirror/latest",
+    parameters: "—",
+    answers:
+      "Where this environment's daily CC0 export went, as the sweep recorded it: environment, repository, branch, path (the environment's own top-level directory), configured, and latest — date, exported_at, commit, tree, head, seal_seq, entries, files_changed, url (the commit's tree on the web) and raw_url (the export's own mirror.json). Nothing is fetched from the mirror to answer it: the record is what this instance pushed, not what the repository looks like this second. A browser gets the mirror page.",
+    refusals:
+      "404 no_export with reason mirror_not_configured or no_export_yet, and configured, repository, branch and path beside it, so a caller can tell an environment that never exports from one whose first export is still owed; 405 with Allow: GET; 503 storage_unreachable.",
   },
   {
     method: "GET",
@@ -452,7 +461,6 @@ const ATTESTATION_PATH: readonly Endpoint[] = [
 
 const NOT_YET_BUILT: readonly { readonly what: string; readonly when: string }[] =
   [
-    { what: "The log mirror", when: "M23" },
     { what: "API keys, paid tiers, webhooks, rate limits", when: "M24" },
     {
       what: "Production submission, genesis, and the payout provider",
@@ -737,10 +745,53 @@ npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT} [--domain &lt;slug
         </p>
         <pre class="block mono">npm run standing -- ${origin} &lt;operator&gt;</pre>
         <p class="note">
-          The daily CC0 log mirror is M23 and is not yet published. The data is
-          CC0 today and the whole record is already forkable from this API: the
-          mirror is a convenience, not the licence.
+          The whole log has a command of its own too: the daily CC0 mirror
+          below, which exports every entry, event, seal, anchor and index at the
+          sealed head rather than one entry's bundle.
         </p>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">The mirror and the fork kit</h2>
+        <p class="note">
+          Once per UTC day the sweep exports the sealed log to a public
+          repository under CC0, and
+          <span class="mono">GET /mirror/latest</span> says where the last
+          export went. The record is what this instance pushed, so the answer is
+          the same whether the repository is reachable from here or not; a
+          browser gets <a href="/mirror/latest">the mirror page</a> instead of
+          the object. Section 11: leaving is a protocol right, and the data was
+          CC0 before there was a mirror to put it in.
+        </p>
+        <pre class="block mono">{ "environment": "demo", "repository": "https://github.com/nomankind-ai/log",
+  "branch": "main", "path": "demo", "configured": true,
+  "latest": { "date": "2026-09-10", "exported_at": "2026-09-10T00:04:11Z",
+    "commit": "&lt;sha&gt;", "tree": "&lt;sha&gt;", "head": 54, "seal_seq": 11,
+    "entries": 9, "files_changed": 3, "url": "&lt;the commit's tree&gt;",
+    "raw_url": "&lt;that export's mirror.json&gt;" } }</pre>
+        <pre class="block mono">{ "error": "no_export", "reason": "no_export_yet", "configured": true,
+  "repository": "https://github.com/nomankind-ai/log", "branch": "main", "path": "demo" }</pre>
+        <p class="note">
+          The 404 names which of the two it is:
+          <span class="mono">mirror_not_configured</span> on an environment that
+          pushes nothing, <span class="mono">no_export_yet</span> when the first
+          export is still owed. Both carry the repository, so a caller that
+          cannot get an export from here still knows where to clone.
+        </p>
+        <p class="note">
+          Two commands build and check a mirror from outside. The first writes
+          the same <span class="mono">&lt;env&gt;/</span> layout the Worker
+          exports, byte for byte, from any instance's public API; the second
+          verifies a directory of it — the event chain, every seal and its root,
+          every anchor, then each entry against the log it came from. The
+          verifier fetches the captures an entry needs from the environment's
+          archive by default, reads them from a local directory with
+          <span class="mono">--captures</span>, and checks one entry rather than
+          all of them with <span class="mono">--entry</span>. Exit 0 clean, 1 on
+          a named failure, 2 on usage.
+        </p>
+        <pre class="block mono">npm run mirror -- ${origin} ./mirror
+npm run verify-mirror -- ./mirror/&lt;env&gt; [--captures &lt;url-or-dir&gt;] [--entry &lt;id&gt;]</pre>
       </section>
 
       <section class="panel">

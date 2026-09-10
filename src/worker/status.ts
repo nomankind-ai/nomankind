@@ -3,7 +3,7 @@
  *
  * Whitepaper Section 11, Deployment and status: nomankind publishes what it is
  * running and whether it is working. `GET /status` is the second half of that as
- * JSON — twelve stages, the five doors nobody probes, four counters, and the two
+ * JSON — thirteen stages, the five doors nobody probes, four counters, and the two
  * thresholds the states were decided by, so a reader can check the arithmetic
  * without this Worker.
  *
@@ -24,6 +24,7 @@
  * integers are HTTP status codes.
  */
 
+import { mirrorKindFor } from "../adapters/mirror.js";
 import { PRODUCTION } from "../adapters/payout.js";
 import { witnessAdapterFor } from "../adapters/witness.js";
 import { utcDay } from "../anchor.js";
@@ -50,6 +51,7 @@ import {
   getAnchor,
   headSeq,
   latestEventOfType,
+  latestMirror,
   latestReceipt,
   latestSeal,
   payoutRows,
@@ -116,6 +118,7 @@ export async function statusInput(
   const reconciliation = await reconciliationRows(db, 1);
   const payouts = await payoutRows(db, 1);
   const anchor = await getAnchor(db, yesterday);
+  const mirror = await latestMirror(db);
 
   // The position the standing step recomputed at, off its own stored detail:
   // Section 9's standing is derived from sealed events, and the sweep is what
@@ -217,6 +220,22 @@ export async function statusInput(
       due: (await dueAttestations(db, { now, limit: LIST_PAGE_LIMIT })).length,
       total: await countAttestations(db),
     },
+    mirror: {
+      // The track this environment actually runs, asked of the same function the
+      // sweep asks, so the page cannot claim a repository the sweep is not
+      // pushing to.
+      kind: mirrorKindFor(env),
+      newest:
+        mirror === null
+          ? null
+          : {
+              date: mirror.date,
+              exported_at: mirror.exported_at,
+              commit: mirror.commit,
+              head: mirror.head,
+              url: mirror.url,
+            },
+    },
     exercised: {
       submission:
         submittedEvent === null || submittedCore === null
@@ -244,7 +263,7 @@ export async function statusInput(
  *
  * The thresholds go out with the answer because a state nobody can recompute is
  * a state nobody can check: a reader holding this document and src/status.ts's
- * rules gets the same twelve readings we did.
+ * rules gets the same thirteen readings we did.
  *
  * `as_of` is the last sweep run and never the request. The page is a reading of
  * a record, so it is dated by the record — an `as_of` of "now" would say the
