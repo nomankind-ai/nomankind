@@ -20,7 +20,8 @@ import { describe, expect, it } from "vitest";
 import { CORE_KEYS } from "../src/core.js";
 import type { Sidecar } from "../src/derive.js";
 import type { Event } from "../src/events.js";
-import { TRUSTED_POOL_SWITCH } from "../src/policy.js";
+import { ledgerBalance, type LedgerRow } from "../src/ledger.js";
+import { LIST_PAGE_LIMIT, TRUSTED_POOL_SWITCH } from "../src/policy.js";
 import type { Seal } from "../src/seal.js";
 import type { StakeRecord } from "../src/stake.js";
 import { renderEntries } from "../src/ui/pages/entries.js";
@@ -379,7 +380,74 @@ const operatorRow: OperatorRow = {
   agents: 2,
   validations: 7,
   overturned: 2,
+  standing: { standing: 14, seq: 61 },
 };
+
+/**
+ * The operator's money (M21).
+ *
+ * A fake clock, as everywhere else time matters: held and released are questions
+ * about an instant, so the fixture names one and `ledgerBalance` answers at it
+ * rather than at whenever the suite happens to run. One share is still inside
+ * the holdback, one is out and has been paid, and the payout names the row it
+ * covered — which is the only thing that makes the paid column a fact.
+ */
+const LEDGER_NOW = "2026-09-09T00:00:00.000Z";
+const HELD_SHARE_ID = `read_share:30:${ENTRY_ID}:submitter:k1.example`;
+const PAID_SHARE_ID = `read_share:20:${ENTRY_ID}:validator:k1.example`;
+
+const operatorLedger: LedgerRow[] = [
+  {
+    id: `payout:k1.example:2026-09-01`,
+    kind: "payout",
+    entry_id: null,
+    operator: "k1.example",
+    role: null,
+    date: "2026-09-01",
+    reads: null,
+    unit: "micros",
+    amount: 250_000,
+    available_at: null,
+    seq: 40,
+    at: "2026-09-01T00:00:00.000Z",
+    ref: { reference: "provider-ref-1", rows: [PAID_SHARE_ID] },
+  },
+  {
+    id: HELD_SHARE_ID,
+    kind: "read_share",
+    entry_id: ENTRY_ID,
+    operator: "k1.example",
+    role: "submitter",
+    date: "2026-09-08",
+    reads: 10_000,
+    unit: "micros",
+    amount: 750_000,
+    available_at: "2026-10-08T00:00:00.000Z",
+    seq: 30,
+    at: "2026-09-08T12:00:00.000Z",
+    ref: { price_micros_per_read: 500, share_percent: 15, stale: false },
+  },
+  {
+    id: PAID_SHARE_ID,
+    kind: "read_share",
+    entry_id: ENTRY_ID,
+    operator: "k1.example",
+    role: "validator",
+    date: "2026-07-20",
+    reads: 10_000,
+    unit: "micros",
+    amount: 250_000,
+    available_at: "2026-08-19T00:00:00.000Z",
+    seq: 20,
+    at: "2026-07-20T12:00:00.000Z",
+    ref: { price_micros_per_read: 500, share_percent: 5, stale: false },
+  },
+];
+
+const operatorPayouts: LedgerRow[] = operatorLedger.filter(
+  (row) => row.kind === "payout",
+);
+const operatorBalance = ledgerBalance(operatorLedger, LEDGER_NOW);
 
 /** Every page, so the escaping check runs over all of them at once. */
 function everyPage(): Record<string, string> {
@@ -424,6 +492,9 @@ function everyPage(): Record<string, string> {
           signed_at: "2026-09-08T12:00:00.000Z",
         },
       ],
+      ledger: operatorLedger,
+      payouts: operatorPayouts,
+      balance: operatorBalance,
     }),
   };
 }
@@ -433,6 +504,10 @@ describe("nobody else's text becomes markup", () => {
     for (const [name, document] of Object.entries(everyPage())) {
       expect([name, document.includes("<script")]).toEqual([name, false]);
       expect([name, document.includes("</script")]).toEqual([name, false]);
+      // And no inline style either: the CSP names no script source and no
+      // 'unsafe-inline' style, so a page whose look depended on either is a page
+      // the browser draws wrong.
+      expect([name, document.includes(' style="')]).toEqual([name, false]);
     }
     const shown = everyPage();
     for (const name of ["home", "entries", "entry"]) {
@@ -854,14 +929,73 @@ describe("the operator pages", () => {
         trustedSeq: null,
         validations: 0,
         overturned: 0,
+        standing: null,
       },
     ],
+  });
+
+  /** An operator nothing has happened to yet: every panel's empty state at once. */
+  const quiet = renderOperator(ctx, {
+    row: {
+      ...operatorRow,
+      validations: 0,
+      agents: 0,
+      overturned: 0,
+      standing: null,
+    },
+    agents: [],
+    attestation: null,
+    namedBy: null,
+    payoutStatus: null,
+    validations: [],
+    ledger: [],
+    payouts: [],
+    balance: ledgerBalance([], LEDGER_NOW),
   });
 
   it("names the maintainer as one that cannot validate", () => {
     expect(directory).toContain("cannot validate");
     expect(directory).toContain('<a href="/operators/maintainer.example">');
-    expect(directory).toContain("not yet published (M21)");
+  });
+
+  it("fills the standing column with the number and the position it was computed at", () => {
+    // The column is a reading now that the formula is published (Section 9), so
+    // the milestone placeholder is gone. The position travels with the number
+    // because a standing without one is a standing nobody can recompute.
+    expect(directory).not.toContain("not yet published (M21)");
+    expect(directory).toContain(
+      `<td title="computed at position 61">\n      14\n    </td>`,
+    );
+  });
+
+  it("shows the standing of an operator far past a page of the leaderboard", () => {
+    // The route gathers standings over exactly the ids on the page. It used to
+    // gather the top LIST_PAGE_LIMIT by standing and join that against a page
+    // ordered by id, which is a different ordering: the hundred-and-first
+    // operator's stored standing fell out of the join and the page showed a
+    // dash for a number the sweep had written. A full page of rows with the low
+    // standing last is what that bug survived on.
+    const many = Array.from({ length: LIST_PAGE_LIMIT + 1 }, (_, index) => ({
+      ...operatorRow,
+      id: `op-${String(index).padStart(3, "0")}.example`,
+      standing: { standing: LIST_PAGE_LIMIT + 1 - index, seq: 61 },
+    }));
+
+    const page = renderOperators(ctx, { rows: many });
+
+    expect(page).toContain('<a href="/operators/op-100.example">');
+    expect(page).toContain(
+      `<td title="computed at position 61">\n      1\n    </td>`,
+    );
+    // And no row anywhere on it fell back to the not-computed dash.
+    expect(page).not.toContain(`<td class="dim">—</td>`);
+  });
+
+  it("shows a dash, and never a zero, for an operator nothing has been computed for", () => {
+    // Not computed and computed to nothing are different facts, and a zero in
+    // this cell would state the second when the log only supports the first.
+    expect(directory).toContain(`<td class="dim">—</td>`);
+    expect(directory).toContain("a dash means the");
   });
 
   it("fills the overturned column with a count, and a zero with a zero", () => {
@@ -872,7 +1006,7 @@ describe("the operator pages", () => {
     expect(directory).toContain(`<td class="danger">\n      2\n    </td>`);
     expect(directory).toContain(`<td class="dim">\n      0\n    </td>`);
     expect(directory).toContain(
-      "entries this operator signed, as\n        submitter or as approver, that an upheld dispute overturned",
+      "entries this operator signed, as submitter or as approver, that an\n        upheld dispute overturned",
     );
   });
 
@@ -895,6 +1029,9 @@ describe("the operator pages", () => {
           signed_at: "2026-09-08T12:00:00.000Z",
         },
       ],
+      ledger: operatorLedger,
+      payouts: operatorPayouts,
+      balance: operatorBalance,
     });
     expect(one).toContain("nomankind-independence-v1");
     expect(one).toContain("YXR0ZXN0");
@@ -907,17 +1044,117 @@ describe("the operator pages", () => {
   });
 
   it("says an operator has signed nothing rather than showing an empty table", () => {
-    const quiet = renderOperator(ctx, {
-      row: { ...operatorRow, validations: 0, agents: 0, overturned: 0 },
+    expect(quiet).toContain("This operator has signed no decisions.");
+    expect(quiet).toContain("No agent is bound.");
+    expect(quiet).toContain("No attestation is stored on this row.");
+  });
+
+  /**
+   * Standing and the ledger (M21, Whitepaper Section 9). The panel's whole claim
+   * is that the number can be recomputed, so the test holds the three things
+   * that make that true: the number, the position it was computed at, and the
+   * two ways to check it.
+   */
+  it("shows the stored standing, its position, and how to recompute it", () => {
+    const one = renderOperator(ctx, {
+      row: operatorRow,
+      agents: ["1F916:k1"],
+      attestation: null,
+      namedBy: null,
+      payoutStatus: null,
+      validations: [],
+      ledger: operatorLedger,
+      payouts: operatorPayouts,
+      balance: operatorBalance,
+    });
+    expect(one).toContain("<h2>Standing</h2>");
+    expect(one).toContain("<dd>14</dd>");
+    expect(one).toContain("<dd>position 61</dd>");
+    expect(one).toContain("recomputable by anyone");
+    expect(one).toContain("GET /operators/k1.example/standing");
+    expect(one).toContain(
+      `npm run standing -- ${ctx.origin} k1.example`,
+    );
+  });
+
+  it("says in words that no standing has been computed rather than showing a zero", () => {
+    expect(quiet).toContain(
+      "No standing has been computed for this operator yet.",
+    );
+    expect(quiet).toContain("That is not a\n          standing of zero");
+    // The command is still there: the endpoint computes it on demand, so an
+    // operator with no cached number is not an operator with nothing to check.
+    expect(quiet).toContain("npm run standing --");
+  });
+
+  it("shows the ledger balance in micro-USD with a dollar rendering beside it", () => {
+    const one = renderOperator(ctx, {
+      row: operatorRow,
       agents: [],
       attestation: null,
       namedBy: null,
       payoutStatus: null,
       validations: [],
+      ledger: operatorLedger,
+      payouts: operatorPayouts,
+      balance: operatorBalance,
     });
-    expect(quiet).toContain("This operator has signed no decisions.");
-    expect(quiet).toContain("No agent is bound.");
-    expect(quiet).toContain("No attestation is stored on this row.");
+    // The balance is the one `ledgerBalance` computed at the fixture's clock, so
+    // the page is checked against the kernel and never against a number typed
+    // into a test: one share held, one released and paid.
+    expect(operatorBalance).toEqual({
+      accrued: 1_000_000,
+      held: 750_000,
+      released: 250_000,
+      clawed_back: 0,
+      paid: 250_000,
+      carried_forward: 0,
+    });
+    expect(one).toContain("<h2>Ledger</h2>");
+    expect(one).toContain("micro-USD, a millionth of a dollar");
+    for (const name of [
+      "accrued",
+      "held",
+      "released",
+      "clawed_back",
+      "paid",
+      "carried_forward",
+    ]) {
+      expect(one, `${name} has no field`).toContain(
+        `<span class="field-name">${name}</span>`,
+      );
+    }
+    expect(one).toContain("1000000");
+    expect(one).toContain("$1.000000");
+    expect(one).toContain("$0.750000");
+  });
+
+  it("shows one ledger row per stored row, and marks a row a payout covered", () => {
+    const one = renderOperator(ctx, {
+      row: operatorRow,
+      agents: [],
+      attestation: null,
+      namedBy: null,
+      payoutStatus: null,
+      validations: [],
+      ledger: operatorLedger,
+      payouts: operatorPayouts,
+      balance: operatorBalance,
+    });
+    expect(one).toContain("<th>available_at</th>");
+    expect(one).toContain("<td>read_share</td>");
+    expect(one).toContain("<td>payout</td>");
+    expect(one).toContain(`<a href="/entries/${ENTRY_ID}">`);
+    expect(one).toContain("2026-10-08 00:00:00Z");
+    // The paid column is a fact off the payout itself: it names the row ids it
+    // covered, so the held share is unpaid and the released one is paid.
+    expect(one).toContain(`<td class="accent">\n                      paid\n`);
+  });
+
+  it("says in words when nothing has been recorded against an operator", () => {
+    expect(quiet).toContain(
+      "Nothing has been recorded against this operator: no read share, no",
+    );
   });
 });
 

@@ -418,6 +418,12 @@ async function register(
       trusted: false,
       trusted_seq: null,
       payout_status: payoutStatus,
+      // The connected account id the body carried, and nothing else about the
+      // account (D-053): a payout cycle has to know where an operator's money
+      // leaves through, and without it the payout step has no reference to
+      // transfer against and skips the operator entirely. The `agent_bound`
+      // event is unchanged — this is the Worker's index, not the public log.
+      payout_reference: payout.reference,
     },
   };
   const agentRecord: AgentRecord = {

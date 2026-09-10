@@ -16,6 +16,7 @@
 
 import type { Sidecar } from "../derive.js";
 import type { Event } from "../events.js";
+import type { LedgerBalance, LedgerRow } from "../ledger.js";
 import type { Seal } from "../seal.js";
 import type { StakeRecord } from "../stake.js";
 
@@ -145,6 +146,18 @@ export interface EntryData {
   disputeOf: string | null;
 }
 
+/**
+ * A standing the formula already returned, and the log position it returned it
+ * at (Section 9). Carried verbatim from the operators row: the column is a cache
+ * of a published computation and never an authority, so the position travels
+ * with the number or a reader has nothing to recompute against.
+ */
+export interface StandingCache {
+  standing: number;
+  /** The `position` src/standing.ts folded to when this number was computed. */
+  seq: number;
+}
+
 export interface OperatorRow {
   id: string;
   maintainer: boolean;
@@ -161,6 +174,13 @@ export interface OperatorRow {
    * agents signed it, and zero is a reading and not a missing number.
    */
   overturned: number;
+  /**
+   * The standing the published formula last returned for this operator, with the
+   * position it was computed at, or null when it has never been computed. Null
+   * is "not computed yet" and is never a zero: an operator that has earned
+   * nothing has a standing of 0, and the two must not be shown the same way.
+   */
+  standing: StandingCache | null;
 }
 
 export interface OperatorsData {
@@ -182,6 +202,23 @@ export interface OperatorData {
     seq: number;
     signed_at: string;
   }>;
+  /**
+   * This operator's newest ledger rows, newest first, exactly as
+   * `ledgerRowsForOperator` read them at the route's own limit.
+   */
+  ledger: LedgerRow[];
+  /**
+   * What those rows add up to, as `ledgerBalance` computed them at the route's
+   * injected clock. Carried rather than recomputed here, for the same reason
+   * every derived field on the entry page is: the view adds nothing up.
+   */
+  balance: LedgerBalance;
+  /**
+   * This operator's payouts, newest first. They say which accruals have already
+   * left — each names the row ids it covered — so the ledger table can mark a
+   * row paid without the page working out what a payout was for.
+   */
+  payouts: LedgerRow[];
 }
 
 /** One candidate or member of the founding trusted pool (Section 11, genesis). */

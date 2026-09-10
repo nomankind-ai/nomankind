@@ -27,7 +27,11 @@
  * receipt covering the page. M19 mounts the browsing UI (src/worker/pages.ts)
  * ahead of all of them: it is the log's face for a person rather than an agent,
  * it owns the pages and the stylesheets, and on the four paths it shares with the
- * JSON doors it answers HTML to a browser and returns null otherwise. The final
+ * JSON doors it answers HTML to a browser and returns null otherwise. M21
+ * mounts Section 9's own reads (src/worker/standing.ts) — the standing table,
+ * one operator's standing, one operator's ledger, and the ledger page — and
+ * gives the sweep the three steps that produce them: price what the seal
+ * committed to, recompute standing, and pay the cycle. The final
  * refusal below answers in the same two voices for the same reason.
  *
  * This file is the one place in the system that reads a wall clock, and it
@@ -63,6 +67,7 @@ import { handleReconfirm } from "./reconfirm.js";
 import { handleRegistry, json } from "./registry.js";
 import { handleRevalidate } from "./revalidate.js";
 import { handleSeals } from "./seals.js";
+import { handleStanding } from "./standing.js";
 import { handleSubmit } from "./submit.js";
 import { runSweep } from "./sweep.js";
 import {
@@ -195,6 +200,12 @@ export async function handleRequest(
   const seals = await handleSeals(request, env);
   if (seals !== null) return seals;
 
+  // M21's four reads, Section 9's "Standing" and "Money": the whole standing
+  // table and one operator's, recomputed from the sealed log, and the ledger
+  // beside them. JSON only, whatever the caller asks for.
+  const standing = await handleStanding(request, env, { now });
+  if (standing !== null) return standing;
+
   // Nothing answered. A browser gets the 404 page, which tells a reader what
   // kinds of address land there; everything else gets the same JSON refusal it
   // has always got, because an agent parsing `not_found` must keep parsing it.
@@ -273,9 +284,15 @@ export default {
   ): Promise<void> => {
     await runSweep(
       env,
-      await sweepDepsFor(env, () => controller.scheduledTime, {
-        beacon: new DrandReader(),
-      }),
+      {
+        ...(await sweepDepsFor(env, () => controller.scheduledTime, {
+          beacon: new DrandReader(),
+        })),
+        // The payout adapter this environment runs (decision D-013 as amended,
+        // D-053): a mock on demo and local, the stub that refuses on
+        // production, and never a fixture — the same rule the beacon follows.
+        payout: payoutAdapterFor(env.ENVIRONMENT),
+      },
     );
   },
 };

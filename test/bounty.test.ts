@@ -79,8 +79,10 @@ describe("bountyAccrual", () => {
       stale_from: "2026-06-01",
       stale_until: AT,
       seq: event.seq,
-      // Section 9's pricing is M21's; nothing here invents a number.
-      amount_cents: null,
+      // What the bounty is worth is the sum of the halves the entry withheld
+      // while it was stale, which is a question about its pool rows and not
+      // about this event: src/ledger.ts prices it.
+      amount_micros: null,
     });
   });
 
@@ -109,7 +111,7 @@ describe("bountyAccrual", () => {
       stale_from: "2026-06-01",
       stale_until: "2027-01-02T03:04:05.000Z",
       seq: 1,
-      amount_cents: null,
+      amount_micros: null,
     });
   });
 

@@ -194,6 +194,35 @@ describe("payout adapters", () => {
     );
   });
 
+  it("transfers only for a reference it would also call verified", async () => {
+    const mock = new MockPayoutAdapter();
+    const first = await mock.transfer("mock-verified-abc", 5_000_000);
+    expect(first).toEqual({ ok: true, transfer: "mock-transfer-1" });
+    // A counter, so a demo can tell two transfers apart.
+    expect(await mock.transfer("mock-verified-abc", 1)).toEqual({
+      ok: true,
+      transfer: "mock-transfer-2",
+    });
+    // Pending onboarding is not payable: the mock must not pay an operator it
+    // has just said the provider is still checking.
+    expect(await mock.transfer("mock-pending-abc", 1)).toEqual({
+      ok: false,
+      reason: "failed",
+    });
+    expect(await mock.transfer("anything-else", 1)).toEqual({
+      ok: false,
+      reason: "failed",
+    });
+  });
+
+  it("says nothing left rather than that it failed, when nothing was wired", async () => {
+    // "unavailable" and never "failed": the cycle that meets this carries the
+    // accrual forward untouched, where a failure would say it was refused.
+    expect(
+      await new UnavailablePayoutAdapter().transfer("mock-verified-abc", 5_000_000),
+    ).toEqual({ ok: false, reason: "unavailable" });
+  });
+
   it("gives production the unavailable stub and everything else the mock", () => {
     expect(payoutAdapterFor("production")).toBeInstanceOf(UnavailablePayoutAdapter);
     expect(payoutAdapterFor("demo")).toBeInstanceOf(MockPayoutAdapter);

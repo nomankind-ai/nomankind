@@ -43,6 +43,7 @@ import {
   witnessAdapterFor,
   type EnvironmentWitnessAdapter,
 } from "../adapters/witness.js";
+import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import type { AnchorAdapter } from "../anchor.js";
 import { SWEEP_INTERVAL_MINUTES } from "../policy.js";
 import type { Env } from "./env.js";
@@ -105,6 +106,7 @@ export interface SweeperDeps {
   readonly pinned?: PinnedWitnesses;
   readonly ineligibleAgents?: ReadonlySet<string>;
   readonly anchor?: AnchorAdapter;
+  readonly payout?: PayoutAdapter;
 }
 
 /**
@@ -139,6 +141,12 @@ export async function sweepDepsFor(
     anchor:
       deps?.anchor ??
       anchorAdapterFor(env.ENVIRONMENT, () => new Date(nowMs())),
+    // The payout adapter this environment runs (D-013 as amended, D-053): a
+    // mock on demo and local, the stub that refuses on production. Built here
+    // rather than only at the scheduled handler because the alarm is a sweep
+    // like any other — a cycle that pays through the cron door and skips
+    // `payout_unconfigured` through the alarm would be two different sweeps.
+    payout: deps?.payout ?? payoutAdapterFor(env.ENVIRONMENT),
   };
 }
 

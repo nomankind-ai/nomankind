@@ -8,12 +8,13 @@
  * validate, and the page says so on its row rather than leaving a reader to work
  * it out from the flag.
  *
- * One column is an honest blank. Standing is derived by a published formula that
- * M21 has not published yet, and a number invented here would be a number nobody
- * can recompute, which is the one thing this log is against, so the column says
- * which milestone it waits on. The overturned count beside it is a reading: the
- * entries an operator signed, as submitter or as approver, that an upheld
- * dispute overturned, counted once per entry.
+ * The standing column is now a reading like every other (Section 9): the number
+ * the published formula returned, shown with the log position it was computed
+ * at, because a standing without its position is a number nobody can recompute.
+ * An operator the formula has not been run for yet shows a dash rather than a
+ * zero — nothing computed and nothing earned are different facts. The overturned
+ * count beside it is a reading too: the entries an operator signed, as submitter
+ * or as approver, that an upheld dispute overturned, counted once per entry.
  *
  * Pure: the rows were gathered by the route.
  */
@@ -21,10 +22,20 @@
 import { html, layout, type Safe } from "../html.js";
 import type { OperatorRow, OperatorsData, PageContext } from "../types.js";
 
-/** The one column nothing can compute yet, and the milestone that will. */
-const NOT_PUBLISHED_STANDING = "not yet published (M21)";
-
 const EM_DASH = "—";
+
+/**
+ * The standing cell: the integer, and the position it was computed at in the
+ * title, so a reader can rerun the formula over the log up to that position and
+ * check the number. A dash when nothing has been computed for this operator.
+ */
+function standingCell(operator: OperatorRow): Safe {
+  const cached = operator.standing;
+  if (cached === null) return html`<td class="dim">${EM_DASH}</td>`;
+  return html`<td title="computed at position ${cached.seq}">
+      ${cached.standing}
+    </td>`;
+}
 
 function row(operator: OperatorRow): Safe {
   const trustedClass = operator.trusted ? "accent" : "dim";
@@ -40,7 +51,7 @@ function row(operator: OperatorRow): Safe {
     <td class="muted">${operator.provider ? "provider" : EM_DASH}</td>
     <td>${operator.agents}</td>
     <td>${operator.validations}</td>
-    <td class="dim">${NOT_PUBLISHED_STANDING}</td>
+    ${standingCell(operator)}
     <td class="${operator.overturned === 0 ? "dim" : "danger"}">
       ${operator.overturned}
     </td>
@@ -90,10 +101,13 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
             </div>`}
       </section>
       <p class="note">
-        Standing is derived from the sealed events by a formula M21 publishes,
-        and anyone can recompute it once that formula exists. The overturned
-        count is already a reading of the log: entries this operator signed, as
-        submitter or as approver, that an upheld dispute overturned.
+        Standing is derived from the sealed events by the published formula on
+        the policy page, so anyone can recompute it and get the same number; each
+        cell carries the log position it was computed at, and a dash means the
+        formula has not been run for that operator yet rather than that it has
+        earned nothing. The overturned count beside it is a reading of the log
+        too: entries this operator signed, as submitter or as approver, that an
+        upheld dispute overturned.
       </p>
     `,
   });

@@ -23,7 +23,10 @@ import {
   MODEL_PROVIDER_DOMAINS,
   NONCE_RETENTION_SECONDS,
   NORM_VERSION,
+  PAYOUT_CYCLE,
+  PAYOUT_MINIMUM_MICROS,
   POLICY,
+  READ_PRICE_MICROS_PER_READ,
   REGISTRY,
   REQUEST_CLOCK_SKEW_SECONDS,
   READ_SHARE_SPLIT,
@@ -33,6 +36,15 @@ import {
   SEAL_MAX_EVENTS,
   SLOT_COUNT,
   STALENESS_WINDOW_DAYS,
+  STANDING_ASSIGNMENT_MISSED,
+  STANDING_DECAY_PAUSED,
+  STANDING_DISPUTE_UPHELD,
+  STANDING_OVERTURNED_SIGNER,
+  STANDING_SUBMISSION_VERIFIED,
+  STANDING_TRUSTED_ENTRY,
+  STANDING_TRUSTED_STAY,
+  STANDING_VALIDATION_ASSIGNED,
+  STANDING_VALIDATION_VOLUNTEERED,
   SWEEP_INTERVAL_MINUTES,
   TRUSTED_POOL_SWITCH,
   WITNESSES_REQUIRED,
@@ -84,6 +96,18 @@ const EXPECTED_POLICY_KEYS = [
   "DISPUTE_FILING_FEE_CENTS",
   "REVALIDATION_REQUEST_STAKE_STANDING",
   "REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW",
+  "STANDING_VALIDATION_VOLUNTEERED",
+  "STANDING_VALIDATION_ASSIGNED",
+  "STANDING_SUBMISSION_VERIFIED",
+  "STANDING_DISPUTE_UPHELD",
+  "STANDING_OVERTURNED_SIGNER",
+  "STANDING_ASSIGNMENT_MISSED",
+  "STANDING_TRUSTED_ENTRY",
+  "STANDING_TRUSTED_STAY",
+  "STANDING_DECAY_PAUSED",
+  "READ_PRICE_MICROS_PER_READ",
+  "PAYOUT_MINIMUM_MICROS",
+  "PAYOUT_CYCLE",
   "NORM_VERSION",
   "FETCH_MAX_REDIRECTS",
   "FETCH_TIMEOUT_MS",
@@ -337,11 +361,87 @@ describe("policy numbers", () => {
     expect(Object.keys(POLICY).sort()).toEqual([...EXPECTED_POLICY_KEYS].sort());
   });
 
-  it("exports only numbers, the norm version, and frozen objects", () => {
+  it("holds the standing amounts, all integers (M21)", () => {
+    // Section 9 names every move and states no amount, so all of these are the
+    // maintainer's own placeholders. What the paper does fix is the ordering:
+    // "assigned validations weigh more than volunteered ones".
+    expect(STANDING_VALIDATION_ASSIGNED).toBeGreaterThan(
+      STANDING_VALIDATION_VOLUNTEERED,
+    );
+    for (const value of [
+      STANDING_VALIDATION_VOLUNTEERED,
+      STANDING_VALIDATION_ASSIGNED,
+      STANDING_SUBMISSION_VERIFIED,
+      STANDING_DISPUTE_UPHELD,
+      STANDING_OVERTURNED_SIGNER,
+      STANDING_ASSIGNMENT_MISSED,
+      STANDING_TRUSTED_ENTRY,
+    ]) {
+      expect(Number.isInteger(value)).toBe(true);
+      expect(value).toBeGreaterThan(0);
+    }
+    // The stay threshold is the one that may be zero: falling below it means
+    // owing more than you have earned.
+    expect(Number.isInteger(STANDING_TRUSTED_STAY)).toBe(true);
+    expect(STANDING_TRUSTED_STAY).toBeLessThanOrEqual(STANDING_TRUSTED_ENTRY);
+  });
+
+  it("pauses decay and publishes no rate for it", () => {
+    // Section 9: decay "is paused until the paid loop starts (below), since
+    // before then there is nothing for it to decay against". A rate of zero
+    // would be a number nobody decided; the pause is the published fact.
+    expect(STANDING_DECAY_PAUSED).toBe(true);
+    expect(POLICY.STANDING_DECAY_PAUSED).toBe(STANDING_DECAY_PAUSED);
+    for (const key of Object.keys(POLICY)) {
+      expect(key).not.toMatch(/DECAY_RATE|DECAY_DAYS/);
+    }
+  });
+
+  it("prices a read in micro-USD, at the paper's own example (M21)", () => {
+    // "At $0.50 per thousand paid reads": fifty cents per thousand is five
+    // hundred micro-USD per read, and the paper's worked example follows.
+    expect(READ_PRICE_MICROS_PER_READ).toBe(500);
+    expect(READ_PRICE_MICROS_PER_READ * 1000).toBe(500_000);
+    const reads = 10_000;
+    expect((reads * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.submitter) / 100)
+      .toBe(750_000);
+    expect((reads * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.validator) / 100)
+      .toBe(250_000);
+  });
+
+  it("carries the payout floor and cycle (D-053)", () => {
+    expect(PAYOUT_MINIMUM_MICROS).toBe(5_000_000);
+    // Five dollars, in the micro-USD the ledger counts in.
+    expect(PAYOUT_MINIMUM_MICROS).toBe(5 * 1_000_000);
+    expect(Number.isInteger(PAYOUT_MINIMUM_MICROS)).toBe(true);
+    expect(PAYOUT_CYCLE).toBe("monthly");
+  });
+
+  it("no longer carries a seed fee (D-052)", async () => {
+    // "There is no seed fee: the maintainer pays nothing from its own funds,
+    // and validating before revenue earns standing and read-share slots on the
+    // entries validated, which pay from the first paid read."
+    const policyModule = (await import("../src/policy.js")) as Record<
+      string,
+      unknown
+    >;
+    for (const key of Object.keys(POLICY)) expect(key).not.toMatch(/SEED_FEE/);
+    for (const name of Object.keys(policyModule)) {
+      expect(name).not.toMatch(/SEED_FEE/);
+    }
+  });
+
+  it("exports only numbers, two names, one flag, and frozen objects", () => {
     for (const [key, value] of Object.entries(POLICY)) {
       expect(value).not.toBeNull();
-      if (key === "NORM_VERSION") {
+      if (key === "NORM_VERSION" || key === "PAYOUT_CYCLE") {
         expect(typeof value).toBe("string");
+        continue;
+      }
+      // Section 9 publishes the decay pause and no rate, so one entry is a
+      // flag. It is the only one, and this is what keeps it that way.
+      if (key === "STANDING_DECAY_PAUSED") {
+        expect(typeof value).toBe("boolean");
         continue;
       }
       if (typeof value === "object") {
@@ -380,5 +480,18 @@ describe("policy numbers", () => {
     expect(POLICY.REGISTRY).toBe(REGISTRY);
     expect(POLICY.WITNESS_PIN).toBe(WITNESS_PIN);
     expect(POLICY.ANCHOR_CALENDARS).toBe(ANCHOR_CALENDARS);
+    expect(POLICY.STANDING_VALIDATION_VOLUNTEERED).toBe(
+      STANDING_VALIDATION_VOLUNTEERED,
+    );
+    expect(POLICY.STANDING_VALIDATION_ASSIGNED).toBe(STANDING_VALIDATION_ASSIGNED);
+    expect(POLICY.STANDING_SUBMISSION_VERIFIED).toBe(STANDING_SUBMISSION_VERIFIED);
+    expect(POLICY.STANDING_DISPUTE_UPHELD).toBe(STANDING_DISPUTE_UPHELD);
+    expect(POLICY.STANDING_OVERTURNED_SIGNER).toBe(STANDING_OVERTURNED_SIGNER);
+    expect(POLICY.STANDING_ASSIGNMENT_MISSED).toBe(STANDING_ASSIGNMENT_MISSED);
+    expect(POLICY.STANDING_TRUSTED_ENTRY).toBe(STANDING_TRUSTED_ENTRY);
+    expect(POLICY.STANDING_TRUSTED_STAY).toBe(STANDING_TRUSTED_STAY);
+    expect(POLICY.READ_PRICE_MICROS_PER_READ).toBe(READ_PRICE_MICROS_PER_READ);
+    expect(POLICY.PAYOUT_MINIMUM_MICROS).toBe(PAYOUT_MINIMUM_MICROS);
+    expect(POLICY.PAYOUT_CYCLE).toBe(PAYOUT_CYCLE);
   });
 });

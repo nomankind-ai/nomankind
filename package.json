@@ -19,6 +19,7 @@
     "register": "npm run build --silent && node dist/cli/register.js",
     "report": "npm run build --silent && node dist/cli/report.js",
     "revalidate": "npm run build --silent && node dist/cli/revalidate.js",
+    "standing": "npm run build --silent && node dist/cli/standing.js",
     "submit": "npm run build --silent && node dist/cli/submit.js",
     "sync": "npm run build --silent && node dist/cli/sync.js",
     "test": "vitest run",

@@ -22,6 +22,7 @@ import { utcDay, type Anchor, type AnchorExternal } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
 import type { BountyAccrual } from "../bounty.js";
 import type { Sidecar } from "../derive.js";
+import type { LedgerRow } from "../ledger.js";
 import {
   appendEvent,
   type Event,
@@ -1632,7 +1633,27 @@ export async function recordReconfirmation(
 }
 
 /**
- * The bounties one entry accrued, oldest first.
+ * A bounty row as the ledger table actually holds it: one of two shapes.
+ *
+ * M15's door writes the unpriced `BountyAccrual` the moment a reconfirmation
+ * lands, and M21's sweep replaces it under the same id with src/ledger.ts's
+ * priced `LedgerRow` (`priceBountyRow`). So the same entry's bounties can come
+ * back as either, depending on whether the sweep has run since, and a caller
+ * has to ask which it is holding rather than assume. The accrual's three window
+ * fields are what tells them apart: a priced row has none of them, which is
+ * exactly the test the sweep's pricing step makes before it prices again.
+ */
+export type StoredBountyRow =
+  | BountyAccrual
+  | (LedgerRow & {
+      readonly stale_from?: never;
+      readonly stale_until?: never;
+      readonly amount_micros?: never;
+    });
+
+/**
+ * The bounties one entry accrued, oldest first, in whichever of the two shapes
+ * above each one is in.
  *
  * Read through `json_extract` rather than a column of its own: `ledger` is the
  * placeholder 0001 declared and M21 is the milestone that shapes it, so adding
@@ -1644,7 +1665,7 @@ export async function bountiesForEntry(
   db: D1Like,
   entryId: string,
   limit: number,
-): Promise<BountyAccrual[]> {
+): Promise<StoredBountyRow[]> {
   const rows = await db
     .prepare(
       `SELECT payload_json FROM ledger
@@ -1653,7 +1674,9 @@ export async function bountiesForEntry(
     )
     .bind(BOUNTY_ACCRUAL, entryId, limit)
     .all<Row>();
-  return rows.results.map((row) => readJson<BountyAccrual>(row, "payload_json"));
+  return rows.results.map((row) =>
+    readJson<StoredBountyRow>(row, "payload_json"),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2149,6 +2172,581 @@ export async function overturnedCountsByOperator(
         ? left.operator.localeCompare(right.operator)
         : right.count - left.count,
     );
+}
+
+// ---------------------------------------------------------------------------
+// The ledger (M21)
+// ---------------------------------------------------------------------------
+
+/**
+ * The columns one ledger row is written into. `payload_json` carries the whole
+ * row as src/ledger.ts built it, and every column beside it is what a lookup
+ * seeks on — never a second source of truth. 0010 added amount, unit, role,
+ * "date" and available_at for exactly that reason: a sum through json_extract is
+ * a scan of the table.
+ */
+const LEDGER_ROW_COLUMNS =
+  `id, kind, operator_id, entry_id, seq, created_at, payload_json, ` +
+  `amount, unit, role, "date", available_at`;
+
+/** The kinds that accrue money to an operator and wait out the holdback. */
+const ACCRUAL_KINDS = `('read_share', 'bounty_accrual')`;
+
+/**
+ * One row, as src/ledger.ts built it.
+ *
+ * A row written by this milestone carries the whole `LedgerRow` in
+ * `payload_json`, so it comes back verbatim. A stake row (src/stake.ts) predates
+ * `LedgerRow` and carries a `StakeRecord` instead, so it is presented through
+ * the columns 0010 backfilled, with the record itself under `ref`. A reward row
+ * whose amount was never priced reads as zero, and the record under `ref` is
+ * where the null it actually carries can be read.
+ */
+function toLedgerRow(row: Row): LedgerRow {
+  const payload = readJson<Record<string, unknown>>(row, "payload_json");
+  if (typeof payload["ref"] === "object" && payload["ref"] !== null) {
+    return payload as unknown as LedgerRow;
+  }
+  const unit = readNullableText(row, "unit");
+  return {
+    id: readText(row, "id"),
+    kind: readText(row, "kind") as LedgerRow["kind"],
+    entry_id: readNullableText(row, "entry_id"),
+    operator: readNullableText(row, "operator_id"),
+    role: readNullableText(row, "role") as LedgerRow["role"],
+    date: readNullableText(row, "date"),
+    reads: null,
+    unit: (unit ?? "standing") as LedgerRow["unit"],
+    amount: readNullableInteger(row, "amount") ?? 0,
+    available_at: readNullableText(row, "available_at"),
+    seq: readInteger(row, "seq"),
+    at: readText(row, "created_at"),
+    ref: payload,
+  };
+}
+
+/**
+ * The insert that writes one ledger row.
+ *
+ * INSERT OR IGNORE, and the id is the whole idempotence: every id src/ledger.ts
+ * builds names the event that produced the row and what the row is about, so a
+ * step replayed after a partial failure — or a cursor set back — writes the same
+ * ids and changes nothing. It is OR IGNORE rather than an upsert on purpose: a
+ * row that already exists was derived from the same sealed events, so rewriting
+ * it could only ever overwrite a right answer with the same right answer, and if
+ * it would not, the difference is a bug that must stay visible.
+ */
+function ledgerRowStatement(db: D1Like, row: LedgerRow): D1LikeStatement {
+  return db
+    .prepare(
+      `INSERT OR IGNORE INTO ledger (${LEDGER_ROW_COLUMNS})
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      row.id,
+      row.kind,
+      row.operator,
+      row.entry_id,
+      row.seq,
+      row.at,
+      writeJson(row),
+      row.amount,
+      row.unit,
+      row.role,
+      row.date,
+      row.available_at,
+    );
+}
+
+/** Write a run of ledger rows in one batch; idempotent by id. */
+export async function putLedgerRows(
+  db: D1Like,
+  rows: readonly LedgerRow[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  await db.batch(rows.map((row) => ledgerRowStatement(db, row)));
+}
+
+/**
+ * Replace M15's unpriced accrual with the priced row, atomically.
+ *
+ * The door writes the accrual the moment a reconfirmation lands, with no amount
+ * (src/bounty.ts: pricing is M21's), and src/ledger.ts builds the priced row
+ * under exactly the same id — so one of the two has to go or the insert is
+ * ignored and the bounty stays unpriced forever. Two statements would leave a
+ * window where the sweep has deleted the accrual and not yet written the price:
+ * a crash there loses the bounty, because the delete is the only record that it
+ * was ever owed. One batch makes that window impossible.
+ *
+ * The `amount IS NULL` clause is what keeps a replayed cursor safe: a row that
+ * has already been priced is never deleted, and the insert that follows is
+ * ignored by id, so a rerun reprices nothing and removes nothing.
+ */
+export async function priceBountyRow(
+  db: D1Like,
+  unpricedId: string,
+  row: LedgerRow,
+): Promise<void> {
+  await db.batch([
+    db
+      .prepare(`DELETE FROM ledger WHERE id = ? AND amount IS NULL`)
+      .bind(unpricedId),
+    ledgerRowStatement(db, row),
+  ]);
+}
+
+/**
+ * One operator's ledger, newest first, resuming strictly before `beforeSeq`.
+ *
+ * Newest first because that is the question an operator page asks — what
+ * happened to my money lately — and because a payout cycle reads through
+ * `releasedUnpaidRows` and not through this.
+ */
+export async function ledgerRowsForOperator(
+  db: D1Like,
+  operator: string,
+  limit: number,
+  beforeSeq?: number,
+): Promise<LedgerRow[]> {
+  const rows =
+    beforeSeq === undefined
+      ? await db
+          .prepare(
+            `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+             WHERE operator_id = ? ORDER BY seq DESC LIMIT ?`,
+          )
+          .bind(operator, limit)
+          .all<Row>()
+      : await db
+          .prepare(
+            `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+             WHERE operator_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`,
+          )
+          .bind(operator, beforeSeq, limit)
+          .all<Row>();
+  return rows.results.map(toLedgerRow);
+}
+
+/**
+ * Every row of one kind on one UTC day, oldest first: the read behind the daily
+ * reconciliation. Served by 0010's (kind, "date") index.
+ *
+ * The optional `limit` is the caller's, as everywhere else in this module; a
+ * day's rows are bounded by the entries read that day, so a reconciliation asks
+ * for all of them and a page asks for a page.
+ */
+export async function ledgerRowsOn(
+  db: D1Like,
+  kind: LedgerRow["kind"],
+  date: string,
+  limit?: number,
+): Promise<LedgerRow[]> {
+  const rows =
+    limit === undefined
+      ? await db
+          .prepare(
+            `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+             WHERE kind = ? AND "date" = ? ORDER BY seq`,
+          )
+          .bind(kind, date)
+          .all<Row>()
+      : await db
+          .prepare(
+            `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+             WHERE kind = ? AND "date" = ? ORDER BY seq LIMIT ?`,
+          )
+          .bind(kind, date, limit)
+          .all<Row>();
+  return rows.results.map(toLedgerRow);
+}
+
+/**
+ * One entry's read shares that are still inside the holdback at `at`, unpaid.
+ *
+ * Section 9: an upheld dispute "can claw them back before they leave", and the
+ * rows that have already left are not this query's business. src/ledger.ts's
+ * `clawbackRows` applies the same test again to what comes back.
+ */
+export async function heldReadShareRows(
+  db: D1Like,
+  entryId: string,
+  at: string,
+): Promise<LedgerRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+       WHERE entry_id = ? AND kind = 'read_share' AND paid_by IS NULL
+         AND available_at > ? ORDER BY seq`,
+    )
+    .bind(entryId, at)
+    .all<Row>();
+  return rows.results.map(toLedgerRow);
+}
+
+/**
+ * One entry's withheld halves over a window of days, oldest first: what a
+ * reconfirmation collects (Section 7's reconfirmation bounty). Both bounds are
+ * inclusive, because the window runs from the day the entry went stale to the
+ * day it was made fresh again and both of those days withheld.
+ */
+export async function bountyPoolRows(
+  db: D1Like,
+  entryId: string,
+  fromDate: string,
+  toDate: string,
+): Promise<LedgerRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+       WHERE entry_id = ? AND kind = 'bounty_pool'
+         AND "date" >= ? AND "date" <= ? ORDER BY "date", seq`,
+    )
+    .bind(entryId, fromDate, toDate)
+    .all<Row>();
+  return rows.results.map(toLedgerRow);
+}
+
+/**
+ * What one operator has coming at `now`: unpaid accruals past the holdback, and
+ * every unpaid clawback.
+ *
+ * A clawback is released the instant it is written and carries no
+ * `available_at`, so it can never wait behind a holdback — money that has to
+ * come back must not be payable out from under. src/ledger.ts's `payoutPlan`
+ * applies the same rule again to what comes back.
+ */
+export async function releasedUnpaidRows(
+  db: D1Like,
+  operator: string,
+  now: string,
+): Promise<LedgerRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+       WHERE operator_id = ? AND paid_by IS NULL
+         AND (kind = 'clawback'
+              OR (kind IN ${ACCRUAL_KINDS} AND available_at <= ?))
+       ORDER BY seq`,
+    )
+    .bind(operator, now)
+    .all<Row>();
+  return rows.results.map(toLedgerRow);
+}
+
+/** The updates that stamp a payout onto the rows it covers. */
+function ledgerPaidStatements(
+  db: D1Like,
+  rowIds: readonly string[],
+  payoutId: string,
+): D1LikeStatement[] {
+  return rowIds.map((id) =>
+    db
+      .prepare(`UPDATE ledger SET paid_by = ? WHERE id = ? AND paid_by IS NULL`)
+      .bind(payoutId, id),
+  );
+}
+
+/**
+ * Stamp a payout onto the rows it paid.
+ *
+ * `AND paid_by IS NULL` is the whole safety of it: a row already claimed by an
+ * earlier payout is left where it is rather than being quietly reassigned, so
+ * two cycles racing cannot both pay the same accrual.
+ */
+export async function markLedgerPaid(
+  db: D1Like,
+  rowIds: readonly string[],
+  payoutId: string,
+): Promise<void> {
+  if (rowIds.length === 0) return;
+  await db.batch(ledgerPaidStatements(db, rowIds, payoutId));
+}
+
+/**
+ * Record a payout: write the payout row and stamp the rows it covers, in one
+ * batch.
+ *
+ * The one write in this module that is not derivable from the log, so it is also
+ * the one that must be atomic against itself: a payout row without its stamps
+ * would pay the same accruals again next cycle, and stamps without their row
+ * would lose the money's trail.
+ */
+export async function recordPayout(
+  db: D1Like,
+  row: LedgerRow,
+  rowIds: readonly string[],
+): Promise<void> {
+  const statements = [ledgerRowStatement(db, row)];
+  statements.push(...ledgerPaidStatements(db, rowIds, row.id));
+  await db.batch(statements);
+}
+
+/** How far a ledger step has read, or null when it has never run. */
+export async function ledgerCursor(
+  db: D1Like,
+  name: string,
+): Promise<number | null> {
+  const row = await db
+    .prepare(`SELECT seq FROM ledger_state WHERE name = ? ${ONE_ROW}`)
+    .bind(name)
+    .first<Row>();
+  return row === null ? null : readInteger(row, "seq");
+}
+
+/** Move a ledger step's cursor. */
+export async function setLedgerCursor(
+  db: D1Like,
+  name: string,
+  seq: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO ledger_state (name, seq) VALUES (?, ?)
+       ON CONFLICT (name) DO UPDATE SET seq = excluded.seq`,
+    )
+    .bind(name, seq)
+    .run();
+}
+
+/** The daily reconciliations, newest first. */
+export async function reconciliationRows(
+  db: D1Like,
+  limit: number,
+): Promise<LedgerRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+       WHERE kind = 'reconciliation' ORDER BY seq DESC LIMIT ?`,
+    )
+    .bind(limit)
+    .all<Row>();
+  return rows.results.map(toLedgerRow);
+}
+
+/** The payouts, newest first, for one operator or for everyone. */
+export async function payoutRows(
+  db: D1Like,
+  limit: number,
+  operator?: string,
+): Promise<LedgerRow[]> {
+  const rows =
+    operator === undefined
+      ? await db
+          .prepare(
+            `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+             WHERE kind = 'payout' ORDER BY seq DESC LIMIT ?`,
+          )
+          .bind(limit)
+          .all<Row>()
+      : await db
+          .prepare(
+            `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+             WHERE kind = 'payout' AND operator_id = ? ORDER BY seq DESC LIMIT ?`,
+          )
+          .bind(operator, limit)
+          .all<Row>();
+  return rows.results.map(toLedgerRow);
+}
+
+/**
+ * Every ledger row about one entry, oldest first, whatever its kind: the read
+ * behind the entry page's money panel. `ledgerRowsForEntry` keeps its stake
+ * filter, because the dispute panel asks a narrower question and its answer is
+ * a `StakeRecord`.
+ */
+export async function entryLedgerRows(
+  db: D1Like,
+  entryId: string,
+  limit: number,
+): Promise<LedgerRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
+       WHERE entry_id = ? ORDER BY seq LIMIT ?`,
+    )
+    .bind(entryId, limit)
+    .all<Row>();
+  return rows.results.map(toLedgerRow);
+}
+
+// ---------------------------------------------------------------------------
+// Standing (M21)
+// ---------------------------------------------------------------------------
+
+/** One operator's cached standing, and the position it was computed at. */
+export interface OperatorStanding {
+  readonly standing: number;
+  readonly seq: number;
+}
+
+/** The update that caches one operator's standing. */
+function operatorStandingStatement(
+  db: D1Like,
+  operator: string,
+  standing: number,
+  seq: number,
+): D1LikeStatement {
+  return db
+    .prepare(`UPDATE operators SET standing = ?, standing_seq = ? WHERE id = ?`)
+    .bind(standing, seq, operator);
+}
+
+/**
+ * Cache what the published formula returned for one operator, at the position it
+ * was computed at.
+ *
+ * A cache and nothing more. Section 9: standing "is derived from the sealed
+ * public events by a published formula, so anyone can recompute anyone's
+ * standing from the log and get the same number" — so this column is never read
+ * as an authority, and `standing_seq` is what makes it checkable: rerun
+ * src/standing.ts over the log up to that position and the number must match.
+ */
+export async function setOperatorStanding(
+  db: D1Like,
+  operator: string,
+  standing: number,
+  seq: number,
+): Promise<void> {
+  await operatorStandingStatement(db, operator, standing, seq).run();
+}
+
+/**
+ * The cached standings, by operator, highest first. Operators whose standing has
+ * never been computed are not in the map at all: null is "not computed yet" and
+ * never "zero", and a page that finds an operator missing recomputes.
+ */
+export async function standingByOperator(
+  db: D1Like,
+  limit: number,
+): Promise<Map<string, OperatorStanding>> {
+  const rows = await db
+    .prepare(
+      `SELECT id, standing, standing_seq FROM operators
+       WHERE standing IS NOT NULL ORDER BY standing DESC, id LIMIT ?`,
+    )
+    .bind(limit)
+    .all<Row>();
+  const standings = new Map<string, OperatorStanding>();
+  for (const row of rows.results) {
+    standings.set(readText(row, "id"), {
+      standing: readInteger(row, "standing"),
+      seq: readInteger(row, "standing_seq"),
+    });
+  }
+  return standings;
+}
+
+/**
+ * One operator's own cached standing, or null when it has never been computed.
+ *
+ * `standingByOperator` is a leaderboard — the highest `limit` standings — so it
+ * is the wrong read for a question about one named operator: the hundred-and
+ * -first operator by standing is absent from it and would answer "not computed
+ * yet" although its column is written. This asks the row itself, so the answer
+ * does not depend on how the operator ranks.
+ */
+export async function operatorStanding(
+  db: D1Like,
+  operator: string,
+): Promise<OperatorStanding | null> {
+  const row = await db
+    .prepare(
+      `SELECT standing, standing_seq FROM operators
+       WHERE id = ? AND standing IS NOT NULL`,
+    )
+    .bind(operator)
+    .first<Row>();
+  if (row === null) return null;
+  return {
+    standing: readInteger(row, "standing"),
+    seq: readInteger(row, "standing_seq"),
+  };
+}
+
+/**
+ * The cached standings of exactly these operators, by operator.
+ *
+ * The directory's read: one grouped query over the ids on the page rather than a
+ * read per row, and rather than a leaderboard joined against a page ordered by
+ * id — those two orderings do not agree, so past the leaderboard's limit the
+ * join silently drops standings that are stored. Ids with no cached standing are
+ * absent from the map, which is "not computed yet" and never "zero".
+ */
+export async function standingForOperators(
+  db: D1Like,
+  ids: readonly string[],
+): Promise<Map<string, OperatorStanding>> {
+  const standings = new Map<string, OperatorStanding>();
+  if (ids.length === 0) return standings;
+  const rows = await db
+    .prepare(
+      `SELECT id, standing, standing_seq FROM operators
+       WHERE standing IS NOT NULL AND id IN (${ids.map(() => "?").join(", ")})`,
+    )
+    .bind(...ids)
+    .all<Row>();
+  for (const row of rows.results) {
+    standings.set(readText(row, "id"), {
+      standing: readInteger(row, "standing"),
+      seq: readInteger(row, "standing_seq"),
+    });
+  }
+  return standings;
+}
+
+/**
+ * Trust or untrust an operator because of its standing: append the event, cache
+ * the standing that caused it, and rewrite the operator row, atomically.
+ *
+ * Section 9: standing "gates everything discretionary, from entry to and stay in
+ * the trusted pool". The event is what grants or removes the trust and the row
+ * is the index into it, so a row without its event would be a pool nobody can
+ * verify offline and an event without its row would be a pool the Worker cannot
+ * see. One `batch` makes both impossible, and the run is checked against the
+ * head by exactly the rule a plain append uses.
+ *
+ * `named_by` is the reason rather than an agent id, because no key did this:
+ * `/genesis` records the maintainer's agent when a human names an operator, and
+ * here the formula did it. `standing` and `position` are what the sweep computed
+ * and are cached beside the row for the same reason `setOperatorStanding` exists
+ * — so a reader can recompute them and check.
+ */
+export async function recordTrustChange(
+  db: D1Like,
+  kind: "operator_trusted" | "operator_untrusted",
+  operator: string,
+  at: string,
+  reason: "standing",
+  standing: number,
+  position: number,
+): Promise<Event> {
+  const record = await getOperator(db, operator);
+  if (record === null) {
+    throw new Error(`recordTrustChange: unknown operator ${operator}`);
+  }
+
+  const { event, statements } = await sealOntoHead(db, {
+    at,
+    type: kind,
+    entry_id: null,
+    payload: { operator },
+  });
+
+  const trusted = kind === "operator_trusted";
+  statements.push(
+    operatorStatement(db, {
+      ...record,
+      details: {
+        ...record.details,
+        trusted,
+        trusted_seq: trusted ? event.seq : null,
+        named_by: reason,
+      },
+    }),
+  );
+  statements.push(operatorStandingStatement(db, operator, standing, position));
+  await db.batch(statements);
+  return event;
 }
 
 // ---------------------------------------------------------------------------

@@ -17,10 +17,12 @@
  * same records come back by replaying the log; a row that disagrees with the log
  * is wrong, and the log is right.
  *
- * `amount_cents` is null on purpose. Section 9's pricing — the half rate, the
- * read counts, the thirty-day hold — is M21's, and putting a number here now
- * would freeze a policy that does not exist yet into a stored record. Policy
- * numbers live in src/policy.ts and nowhere else.
+ * `amount_micros` is null at the door on purpose. The accrual says that a
+ * bounty came due and over what window; what it is worth is the sum of the
+ * halves the entry withheld while it was stale, which is a question about the
+ * entry's `bounty_pool` rows and not about this event. src/ledger.ts prices it
+ * (`bountyAccrualRow`), in the integer micro-USD every read-revenue amount is
+ * counted in. Policy numbers live in src/policy.ts and nowhere else.
  */
 
 import type { Event } from "./events.js";
@@ -45,8 +47,12 @@ export interface BountyAccrual {
   readonly stale_until: string;
   /** The reconfirmation event's position in the log. */
   readonly seq: number;
-  /** Null until M21 publishes the pricing that would fill it. */
-  readonly amount_cents: null;
+  /**
+   * The bounty in micro-USD, or null when it has not been priced yet. Null at
+   * the door: src/ledger.ts sums the entry's withheld pool rows over exactly
+   * the window above and fills it.
+   */
+  readonly amount_micros: number | null;
 }
 
 /**
@@ -77,6 +83,6 @@ export function bountyAccrual(
     stale_from: before.expires_at,
     stale_until: reconfirmation.at,
     seq: reconfirmation.seq,
-    amount_cents: null,
+    amount_micros: null,
   };
 }

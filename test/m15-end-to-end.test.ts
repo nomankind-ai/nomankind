@@ -766,7 +766,7 @@ describe("reconfirming a stale entry", () => {
     expect(accrual.stale_until).toBe(at.toISOString());
     // M21 publishes the pricing; nothing here freezes a number that does not
     // exist yet.
-    expect(accrual.amount_cents).toBeNull();
+    expect(accrual.amount_micros).toBeNull();
 
     const event = await eventBySeq(world.store.db, accrual.seq);
     expect(event?.type).toBe("reconfirmation");

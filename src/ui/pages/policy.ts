@@ -56,6 +56,31 @@ function group(title: string, items: readonly Row[]): Safe {
       </section>`;
 }
 
+/**
+ * Micro-USD per dollar, and reads per thousand reads. Units and not policy
+ * numbers: the first is what a millionth of a dollar means (src/ledger.ts) and
+ * the second is what "per thousand" means. Every amount they are applied to is
+ * read from POLICY.
+ */
+const MICROS_PER_DOLLAR = 1_000_000;
+const READS_PER_THOUSAND = 1_000;
+
+/** A micro-USD amount as dollars, by integer arithmetic and never a float. */
+function dollars(micros: number): string {
+  const whole = Math.trunc(micros / MICROS_PER_DOLLAR);
+  const fraction = micros % MICROS_PER_DOLLAR;
+  const cents = Math.trunc(fraction / (MICROS_PER_DOLLAR / 100));
+  const remainder = fraction % (MICROS_PER_DOLLAR / 100);
+  return remainder === 0
+    ? `$${whole}.${String(cents).padStart(2, "0")}`
+    : `$${whole}.${String(fraction).padStart(6, "0")}`;
+}
+
+/** The paper's own worked figure, derived from the price rather than restated. */
+function dollarsPerThousandReads(microsPerRead: number): string {
+  return dollars(microsPerRead * READS_PER_THOUSAND);
+}
+
 /** A list-valued constant, one item per line, in order. */
 function listRows(name: string, values: readonly string[]): Safe[] {
   return values.map(
@@ -219,22 +244,85 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         "The contributor pool's share of paid-read revenue at launch. It is a floor that only rises, on published milestones, and never falls.",
     },
     {
-      name: "the standing formula and its decay rate",
-      value: "not yet published (M21)",
+      name: "READ_PRICE_MICROS_PER_READ",
+      value: `${policy.READ_PRICE_MICROS_PER_READ} micro-USD per read`,
       means:
-        "Standing is derived from the sealed events by a published formula, so anyone can recompute anyone's standing and get the same number. Decay is paused until the paid loop starts. Neither the formula nor the rate is published yet.",
+        `The price a paid read is charged at, and the number every read share is computed from: ${dollarsPerThousandReads(policy.READ_PRICE_MICROS_PER_READ)} per thousand reads. Micro-USD, a millionth of a dollar, because one read's submitter share is a fraction of a cent and a ledger that rounded it to cents would pay the long tail nothing.`,
     },
     {
-      name: "the payout minimum and the payout cycle",
-      value: "not yet published (M21, decision D-053)",
+      name: "PAYOUT_MINIMUM_MICROS",
+      value: `${policy.PAYOUT_MINIMUM_MICROS} micro-USD`,
       means:
-        "How small a balance is carried forward instead of paid, and how often payouts run. Needs data from the first months of operation.",
+        `How small a released balance is carried forward instead of paid: ${dollars(policy.PAYOUT_MINIMUM_MICROS)}. Nothing is written off, because a transfer that cost more than it paid would take the difference out of the contributor pool (decision D-053).`,
     },
     {
-      name: "paid read tiers and the price per thousand reads",
+      name: "PAYOUT_CYCLE",
+      value: policy.PAYOUT_CYCLE,
+      means:
+        "How often payouts run: one UTC calendar month per cycle, per operator (decision D-053).",
+    },
+    {
+      name: "paid read tiers and their rate limits",
       value: "not yet published (M24)",
       means:
-        "Reads are free at low volume today. The paid tiers, their rate limits and the price the contributor share is computed against arrive with M24.",
+        "Reads are free at low volume today. The price above is published policy; the paid tiers and the rate limits that go with them arrive with M24.",
+    },
+  ];
+
+  const standing: Row[] = [
+    {
+      name: "STANDING_VALIDATION_VOLUNTEERED",
+      value: `${policy.STANDING_VALIDATION_VOLUNTEERED} standing`,
+      means:
+        "Earned for a completed validation nobody was drawn for, and for a reconfirmation, which is a check volunteered the same way.",
+    },
+    {
+      name: "STANDING_VALIDATION_ASSIGNED",
+      value: `${policy.STANDING_VALIDATION_ASSIGNED} standing`,
+      means:
+        "Earned for a completed validation the beacon assigned. Assigned work weighs highest, which is what makes an assignment on an entry nobody will read worth doing.",
+    },
+    {
+      name: "STANDING_SUBMISSION_VERIFIED",
+      value: `${policy.STANDING_SUBMISSION_VERIFIED} standing`,
+      means:
+        "Earned by the submitter's operator the first time an entry actually derives verified, and once per entry however many decisions follow.",
+    },
+    {
+      name: "STANDING_DISPUTE_UPHELD",
+      value: `${policy.STANDING_DISPUTE_UPHELD} standing`,
+      means:
+        "Earned by the challenger when a dispute is upheld, on top of the stake coming back.",
+    },
+    {
+      name: "STANDING_OVERTURNED_SIGNER",
+      value: `${policy.STANDING_OVERTURNED_SIGNER} standing`,
+      means:
+        "Burned from every operator that signed an overturned entry — its author, each approver, each reconfirmer — once each per entry.",
+    },
+    {
+      name: "STANDING_ASSIGNMENT_MISSED",
+      value: `${policy.STANDING_ASSIGNMENT_MISSED} standing`,
+      means:
+        "Burned when an assigned validation or an assigned revalidation goes unanswered past its window.",
+    },
+    {
+      name: "STANDING_TRUSTED_ENTRY",
+      value: `${policy.STANDING_TRUSTED_ENTRY} standing`,
+      means:
+        "What a registered operator must reach to enter the trusted pool. No model provider and no maintainer operator enters it at any standing.",
+    },
+    {
+      name: "STANDING_TRUSTED_STAY",
+      value: `${policy.STANDING_TRUSTED_STAY} standing`,
+      means:
+        "What a trusted operator must stay at or above to keep it. Two numbers rather than one, so an operator sitting exactly at the bar is not trusted and untrusted by turns.",
+    },
+    {
+      name: "STANDING_DECAY_PAUSED",
+      value: policy.STANDING_DECAY_PAUSED ? "paused" : "active",
+      means:
+        "Whether standing decays. Decay is paused until the paid loop starts, since before then there is nothing for it to decay against — so there is no decay term at all, rather than a rate of zero nobody published.",
     },
   ];
 
@@ -374,7 +462,15 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
 
       ${group("Validation", validation)} ${group("Evidence", evidence)}
       ${group("Freshness", staleness)} ${group("Money and standing", money)}
-      ${group("Disputes and reports", disputes)}
+      ${group("Standing", standing)} ${group("Disputes and reports", disputes)}
+
+      <p class="note">
+        Those numbers and the two stakes below are the whole standing formula:
+        nothing else in the log moves standing, so a reader can fold the sealed
+        events themselves and get the same number the log shows. Standing is not
+        a score nomankind assigns — it is derived from the log, and a stored
+        standing that disagrees with the log is wrong.
+      </p>
 
       <p class="note">
         Every stake above is a placeholder the maintainer set, and a stake is a
