@@ -175,6 +175,7 @@ import {
   putAnchor,
   putEntry,
   putLedgerRows,
+  putSweepSteps,
   readCounterRangeOn,
   readCountsOn,
   recordAssignment,
@@ -197,6 +198,7 @@ import {
   unwitnessedSeals,
   type OperatorRecord,
   type StoredBountyRow,
+  type SweepStepRow,
   type StoredEntry,
   type StoredEntryInput,
 } from "../storage/repository.js";
@@ -239,7 +241,46 @@ export interface SweepDeps {
    * `payout_unconfigured` rather than one that pretends to have paid.
    */
   readonly payout?: PayoutAdapter;
+  /**
+   * Which door ran this sweep (M23, decision D-076): `cron` from the scheduled
+   * handler in src/worker/index.ts, `alarm` from the Sweeper Durable Object.
+   *
+   * Optional and defaulted to `alarm`, because the alarm is the sweep's own
+   * timer and the cron door is the repair for a chain that broke: a caller that
+   * says nothing is the timer. It reaches only the `sweep_steps` rows the last
+   * step writes, and no rule anywhere reads it — a step that ran did the same
+   * work whichever door called it.
+   */
+  readonly trigger?: SweepTrigger;
 }
+
+/** Which door ran the sweep. */
+export type SweepTrigger = "alarm" | "cron";
+
+/**
+ * The steps one run writes a `sweep_steps` row for, in the order they run.
+ *
+ * `sweep` is the run itself and the rest are its steps, so the page can tell "the
+ * timer has stopped" from "the timer is running and the seal step is refusing" —
+ * two very different things that look identical in a log that only records what
+ * was appended.
+ */
+export const SWEEP_STEPS: readonly string[] = Object.freeze([
+  "sweep",
+  "snapshot",
+  "expiry",
+  "draws",
+  "revalidation",
+  "staleness",
+  "publish",
+  "seal",
+  "witness",
+  "anchor",
+  "ledger",
+  "standing",
+  "payout",
+  "attestation",
+]);
 
 /** The four sealing deps, once they are known to be there. */
 interface SealingDeps {
@@ -1439,6 +1480,17 @@ async function payoutStep(
 }
 
 /**
+ * What a thrown thing says, as one line for the board.
+ *
+ * A step that throws did not refuse under a rule — there is no reason name for
+ * "D1 was gone" — so the board shows the message itself rather than inventing a
+ * word for it.
+ */
+function thrownReason(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
+}
+
+/**
  * Run one sweep.
  *
  * Never throws for a rule: every refusal from the kernel is counted and the run
@@ -1452,514 +1504,591 @@ export async function runSweep(
   const db = env.DB;
   const at = deps.now.toISOString();
   const skipped: Record<string, number> = {};
+  // Which step the run is in, for the status board only (M23, decision D-076).
+  // The report is untouched by it: `skipped` counts exactly what it always
+  // counted, and this records, per step, the first reason that step gave.
+  let inStep = SWEEP_STEPS[0]!;
+  const stepSkip = new Map<string, string>();
+  const noteSkip = (step: string, reason: string): void => {
+    if (!stepSkip.has(step)) stepSkip.set(step, reason);
+  };
   const skip = (reason: string): void => {
     skipped[reason] = (skipped[reason] ?? 0) + 1;
+    noteSkip(inStep, reason);
   };
 
-  // (a) The pool snapshot. Committed before any draw, and never by a draw: the
-  // commitment has to be in the log before the beacon round that uses it.
-  const registry = await registryEvents(db);
-  // Decision D-071: every draw below is domain-blind by construction, so the
-  // caller is the one that keeps an operator out of a domain it never attested
-  // in. This is the fold the exclusion lists are built from, taken once for the
-  // run and read again after the snapshot is sealed, because a registration in
-  // this same run would otherwise be invisible to it.
-  let snapshot: SweepReport["snapshot"] = null;
-  const owed = poolSnapshotDue(registry);
-  if (owed !== null) {
-    const event = await recordPoolSnapshot(db, {
-      at,
-      type: "pool_snapshot",
-      entry_id: null,
-      payload: { operators: [...owed] },
-    });
-    // Kept in hand rather than re-read: the draws below read the pool through
-    // the same events this run just sealed.
-    registry.push(event);
-    snapshot = { seq: event.seq, operators: [...owed] };
-  }
+  // What the board is written from, hoisted out of the run because the rows are
+  // written in a `finally`: a step that throws — D1 gone, an adapter breaking
+  // its contract — still leaves a board saying which step it was in, which is
+  // exactly the run a reader most needs to see.
+  let beacon: Beacon | null = null;
+  let beaconRefusal: string | null = null;
+  let report: SweepReport | null = null;
+  /** The step the run threw in, or null while nothing has thrown. */
+  let failedStep: string | null = null;
 
-  // (b) Expiry. The rows say which assignments are past their deadline; the
-  // kernel says whether each one is still open and really missed, because the
-  // row is only an index into the log and the log is the record.
-  const missed: SweepMiss[] = [];
-  for (const due of await dueAssignments(db, at, LIST_PAGE_LIMIT)) {
-    const events = await eventsForEntry(db, due.entryId);
-    const open = openAssignmentOf(events, due.entryId);
-    if (open === null || open.seq !== due.assignment.seq) {
-      skip("assignment_not_open");
-      continue;
+  try {
+    inStep = "snapshot";
+    // (a) The pool snapshot. Committed before any draw, and never by a draw: the
+    // commitment has to be in the log before the beacon round that uses it.
+    const registry = await registryEvents(db);
+    // Decision D-071: every draw below is domain-blind by construction, so the
+    // caller is the one that keeps an operator out of a domain it never attested
+    // in. This is the fold the exclusion lists are built from, taken once for the
+    // run and read again after the snapshot is sealed, because a registration in
+    // this same run would otherwise be invisible to it.
+    let snapshot: SweepReport["snapshot"] = null;
+    const owed = poolSnapshotDue(registry);
+    if (owed !== null) {
+      const event = await recordPoolSnapshot(db, {
+        at,
+        type: "pool_snapshot",
+        entry_id: null,
+        payload: { operators: [...owed] },
+      });
+      // Kept in hand rather than re-read: the draws below read the pool through
+      // the same events this run just sealed.
+      registry.push(event);
+      snapshot = { seq: event.seq, operators: [...owed] };
     }
-    if (!isAssignmentMissed(open, { now: at })) {
-      skip("assignment_not_missed");
-      continue;
-    }
-    const event = await recordAssignmentMissed(
-      db,
-      buildAssignmentMissed({ entryId: due.entryId, at, assignment: open }),
-      open.seq,
-    );
-    missed.push({
-      entry_id: due.entryId,
-      operator: open.operator,
-      agent: open.agent,
-      seq: event.seq,
-    });
-  }
 
-  // (b2) The same expiry, for the other purpose. Section 6, "Revalidate": the
-  // check carries the same seventy-two hours as a validation assignment, and a
-  // checker who lets them run out is missed exactly as a validator is. A miss
-  // closes the assignment and never the request — the check is still owed — so
-  // the draw step below finds the request open again and redraws it.
-  const revalidationMissed: SweepRevalidationMiss[] = [];
-  for (const due of await dueRevalidationAssignments(db, at, LIST_PAGE_LIMIT)) {
-    const open = await openRevalidationAssignment(db, due.entryId);
-    if (open === null || open.seq !== due.assignment.seq) {
-      skip("revalidation_not_open");
-      continue;
+    inStep = "expiry";
+    // (b) Expiry. The rows say which assignments are past their deadline; the
+    // kernel says whether each one is still open and really missed, because the
+    // row is only an index into the log and the log is the record.
+    const missed: SweepMiss[] = [];
+    for (const due of await dueAssignments(db, at, LIST_PAGE_LIMIT)) {
+      const events = await eventsForEntry(db, due.entryId);
+      const open = openAssignmentOf(events, due.entryId);
+      if (open === null || open.seq !== due.assignment.seq) {
+        skip("assignment_not_open");
+        continue;
+      }
+      if (!isAssignmentMissed(open, { now: at })) {
+        skip("assignment_not_missed");
+        continue;
+      }
+      const event = await recordAssignmentMissed(
+        db,
+        buildAssignmentMissed({ entryId: due.entryId, at, assignment: open }),
+        open.seq,
+      );
+      missed.push({
+        entry_id: due.entryId,
+        operator: open.operator,
+        agent: open.agent,
+        seq: event.seq,
+      });
     }
-    if (!isAssignmentMissed(open, { now: at })) {
-      skip("revalidation_not_missed");
-      continue;
-    }
-    const world = await entryWorld(db, due.entryId);
-    const event = await recordRevalidationMissed(
-      db,
-      {
-        event: {
-          at,
-          type: "revalidation_missed",
-          entry_id: due.entryId,
-          payload: {
-            request_seq: due.requestSeq,
-            agent: open.agent,
-            operator: open.operator,
+
+    inStep = "revalidation";
+    // (b2) The same expiry, for the other purpose. Section 6, "Revalidate": the
+    // check carries the same seventy-two hours as a validation assignment, and a
+    // checker who lets them run out is missed exactly as a validator is. A miss
+    // closes the assignment and never the request — the check is still owed — so
+    // the draw step below finds the request open again and redraws it.
+    const revalidationMissed: SweepRevalidationMiss[] = [];
+    for (const due of await dueRevalidationAssignments(db, at, LIST_PAGE_LIMIT)) {
+      const open = await openRevalidationAssignment(db, due.entryId);
+      if (open === null || open.seq !== due.assignment.seq) {
+        skip("revalidation_not_open");
+        continue;
+      }
+      if (!isAssignmentMissed(open, { now: at })) {
+        skip("revalidation_not_missed");
+        continue;
+      }
+      const world = await entryWorld(db, due.entryId);
+      const event = await recordRevalidationMissed(
+        db,
+        {
+          event: {
+            at,
+            type: "revalidation_missed",
+            entry_id: due.entryId,
+            payload: {
+              request_seq: due.requestSeq,
+              agent: open.agent,
+              operator: open.operator,
+            },
+          },
+          // The row is rewritten so the sidecar's view of the check goes back to
+          // having no draw standing, which is what a reader is owed the moment
+          // the window ran out.
+          stored: (missedEvent): StoredEntryInput => {
+            const derived = rederive(world, due.entryId, deps.now, [missedEvent]);
+            return {
+              entry: derived.entry,
+              sidecar: derived.sidecar,
+              derivedThroughSeq: missedEvent.seq,
+            };
           },
         },
-        // The row is rewritten so the sidecar's view of the check goes back to
-        // having no draw standing, which is what a reader is owed the moment
-        // the window ran out.
-        stored: (missedEvent): StoredEntryInput => {
-          const derived = rederive(world, due.entryId, deps.now, [missedEvent]);
-          return {
-            entry: derived.entry,
-            sidecar: derived.sidecar,
-            derivedThroughSeq: missedEvent.seq,
-          };
-        },
-      },
-      open.seq,
-    );
-    revalidationMissed.push({
-      entry_id: due.entryId,
-      request_seq: due.requestSeq,
-      operator: open.operator,
-      agent: open.agent,
-      seq: event.seq,
-    });
-  }
-
-  // (c) The draws. One beacon read for the whole run, so every entry drawn in
-  // this run is drawn against the same public round.
-  const result = await deps.beacon.latest();
-  const beacon: Beacon | null = result.ok ? result.beacon : null;
-  const beaconRefusal = result.ok ? null : result.reason;
-
-  const drawn: SweepDraw[] = [];
-  let afterSubmittedSeq: number | undefined;
-  for (;;) {
-    const page = await listEntries(
-      db,
-      afterSubmittedSeq === undefined
-        ? { status: "draft", limit: LIST_PAGE_LIMIT }
-        : { status: "draft", limit: LIST_PAGE_LIMIT, afterSubmittedSeq },
-    );
-    if (page.length === 0) break;
-
-    for (const stored of page) {
-      const entryId = (stored.entry as Record<string, unknown>)["id"] as string;
-      const events = await eventsForEntry(db, entryId);
-      const all = [...registry, ...events];
-
-      // Whether a draw is owed at all is read from the log, and from the status
-      // and the split derivation already computed. Asked before the beacon, so
-      // an entry that is owed no draw reports the rule that says so rather than
-      // whatever the network happened to answer.
-      const due = drawDue({
-        events: all,
-        entryId,
-        status: (stored.entry as Record<string, unknown>)[
-          "status"
-        ] as EntryStatus,
-        needsReplacement: stored.sidecar.needs_replacement,
+        open.seq,
+      );
+      revalidationMissed.push({
+        entry_id: due.entryId,
+        request_seq: due.requestSeq,
+        operator: open.operator,
+        agent: open.agent,
+        seq: event.seq,
       });
-      if (!due.due) {
-        skip(due.reason);
-        continue;
+    }
+
+    inStep = "draws";
+    // (c) The draws. One beacon read for the whole run, so every entry drawn in
+    // this run is drawn against the same public round.
+    const result = await deps.beacon.latest();
+    beacon = result.ok ? result.beacon : null;
+    beaconRefusal = result.ok ? null : result.reason;
+
+    const drawn: SweepDraw[] = [];
+    let afterSubmittedSeq: number | undefined;
+    for (;;) {
+      const page = await listEntries(
+        db,
+        afterSubmittedSeq === undefined
+          ? { status: "draft", limit: LIST_PAGE_LIMIT }
+          : { status: "draft", limit: LIST_PAGE_LIMIT, afterSubmittedSeq },
+      );
+      if (page.length === 0) break;
+
+      for (const stored of page) {
+        const entryId = (stored.entry as Record<string, unknown>)["id"] as string;
+        const events = await eventsForEntry(db, entryId);
+        const all = [...registry, ...events];
+
+        // Whether a draw is owed at all is read from the log, and from the status
+        // and the split derivation already computed. Asked before the beacon, so
+        // an entry that is owed no draw reports the rule that says so rather than
+        // whatever the network happened to answer.
+        const due = drawDue({
+          events: all,
+          entryId,
+          status: (stored.entry as Record<string, unknown>)[
+            "status"
+          ] as EntryStatus,
+          needsReplacement: stored.sidecar.needs_replacement,
+        });
+        if (!due.due) {
+          skip(due.reason);
+          continue;
+        }
+
+        if (beacon === null) {
+          skip(beaconRefusal ?? "beacon_unavailable");
+          continue;
+        }
+
+        const pool = latestPoolSnapshot(all, headPosition(all));
+        if (pool === null) {
+          skip("no_pool_snapshot");
+          continue;
+        }
+
+        // The dispute's own exclusions, plus every pool operator that never
+        // attested in this entry's domain (decision D-071). The entry's domain is
+        // read off its stored copy, which carries the signed core's `domain`
+        // verbatim; a legacy v0.6 entry has none and reads as ai-ecosystem.
+        const draw = await drawValidator({
+          entryId,
+          snapshot: pool,
+          beacon,
+          exclude: [
+            ...exclusionsFor(all, entryId),
+            ...outsideDomain(
+              operatorDomainsAt(registry, headPosition(registry)),
+              pool.operators,
+              domainOf(stored.entry),
+            ),
+          ],
+        });
+        if (!draw.ok) {
+          // snapshot_after_beacon is the paper's own ordering rule: the round
+          // this run can read precedes the snapshot it would draw against, so the
+          // entry waits for a later round rather than being drawn against a
+          // commitment made after it.
+          skip(draw.reason);
+          continue;
+        }
+
+        // Identity and operators: the operator is the unit of assignment, and the
+        // agent named beside it is the first one bound under it.
+        const agents = await agentsForOperator(db, draw.operator, LIST_PAGE_LIMIT);
+        const agent = agents[0];
+        if (agent === undefined) {
+          skip("no_agent_for_operator");
+          continue;
+        }
+
+        const event = await recordAssignment(
+          db,
+          buildAssignment({
+            entryId,
+            at,
+            agent: agent.agentId,
+            operator: draw.operator,
+            beaconRound: beacon.round,
+            replacement: due.replacement,
+          }),
+        );
+
+        // The entry itself is rederived so its stored copy is caught up with the
+        // log; an assignment changes no derived field, and derived_through_seq
+        // saying otherwise would be a row that had fallen behind its own events.
+        const derived = deriveEntry([...all, event], entryId, { now: at });
+        await putEntry(db, derived.entry, derived.sidecar, event.seq);
+
+        drawn.push({
+          entry_id: entryId,
+          operator: draw.operator,
+          agent: agent.agentId,
+          beacon_round: beacon.round,
+          replacement: due.replacement,
+          seq: event.seq,
+        });
       }
 
-      if (beacon === null) {
-        skip(beaconRefusal ?? "beacon_unavailable");
-        continue;
-      }
+      if (page.length < LIST_PAGE_LIMIT) break;
+      afterSubmittedSeq = page[page.length - 1]!.submittedSeq;
+    }
 
-      const pool = latestPoolSnapshot(all, headPosition(all));
-      if (pool === null) {
-        skip("no_pool_snapshot");
-        continue;
-      }
+    // (c2) The revalidation draws. Section 6, "Revalidate": the request "is
+    // assigned at random to a TRUSTED OPERATOR", by the same public randomness as
+    // a validation draw and against the same committed snapshot, so anyone
+    // holding the log and the beacon can recompute who should have been drawn.
+    //
+    // The requests are found through the (type, seq) index rather than by scanning
+    // the log: every `revalidation_requested` ever made, paged, and each one asked
+    // of the kernel whether it is still open. That is bounded by how many checks
+    // have ever been asked for, which is what the cap and the stake exist to keep
+    // small.
+    inStep = "revalidation";
+    const revalidationDrawn: SweepRevalidationDraw[] = [];
+    let afterRequestSeq = -1;
+    for (;;) {
+      const requests = await eventsOfType(
+        db,
+        "revalidation_requested",
+        afterRequestSeq,
+        LIST_PAGE_LIMIT,
+      );
+      if (requests.length === 0) break;
 
-      // The dispute's own exclusions, plus every pool operator that never
-      // attested in this entry's domain (decision D-071). The entry's domain is
-      // read off its stored copy, which carries the signed core's `domain`
-      // verbatim; a legacy v0.6 entry has none and reads as ai-ecosystem.
-      const draw = await drawValidator({
-        entryId,
-        snapshot: pool,
-        beacon,
-        exclude: [
-          ...exclusionsFor(all, entryId),
+      for (const request of requests) {
+        const entryId = request.entry_id;
+        // Unreachable: `appendEvent` refuses an entry-scoped event without one.
+        if (entryId === null) continue;
+
+        const world = await entryWorld(db, entryId);
+        const open = openRevalidation(world.entryEvents);
+        if (open === null || open.seq !== request.seq) {
+          skip("revalidation_resolved");
+          continue;
+        }
+        if ((await openRevalidationAssignment(db, entryId)) !== null) {
+          skip("revalidation_assigned");
+          continue;
+        }
+
+        if (beacon === null) {
+          skip(beaconRefusal ?? "beacon_unavailable");
+          continue;
+        }
+
+        const all = [...registry, ...world.entryEvents];
+        const pool = latestPoolSnapshot(all, headPosition(all));
+        if (pool === null) {
+          skip("no_pool_snapshot");
+          continue;
+        }
+
+        // The submitter's operator and the requester's, and nobody else's: a
+        // revalidation is a recheck rather than a challenge, so it does not carry
+        // the dispute's extra exclusion (src/dispute.ts).
+        const submission = world.entryEvents.find(
+          (event) => event.type === "entry_submitted",
+        ) as Event<"entry_submitted"> | undefined;
+        const authorOperator =
+          (submission?.payload.core["author_operator"] as string | null) ?? null;
+        const exclude = [
+          ...revalidationDrawExclusions(
+            authorOperator,
+            (open as Event<"revalidation_requested">).payload.operator,
+          ),
+          // And every pool operator not attested in the entry's own domain, off
+          // the signed core the submission event carries (decision D-071).
           ...outsideDomain(
             operatorDomainsAt(registry, headPosition(registry)),
             pool.operators,
-            domainOf(stored.entry),
+            domainOf(submission?.payload.core ?? null),
           ),
-        ],
-      });
-      if (!draw.ok) {
-        // snapshot_after_beacon is the paper's own ordering rule: the round
-        // this run can read precedes the snapshot it would draw against, so the
-        // entry waits for a later round rather than being drawn against a
-        // commitment made after it.
-        skip(draw.reason);
-        continue;
-      }
+        ];
 
-      // Identity and operators: the operator is the unit of assignment, and the
-      // agent named beside it is the first one bound under it.
-      const agents = await agentsForOperator(db, draw.operator, LIST_PAGE_LIMIT);
-      const agent = agents[0];
-      if (agent === undefined) {
-        skip("no_agent_for_operator");
-        continue;
-      }
-
-      const event = await recordAssignment(
-        db,
-        buildAssignment({
+        // The M4 draw first, so above the switch a checker and a validator are
+        // drawn by exactly the same function. Below it, `drawChecker` answers the
+        // same question without the rule that belongs to validation alone.
+        const attempted = await drawValidator({
           entryId,
-          at,
-          agent: agent.agentId,
-          operator: draw.operator,
-          beaconRound: beacon.round,
-          replacement: due.replacement,
-        }),
-      );
+          snapshot: pool,
+          beacon,
+          exclude,
+        });
+        const draw =
+          !attempted.ok && attempted.reason === "pool_below_switch"
+            ? await drawChecker({ entryId, snapshot: pool, beacon, exclude })
+            : attempted;
+        if (!draw.ok) {
+          skip(draw.reason);
+          continue;
+        }
 
-      // The entry itself is rederived so its stored copy is caught up with the
-      // log; an assignment changes no derived field, and derived_through_seq
-      // saying otherwise would be a row that had fallen behind its own events.
-      const derived = deriveEntry([...all, event], entryId, { now: at });
-      await putEntry(db, derived.entry, derived.sidecar, event.seq);
+        // Identity and operators: the operator is the unit, and the agent named
+        // beside it is the first one bound under it.
+        const agents = await agentsForOperator(db, draw.operator, LIST_PAGE_LIMIT);
+        const agent = agents[0];
+        if (agent === undefined) {
+          skip("no_agent_for_operator");
+          continue;
+        }
 
-      drawn.push({
-        entry_id: entryId,
-        operator: draw.operator,
-        agent: agent.agentId,
-        beacon_round: beacon.round,
-        replacement: due.replacement,
-        seq: event.seq,
-      });
-    }
-
-    if (page.length < LIST_PAGE_LIMIT) break;
-    afterSubmittedSeq = page[page.length - 1]!.submittedSeq;
-  }
-
-  // (c2) The revalidation draws. Section 6, "Revalidate": the request "is
-  // assigned at random to a TRUSTED OPERATOR", by the same public randomness as
-  // a validation draw and against the same committed snapshot, so anyone
-  // holding the log and the beacon can recompute who should have been drawn.
-  //
-  // The requests are found through the (type, seq) index rather than by scanning
-  // the log: every `revalidation_requested` ever made, paged, and each one asked
-  // of the kernel whether it is still open. That is bounded by how many checks
-  // have ever been asked for, which is what the cap and the stake exist to keep
-  // small.
-  const revalidationDrawn: SweepRevalidationDraw[] = [];
-  let afterRequestSeq = -1;
-  for (;;) {
-    const requests = await eventsOfType(
-      db,
-      "revalidation_requested",
-      afterRequestSeq,
-      LIST_PAGE_LIMIT,
-    );
-    if (requests.length === 0) break;
-
-    for (const request of requests) {
-      const entryId = request.entry_id;
-      // Unreachable: `appendEvent` refuses an entry-scoped event without one.
-      if (entryId === null) continue;
-
-      const world = await entryWorld(db, entryId);
-      const open = openRevalidation(world.entryEvents);
-      if (open === null || open.seq !== request.seq) {
-        skip("revalidation_resolved");
-        continue;
-      }
-      if ((await openRevalidationAssignment(db, entryId)) !== null) {
-        skip("revalidation_assigned");
-        continue;
-      }
-
-      if (beacon === null) {
-        skip(beaconRefusal ?? "beacon_unavailable");
-        continue;
-      }
-
-      const all = [...registry, ...world.entryEvents];
-      const pool = latestPoolSnapshot(all, headPosition(all));
-      if (pool === null) {
-        skip("no_pool_snapshot");
-        continue;
-      }
-
-      // The submitter's operator and the requester's, and nobody else's: a
-      // revalidation is a recheck rather than a challenge, so it does not carry
-      // the dispute's extra exclusion (src/dispute.ts).
-      const submission = world.entryEvents.find(
-        (event) => event.type === "entry_submitted",
-      ) as Event<"entry_submitted"> | undefined;
-      const authorOperator =
-        (submission?.payload.core["author_operator"] as string | null) ?? null;
-      const exclude = [
-        ...revalidationDrawExclusions(
-          authorOperator,
-          (open as Event<"revalidation_requested">).payload.operator,
-        ),
-        // And every pool operator not attested in the entry's own domain, off
-        // the signed core the submission event carries (decision D-071).
-        ...outsideDomain(
-          operatorDomainsAt(registry, headPosition(registry)),
-          pool.operators,
-          domainOf(submission?.payload.core ?? null),
-        ),
-      ];
-
-      // The M4 draw first, so above the switch a checker and a validator are
-      // drawn by exactly the same function. Below it, `drawChecker` answers the
-      // same question without the rule that belongs to validation alone.
-      const attempted = await drawValidator({
-        entryId,
-        snapshot: pool,
-        beacon,
-        exclude,
-      });
-      const draw =
-        !attempted.ok && attempted.reason === "pool_below_switch"
-          ? await drawChecker({ entryId, snapshot: pool, beacon, exclude })
-          : attempted;
-      if (!draw.ok) {
-        skip(draw.reason);
-        continue;
-      }
-
-      // Identity and operators: the operator is the unit, and the agent named
-      // beside it is the first one bound under it.
-      const agents = await agentsForOperator(db, draw.operator, LIST_PAGE_LIMIT);
-      const agent = agents[0];
-      if (agent === undefined) {
-        skip("no_agent_for_operator");
-        continue;
-      }
-
-      const event = await recordRevalidationAssignment(db, {
-        event: {
-          at,
-          type: "revalidation_assigned",
-          entry_id: entryId,
-          payload: {
-            request_seq: request.seq,
-            agent: agent.agentId,
-            operator: draw.operator,
-            beacon_round: beacon.round,
-            // The same seventy-two hours a validation assignment carries.
-            deadline: assignmentDeadline(at),
+        const event = await recordRevalidationAssignment(db, {
+          event: {
+            at,
+            type: "revalidation_assigned",
+            entry_id: entryId,
+            payload: {
+              request_seq: request.seq,
+              agent: agent.agentId,
+              operator: draw.operator,
+              beacon_round: beacon.round,
+              // The same seventy-two hours a validation assignment carries.
+              deadline: assignmentDeadline(at),
+            },
           },
-        },
-        stored: (assigned): StoredEntryInput => {
-          const derived = rederive(world, entryId, deps.now, [assigned]);
-          return {
-            entry: derived.entry,
-            sidecar: derived.sidecar,
-            derivedThroughSeq: assigned.seq,
-          };
-        },
-      });
+          stored: (assigned): StoredEntryInput => {
+            const derived = rederive(world, entryId, deps.now, [assigned]);
+            return {
+              entry: derived.entry,
+              sidecar: derived.sidecar,
+              derivedThroughSeq: assigned.seq,
+            };
+          },
+        });
 
-      revalidationDrawn.push({
-        entry_id: entryId,
-        request_seq: request.seq,
-        operator: draw.operator,
-        agent: agent.agentId,
-        beacon_round: beacon.round,
-        seq: event.seq,
-      });
+        revalidationDrawn.push({
+          entry_id: entryId,
+          request_seq: request.seq,
+          operator: draw.operator,
+          agent: agent.agentId,
+          beacon_round: beacon.round,
+          seq: event.seq,
+        });
+      }
+
+      afterRequestSeq = requests[requests.length - 1]!.seq;
+      if (requests.length < LIST_PAGE_LIMIT) break;
     }
 
-    afterRequestSeq = requests[requests.length - 1]!.seq;
-    if (requests.length < LIST_PAGE_LIMIT) break;
-  }
-
-  // (d) Staleness. Whitepaper Section 7, "Freshness and decay": past its window
-  // an entry stays verified but shows as stale. Nobody appends an event for
-  // that — the window closing is a fact about the calendar and about the log,
-  // and derivation already computes it — so this step appends nothing. It finds
-  // the rows the day turned on and rewrites them from their own events, which
-  // is what makes the stored copy agree with what a reader deriving for
-  // themselves would get.
-  //
-  // The rederivation goes through the entry's whole world (src/worker/world.ts)
-  // rather than its own events alone, because a superseded entry can also go
-  // stale, and reading it without its superseders would drop the
-  // `superseded_by` the log says is there.
-  const staled: string[] = [];
-  const today = at.slice(0, 10);
-  let afterExpiresAt: string | undefined;
-  let afterId: string | undefined;
-  for (;;) {
-    const page = await staleDue(
-      db,
-      afterExpiresAt === undefined || afterId === undefined
-        ? { today, limit: LIST_PAGE_LIMIT }
-        : { today, limit: LIST_PAGE_LIMIT, afterExpiresAt, afterId },
-    );
-    if (page.length === 0) break;
-
-    for (const due of page) {
-      const world = await entryWorld(db, due.id);
-      const derived = rederive(world, due.id, deps.now);
-      // The column said the window had run out; derivation is the authority on
-      // whether it actually has. A row that comes back fresh is left alone —
-      // storing it would be storing the column's opinion over the log's — and
-      // the cursor carries past it, so the loop still terminates.
-      if (!derived.derived.stale) {
-        skip("not_stale_on_rederive");
-        continue;
-      }
-      // A rewrite is a write, so the whole derived entry goes past the
-      // published schema first, exactly as the two write doors do it before
-      // they store anything. A refusal is counted like any other rule rather
-      // than thrown — the run carries on — and, as with a row that came back
-      // fresh, the cursor carries past the row it refused, so the loop still
-      // terminates.
-      if (!passesSchemaForRewrite(derived.entry)) {
-        skip("schema_invalid");
-        continue;
-      }
-      // The entry is stored at the position it was already derived through: no
-      // event was appended, so the log has not moved.
-      const stored = await getEntry(db, due.id);
-      await putEntry(
+    inStep = "staleness";
+    // (d) Staleness. Whitepaper Section 7, "Freshness and decay": past its window
+    // an entry stays verified but shows as stale. Nobody appends an event for
+    // that — the window closing is a fact about the calendar and about the log,
+    // and derivation already computes it — so this step appends nothing. It finds
+    // the rows the day turned on and rewrites them from their own events, which
+    // is what makes the stored copy agree with what a reader deriving for
+    // themselves would get.
+    //
+    // The rederivation goes through the entry's whole world (src/worker/world.ts)
+    // rather than its own events alone, because a superseded entry can also go
+    // stale, and reading it without its superseders would drop the
+    // `superseded_by` the log says is there.
+    const staled: string[] = [];
+    const today = at.slice(0, 10);
+    let afterExpiresAt: string | undefined;
+    let afterId: string | undefined;
+    for (;;) {
+      const page = await staleDue(
         db,
-        derived.entry,
-        derived.sidecar,
-        stored?.derivedThroughSeq ?? headPosition(world.entryEvents),
+        afterExpiresAt === undefined || afterId === undefined
+          ? { today, limit: LIST_PAGE_LIMIT }
+          : { today, limit: LIST_PAGE_LIMIT, afterExpiresAt, afterId },
       );
-      staled.push(due.id);
+      if (page.length === 0) break;
+
+      for (const due of page) {
+        const world = await entryWorld(db, due.id);
+        const derived = rederive(world, due.id, deps.now);
+        // The column said the window had run out; derivation is the authority on
+        // whether it actually has. A row that comes back fresh is left alone —
+        // storing it would be storing the column's opinion over the log's — and
+        // the cursor carries past it, so the loop still terminates.
+        if (!derived.derived.stale) {
+          skip("not_stale_on_rederive");
+          continue;
+        }
+        // A rewrite is a write, so the whole derived entry goes past the
+        // published schema first, exactly as the two write doors do it before
+        // they store anything. A refusal is counted like any other rule rather
+        // than thrown — the run carries on — and, as with a row that came back
+        // fresh, the cursor carries past the row it refused, so the loop still
+        // terminates.
+        if (!passesSchemaForRewrite(derived.entry)) {
+          skip("schema_invalid");
+          continue;
+        }
+        // The entry is stored at the position it was already derived through: no
+        // event was appended, so the log has not moved.
+        const stored = await getEntry(db, due.id);
+        await putEntry(
+          db,
+          derived.entry,
+          derived.sidecar,
+          stored?.derivedThroughSeq ?? headPosition(world.entryEvents),
+        );
+        staled.push(due.id);
+      }
+
+      // Keyset, always advanced past the page just read. A row this run rewrote
+      // leaves the index, so resuming from the start would be right too; resuming
+      // from the cursor is what keeps a row it skipped from coming back forever.
+      afterExpiresAt = page[page.length - 1]!.expires_at;
+      afterId = page[page.length - 1]!.id;
     }
 
-    // Keyset, always advanced past the page just read. A row this run rewrote
-    // leaves the index, so resuming from the start would be right too; resuming
-    // from the cursor is what keeps a row it skipped from coming back forever.
-    afterExpiresAt = page[page.length - 1]!.expires_at;
-    afterId = page[page.length - 1]!.id;
-  }
+    inStep = "publish";
+    // (e) The day's read counts. Before the seal on purpose: the count this run
+    // publishes is sealed by this same run, which is what Section 9's "each day's
+    // published count is the number the seal commits to" asks for. It needs
+    // nothing but the clock, so it runs on every environment.
+    const published = await publishStep(db, deps.now, at, skip);
 
-  // (e) The day's read counts. Before the seal on purpose: the count this run
-  // publishes is sealed by this same run, which is what Section 9's "each day's
-  // published count is the number the seal commits to" asks for. It needs
-  // nothing but the clock, so it runs on every environment.
-  const published = await publishStep(db, deps.now, at, skip);
+    inStep = "attestation";
+    // (e2) The attestations whose window ran out. Before the seal for the same
+    // reason the read counts are: an expiry appended here is sealed by this same
+    // run, so the log commits to it at once rather than a cycle later.
+    const attestations = await attestationStep(db, at, skip);
 
-  // (e2) The attestations whose window ran out. Before the seal for the same
-  // reason the read counts are: an expiry appended here is sealed by this same
-  // run, so the log commits to it at once rather than a cycle later.
-  const attestations = await attestationStep(db, at, skip);
+    // (f), (g) and (h). The seal, the countersignatures, and yesterday's anchor,
+    // in that order: a seal has to exist before anyone can countersign it, and a
+    // day's roots have to be fixed before the day is anchored. Every refusal is
+    // counted like the five steps above, and the run carries on.
+    let sealed: SweepReport["sealed"] = null;
+    let witnessed: SweepReport["witnessed"] = [];
+    let anchored: SweepReport["anchored"] = null;
+    const sealing = sealingDeps(deps);
+    inStep = "seal";
+    if (sealing === null) {
+      skip("sealing_unconfigured");
+      // One refusal in the report, three steps on the status board: the witness
+      // and anchor steps did not run either, and a board that showed them blank
+      // would read as "never reached" rather than "not configured here".
+      noteSkip("witness", "sealing_unconfigured");
+      noteSkip("anchor", "sealing_unconfigured");
+    } else {
+      sealed = await sealStep(db, sealing, skip);
+      // Who the maintainer is, read exactly as derivation reads it: the operators
+      // the registry events flag, at the head of what this run read.
+      const { maintainers } = registeredOperatorsAt(
+        registry,
+        headPosition(registry),
+      );
+      inStep = "witness";
+      witnessed = await witnessStep(db, sealing, maintainers, skip);
+      inStep = "anchor";
+      anchored = await anchorStep(db, sealing, skip);
+    }
 
-  // (f), (g) and (h). The seal, the countersignatures, and yesterday's anchor,
-  // in that order: a seal has to exist before anyone can countersign it, and a
-  // day's roots have to be fixed before the day is anchored. Every refusal is
-  // counted like the five steps above, and the run carries on.
-  let sealed: SweepReport["sealed"] = null;
-  let witnessed: SweepReport["witnessed"] = [];
-  let anchored: SweepReport["anchored"] = null;
-  const sealing = sealingDeps(deps);
-  if (sealing === null) {
-    skip("sealing_unconfigured");
-  } else {
-    sealed = await sealStep(db, sealing, skip);
-    // Who the maintainer is, read exactly as derivation reads it: the operators
-    // the registry events flag, at the head of what this run read.
-    const { maintainers } = registeredOperatorsAt(
-      registry,
-      headPosition(registry),
+    // (i), (j) and (k). The money and the standing, read off what the log has
+    // sealed — this run's own seal included, which is why they come after the
+    // seal step and not before it. A log with no seal at all has nothing any of
+    // them may read, and all three say so in the same word.
+    let ledger: SweepReport["ledger"] = null;
+    let standing: SweepReport["standing"] = null;
+    let payouts: SweepReport["payouts"] = [];
+    const sealedHead = await latestSeal(db);
+    inStep = "ledger";
+    if (sealedHead === null) {
+      skip("unsealed");
+      skip("unsealed");
+      skip("unsealed");
+      // The same three refusals the report counts, told apart by step.
+      noteSkip("standing", "unsealed");
+      noteSkip("payout", "unsealed");
+    } else {
+      ledger = await ledgerStep(db, sealedHead.last_seq);
+      inStep = "standing";
+      standing = await standingStep(db, sealedHead.last_seq, at, skip);
+      inStep = "payout";
+      payouts = await payoutStep(db, deps.payout, sealedHead.last_seq, at, skip);
+    }
+
+    report = {
+      at,
+      snapshot,
+      missed,
+      drawn,
+      revalidation_drawn: revalidationDrawn,
+      revalidation_missed: revalidationMissed,
+      staled,
+      published,
+      attestations,
+      sealed,
+      witnessed,
+      anchored,
+      ledger,
+      standing,
+      payouts,
+      skipped,
+    };
+
+    // The run's own account of itself, once, on stdout. Nothing else surfaces the
+    // skip counts in production: a scheduled sweep has no caller to hand the
+    // report to, so a step that did nothing looked the same as one that was never
+    // reached. Cloudflare's observability keeps this line, which is how a
+    // `witness_pending` in production becomes a reason someone can read.
+    //
+    // Safe to log in full: the report is ids, positions, counts, operator names
+    // and reason names. No key, credential or bearer token is ever in it, and the
+    // adapters that hold those never put them in what they return.
+    console.log(JSON.stringify({ sweep: report }));
+
+    return report;
+  } catch (failure) {
+    // The step the run was in when it threw, marked with what the throw said,
+    // and the run itself with it, because a run that fell over did not get
+    // through. `noteSkip` and not `skip`: the report counts rule refusals and a
+    // throw is not one. The steps below this one get no row at all — they never
+    // ran, and the row they have is the last run that did reach them. The error
+    // is rethrown untouched, because a sweep that could not finish has not
+    // swept and the platform should see that.
+    failedStep = inStep;
+    const reason = thrownReason(failure);
+    noteSkip(inStep, reason);
+    noteSkip("sweep", reason);
+    throw failure;
+  } finally {
+    // (l) The status board, one row per step: when it last ran, when it last got
+    // through, and what it last refused with. In a `finally` so the run that
+    // failed is the one the board describes — on a throw it writes the steps
+    // the run reached and no others, with no detail, because there is no report
+    // to take it from, and the step that threw carries the message as its
+    // reason.
+    //
+    // Nothing above it changes and nothing below reads it: the rows exist so
+    // src/worker/status.ts can answer "is the clockwork running", which the
+    // events table cannot, because a step that did nothing appends nothing.
+    // A failure of this write is not caught either, for the same reason.
+    await putSweepSteps(
+      db,
+      stepRows(at, report, deps, {
+        stepSkip,
+        beacon,
+        beaconRefusal,
+        failedStep,
+      }),
     );
-    witnessed = await witnessStep(db, sealing, maintainers, skip);
-    anchored = await anchorStep(db, sealing, skip);
   }
-
-  // (i), (j) and (k). The money and the standing, read off what the log has
-  // sealed — this run's own seal included, which is why they come after the
-  // seal step and not before it. A log with no seal at all has nothing any of
-  // them may read, and all three say so in the same word.
-  let ledger: SweepReport["ledger"] = null;
-  let standing: SweepReport["standing"] = null;
-  let payouts: SweepReport["payouts"] = [];
-  const sealedHead = await latestSeal(db);
-  if (sealedHead === null) {
-    skip("unsealed");
-    skip("unsealed");
-    skip("unsealed");
-  } else {
-    ledger = await ledgerStep(db, sealedHead.last_seq);
-    standing = await standingStep(db, sealedHead.last_seq, at, skip);
-    payouts = await payoutStep(db, deps.payout, sealedHead.last_seq, at, skip);
-  }
-
-  const report: SweepReport = {
-    at,
-    snapshot,
-    missed,
-    drawn,
-    revalidation_drawn: revalidationDrawn,
-    revalidation_missed: revalidationMissed,
-    staled,
-    published,
-    attestations,
-    sealed,
-    witnessed,
-    anchored,
-    ledger,
-    standing,
-    payouts,
-    skipped,
-  };
-
-  // The run's own account of itself, once, on stdout. Nothing else surfaces the
-  // skip counts in production: a scheduled sweep has no caller to hand the
-  // report to, so a step that did nothing looked the same as one that was never
-  // reached. Cloudflare's observability keeps this line, which is how a
-  // `witness_pending` in production becomes a reason someone can read.
-  //
-  // Safe to log in full: the report is ids, positions, counts, operator names
-  // and reason names. No key, credential or bearer token is ever in it, and the
-  // adapters that hold those never put them in what they return.
-  console.log(JSON.stringify({ sweep: report }));
-
-  return report;
 }
 
 /** The sealing deps, or null when this caller asked for the sweep without them. */
@@ -1972,4 +2101,138 @@ function sealingDeps(deps: SweepDeps): SealingDeps | null {
     ineligibleAgents: deps.ineligibleAgents ?? new Set<string>(),
     anchor: deps.anchor,
   };
+}
+
+/**
+ * The instant a step of this run last got through, or null when it did not.
+ *
+ * Null is "no news" and never "never": `putSweepSteps` carries the stored value
+ * forward past a null, so a step that has been refusing since this morning keeps
+ * the morning it last worked.
+ */
+function okAt(
+  at: string,
+  step: string,
+  stepSkip: ReadonlyMap<string, string>,
+): string | null {
+  return stepSkip.has(step) ? null : at;
+}
+
+/**
+ * What the board is written from besides the report: the reasons each step gave,
+ * the beacon read (which no report field carries), and the step a run threw in.
+ */
+interface Board {
+  readonly stepSkip: ReadonlyMap<string, string>;
+  readonly beacon: Beacon | null;
+  readonly beaconRefusal: string | null;
+  /** The step the run threw in, or null when it finished. */
+  readonly failedStep: string | null;
+}
+
+/**
+ * One run's fourteen step rows.
+ *
+ * The details are each step's own slice of the report, plus the three facts no
+ * report field carries and the status rules need: the round the beacon read (or
+ * why it did not), and the sealed position the standing step recomputed against.
+ *
+ * A null report is the run that threw: there is no report to slice, so the rows
+ * carry an empty detail and say only what the run is known to have done — when
+ * it ran, what started it, and which step refused with what. Only the steps it
+ * reached get a row, and the board is still written, because a run that fell
+ * over is the one worth seeing.
+ *
+ * The beacon is the exception to what `last_ok_at` means. For every other step it
+ * is "this run reached the step and it refused nothing"; for `draws` it is "the
+ * beacon answered", because a run that skipped every draft with
+ * `awaiting_volunteers` did exactly what the rule says and the status page's
+ * beacon stage needs to know when a round last came back rather than when every
+ * entry last happened to be drawable.
+ */
+function stepRows(
+  at: string,
+  report: SweepReport | null,
+  deps: SweepDeps,
+  board: Board,
+): SweepStepRow[] {
+  const { stepSkip, beacon, beaconRefusal } = board;
+  const trigger = deps.trigger ?? "alarm";
+  const details: Record<string, Record<string, unknown>> =
+    report === null
+      ? {}
+      : {
+          // The clock is injected and read once per run (decision D-013 as
+          // amended), so a run begins and ends at the same instant of the log's
+          // own time and the duration is zero by construction. The three keys
+          // are here because the page reads them; none of them is a wall-clock
+          // measurement and none pretends to be one.
+          sweep: { started_at: at, finished_at: at, duration_ms: 0 },
+          snapshot: {
+            seq: report.snapshot === null ? null : report.snapshot.seq,
+            operators: report.snapshot === null ? 0 : report.snapshot.operators.length,
+          },
+          expiry: { missed: report.missed.length },
+          draws: {
+            drawn: report.drawn.length,
+            beacon_round: beacon === null ? null : beacon.round,
+            beacon_at: beacon === null ? null : beacon.at,
+            beacon_reason: beaconRefusal,
+          },
+          revalidation: {
+            drawn: report.revalidation_drawn.length,
+            missed: report.revalidation_missed.length,
+          },
+          staleness: { staled: report.staled.length },
+          publish: {
+            published: report.published.length,
+            date:
+              report.published.length === 0
+                ? null
+                : report.published[report.published.length - 1]!.date,
+          },
+          seal: report.sealed === null ? { seq: null } : { ...report.sealed },
+          witness: {
+            seals: report.witnessed.length,
+            operators: report.witnessed.flatMap((one) => [...one.operators]),
+          },
+          anchor: report.anchored === null ? { date: null } : { ...report.anchored },
+          ledger: report.ledger === null ? { through: null } : { ...report.ledger },
+          standing:
+            report.standing === null
+              ? { position: null }
+              : { ...report.standing, trusted: [...report.standing.trusted] },
+          payout: {
+            payouts: report.payouts.length,
+            amount: report.payouts.reduce((total, one) => total + one.amount, 0),
+          },
+          attestation: { expired: report.attestations.expired.length },
+        };
+
+  const failedAt =
+    board.failedStep === null ? null : SWEEP_STEPS.indexOf(board.failedStep);
+  // A run that threw never reached the steps below the one it threw in, so it
+  // writes no row for them. Their stored row is the last run that did reach
+  // them, and rewriting it would date a step to a run it had no part in and
+  // wipe the detail the status rules read off it.
+  const reached =
+    failedAt === null ? SWEEP_STEPS : SWEEP_STEPS.slice(0, failedAt + 1);
+
+  return reached.map((step) => {
+    const reason = stepSkip.get(step) ?? null;
+    return {
+      step,
+      last_run_at: at,
+      last_ok_at:
+        step === "draws"
+          ? beacon === null
+            ? null
+            : at
+          : okAt(at, step, stepSkip),
+      last_skip_reason: reason,
+      last_skip_at: reason === null ? null : at,
+      detail: details[step] ?? {},
+      trigger,
+    };
+  });
 }

@@ -21,7 +21,7 @@
 import { utcDay, type Anchor, type AnchorExternal } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
 import { domainOf } from "../core.js";
-import { DEFAULT_DOMAIN } from "../policy.js";
+import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "../policy.js";
 import type { DerivedAttestation } from "../attest.js";
 import type { BountyAccrual } from "../bounty.js";
 import type { Sidecar } from "../derive.js";
@@ -757,16 +757,25 @@ export async function captureForHash(
   return row === null ? null : toCapture(row);
 }
 
-/** Every capture one entry rests on, in role order. Bounded by the entry. */
+/**
+ * Every capture one entry rests on, in role order, up to `limit` of them.
+ *
+ * Bounded by the entry — the table's key is (entry_id, role) — and bounded again
+ * by an explicit limit, because `report:<seq>` roles accumulate one per failure
+ * report and no read here may be open-ended. The number is the caller's;
+ * `LIST_PAGE_LIMIT` stands behind the callers that want one entry's captures
+ * whole, and it is src/policy.ts's number rather than one invented here.
+ */
 export async function capturesForEntry(
   db: D1Like,
   entryId: string,
+  limit: number = LIST_PAGE_LIMIT,
 ): Promise<CaptureRecord[]> {
   const rows = await db
     .prepare(
-      `SELECT ${CAPTURE_COLUMNS} FROM captures WHERE entry_id = ? ORDER BY role`,
+      `SELECT ${CAPTURE_COLUMNS} FROM captures WHERE entry_id = ? ORDER BY role LIMIT ?`,
     )
-    .bind(entryId)
+    .bind(entryId, limit)
     .all<Row>();
   return rows.results.map(toCapture);
 }
@@ -4672,4 +4681,237 @@ export async function eventsForAttestation(
     .bind(...ATTESTATION_EVENT_TYPES, id)
     .all<Row>();
   return rows.results.map(toEvent);
+}
+
+// ---------------------------------------------------------------------------
+// The sweep's own account of itself (M23, decision D-076)
+// ---------------------------------------------------------------------------
+
+/**
+ * One step of one sweep run, as the status page reads it.
+ *
+ * A status board and never a history: one row per step name, replaced at the
+ * end of every run. `last_ok_at`, `last_skip_reason` and `last_skip_at` are null
+ * when this run has nothing new to say about them, and the upsert keeps
+ * whatever stood there — so a step that has been refusing since noon still
+ * carries the morning it last worked.
+ *
+ * `detail` is the step's own part of the sweep report plus the facts the status
+ * rules need that no event carries. Nothing derives anything from it here: it
+ * goes in as JSON and comes back as JSON.
+ */
+export interface SweepStepRow {
+  readonly step: string;
+  readonly last_run_at: string;
+  readonly last_ok_at: string | null;
+  readonly last_skip_reason: string | null;
+  readonly last_skip_at: string | null;
+  readonly detail: Record<string, unknown>;
+  /** `alarm` or `cron`: which door ran the sweep this row is from. */
+  readonly trigger: string;
+}
+
+const SWEEP_STEP_COLUMNS = `step, last_run_at, last_ok_at, last_skip_reason, last_skip_at, detail_json, "trigger"`;
+
+function toSweepStep(row: Row): SweepStepRow {
+  return {
+    step: readText(row, "step"),
+    last_run_at: readText(row, "last_run_at"),
+    last_ok_at: readNullableText(row, "last_ok_at"),
+    last_skip_reason: readNullableText(row, "last_skip_reason"),
+    last_skip_at: readNullableText(row, "last_skip_at"),
+    detail: readJson<Record<string, unknown>>(row, "detail_json"),
+    trigger: readText(row, "trigger"),
+  };
+}
+
+/**
+ * Write one run's step rows, in one batch.
+ *
+ * COALESCE on the three carried columns, and only on those three: a run that
+ * reached a step always moves `last_run_at`, `detail_json` and `"trigger"`,
+ * because those are about this run; `last_ok_at` and the skip pair are about the
+ * last run that had something to say, so a null from this run means "no news"
+ * rather than "never". A step that has never once succeeded therefore keeps a
+ * null `last_ok_at`, which is exactly what the page reads as `idle`.
+ *
+ * One batch, so a reader between two steps of the same run never sees half a
+ * board.
+ */
+export async function putSweepSteps(
+  db: D1Like,
+  rows: readonly SweepStepRow[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  const statements = rows.map((row) =>
+    db
+      .prepare(
+        `INSERT INTO sweep_steps (${SWEEP_STEP_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (step) DO UPDATE SET
+           last_run_at = excluded.last_run_at,
+           last_ok_at = COALESCE(excluded.last_ok_at, sweep_steps.last_ok_at),
+           last_skip_reason =
+             COALESCE(excluded.last_skip_reason, sweep_steps.last_skip_reason),
+           last_skip_at = COALESCE(excluded.last_skip_at, sweep_steps.last_skip_at),
+           detail_json = excluded.detail_json,
+           "trigger" = excluded."trigger"`,
+      )
+      .bind(
+        row.step,
+        row.last_run_at,
+        row.last_ok_at,
+        row.last_skip_reason,
+        row.last_skip_at,
+        writeJson(row.detail),
+        row.trigger,
+      ),
+  );
+  await db.batch(statements);
+}
+
+/**
+ * Every step row, in step order.
+ *
+ * No limit, and it is not a list read that needs one: the table holds exactly
+ * one row per step of the sweep, the steps are named in src/worker/sweep.ts, and
+ * the count is a property of the code rather than of how much has happened.
+ */
+export async function sweepSteps(db: D1Like): Promise<SweepStepRow[]> {
+  const rows = await db
+    .prepare(`SELECT ${SWEEP_STEP_COLUMNS} FROM sweep_steps ORDER BY step`)
+    .all<Row>();
+  return rows.results.map(toSweepStep);
+}
+
+/**
+ * How many events the newest seal does not cover, and the oldest one's instant.
+ *
+ * `afterSeq` is the seal's `last_seq`, or null when nothing is sealed at all —
+ * in which case every event is unsealed. One aggregate over the primary key
+ * range, so the cost is the seek and not the count.
+ */
+export async function unsealedEvents(
+  db: D1Like,
+  afterSeq: number | null,
+): Promise<{ count: number; oldest_at: string | null }> {
+  const row =
+    afterSeq === null
+      ? await db
+          .prepare(`SELECT COUNT(*) AS n, MIN("at") AS oldest FROM events`)
+          .first<Row>()
+      : await db
+          .prepare(
+            `SELECT COUNT(*) AS n, MIN("at") AS oldest FROM events WHERE seq > ?`,
+          )
+          .bind(afterSeq)
+          .first<Row>();
+  if (row === null) return { count: 0, oldest_at: null };
+  return {
+    count: readInteger(row, "n"),
+    oldest_at: readNullableText(row, "oldest"),
+  };
+}
+
+/**
+ * The trusted operators' ids, in id order, up to the caller's own limit.
+ *
+ * The same condition `countTrustedOperators` counts, returning the names: the
+ * status page compares them against the operators the newest `pool_snapshot`
+ * committed, and a count could not tell a swap from a match. The JSON value's
+ * own truth rather than `= 1`, exactly as that count reads it.
+ */
+export async function trustedOperatorIds(
+  db: D1Like,
+  limit: number,
+): Promise<string[]> {
+  const rows = await db
+    .prepare(
+      `SELECT id FROM operators
+       WHERE json_extract(operator_json, '$.trusted') ORDER BY id LIMIT ?`,
+    )
+    .bind(limit)
+    .all<Row>();
+  return rows.results.map((row) => readText(row, "id"));
+}
+
+/** How many operators are registered at all, trusted or not. */
+export async function countOperators(db: D1Like): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM operators`)
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "n");
+}
+
+/**
+ * How many seals carry at least one countersignature.
+ *
+ * The complement of `unwitnessedSeals`'s first clause, counted rather than
+ * listed: the status page shows witnessed over total and never the seals
+ * themselves.
+ */
+export async function countWitnessedSeals(db: D1Like): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM seals WHERE witnesses_json <> '[]'`)
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "n");
+}
+
+/**
+ * How many seals were sealed on one UTC day.
+ *
+ * The same half-open text range `sealsSealedOn` seeks on, counted instead of
+ * loaded: the anchoring stage asks only whether the day had anything to anchor,
+ * and a day's seals are not a page anyone wants to read to answer that.
+ */
+export async function countSealsSealedOn(
+  db: D1Like,
+  date: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM seals WHERE sealed_at >= ? AND sealed_at < ?`,
+    )
+    .bind(`${date}T`, `${date}U`)
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "n");
+}
+
+/**
+ * The newest receipt of one kind: its counter and when it was created, or null
+ * when none was ever issued.
+ *
+ * What the status page's "exercised, not probed" rows are: nobody probes the
+ * read door on a schedule, so the evidence that it works is the last time
+ * somebody used it. The counter is the receipts table's own `seq`, and it is
+ * the index this seeks, so this is one seek rather than a scan.
+ */
+export async function latestReceipt(
+  db: D1Like,
+  kind: "read" | "sync",
+): Promise<{ counter: number; created_at: string } | null> {
+  const row = await db
+    .prepare(
+      `SELECT seq, created_at FROM receipts WHERE kind = ? ORDER BY seq DESC ${ONE_ROW}`,
+    )
+    .bind(kind)
+    .first<Row>();
+  if (row === null) return null;
+  return {
+    counter: readInteger(row, "seq"),
+    created_at: readText(row, "created_at"),
+  };
+}
+
+/**
+ * How many attestations there have ever been.
+ *
+ * The status page's one question about the training path that a page of rows
+ * cannot answer: "has anyone ever asked for a probe set here". A count, so the
+ * answer does not depend on a limit.
+ */
+export async function countAttestations(db: D1Like): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM attestations`)
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "n");
 }

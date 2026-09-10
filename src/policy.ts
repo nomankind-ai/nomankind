@@ -292,6 +292,34 @@ export const SEAL_INTERVAL_MINUTES = 5;
 export const SWEEP_INTERVAL_MINUTES = 5;
 
 /**
+ * The status page (decision D-076): how many of its own intervals a periodic
+ * stage may fall behind before the page calls it `attention`.
+ *
+ * Not a whitepaper number and not a rule: Section 11 promises a public status
+ * page and says nothing about when a late timer is late enough to mention. Two
+ * is the maintainer's own choice — one interval is an ordinary run that has not
+ * happened yet, and two is a run that was missed — and it moves by decision.
+ *
+ * An interval is the stage's own, never a single global one: the sweep timer
+ * reads it against SWEEP_INTERVAL_MINUTES and sealing against
+ * SEAL_INTERVAL_MINUTES, so a cadence that changes moves its own stage's bar
+ * with it.
+ */
+export const STATUS_ATTENTION_AFTER_INTERVALS = 2;
+
+/**
+ * The status page (decision D-076): how long a broken rule may stand before the
+ * page calls it `failing` rather than `attention`.
+ *
+ * The maintainer's own number for the same reason as the one above, and thirty
+ * minutes because it is six sweeps: a stage still broken after six chances to
+ * fix itself is not waiting on the next run, it is stuck. Minutes rather than
+ * intervals because it is one bar for every stage — a reader looking at the page
+ * should not have to know each stage's cadence to know what red means.
+ */
+export const STATUS_FAILING_AFTER_MINUTES = 30;
+
+/**
  * The log (failure reports). Reports from this many distinct verified
  * operators auto-open a revalidation. The paper says the threshold is
  * published policy but states no number, so three is the maintainer's own
@@ -727,6 +755,8 @@ export const POLICY = Object.freeze({
   CONTRIBUTOR_SHARE_PERCENT,
   SEAL_INTERVAL_MINUTES,
   SWEEP_INTERVAL_MINUTES,
+  STATUS_ATTENTION_AFTER_INTERVALS,
+  STATUS_FAILING_AFTER_MINUTES,
   WITNESSES_REQUIRED,
   SEAL_MAX_EVENTS,
   WITNESS_FILE_TAIL_BYTES,

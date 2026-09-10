@@ -756,6 +756,7 @@ describe("migrations", () => {
       "0010_ledger.sql",
       "0011_attestations.sql",
       "0012_domains.sql",
+      "0013_status.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -901,6 +902,7 @@ describe("migrations", () => {
       "0010_ledger.sql",
       "0011_attestations.sql",
       "0012_domains.sql",
+      "0013_status.sql",
     ]);
   });
 });

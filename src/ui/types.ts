@@ -21,6 +21,7 @@ import type { Event } from "../events.js";
 import type { LedgerBalance, LedgerRow } from "../ledger.js";
 import type { Seal } from "../seal.js";
 import type { StakeRecord } from "../stake.js";
+import type { Counter, Exercised, Stage } from "../status.js";
 
 /**
  * The three things every page knows about the request it is answering, and
@@ -347,4 +348,132 @@ export interface LandingData {
   sealCount: number;
   verified: number;
   witnesses: number;
+}
+
+/**
+ * What the How it works page is handed (D-076).
+ *
+ * The page is the pipeline explained, and every stage of it carries a link into
+ * this environment's own log rather than a description of one — so every field
+ * below is a reading, and every one of them is nullable, because production
+ * holds no entries the day it opens and a page that showed a plan where the log
+ * holds nothing would be the first thing a reader disbelieved. Null is rendered
+ * as words ("no entry yet", "no seal yet", "none stale", "no attestation yet")
+ * and never as an em dash: this page is prose, and a dash in a sentence is not
+ * an empty state a reader can read.
+ *
+ * Nothing here is derived by the page. The tier is the sidecar's effective one,
+ * the counts are counts, and the two hosts were parsed where the reading was
+ * done (src/worker/pages.ts) and not in the view.
+ */
+export interface HowItWorksData {
+  /** The newest entry, however far through validation it is. */
+  entry: {
+    id: string;
+    status: string;
+    /** The sidecar's `effective_tier`, null while the entry is draft. */
+    tier: string | null;
+    domain: string;
+  } | null;
+  /** That entry's snapshot capture: the hash, the source's host, the rule. */
+  capture: {
+    hash: string;
+    host: string;
+    normVersion: string;
+  } | null;
+  /** The trusted pool, and how many operators are registered at all. */
+  pool: {
+    /** The trusted operators' ids, in the directory's own order. */
+    names: string[];
+    trusted: number;
+    registered: number;
+  };
+  /** The newest validation event: where it sits, and what it said. */
+  validation: {
+    seq: number;
+    decision: string;
+    operator: string;
+  } | null;
+  seal: {
+    seq: number;
+    firstSeq: number;
+    lastSeq: number;
+    witnesses: number;
+    sealedAt: string;
+  } | null;
+  anchor: {
+    date: string;
+    /** Seals covered by that day's anchor. */
+    seals: number;
+    /** What the anchor was posted to, in words: "local on demo" and the like. */
+    external: string;
+  } | null;
+  /** The newest published read count, and the seq the log carries it at. */
+  readCount: {
+    seq: number;
+    date: string;
+    total: number;
+    counterFirst: number | null;
+    counterLast: number | null;
+  } | null;
+  /** The newest overturned entry and the correction that overturned it. */
+  overturned: {
+    id: string;
+    correction: string | null;
+  } | null;
+  /** How many entries are stale now. */
+  stale: number;
+  /**
+   * When the first freshness window on this environment ends: the newest
+   * entry's own `expires_at`, carried verbatim. Null when nothing is submitted,
+   * or when the newest entry is in a category that carries no window.
+   */
+  nextWindowEnds: string | null;
+  /** The standing table's top rows, and the position they were computed at. */
+  standing: {
+    position: number | null;
+    rows: Array<{ operator: string; standing: number }>;
+  };
+  /** The newest daily reconciliation, exactly as the ledger row states it. */
+  reconciliation: {
+    date: string;
+    published: number;
+    accrued: number;
+    ok: boolean;
+  } | null;
+  /** The newest attestation that has been scored. */
+  attestation: {
+    id: string;
+    status: string;
+    /** The median score as `agreed / probes`, null while it is unscored. */
+    score: string | null;
+    date: string | null;
+    scorers: string[];
+  } | null;
+  /** The position a sync example resumes from: the sealed head, or 0. */
+  syncFrom: number;
+}
+
+/**
+ * What the Status page is handed (D-076).
+ *
+ * The same object `GET /status` answers as JSON, in the same order: the page and
+ * the endpoint read one input and one set of rules, so a reader who curls the
+ * path and a reader who opens it are looking at the same lights. Nothing here is
+ * probed when the page loads — every field is the last sweep's stored report and
+ * the log, which is what lets the page say it cannot be warmed.
+ */
+export interface StatusData {
+  /**
+   * The sweep run the page is as of, ISO, null when none has run. The head line
+   * says so in words rather than showing the wall clock: the page is as of the
+   * record, not as of the request.
+   */
+  asOf: string | null;
+  /** The four headline numbers, exactly as `statusCounters` computed them. */
+  counters: Counter;
+  /** The twelve stages, in the order the pipeline runs them. */
+  stages: readonly Stage[];
+  /** The five stages that run only when someone asks. */
+  exercised: readonly Exercised[];
 }

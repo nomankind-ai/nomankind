@@ -138,6 +138,22 @@ export function fmtInstant(iso: string | null): string {
   return `${text.slice(0, 10)} ${text.slice(11, 19)}Z`;
 }
 
+/**
+ * The time of day of an instant, as `14:00:19 UTC`, or an em dash for null.
+ *
+ * The status and how-it-works pages date one thing per line and then say when in
+ * the day it happened, because a reader looking at a pipeline is asking how long
+ * ago something ran and not what day it is. UTC and always UTC: the log has one
+ * clock, and a page that rendered a local time would be a page two readers
+ * disagree about.
+ */
+export function fmtTimeUtc(iso: string | null): string {
+  if (iso === null) return EM_DASH;
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  return `${at.toISOString().slice(11, 19)} UTC`;
+}
+
 /** The date part of an instant or a date, or an em dash for null. */
 export function fmtDate(iso: string | null): string {
   if (iso === null) return EM_DASH;
@@ -241,6 +257,8 @@ const NAV: readonly { readonly href: string; readonly label: string; readonly ex
     { href: "/policy", label: "Policy" },
     { href: "/api", label: "API" },
     { href: "/genesis", label: "Genesis" },
+    { href: "/how-it-works", label: "How it works" },
+    { href: "/status", label: "Status" },
     { href: PAPER_URL, label: "Paper", external: true },
   ];
 

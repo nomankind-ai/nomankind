@@ -125,6 +125,23 @@ describe("renderPolicy", () => {
     }
   });
 
+  it("publishes the two status thresholds as their own group", () => {
+    // The status page's whole judgement is these two numbers, so they are
+    // published beside every other number the record runs on rather than left in
+    // the code that reads them.
+    expect(page).toContain("Status");
+    expect(page).toContain(
+      `<td class="mono">STATUS_ATTENTION_AFTER_INTERVALS</td>`,
+    );
+    expect(page).toContain(
+      `<td class="mono">${POLICY.STATUS_ATTENTION_AFTER_INTERVALS} intervals</td>`,
+    );
+    expect(page).toContain(`<td class="mono">STATUS_FAILING_AFTER_MINUTES</td>`);
+    expect(page).toContain(
+      `<td class="mono">${POLICY.STATUS_FAILING_AFTER_MINUTES} minutes</td>`,
+    );
+  });
+
   it("no longer names the globals a domain replaced", () => {
     // The three names left src/policy.ts and src/evidence.ts, so a page still
     // publishing one would be publishing a table that no longer exists.
@@ -311,10 +328,25 @@ describe("renderApi", () => {
       "/operators/{id}/standing",
       "/operators/{id}/ledger",
       "/ledger",
+      "/status",
+      "/how-it-works",
     ];
     for (const path of paths) {
       expect(page, `${path} is not documented`).toContain(path);
     }
+  });
+
+  it("documents the status endpoint's shape, and that it refuses nothing", () => {
+    // A stage that is failing is an answer and not a refusal, which is the one
+    // thing about this endpoint a caller has to be told: the only 503 is storage
+    // being unreachable, and nothing else on it can turn into an error.
+    expect(page).toContain("STATUS_ATTENTION_AFTER_INTERVALS");
+    expect(page).toContain("STATUS_FAILING_AFTER_MINUTES");
+    expect(page).toContain("ok, attention, failing, idle");
+    expect(page).toContain(
+      "a stage that is failing is an answer and not a refusal",
+    );
+    expect(page).toContain("503 storage_unreachable");
   });
 
   it("documents the standing and ledger routes with their shapes and refusals", () => {

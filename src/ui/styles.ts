@@ -443,6 +443,70 @@ pre.block {
 }
 pre.block.plain { color: var(--muted); }
 
+/* --- the how-it-works strip (D-076) ----------------------------------- */
+/* Eight steps across the top of the how-it-works page, each an anchor to the
+   panel below it. A grid of eight and not a flex row: the eight are one strip
+   and have to stay one strip, so they share the width rather than each taking
+   the width of its own words. */
+.steps {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 8px;
+}
+.step {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 64px;
+}
+.step-n { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.step-t { font-size: 13px; color: var(--text); }
+/* The step is itself the anchor, so the selector is a.step and not .step a:
+   the strip's links take the page's text colour rather than the link colour. */
+a.step { color: var(--text); }
+/* The step's number where it repeats in the panel heading below, so a reader
+   who followed an anchor lands on the number they clicked. */
+.stage-num {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 0.06em;
+  margin-right: 10px;
+}
+
+/* --- prose paragraphs -------------------------------------------------- */
+/* The documentation paragraph, as the artboards define it. Scoped to the
+   elements that carry it as a paragraph — a <p>, and the sentence inside an
+   .alert — because \`prose\` is already a table cell and a definition value
+   elsewhere in this sheet, where it means "sans, not mono" and nothing else.
+   An unscoped rule here would put a max-width and a border under those too. */
+p.prose,
+.alert .prose {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 820px;
+  margin: 0;
+}
+p.prose a { color: var(--text); border-bottom: 1px solid var(--accent-edge); }
+
+/* --- the degraded band ------------------------------------------------- */
+/* Drawn only when a stage is failing or needs attention, above the counters:
+   the one place in this UI that says something is wrong, so it is bordered in
+   the danger colour and says which stages and how many. */
+.alert {
+  border: 1px solid var(--danger);
+  background: var(--panel);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.alert-title { font-size: 13px; color: var(--danger); font-family: var(--mono); }
+
 /* --- two columns, collapsing ------------------------------------------ */
 .cols {
   display: grid;
@@ -460,6 +524,9 @@ pre.block.plain { color: var(--muted); }
 
 @media (max-width: 900px) {
   .cols, .cols-side { grid-template-columns: minmax(0, 1fr); }
+  /* Eight across is eight columns of one word each below the breakpoint. The
+     strip wraps into as many rows as it needs instead. */
+  .steps { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
   .header, .main, .footer { padding-left: 16px; padding-right: 16px; }
   dl.kv, dl.dl { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
   dl.kv dt, dl.dl dt { margin-top: 8px; }

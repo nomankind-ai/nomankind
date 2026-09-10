@@ -203,6 +203,23 @@ const READ_PATH: readonly Endpoint[] = [
   },
   {
     method: "GET",
+    path: "/status",
+    parameters: "—",
+    answers:
+      "Every stage of the pipeline as the last sweep left it: as_of, environment, counters (last sweep, stages, sealed head, witnessed), stages — twelve of them, each with stage, state (ok, attention, failing, idle), last, rule and evidence — exercised (the five stages that run only when someone asks), and thresholds (STATUS_ATTENTION_AFTER_INTERVALS, STATUS_FAILING_AFTER_MINUTES). Nothing is probed to answer it: every reading is a published rule applied to the log and to the report the sweep stored at the end of its last run, so the answer cannot be warmed by asking for it. A browser gets the same object as the status page.",
+    refusals:
+      "None of its own: a stage that is failing is an answer and not a refusal. 503 storage_unreachable; 405 with Allow: GET.",
+  },
+  {
+    method: "GET",
+    path: "/how-it-works",
+    parameters: "—",
+    answers:
+      "The pipeline explained in eight panels, each carrying this environment's own newest record for that stage — the newest entry and its capture, the trusted pool, the newest decision, seal and anchor, yesterday's read count, standing and the ledger, the newest attestation — and the policy names that stage runs under. HTML only: it is a page about the log and not a view of it, so it has no JSON twin.",
+    refusals: "—",
+  },
+  {
+    method: "GET",
     path: "/standing",
     parameters: "—",
     answers:
