@@ -15,6 +15,7 @@
     "export": "npm run build --silent && node dist/cli/export.js",
     "gen:validator": "npm run build --silent && node dist/cli/gen-validator.js",
     "keygen": "npm run build --silent && node dist/cli/keygen.js",
+    "mirror": "npm run build --silent && node dist/cli/mirror.js",
     "read": "npm run build --silent && node dist/cli/read.js",
     "reconfirm": "npm run build --silent && node dist/cli/reconfirm.js",
     "register": "npm run build --silent && node dist/cli/register.js",
@@ -27,7 +28,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "validate": "npm run build --silent && node dist/cli/validator.js",
-    "verify": "npm run build --silent && node dist/cli/verify.js"
+    "verify": "npm run build --silent && node dist/cli/verify.js",
+    "verify-mirror": "npm run build --silent && node dist/cli/verify-mirror.js"
   },
   "devDependencies": {
     "@types/node": "26.4.1",

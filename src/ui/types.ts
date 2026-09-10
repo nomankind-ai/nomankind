@@ -21,7 +21,9 @@ import type { Event } from "../events.js";
 import type { LedgerBalance, LedgerRow } from "../ledger.js";
 import type { Seal } from "../seal.js";
 import type { StakeRecord } from "../stake.js";
+import type { MirrorKind } from "../adapters/mirror.js";
 import type { Counter, Exercised, Stage } from "../status.js";
+import type { MirrorRecord } from "../storage/repository.js";
 
 /**
  * The three things every page knows about the request it is answering, and
@@ -472,8 +474,35 @@ export interface StatusData {
   asOf: string | null;
   /** The four headline numbers, exactly as `statusCounters` computed them. */
   counters: Counter;
-  /** The twelve stages, in the order the pipeline runs them. */
+  /** Every stage, in the order the pipeline runs them. */
   stages: readonly Stage[];
   /** The five stages that run only when someone asks. */
   exercised: readonly Exercised[];
+}
+
+/**
+ * What the Mirror page is handed (Section 11: the daily log mirror under CC0,
+ * and exit as a protocol right).
+ *
+ * The same reading `GET /mirror/latest` answers as JSON, in the same order: the
+ * record of the newest export, and where the mirror lives. Nothing here is
+ * fetched from GitHub when the page loads — `latest` is the row the sweep wrote
+ * when it pushed, so the page reports what this instance exported and never what
+ * a repository looks like right now, which is a thing only the repository can
+ * say. `configured` is false when no mirror adapter is available on this
+ * environment, which is not a failure and is said in words rather than shown as
+ * an empty panel.
+ */
+export interface MirrorData {
+  /** Whether this environment can push at all: the adapter is not unavailable. */
+  configured: boolean;
+  /** Which adapter this environment pushes through: github, mock, unavailable. */
+  kind: MirrorKind;
+  /** The mirror repository as a web URL, exactly as the JSON route names it. */
+  repository: string;
+  branch: string;
+  /** The top-level directory this environment exports under: demo, production. */
+  path: string;
+  /** The newest export this instance recorded, null before the first one. */
+  latest: MirrorRecord | null;
 }

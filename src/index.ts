@@ -18,6 +18,7 @@ export * from "./hash.js";
 export * from "./identity.js";
 export * from "./ledger.js";
 export * from "./merkle.js";
+export * from "./mirror.js";
 export * from "./normalize.js";
 export * from "./policy.js";
 export * from "./probe.js";

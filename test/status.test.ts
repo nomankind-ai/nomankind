@@ -86,6 +86,7 @@ function empty(): StatusInput {
     reconciliation: null,
     standing_position: null,
     attestations: { due: 0, total: 0 },
+    mirror: { kind: "unavailable", newest: null },
     exercised: {
       submission: null,
       registration: null,
@@ -115,8 +116,8 @@ function swept(over: Partial<StatusInput> = {}): StatusInput {
   return { ...empty(), steps: [step("sweep")], ...over };
 }
 
-describe("the twelve stages", () => {
-  it("names them in the pipeline's order and answers all twelve", () => {
+describe("the thirteen stages", () => {
+  it("names them in the pipeline's order and answers all thirteen", () => {
     expect(stageStates(empty(), NOW).map((one) => one.stage)).toEqual([
       "sweep timer",
       "pool snapshot",
@@ -130,11 +131,12 @@ describe("the twelve stages", () => {
       "ledger",
       "standing",
       "attestations",
+      "mirror export",
     ]);
   });
 
   it("says each rule in the page's words, with the numbers from policy", () => {
-    // The twelve sentences the mockup approved, pinned: the wording is the page
+    // The thirteen sentences the mockup approved, pinned: the wording is the page
     // and changing it is a design change. Two of them say a number, and both
     // come from src/policy.ts rather than from a digit typed here.
     const rules = [
@@ -150,10 +152,11 @@ describe("the twelve stages", () => {
       "yesterday's reconciliation row present and equal",
       "standing stored at the sealed head",
       "no open attestation past ATTESTATION_WINDOW_HOURS",
+      "today's export committed to the mirror repository",
     ];
     expect(stageStates(empty(), NOW).map((one) => one.rule)).toEqual(rules);
     // The rule is what the state was decided by and not a reading of it, so a
-    // world where things have happened says exactly the same twelve.
+    // world where things have happened says exactly the same thirteen.
     expect(stageStates(swept(), NOW).map((one) => one.rule)).toEqual(rules);
   });
 
@@ -649,8 +652,8 @@ describe("the four counters", () => {
       lastSweepAt: null,
       lastSweepAge: null,
       lastSweepTrigger: null,
-      stagesOk: 12,
-      stagesTotal: 12,
+      stagesOk: 13,
+      stagesTotal: 13,
       stagesFailing: 0,
       stagesAttention: 0,
       sealedHead: null,
@@ -665,7 +668,7 @@ describe("the four counters", () => {
   it("counts idle stages with the ok ones", () => {
     const input = swept();
     const counters = statusCounters(stageStates(input, NOW), input);
-    expect([counters.stagesOk, counters.stagesTotal]).toEqual([12, 12]);
+    expect([counters.stagesOk, counters.stagesTotal]).toEqual([13, 13]);
     expect(counters.lastSweepAge).toBe("0 min ago");
     expect(counters.lastSweepTrigger).toBe("alarm");
   });
@@ -688,7 +691,7 @@ describe("the four counters", () => {
     // interval and not past the failing one.
     expect(counters.stagesFailing).toBe(2);
     expect(counters.stagesAttention).toBe(1);
-    expect(counters.stagesOk).toBe(9);
+    expect(counters.stagesOk).toBe(10);
     expect([counters.sealedHead, counters.newestSealSeq]).toEqual([30, 3]);
     expect([counters.seals, counters.witnessedSeals]).toEqual([4, 3]);
     expect(counters.unsealedEvents).toBe(1);

@@ -60,6 +60,7 @@
 import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
 import { DohResolver, type DnsResolver } from "../adapters/dns.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
+import { mirrorAdapterFor } from "../adapters/mirror.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import { htmlResponse } from "../ui/html.js";
 import { renderNotFound } from "../ui/pages/errors.js";
@@ -68,6 +69,7 @@ import { handleAttest } from "./attest.js";
 import { handleDispute } from "./dispute.js";
 import { handleEvents } from "./events.js";
 import { handleFailureReports } from "./failure-reports.js";
+import { handleMirror } from "./mirror.js";
 import { forMethod, handlePages, wantsHtml } from "./pages.js";
 import { handleRead } from "./read.js";
 import { handleReconfirm } from "./reconfirm.js";
@@ -227,6 +229,13 @@ export async function handleRequest(
   const status = await handleStatus(request, env, { now });
   if (status !== null) return status;
 
+  // M23's other read, Section 11's daily log mirror: where the newest export of
+  // the sealed log landed, as JSON. A browser asking for the same path never
+  // gets here — src/worker/pages.ts answered it with the page above, exactly as
+  // /policy and /status split.
+  const mirror = await handleMirror(request, env);
+  if (mirror !== null) return mirror;
+
   // M22's three doors and four reads, Section 8's "Drift attestation" and "The
   // confidence field": a model asks for a probe set drawn by public randomness,
   // answers it, and three drawn operators sign what they made of the answers;
@@ -323,6 +332,9 @@ export default {
         // D-053): a mock on demo and local, the stub that refuses on
         // production, and never a fixture — the same rule the beacon follows.
         payout: payoutAdapterFor(env.ENVIRONMENT),
+        // Where the day's export goes (M23), built the same way and for the
+        // same reason: the cron door and the alarm mirror to one repository.
+        mirror: mirrorAdapterFor(env),
         // Which door ran it, for the status board's own row (D-076). The Sweeper
         // Durable Object says nothing and is read as `alarm`, which is what it
         // is: the sweep's own timer, with this cron trigger as the repair.

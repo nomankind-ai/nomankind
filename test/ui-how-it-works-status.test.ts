@@ -252,7 +252,7 @@ describe("renderHowItWorks", () => {
 // Status
 // ---------------------------------------------------------------------------
 
-/** The twelve stages, in the order the pipeline runs them. */
+/** Every stage, in the order the pipeline runs them. */
 const STAGE_NAMES: readonly string[] = [
   "sweep timer",
   "pool snapshot",
@@ -266,6 +266,10 @@ const STAGE_NAMES: readonly string[] = [
   "ledger",
   "standing",
   "attestations",
+  // M23: the daily CC0 export is a stage of the pipeline like any other, and
+  // the page counts whatever it is handed — nothing here or in the page pins
+  // how many stages there are.
+  "mirror export",
 ];
 
 function stage(name: string, state: Stage["state"]): Stage {
@@ -312,8 +316,8 @@ const HEALTHY_COUNTER: Counter = {
   lastSweepAt: "2026-09-10T14:05:07.000Z",
   lastSweepAge: "2 min ago",
   lastSweepTrigger: "alarm",
-  stagesOk: 12,
-  stagesTotal: 12,
+  stagesOk: 13,
+  stagesTotal: 13,
   stagesFailing: 0,
   stagesAttention: 0,
   sealedHead: 54,
@@ -338,7 +342,7 @@ const DEGRADED: StatusData = {
     ...HEALTHY_COUNTER,
     lastSweepAge: "23 min ago",
     lastSweepAt: "2026-09-10T13:42:04.000Z",
-    stagesOk: 9,
+    stagesOk: 10,
     stagesFailing: 1,
     stagesAttention: 2,
     unsealedEvents: 3,
@@ -377,7 +381,7 @@ describe("renderStatus", () => {
     expect(flat(page)).toContain("GET /status</a> answers this table as JSON");
   });
 
-  it("renders the twelve stages, with the rule and the evidence beside each", () => {
+  it("renders every stage it is handed, with the rule and the evidence beside each", () => {
     for (const name of STAGE_NAMES) {
       expect(page, `${name} has no row`).toContain(`<td>${name}</td>`);
       expect(page, `${name} shows no rule`).toContain(`the rule for ${name}`);
@@ -425,7 +429,7 @@ describe("renderStatus", () => {
     // And the sentence names them, in the rules module's own words.
     expect(flat(degraded)).toContain("Witnessing is failing");
     expect(flat(degraded)).toContain("sweep timer and ledger need attention");
-    expect(flat(degraded)).toContain("The other 9 stages hold.");
+    expect(flat(degraded)).toContain("The other 10 stages hold.");
   });
 
   it("carries no script and no inline style", () => {

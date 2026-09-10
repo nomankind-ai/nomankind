@@ -4915,3 +4915,161 @@ export async function countAttestations(db: D1Like): Promise<number> {
     .first<Row>();
   return row === null ? 0 : readInteger(row, "n");
 }
+
+// ---------------------------------------------------------------------------
+// The daily mirror
+// ---------------------------------------------------------------------------
+
+/**
+ * One day's export, as the row keeps it (M23).
+ *
+ * The column names verbatim, except that the two git object names are `commit`
+ * and `tree` here and `commit_sha` and `tree_sha` in SQLite: `commit` is a
+ * SQLite keyword and a column of that name would have to be quoted everywhere,
+ * while a reader of the JSON wants the git word.
+ *
+ * Nothing here is derived and nothing here is a source of truth about the log.
+ * The mirror repository is the record of what was exported; this is the note
+ * saying the day is done and where it landed.
+ */
+export interface MirrorRecord {
+  /** The UTC day the export covers, "YYYY-MM-DD". */
+  readonly date: string;
+  readonly exported_at: string;
+  /** The commit the export landed in, or the head it was already at. */
+  readonly commit: string;
+  readonly tree: string;
+  /** The sealed position the export was built at. */
+  readonly head: number;
+  /** The newest seal's own seq at that position. */
+  readonly seal_seq: number;
+  readonly entries: number;
+  /** 0 when the repository already held these bytes. */
+  readonly files_changed: number;
+  readonly url: string;
+  readonly raw_url: string;
+}
+
+const MIRROR_COLUMNS = `"date", exported_at, commit_sha, tree_sha, head, seal_seq, entries, files_changed, url, raw_url`;
+
+function toMirror(row: Row): MirrorRecord {
+  return {
+    date: readText(row, "date"),
+    exported_at: readText(row, "exported_at"),
+    commit: readText(row, "commit_sha"),
+    tree: readText(row, "tree_sha"),
+    head: readInteger(row, "head"),
+    seal_seq: readInteger(row, "seal_seq"),
+    entries: readInteger(row, "entries"),
+    files_changed: readInteger(row, "files_changed"),
+    url: readText(row, "url"),
+    raw_url: readText(row, "raw_url"),
+  };
+}
+
+/** Record one day's export, replacing whatever was there for that day. */
+export async function putMirror(
+  db: D1Like,
+  record: MirrorRecord,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO mirrors (${MIRROR_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT ("date") DO UPDATE SET
+         exported_at = excluded.exported_at,
+         commit_sha = excluded.commit_sha,
+         tree_sha = excluded.tree_sha,
+         head = excluded.head,
+         seal_seq = excluded.seal_seq,
+         entries = excluded.entries,
+         files_changed = excluded.files_changed,
+         url = excluded.url,
+         raw_url = excluded.raw_url`,
+    )
+    .bind(
+      record.date,
+      record.exported_at,
+      record.commit,
+      record.tree,
+      record.head,
+      record.seal_seq,
+      record.entries,
+      record.files_changed,
+      record.url,
+      record.raw_url,
+    )
+    .run();
+}
+
+/**
+ * The most recent export, or null when nothing has been exported here.
+ *
+ * Days sort as strings because the day is always "YYYY-MM-DD" in UTC, so lexical
+ * order is chronological order and the primary key is the index.
+ */
+export async function latestMirror(db: D1Like): Promise<MirrorRecord | null> {
+  const row = await db
+    .prepare(
+      `SELECT ${MIRROR_COLUMNS} FROM mirrors ORDER BY "date" DESC ${ONE_ROW}`,
+    )
+    .first<Row>();
+  return row === null ? null : toMirror(row);
+}
+
+/** One day's export, by its UTC calendar day, or null when that day has none. */
+export async function mirrorOn(
+  db: D1Like,
+  date: string,
+): Promise<MirrorRecord | null> {
+  const row = await db
+    .prepare(`SELECT ${MIRROR_COLUMNS} FROM mirrors WHERE "date" = ? ${ONE_ROW}`)
+    .bind(date)
+    .first<Row>();
+  return row === null ? null : toMirror(row);
+}
+
+/** Where a page of exportable entry ids starts and stops. */
+export interface EntryIdsThroughQuery {
+  /** The sealed head: no entry submitted after it is part of the export. */
+  readonly throughSeq: number;
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+  /** Resume strictly after this submitted_seq; omit for the first page. */
+  readonly afterSubmittedSeq?: number;
+}
+
+/**
+ * The ids of the entries submitted at or below a sealed position, in submission
+ * order.
+ *
+ * Ids and positions only, because the export re-derives every entry from its own
+ * world at the sealed head and the stored copy — derived at whatever position
+ * the last writer reached — is not what the mirror carries. Keyset over
+ * submitted_seq, so the walk costs an index seek per page however far in it is.
+ */
+export async function entryIdsThrough(
+  db: D1Like,
+  query: EntryIdsThroughQuery,
+): Promise<{ id: string; submittedSeq: number }[]> {
+  const rows =
+    query.afterSubmittedSeq === undefined
+      ? await db
+          .prepare(
+            `SELECT id, submitted_seq FROM entries
+             WHERE submitted_seq <= ? ORDER BY submitted_seq LIMIT ?`,
+          )
+          .bind(query.throughSeq, query.limit)
+          .all<Row>()
+      : await db
+          .prepare(
+            `SELECT id, submitted_seq FROM entries
+             WHERE submitted_seq <= ? AND submitted_seq > ?
+             ORDER BY submitted_seq LIMIT ?`,
+          )
+          .bind(query.throughSeq, query.afterSubmittedSeq, query.limit)
+          .all<Row>();
+  return rows.results.map((row) => ({
+    id: readText(row, "id"),
+    submittedSeq: readInteger(row, "submitted_seq"),
+  }));
+}
