@@ -255,6 +255,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
       <header class="topbar row">
         <span class="wordmark mono">NOMANKIND</span>
         <nav class="topnav">
+          <a href="/how-it-works">How it works</a>
           <a href="${PAPER_URL}" rel="noopener">Whitepaper</a>
           <a href="${CODE_URL}" rel="noopener">Code</a>
           <a href="${LOG_URL}" rel="noopener">Log mirror</a>
