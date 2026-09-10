@@ -103,7 +103,7 @@ function hour(hours: number): Date {
 
 const VERIFIED_REFERENCE = "mock-verified-m22b";
 
-const SUBJECT = "kestrel/kestrel-1";
+const SUBJECT = "example/kestrel-1";
 const CATEGORY = "pricing";
 
 const PAGE: FixturePage = {
@@ -266,7 +266,7 @@ async function legacyCore(agent: TestAgent): Promise<Core> {
     id: null,
     subject: SUBJECT,
     category: CATEGORY,
-    claim: "kestrel/kestrel-1 seat pricing was $38 per seat per month",
+    claim: "example/kestrel-1 seat pricing was $38 per seat per month",
     before: "$35 per seat per month",
     after: "$38 per seat per month",
     effective_at: "2026-08-01",
@@ -335,7 +335,7 @@ beforeAll(async () => {
     subject: SUBJECT,
     category: CATEGORY,
     domain: DEFAULT_DOMAIN,
-    claim: "kestrel/kestrel-1 seat pricing is $40 per seat per month",
+    claim: "example/kestrel-1 seat pricing is $40 per seat per month",
     before: "$35 per seat per month",
     after: "$40 per seat per month",
     effective_at: "2026-09-01",
@@ -410,7 +410,7 @@ describe("a submission names its domain, or the door refuses before it writes", 
   it("refuses a domain nobody registered", async () => {
     const before = await head();
     const core = await submittedCore(author, {
-      ...pricing("kestrel/kestrel-1 seat pricing is filed in no domain at all"),
+      ...pricing("example/kestrel-1 seat pricing is filed in no domain at all"),
       domain: UNREGISTERED,
     } as never);
 
@@ -428,7 +428,7 @@ describe("a submission names its domain, or the door refuses before it writes", 
     // categories; which of them a domain admits is the registry document's
     // table, enforced here and not by the schema.
     const core = await submittedCore(author, {
-      ...pricing("kestrel/kestrel-1 gossip", { category: "gossip" }),
+      ...pricing("example/kestrel-1 gossip", { category: "gossip" }),
     } as never);
 
     const answer = await submit(author, core);
@@ -441,7 +441,7 @@ describe("a submission names its domain, or the door refuses before it writes", 
 
   it("puts the domain in the signed core, so the id covers it", async () => {
     const core = await submittedCore(author, {
-      ...pricing("kestrel/kestrel-1 seat pricing is $41 per seat per month"),
+      ...pricing("example/kestrel-1 seat pricing is $41 per seat per month"),
     } as never);
     expect(coreVersion(core)).toBe("v0.7");
     expect(CORE_KEYS).toHaveLength(18);
@@ -843,7 +843,7 @@ describe("the sweep covers a legacy record instead of stopping on it", () => {
   beforeAll(async () => {
     staleLegacyId = await seedLegacy(
       {
-        claim: "kestrel/kestrel-1 seat pricing was $30 per seat per month",
+        claim: "example/kestrel-1 seat pricing was $30 per seat per month",
         after: "$30 per seat per month",
         effective_at: "2026-01-01",
         submitted_at: "2026-01-01T12:00:00.000Z",
@@ -897,7 +897,7 @@ describe("the schema guard still stops the rewrites it should", () => {
       subject: SUBJECT,
       category: CATEGORY,
       domain: DEFAULT_DOMAIN,
-      claim: "kestrel/kestrel-1 seat pricing is $41 per seat per month",
+      claim: "example/kestrel-1 seat pricing is $41 per seat per month",
       before: "$40 per seat per month",
       after: "$41 per seat per month",
       effective_at: "2026-09-02",
@@ -958,7 +958,7 @@ describe("the schema guard still stops the rewrites it should", () => {
     // step answers per entry, so the refusal is this row's and no other's.
     const brokenId = await seedLegacy(
       {
-        claim: "kestrel/kestrel-1 seat pricing was $31 per seat per month",
+        claim: "example/kestrel-1 seat pricing was $31 per seat per month",
         after: "$31 per seat per month",
         effective_at: "the first of January",
         submitted_at: "2026-01-01T12:00:00.000Z",
@@ -994,7 +994,7 @@ describe("the revalidation door reads the entry's own domain", () => {
       subject: SUBJECT,
       category: CATEGORY,
       domain: UNREGISTERED,
-      claim: "kestrel/kestrel-1 seat pricing is $42 per seat per month",
+      claim: "example/kestrel-1 seat pricing is $42 per seat per month",
       before: "$41 per seat per month",
       after: "$42 per seat per month",
       effective_at: "2026-09-03",

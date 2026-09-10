@@ -90,7 +90,7 @@ function hour(hours: number): Date {
 
 const VERIFIED_REFERENCE = "mock-verified-m22";
 
-const SUBJECT = "kestrel/kestrel-1";
+const SUBJECT = "example/kestrel-1";
 const CLAIM = `${SUBJECT} seat pricing is $40 per seat per month`;
 const TEST = "contains:$40 per seat per month";
 

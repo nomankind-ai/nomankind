@@ -354,19 +354,35 @@ async function entries(
   });
   // The total is by status and domain, which is what the page's title attribute
   // says: both are indexed columns (0001_init, 0012_domains), while the tier
-  // filter is a JSON extraction and the freshness filter is a derived boolean,
-  // and a total that counted either would be a second query whose cost grows
-  // with the log for a number nobody asked for.
+  // filter is a JSON extraction, the freshness filter is a derived boolean and
+  // the source filter is applied over the page below, and a total that counted
+  // any of them would be a second query whose cost grows with the log for a
+  // number nobody asked for.
   const total = await countEntries(db, {
     ...(filter.status === null ? {} : { status: filter.status }),
     ...(filter.domain === null ? {} : { domain: filter.domain }),
   });
 
-  const rows = page.map(toRow);
-  const last = rows[rows.length - 1];
+  // The source filter (decision D-080) is applied here rather than in the SQL,
+  // and for a reason the tier filter does not have: a sidecar stored before this
+  // milestone carries no `source` key at all, and the reader defaults it by
+  // computing the class from the stored core (`toSidecar`, the M20 pattern). A
+  // `json_extract(sidecar_json, '$.source.class')` would read null on every one
+  // of those rows and quietly drop entries that do have a class — so the filter
+  // reads the sidecar the store handed back, which is the defaulted one.
+  const kept =
+    filter.source === null
+      ? page
+      : page.filter((stored) => stored.sidecar.source.class === filter.source);
+
+  const rows = kept.map(toRow);
+  // The cursor is the last row *read*, not the last row kept: a page whose
+  // source filter dropped everything still advances, so the pager cannot stall
+  // on a run of entries the reader filtered out.
+  const last = page[page.length - 1];
   const nextBefore =
-    rows.length === LIST_PAGE_LIMIT && last !== undefined
-      ? last.position
+    page.length === LIST_PAGE_LIMIT && last !== undefined
+      ? last.submittedSeq
       : null;
 
   return htmlResponse(

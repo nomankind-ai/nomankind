@@ -21,6 +21,7 @@ import {
   type ReadCandidate,
   type ReadQuery,
   type Sidecar,
+  type SourceClass,
 } from "../src/index.js";
 
 import { DEFAULT_DOMAIN } from "../src/policy.js";
@@ -95,7 +96,32 @@ describe("parseReadQuery", () => {
     }
   });
 
-  it("names its nine refusals in the order it checks them", () => {
+  it("takes a min_source, and refuses anything but the two minima (D-080)", () => {
+    for (const value of ["official", "recognized"]) {
+      expect(
+        accepted(`subject=x&category=pricing&min_source=${value}`),
+      ).toMatchObject({ min_source: value });
+    }
+    // Absent is absent, and never a quiet default.
+    expect(accepted("subject=x&category=pricing")).not.toHaveProperty(
+      "min_source",
+    );
+    // "at least other" is a demand nothing fails, so it is not one a reader may
+    // write: it would look like a filter and be the unfiltered answer.
+    for (const bad of ["other", "", "Official", "any", "official,recognized"]) {
+      expect(refusal(`subject=x&category=pricing&min_source=${bad}`)).toBe(
+        "bad_min_source",
+      );
+    }
+    // After bad_min_tier, before bad_max_age: the first fault wins.
+    expect(refusal("subject=x&category=pricing&min_tier=gold&min_source=nope"))
+      .toBe("bad_min_tier");
+    expect(refusal("subject=x&category=pricing&min_source=nope&max_age=-1")).toBe(
+      "bad_min_source",
+    );
+  });
+
+  it("names its ten refusals in the order it checks them", () => {
     expect(READ_QUERY_REFUSALS).toEqual([
       "unknown_parameter",
       "bad_entry_id",
@@ -105,6 +131,7 @@ describe("parseReadQuery", () => {
       "bad_category",
       "unknown_domain",
       "bad_min_tier",
+      "bad_min_source",
       "bad_max_age",
     ]);
   });
@@ -303,6 +330,7 @@ function candidate(
   status: string,
   lastConfirmed: string,
   effectiveTier: EvidenceTier | null,
+  sourceClass: SourceClass | null = "official",
 ): ReadCandidate {
   return {
     entry: {
@@ -310,7 +338,18 @@ function candidate(
       status,
       last_confirmed: lastConfirmed,
     } as unknown as Entry,
-    sidecar: { effective_tier: effectiveTier } as unknown as Sidecar,
+    sidecar: {
+      effective_tier: effectiveTier,
+      ...(sourceClass === null
+        ? {}
+        : {
+            source: {
+              class: sourceClass,
+              matched_host: null,
+              provider: "openai",
+            },
+          }),
+    } as unknown as Sidecar,
   };
 }
 
@@ -353,6 +392,54 @@ describe("chooseReadable", () => {
     expect(chooseReadable([stated, observed], demand, now)).toBe(observed);
     // With no demand the newest wins, tier and all.
     expect(chooseReadable([stated, observed], bare, now)).toBe(stated);
+  });
+
+  it("skips a verified entry whose source class is below the demand (D-080)", () => {
+    const other = candidate("nmk_other", "verified", "2026-09-08", "observed", "other");
+    const recognized = candidate(
+      "nmk_recognized",
+      "verified",
+      "2026-09-07",
+      "observed",
+      "recognized",
+    );
+    const official = candidate(
+      "nmk_official",
+      "verified",
+      "2026-09-01",
+      "observed",
+      "official",
+    );
+    const candidates = [other, recognized, official];
+
+    expect(
+      chooseReadable(candidates, { ...bare, min_source: "official" }, now),
+    ).toBe(official);
+    expect(
+      chooseReadable(candidates, { ...bare, min_source: "recognized" }, now),
+    ).toBe(recognized);
+    // With no demand the newest wins, class and all.
+    expect(chooseReadable(candidates, bare, now)).toBe(other);
+  });
+
+  it("skips an entry whose sidecar carries no class when a class was demanded", () => {
+    // A row written before the key existed and handed over undefaulted: there is
+    // no class to promise, and answering "probably" is what this must never do.
+    const missing = candidate("nmk_old", "verified", "2026-09-08", "observed", null);
+    const official = candidate(
+      "nmk_official",
+      "verified",
+      "2026-09-01",
+      "observed",
+      "official",
+    );
+
+    expect(
+      chooseReadable([missing, official], { ...bare, min_source: "recognized" }, now),
+    ).toBe(official);
+    expect(chooseReadable([missing], { ...bare, min_source: "official" }, now))
+      .toBeNull();
+    expect(chooseReadable([missing], bare, now)).toBe(missing);
   });
 
   it("skips a verified entry that is older than the age demand", () => {

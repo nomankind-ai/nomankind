@@ -9,7 +9,11 @@
  *
  * Two routes and one answer shape. `GET /read/{id}` names an entry;
  * `GET /read?subject=&category=` asks nomankind to choose the current answer,
- * with `min_tier` and `max_age` as the reader's two demands. Both return
+ * with `min_tier`, `max_age` and `min_source` as the reader's demands — the
+ * third being decision D-080's: how close to the subject's own publisher the
+ * cited source has to be before this reader will take the answer. All three are
+ * parsed by `parseReadQuery` and applied by `chooseReadable`, so this file gains
+ * nothing for it and there is one place a demand can be dropped. Both return
  * `{entry, sidecar, seal, receipt}`: the entry exactly as it is stored, the
  * sidecar beside it, the seal covering the entry's submission — the entry's own
  * `seal` object already carries the inclusion proof, its position and the

@@ -18,6 +18,11 @@
  * Pure: the rows, the total and the cursor were all decided by the route.
  */
 
+// The source classes come from the kernel that derives them (src/sources.ts)
+// rather than from a list retyped in a page, exactly as the category and domain
+// chips come from the schema's own enums: a class added by decision appears as a
+// chip in the same commit it becomes a value the sidecar can carry.
+import { SOURCE_CLASSES } from "../../sources.js";
 import {
   ENTRY_CATEGORIES,
   ENTRY_DOMAINS,
@@ -42,13 +47,14 @@ import type {
 } from "../types.js";
 
 /**
- * The five filter parameters, and which field of the filter each reads.
+ * The six filter parameters, and which field of the filter each reads.
  *
- * `domain` sits where src/ui/query.ts puts it, after status: the order here is
- * the order the chips appear and the order the query string is written in, and
- * two orders for one filter would be two things to keep in step. Its values are
- * the schema's own domain enum, exactly as the category chips are the schema's
- * categories — the registered domains, never a list retyped in a page.
+ * `domain` sits where src/ui/query.ts puts it, after status, and `source` sits
+ * after `domain`: the order here is the order the chips appear and the order the
+ * query string is written in, and two orders for one filter would be two things
+ * to keep in step. Their values are the schema's own domain enum and the
+ * kernel's own source classes, exactly as the category chips are the schema's
+ * categories — never a list retyped in a page.
  */
 const GROUPS: readonly {
   readonly name: keyof EntriesFilter;
@@ -57,6 +63,7 @@ const GROUPS: readonly {
   { name: "category", values: ENTRY_CATEGORIES },
   { name: "status", values: ENTRY_STATUSES },
   { name: "domain", values: ENTRY_DOMAINS },
+  { name: "source", values: SOURCE_CLASSES },
   { name: "tier", values: ENTRY_TIERS },
   { name: "fresh", values: FRESHNESS_VALUES },
 ];
@@ -107,7 +114,7 @@ function group(
   </div>`;
 }
 
-/** The whole panel: five groups and the button that applies them. */
+/** The whole panel: six groups and the button that applies them. */
 function filters(filter: EntriesFilter): Safe {
   return html`<form class="filters" method="get" action="/entries">
     ${GROUPS.map((each) => group(filter, each.name, each.values))}
@@ -177,7 +184,7 @@ export function renderEntries(ctx: PageContext, data: EntriesData): string {
         <h1>Entries</h1>
         <span
           class="mono note"
-          title="The total counts every entry with this status and in this domain; the category, tier and freshness filters narrow the page, not the total."
+          title="The total counts every entry with this status and in this domain; the category, source, tier and freshness filters narrow the page, not the total."
           >${data.rows.length} of ${data.total} · ordered by sealed
           position</span
         >

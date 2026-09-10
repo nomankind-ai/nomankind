@@ -292,7 +292,7 @@ beforeAll(async () => {
   // an index row rather than only a registry.
   const core = await submittedCore(parties[0]!.agent, {
     author_operator: parties[0]!.operator,
-    subject: "kestrel/kestrel-1",
+    subject: "example/kestrel-1",
     category: "limit",
     claim: "kestrel-1 allows 200 requests a minute",
     before: "no documented request limit",
@@ -819,7 +819,7 @@ describe("nothing unsealed is exported", () => {
         domain: DEFAULT_DOMAIN,
         author: parties[0]!.agent.agentId,
         author_operator: parties[0]!.operator,
-        subject: "kestrel/kestrel-2",
+        subject: "example/kestrel-2",
         category: "limit",
         claim: "kestrel-2 allows 200 requests a minute",
         before: "no documented request limit",

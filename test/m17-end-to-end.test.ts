@@ -140,7 +140,7 @@ function date(days: number): string {
 const VERIFIED_REFERENCE = "mock-verified-m17";
 
 /** The subject and category every read in this file asks about. */
-const SUBJECT = "kestrel/kestrel-1";
+const SUBJECT = "example/kestrel-1";
 const CATEGORY = "pricing";
 
 // ---------------------------------------------------------------------------

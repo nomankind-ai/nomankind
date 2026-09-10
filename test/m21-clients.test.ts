@@ -156,7 +156,7 @@ async function name(party: Party): Promise<void> {
 function proposal(): Omit<SubmissionProposal, "author"> {
   return {
     author_operator: author.operator,
-    subject: "kestrel/kestrel-1",
+    subject: "example/kestrel-1",
     category: "pricing",
     domain: DEFAULT_DOMAIN,
     claim: "Kestrel-1 seat pricing is $40 per seat per month",

@@ -118,7 +118,7 @@ const ENVIRONMENT = "demo";
 
 const VERIFIED_REFERENCE = "mock-verified-m23-clients";
 
-const SUBJECT = "kestrel/kestrel-1";
+const SUBJECT = "example/kestrel-1";
 const CATEGORY = "pricing";
 const CITATION = "https://kestrel.example/pricing";
 const PAGE: FixturePage = {
@@ -265,7 +265,7 @@ async function legacyCore(agent: TestAgent): Promise<Core> {
     id: null,
     subject: SUBJECT,
     category: CATEGORY,
-    claim: "kestrel/kestrel-1 seat pricing was $38 per seat per month",
+    claim: "example/kestrel-1 seat pricing was $38 per seat per month",
     before: "$35 per seat per month",
     after: "$38 per seat per month",
     effective_at: "2026-08-01",
@@ -321,7 +321,7 @@ const READS = 10_000;
 
 /** The seeded attestation's id, and what the model answered. */
 let attestation = "";
-const MODEL_ANSWER = "kestrel/kestrel-1 seat pricing is $40 per seat per month";
+const MODEL_ANSWER = "example/kestrel-1 seat pricing is $40 per seat per month";
 
 /**
  * One whole drift attestation, written through the repository's own writers:
@@ -478,7 +478,7 @@ beforeAll(async () => {
     author_operator: k1.operator,
     subject: SUBJECT,
     category: CATEGORY,
-    claim: "kestrel/kestrel-1 seat pricing is $40 per seat per month",
+    claim: "example/kestrel-1 seat pricing is $40 per seat per month",
     before: "$38 per seat per month",
     after: "$40 per seat per month",
     effective_at: "2026-09-01",
@@ -823,7 +823,7 @@ describe("verify-mirror checks a fresh clone end to end", () => {
     const file = JSON.parse(await readFile(path, "utf8")) as {
       entry: Record<string, unknown>;
     };
-    file.entry["claim"] = "kestrel/kestrel-1 seat pricing is $4 per seat per month";
+    file.entry["claim"] = "example/kestrel-1 seat pricing is $4 per seat per month";
     await writeFile(path, `${JSON.stringify(file, null, 2)}\n`, "utf8");
 
     const io = recorder();
@@ -914,7 +914,7 @@ describe("verify-mirror checks a fresh clone end to end", () => {
   it("names the core or the signature when a legacy core is edited", async () => {
     const dir = await editEntry("edited-legacy-core", legacyId, (file) => {
       file.entry["claim"] =
-        "kestrel/kestrel-1 seat pricing was $3 per seat per month";
+        "example/kestrel-1 seat pricing was $3 per seat per month";
     });
 
     const io = recorder();

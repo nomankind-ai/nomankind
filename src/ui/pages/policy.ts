@@ -188,6 +188,103 @@ function domainPanel(slug: string, domain: DomainPolicy): Safe {
 }
 
 /**
+ * One registered domain's source policy (decision D-080).
+ *
+ * The gap this closes is stated on the page itself, because a table without it
+ * reads as trivia: a stated entry verifies when independent operators confirm
+ * the source said what the entry says, and nothing in that checks the source is
+ * one that should be believed about the subject. So a category whose claim has
+ * an authoritative source by nature must cite that source or it is refused at
+ * submission, and every other citation is labeled rather than gated.
+ *
+ * Three tables, all read off the frozen object and none of them retyped here:
+ * the categories the gate applies to, one row per provider with the hosts it
+ * publishes under, and the recognized list. The judgment the policy does not
+ * automate is named in words underneath, because a reader who took the tables
+ * for the whole check would be trusting a hostname where the actual promise is
+ * that three operators read the page.
+ */
+function sourcesPanel(slug: string, domain: DomainPolicy): Safe {
+  const path = `DOMAINS.${slug}.sources`;
+  const sources = domain.sources;
+  const providers = Object.entries(sources.providers);
+  return html`<section class="panel">
+        <h2 class="panel-title">Domains · ${slug} · sources</h2>
+        <p class="note">
+          A stated entry is verified when independent operators confirm the cited
+          source said what the entry says. That checks the reading and not the
+          reader's standing to say it, so a site made yesterday could otherwise
+          carry a pricing claim to verified. The categories below have an
+          authoritative source by nature: an entry in one of them must cite the
+          subject's own official source or it is refused at submission, with
+          <span class="mono">source_not_official</span>, or with
+          <span class="mono">unknown_provider</span> when this table holds no row
+          for the subject's provider at all. Every other citation is classified
+          and labeled — <span class="mono">official</span>,
+          <span class="mono">recognized</span>,
+          <span class="mono">other</span> — and never gated.
+        </p>
+        <p class="note">
+          The host rule: the citation must be
+          <span class="mono">https</span>, and its lowercased host must equal a
+          listed host or be a subdomain of one, so
+          <span class="mono">docs.anthropic.com</span> matches
+          <span class="mono">anthropic.com</span> and
+          <span class="mono">anthropic.com.evil.tld</span> does not. A port or
+          userinfo in the URL makes it <span class="mono">other</span>. The
+          provider is the first path segment of the subject, lowercased, under
+          this domain's subject convention.
+        </p>
+        <div class="table-wrap">
+          <table class="table">
+            <tbody>
+              <tr>
+                <td class="mono">${path}.official_required</td>
+                <td class="mono">${sources.official_required.join(", ")}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>provider</th>
+                <th>official hosts</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${providers.map(
+                ([provider, row]) => html`<tr>
+                  <td class="mono">
+                    ${row.fixture === true ? `${provider} (fixture)` : provider}
+                  </td>
+                  <td class="mono">${row.hosts.join(", ")}</td>
+                </tr>`,
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <tbody>
+              ${listRows(`${path}.recognized_hosts`, sources.recognized_hosts)}
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          A validator's approval asserts that the cited page supports the claim.
+          That is the judgment this policy does not automate and does not replace:
+          the tables above say which sources may be cited for what, and three
+          independent operators still say whether the page cited actually says
+          it. A provider absent from the table has no published official source
+          here, so its official-required claims are refused until a recorded
+          decision adds the row.
+        </p>
+      </section>`;
+}
+
+/**
  * The page.
  *
  * `policy` is the whole frozen object rather than the individual constants: a
@@ -633,8 +730,9 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       </p>
 
       ${group("Validation", validation)} ${group("Evidence", evidence)}
-      ${Object.entries(policy.DOMAINS).map(([slug, domain]) =>
-        domainPanel(slug, domain),
+      ${Object.entries(policy.DOMAINS).map(
+        ([slug, domain]) =>
+          html`${domainPanel(slug, domain)}${sourcesPanel(slug, domain)}`,
       )}
       ${group("Money and standing", money)}
       ${group("Standing", standing)} ${group("Disputes and reports", disputes)}

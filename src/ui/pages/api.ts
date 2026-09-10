@@ -159,21 +159,21 @@ const READ_PATH: readonly Endpoint[] = [
     method: "GET",
     path: "/read",
     parameters:
-      "subject=<s>, category=<c>, domain=<slug>, min_tier=stated|observed, max_age=<days>; entry_id=<id> as the query form of /read/{id}",
+      "subject=<s>, category=<c>, domain=<slug>, min_tier=stated|observed, min_source=official|recognized, max_age=<days>; entry_id=<id> as the query form of /read/{id}",
     answers:
-      "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed, and the age is whole UTC days against last_confirmed.",
+      "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed; min_source is the lowest source class the reader will take, official above recognized above other, compared against the class the sidecar derived from the entry's own citation; and the age is whole UTC days against last_confirmed.",
     refusals:
-      "400 unknown_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
     path: "/sync",
     parameters:
-      `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, domain=<slug>`,
+      `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, min_source=official|recognized, domain=<slug>`,
     answers:
-      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the three can touch an unlearn.",
+      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the four can touch an unlearn.",
     refusals:
-      "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, bad_min_source, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
@@ -187,18 +187,18 @@ const READ_PATH: readonly Endpoint[] = [
     method: "GET",
     path: "/entries",
     parameters:
-      "category=<c>, status=<s>, domain=<slug>, tier=stated|observed, fresh=fresh|stale, before=<position>",
+      "category=<c>, status=<s>, domain=<slug>, source=official|recognized|other, tier=stated|observed, fresh=fresh|stale, before=<position>",
     answers:
-      "The browsing listing, newest sealed position first, one keyset page. A chip group carries each filter, domain among them, and every chip and the pager keep the rest of the query as it stands. HTML only: the JSON twin of a listing is GET /events.",
+      "The browsing listing, newest sealed position first, one keyset page. A chip group carries each filter, domain and source among them, and every chip and the pager keep the rest of the query as it stands. The n-of-m line counts by status and domain, which are indexed columns; category, source, tier and freshness narrow the page rather than the total, and the line says so. HTML only: the JSON twin of a listing is GET /events.",
     refusals:
-      "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_tier, bad_fresh, bad_before. An empty value (?category=) is a refusal and not an absence.",
+      "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_source, bad_tier, bad_fresh, bad_before. An empty value (?category=) is a refusal and not an absence.",
   },
   {
     method: "GET",
     path: "/policy",
     parameters: "—",
     answers:
-      "The published policy object, served from the same module the kernel reads. Every number on the policy page, as JSON, DOMAINS among them — each registered domain's categories, staleness windows, transcript categories, excluded parties, attestation and subject convention.",
+      "The published policy object, served from the same module the kernel reads. Every number on the policy page, as JSON, DOMAINS among them — each registered domain's categories, staleness windows, transcript categories, excluded parties, attestation, subject convention and sources (the official-required categories, the provider table of official hosts, and the recognized hosts).",
     refusals: "405 with Allow: GET.",
   },
   {
@@ -321,7 +321,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry and a Location header. The entry is draft: status is recomputed from the log and is never sent in. The Worker fetches the citation itself under the norm rule and refuses unless what it fetched hashes to the snapshot_hash the author signed.",
     refusals:
-      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 schema_invalid; 409 chain_moved.",
+      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, unknown_provider (the subject's provider has no row in this domain's source table and the category needs an official source), source_not_official (the category has an authoritative source by nature and the citation is not it), bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 schema_invalid; 409 chain_moved.",
   },
   {
     method: "POST",
@@ -351,7 +351,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with { correction, target }: the correction entry as submitted, and the disputed entry as derivation left it. The correction enters the log as its own draft entry and is validated like any other, so nothing about the target moves until the challenge is upheld.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 author_mismatch; then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch, self_dispute; 409 dispute_open; 422 bad_report_link, bad_revalidation_link, insufficient_standing (a registered operator's available standing, less what its open stakes already hold, is below the published dispute stake), schema_invalid.",
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 author_mismatch; then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch, self_dispute; 409 dispute_open; 422 unknown_provider and source_not_official read against the entry being challenged (a correction's own category is never official-required, so the gate here is the target's domain and category: overturning a pricing, limit, deprecation, release or outage claim takes a citation of the target subject's own official source), bad_report_link, bad_revalidation_link, insufficient_standing (a registered operator's available standing, less what its open stakes already hold, is below the published dispute stake), schema_invalid.",
   },
   {
     method: "POST",
@@ -554,6 +554,48 @@ POST
         passes, and status is never sent in: it is recomputed from the log.`,
         WRITE_PATH,
       )}
+
+      <section class="panel">
+        <h2 class="panel-title">Which sources may be cited for what</h2>
+        <p class="note">
+          Every entry carries a source class derived from its own citation and
+          nothing else: <span class="mono">official</span> when the host is one
+          the subject's provider publishes under,
+          <span class="mono">recognized</span> for an editorial, standards,
+          court, regulator or journal host, and
+          <span class="mono">other</span> for everything else. The citation was
+          always in the signed core, so nothing new is signed and no stored entry
+          changes; the class is a reading of it, and it sits in the sidecar
+          beside the effective tier. The tables are published per domain on
+          <a href="/policy">the policy page</a> and in
+          <span class="mono">GET /policy</span>.
+        </p>
+        <p class="note">
+          Categories whose claim has an authoritative source by nature are gated
+          rather than labeled: an entry in one of them must cite the subject's
+          official source, or
+          <span class="mono">POST /entries</span> refuses it
+          <span class="mono">source_not_official</span> before the citation is
+          fetched and before anything is written —
+          <span class="mono">unknown_provider</span> when the table holds no row
+          for the subject's provider at all. A dispute's correction entry goes
+          through the same pipeline, so a correction of a pricing claim must
+          cite the official source too. Everything else is labeled and served,
+          and a reader who wants the gate for themselves asks for it with
+          <span class="mono">min_source</span> on
+          <span class="mono">/read</span> and
+          <span class="mono">/sync</span>, or with the source chips on
+          <a href="/entries">the listing</a>.
+        </p>
+        <p class="note">
+          The host rule is exact: <span class="mono">https</span> only, the
+          lowercased host equal to a listed host or a subdomain of it, and a port
+          or userinfo makes it <span class="mono">other</span>. What none of this
+          automates is the judgment: a validator's approval asserts that the
+          cited page supports the claim, and the class says only whose page it
+          was.
+        </p>
+      </section>
 
       <section class="panel">
         <h2 class="panel-title">

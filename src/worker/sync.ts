@@ -41,6 +41,7 @@ import { entryHash } from "../hash.js";
 import { signSyncReceipt, type SyncReceipt } from "../receipt.js";
 import type { Entry } from "../schema.js";
 import type { Seal } from "../seal.js";
+import type { SourceClass } from "../sources.js";
 import type { D1Like } from "../storage/d1.js";
 import {
   ReceiptConflictError,
@@ -87,6 +88,13 @@ interface EntryState {
   readonly effective_tier: EvidenceTier | null;
   /** The entry's own domain, off its signed core (decision D-071). */
   readonly domain: string;
+  /**
+   * The class the entry's citation earned, off the sidecar re-derived at the
+   * sealed head (decision D-080). Read rather than computed here, exactly as the
+   * effective tier is: the class is derivation's, and a door that worked one out
+   * for itself would be a second answer to a question the sidecar already holds.
+   */
+  readonly source_class: SourceClass;
 }
 
 /** One event of the page, with everything a trainer is handed about it. */
@@ -165,6 +173,7 @@ class Entries {
       status: derived.status,
       effective_tier: sidecar.effective_tier,
       domain: domainOf(entry),
+      source_class: sidecar.source.class,
     };
   }
 }
@@ -339,6 +348,7 @@ async function page(
             status: item.state.status,
             effective_tier: item.state.effective_tier,
             domain: item.state.domain,
+            source_class: item.state.source_class,
           },
       query,
     ),

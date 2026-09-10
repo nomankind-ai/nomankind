@@ -193,6 +193,15 @@ describe("the derived entry", () => {
     // for it, and the example's approvals carry the measurement it takes.
     expect(sidecar.effective_tier).toBe("observed");
     expect(sidecar.test_verdict).toBe("accepted");
+    // The source class (decision D-080) lives beside the entry for the same
+    // reason: nothing new was signed, the citation was always in the core, and
+    // this is derivation's reading of it against the domain's published tables.
+    expect(sidecar.source).toEqual({
+      class: "official",
+      matched_host: "platform.openai.com",
+      provider: "openai",
+    });
+    expect(Object.keys(entry)).not.toContain("source");
     expect(Object.keys(entry)).not.toContain("effective_tier");
     expect(entry["confidence"]).toBeNull();
     expect(entry["seal"]).toBeNull();

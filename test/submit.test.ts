@@ -42,7 +42,11 @@ function proposal(
   overrides: Partial<SubmissionProposal> = {},
 ): SubmissionProposal {
   return {
-    subject: "kestrel/kestrel-2",
+    // The fixture provider (decision D-080): `example` is the reserved-name row
+    // in the domain's provider table, and `kestrel.example` is a subdomain of
+    // the reserved `example` TLD it lists. So a pricing claim here cites its
+    // subject's official source, exactly as a real one must.
+    subject: "example/kestrel-2",
     category: "pricing",
     domain: DEFAULT_DOMAIN,
     claim: "Kestrel-2 seat pricing rose to $25 per seat per month",
@@ -62,7 +66,7 @@ function transcript(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
-    model: "kestrel/kestrel-2",
+    model: "example/kestrel-2",
     prompt: "What is the capital of France?",
     parameters: { temperature: 0 },
     output: "I cannot help with that.",
@@ -287,6 +291,8 @@ describe("checkSubmission", () => {
       "missing_domain",
       "unregistered_domain",
       "category_not_in_domain",
+      "unknown_provider",
+      "source_not_official",
       "bad_submitted_at",
       "author_mismatch",
       "author_operator_mismatch",
@@ -409,6 +415,150 @@ describe("checkSubmission", () => {
     expect(checkSubmission(core, await contextFor(core))).toEqual({
       ok: false,
       reason: "category_not_in_domain",
+    });
+  });
+
+  it("refuses source_not_official for a pricing claim citing a made-up host (D-080)", async () => {
+    // The gap D-080 closes: a site made yesterday could otherwise carry a
+    // pricing claim to verified, because a stated entry is verified when the
+    // validators confirm the source said it and nothing asked whether the source
+    // should be believed about this subject.
+    const core = await buildSubmittedCore(
+      proposal({
+        subject: "openai/gpt-5",
+        citation: "https://made-up-site.example/pricing",
+      }),
+      { now: NOW },
+    );
+
+    expect(checkSubmission(core, await contextFor(core))).toEqual({
+      ok: false,
+      reason: "source_not_official",
+    });
+  });
+
+  it("accepts the same claim citing the subject's own official source", async () => {
+    const core = await buildSubmittedCore(
+      proposal({
+        subject: "openai/gpt-5",
+        citation: "https://platform.openai.com/docs/pricing",
+      }),
+      { now: NOW },
+    );
+
+    expect(checkSubmission(core, await contextFor(core))).toEqual({ ok: true });
+  });
+
+  it("refuses source_not_official for an http citation of an official host", async () => {
+    // A plaintext fetch is a source anybody on the path can rewrite, so it
+    // cannot establish that the official page said anything.
+    const core = await buildSubmittedCore(
+      proposal({
+        subject: "openai/gpt-5",
+        citation: "http://platform.openai.com/docs/pricing",
+      }),
+      { now: NOW },
+    );
+
+    expect(checkSubmission(core, await contextFor(core))).toEqual({
+      ok: false,
+      reason: "source_not_official",
+    });
+  });
+
+  it("refuses unknown_provider for a subject no provider row names", async () => {
+    const core = await buildSubmittedCore(
+      proposal({
+        subject: "kestrel/kestrel-2",
+        citation: "https://kestrel.example/pricing",
+      }),
+      { now: NOW },
+    );
+
+    expect(checkSubmission(core, await contextFor(core))).toEqual({
+      ok: false,
+      reason: "unknown_provider",
+    });
+  });
+
+  it("leaves a category the domain does not gate alone, whatever it cites", async () => {
+    // behavior is a transcript category: it rests on a measurement somebody made
+    // and receipted, not on a document, so there is no official page to demand.
+    const core = await buildSubmittedCore(
+      proposal({
+        category: "behavior",
+        subject: "kestrel/kestrel-2",
+        citation: "https://made-up-site.example/notes",
+        evidence: transcript({ model: "kestrel/kestrel-2" }),
+      }),
+      { now: NOW },
+    );
+
+    expect(checkSubmission(core, await contextFor(core))).toEqual({ ok: true });
+  });
+
+  it("checks the source after the category and before the clock", async () => {
+    // The order is the contract: a query wrong in two ways is reported by its
+    // first fault, so the refusal does not depend on how the gate is written.
+    const badCategory = await renamed(
+      (await buildSubmittedCore(
+        proposal({
+          category: "clinical_trial",
+          subject: "kestrel/kestrel-2",
+          citation: "https://made-up-site.example/x",
+        }),
+        { now: NOW },
+      )) as Core,
+    );
+    expect(checkSubmission(badCategory, await contextFor(badCategory))).toEqual({
+      ok: false,
+      reason: "category_not_in_domain",
+    });
+
+    const badClock = await renamed({
+      ...(await buildSubmittedCore(
+        proposal({
+          subject: "kestrel/kestrel-2",
+          citation: "https://made-up-site.example/x",
+        }),
+        { now: NOW },
+      )),
+      submitted_at: "the eighth of September",
+    });
+    expect(checkSubmission(badClock, await contextFor(badClock))).toEqual({
+      ok: false,
+      reason: "unknown_provider",
+    });
+  });
+
+  it("puts a correction entry through the same rule", async () => {
+    // A correction of a pricing claim is a submission like any other, so it has
+    // to cite the official source a pricing claim does.
+    const refused = await buildSubmittedCore(
+      proposal({
+        category: "pricing",
+        subject: "openai/gpt-5",
+        supersedes: "nmk_" + "a".repeat(32),
+        citation: "https://made-up-site.example/corrected",
+      }),
+      { now: NOW },
+    );
+    expect(checkSubmission(refused, await contextFor(refused))).toEqual({
+      ok: false,
+      reason: "source_not_official",
+    });
+
+    const accepted = await buildSubmittedCore(
+      proposal({
+        category: "pricing",
+        subject: "openai/gpt-5",
+        supersedes: "nmk_" + "a".repeat(32),
+        citation: "https://openai.com/api/pricing",
+      }),
+      { now: NOW },
+    );
+    expect(checkSubmission(accepted, await contextFor(accepted))).toEqual({
+      ok: true,
     });
   });
 

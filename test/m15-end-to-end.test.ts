@@ -271,7 +271,7 @@ function pricing(
   overrides: Partial<Omit<SubmissionProposal, "author">> = {},
 ): Omit<SubmissionProposal, "author"> {
   return {
-    subject: "kestrel/kestrel-1",
+    subject: "example/kestrel-1",
     category: "pricing",
     domain: DEFAULT_DOMAIN,
     claim,

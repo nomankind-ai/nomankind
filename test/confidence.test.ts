@@ -18,6 +18,11 @@ const SIDECAR: Sidecar = {
   trusted_count_at_decision: 12,
   read_share_slots: null,
   revalidations: [],
+  source: {
+    class: "official",
+    matched_host: "platform.openai.com",
+    provider: "openai",
+  },
 };
 
 function reproduction(runs: number, holds: number): Record<string, unknown> {
@@ -119,6 +124,8 @@ const FIELDS = [
   "formula",
   "evidence_tier",
   "effective_tier",
+  "source_class",
+  "source_matched_host",
   "test_verdict",
   "test_acceptance",
   "counts",
@@ -141,6 +148,34 @@ describe("the confidence inputs", () => {
     expect(Object.keys(inputs)).toEqual(FIELDS);
     expect(inputs.confidence).toBeNull();
     expect(inputs.formula).toBeNull();
+  });
+
+  it("publishes the source class and the host it matched, raw (D-080)", () => {
+    // Where the claim came from is a receipt like every other input here: it is
+    // exposed and never weighted, so a learner can prefer provider-stated
+    // pricing for itself without waiting for a formula nobody has calibrated.
+    const inputs = confidenceInputs({
+      entry: entryOf(),
+      sidecar: SIDECAR,
+      now: NOW,
+    });
+
+    expect(inputs.source_class).toBe("official");
+    expect(inputs.source_matched_host).toBe("platform.openai.com");
+  });
+
+  it("reads a sidecar with no source key at all as no class", () => {
+    // A row written before the key existed, handed over by a caller that did not
+    // default it: null is the honest answer, and it fails any reader's demand.
+    const { source: _source, ...withoutSource } = SIDECAR;
+    const inputs = confidenceInputs({
+      entry: entryOf(),
+      sidecar: withoutSource as typeof SIDECAR,
+      now: NOW,
+    });
+
+    expect(inputs.source_class).toBeNull();
+    expect(inputs.source_matched_host).toBeNull();
   });
 
   it("reads a verified observed entry's tiers, counts and age", () => {

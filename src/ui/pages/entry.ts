@@ -15,6 +15,14 @@
  * page that showed only the claimed tier would be handing a reader the observed
  * badge that Section 4 says a reproduction alone earns.
  *
+ * Section 4, the source policy (decision D-080): the derived block carries the
+ * class the entry's own citation earned — official when the host is the
+ * subject's provider's published one, recognized for an editorial, standards,
+ * court or journal host, other for everything else — with the host that matched
+ * and the provider the subject names. It is shown among the derived fields and
+ * not among the signed ones because nothing new was signed: the citation was
+ * always in the core, and the class is a reading of it.
+ *
  * Section 7, freshness: a stale entry is still verified, so its status badge does
  * not change and the freshness line says how old the confirmation is instead.
  *
@@ -171,6 +179,32 @@ function derivedValue(entry: Record_, key: string): Safe {
   return html`<span class="break">${value}</span>`;
 }
 
+/**
+ * The entry's source class, its matched host and its provider (decision D-080).
+ *
+ * `other` is spelt out rather than left as a bare word. A reader who sees
+ * `official` beside a host has been told something; a reader who sees `other`
+ * has been told that this log publishes no authority for this subject, which is
+ * a different statement from "the source is bad" and the page says the one it
+ * means. The matched host is null exactly when the class is other, so it is not
+ * printed there; the provider is the subject's own and is null when the subject
+ * carries no provider segment.
+ */
+function sourceValue(source: EntryData["sidecar"]["source"]): Safe {
+  const provider =
+    source.provider === null
+      ? html`<span class="muted">no provider in the subject</span>`
+      : html`${source.provider}`;
+  if (source.class === "other") {
+    return html`<span class="break"
+        >other: no published authority for this subject</span
+      >
+      <span class="note">provider ${provider}</span>`;
+  }
+  return html`<span class="break">${source.class}</span>
+    <span class="note">${source.matched_host ?? EM_DASH} · provider ${provider}</span>`;
+}
+
 /** The derived block: recomputed from the events, never written. */
 function derived(data: EntryData): Safe {
   return html`<section class="panel">
@@ -185,6 +219,8 @@ function derived(data: EntryData): Safe {
             html`<dt>${key}</dt>
               <dd>${derivedValue(data.entry, key)}</dd>`,
         )}
+        <dt>source</dt>
+        <dd>${sourceValue(data.sidecar.source)}</dd>
         ${data.disputeOf === null
           ? raw("")
           : html`<dt>dispute of</dt>

@@ -99,6 +99,13 @@ export interface EntriesFilter {
    * same way every other filter is carried.
    */
   domain: string | null;
+  /**
+   * The source class the listing was narrowed to — official, recognized, other
+   * — null for all of them (decision D-080). The class is the sidecar's, derived
+   * from the entry's own citation, so this filter asks about where a claim came
+   * from rather than about what the claim says.
+   */
+  source: string | null;
   tier: string | null;
   fresh: "fresh" | "stale" | null;
 }

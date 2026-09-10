@@ -29,6 +29,7 @@ import {
 } from "./policy.js";
 import type { Entry } from "./schema.js";
 import type { EntrySeal } from "./seal.js";
+import { sourceClassOf, type SourceClassification } from "./sources.js";
 import { checkSupersedes } from "./supersede.js";
 import type {
   ApproverRecord,
@@ -132,6 +133,20 @@ export interface Sidecar {
    * check of this entry.
    */
   readonly revalidations: readonly RevalidationView[];
+  /**
+   * Whitepaper Section 4, the source policy (decision D-080): the class the
+   * entry's own citation earned, the listed host that matched it, and the
+   * provider its subject names.
+   *
+   * A derived field and not a signed one. The citation was always in the core;
+   * this is a reading of it against the domain's published tables, computed the
+   * same way from the same bytes by everyone, so every rewrite, every
+   * re-derivation and the mirror's own copy agree without anything being signed
+   * again. It sits in the sidecar rather than in the schema for the reason the
+   * effective tier does: the record says what was claimed, and the log says what
+   * it makes of it.
+   */
+  readonly source: SourceClassification;
 }
 
 /**
@@ -1008,6 +1023,10 @@ export function deriveEntry(
     trusted_count_at_decision: consensus.trustedCountAtDecision,
     read_share_slots: readShareSlotsFor(events, entryId, consensus),
     revalidations: revalidationsFor(events, entryId),
+    // Read off the signed core and the domain's published tables, so a legacy
+    // v0.6 core -- which names no domain and reads as the default one through
+    // `domainOf` -- is classified exactly as a v0.7 core citing the same page is.
+    source: sourceClassOf(domainOf(core), core["subject"], core["citation"]),
   };
 
   const entry: Record<string, unknown> = {};

@@ -236,7 +236,7 @@ async function name(party: Party): Promise<void> {
 /** A stated pricing proposal citing the fixture page. */
 function pricing(claim: string): Omit<SubmissionProposal, "author"> {
   return {
-    subject: "kestrel/kestrel-1",
+    subject: "example/kestrel-1",
     category: "pricing",
     domain: DEFAULT_DOMAIN,
     claim,

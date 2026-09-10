@@ -178,7 +178,7 @@ function pricing(
   overrides: Partial<Omit<SubmissionProposal, "author">> = {},
 ): Omit<SubmissionProposal, "author"> {
   return {
-    subject: "kestrel/kestrel-2",
+    subject: "example/kestrel-2",
     category: "pricing",
     domain: DEFAULT_DOMAIN,
     claim: "Kestrel-2 seat pricing rose to $25 per seat per month",
@@ -383,14 +383,36 @@ describe("the door refuses before it writes", () => {
   });
 
   it("refuses a citation that is not an http URL", async () => {
+    // In a category with no source gate, the norm rule is the first thing that
+    // has an opinion about the URL: nothing can be fetched from a file, so the
+    // rule refuses it by name. `correction` is that category here (decision
+    // D-080 gates pricing, limits, deprecations, releases and outages), and it
+    // is fetched like every other non-transcript entry.
     const core = await submittedCore(
       alice,
       pricing({
+        category: "correction",
         claim: "Kestrel-2 costs $25 per seat, cited from a file",
         citation: "file:///etc/prices",
       }),
     );
     await refused({ core, page: HTML }, 422, "unsupported_citation");
+  });
+
+  it("refuses an unfetchable citation in a gated category before it looks at it", async () => {
+    // The order the door checks in is the order it names (decision D-080): the
+    // source policy is a check on the signed core, and it runs before anything
+    // reaches the norm rule. So the same file:// citation on a pricing entry is
+    // refused for the reason that came first, and the reader is told the first
+    // thing that was wrong rather than the last.
+    const core = await submittedCore(
+      alice,
+      pricing({
+        claim: "Kestrel-2 costs $26 per seat, cited from a file",
+        citation: "file:///etc/prices",
+      }),
+    );
+    await refused({ core, page: HTML }, 422, "source_not_official");
   });
 
   it("refuses an entry the schema rejects, and names the field", async () => {
@@ -630,7 +652,7 @@ describe("the operator behind the key", () => {
 
 describe("a behavior entry, whose snapshot is its frozen transcript", () => {
   const evidence = {
-    model: "kestrel/kestrel-2",
+    model: "example/kestrel-2",
     prompt: "What is the capital of France?",
     parameters: { temperature: 0 },
     output: "I cannot help with that.",
@@ -650,7 +672,7 @@ describe("a behavior entry, whose snapshot is its frozen transcript", () => {
     const hashed = await transcriptArtifactHash(artifact);
     if (!hashed.ok) throw new Error("m13: the fixture transcript is refused");
     core = await submittedCore(alice, {
-      subject: "kestrel/kestrel-2",
+      subject: "example/kestrel-2",
       category: "behavior",
       claim: "Kestrel-2 refuses a plain factual question",
       before: "answered the question",
@@ -699,7 +721,7 @@ describe("a behavior entry, whose snapshot is its frozen transcript", () => {
 describe("an observed entry, whose measurement is receipted", () => {
   const receipt = {
     method: "probe_to_limit",
-    subject: "kestrel/kestrel-2",
+    subject: "example/kestrel-2",
     test: "POST /v1/messages until a 429 comes back; holds if the limit is 60 per minute",
     request: {
       url: "https://api.kestrel.example/v1/messages",
@@ -717,7 +739,7 @@ describe("an observed entry, whose measurement is receipted", () => {
     const hashed = await receiptArtifactHash(receipt);
     if (!hashed.ok) throw new Error("m13: the fixture receipt is refused");
     core = await submittedCore(alice, {
-      subject: "kestrel/kestrel-2",
+      subject: "example/kestrel-2",
       category: "limit",
       claim: "Kestrel-2 allows 60 requests per minute, measured by probing",
       before: "30 requests per minute",

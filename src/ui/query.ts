@@ -9,13 +9,16 @@
  *
  * The category, status and tier enums are read from the entry schema itself and
  * never copied into TypeScript. The schema is the single source of truth for all
- * three, and a list retyped here is a list that will drift from it.
+ * three, and a list retyped here is a list that will drift from it. The source
+ * classes come from src/sources.ts for the same reason: there is one list of
+ * them and this is not a second.
  *
  * Pure: no I/O, no storage, no clock.
  */
 
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
+import { SOURCE_CLASSES } from "../sources.js";
 import type { EntriesFilter } from "./types.js";
 
 /** The schema's category enum. */
@@ -39,6 +42,19 @@ export const ENTRY_TIERS: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * The three source classes (decision D-080). Not a schema enum either: the class
+ * is derived from the entry's citation against the domain's published tables
+ * (src/policy.ts, src/sources.ts), so this is that list and never a second copy
+ * of it. `other` is a value here where it is not one for the reader's
+ * `min_source`, because a chip is an exact class and not a minimum: a reader
+ * looking for the entries nobody has published an authority for asks for
+ * exactly those.
+ */
+export const ENTRY_SOURCES: readonly string[] = Object.freeze([
+  ...SOURCE_CLASSES,
+]);
+
+/**
  * The freshness filter's two values. Not a schema enum: `stale` is a derived
  * boolean (src/derive.ts), so this is the two ways of asking about it and
  * nothing more.
@@ -54,6 +70,7 @@ export const ENTRIES_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "status",
   "domain",
   "tier",
+  "source",
   "fresh",
   "before",
 ]);
@@ -70,6 +87,7 @@ export const ENTRIES_QUERY_REFUSALS = [
   "bad_status",
   "unknown_domain",
   "bad_tier",
+  "bad_source",
   "bad_fresh",
   "bad_before",
 ] as const;
@@ -133,6 +151,8 @@ export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
   if (!domain.ok) return { ok: false, reason: "unknown_domain" };
   const tier = readEnum(params, "tier", ENTRY_TIERS);
   if (!tier.ok) return { ok: false, reason: "bad_tier" };
+  const source = readEnum(params, "source", ENTRY_SOURCES);
+  if (!source.ok) return { ok: false, reason: "bad_source" };
   const fresh = readEnum(params, "fresh", FRESHNESS_VALUES);
   if (!fresh.ok) return { ok: false, reason: "bad_fresh" };
 
@@ -152,6 +172,7 @@ export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
       status: status.value,
       domain: domain.value,
       tier: tier.value,
+      source: source.value,
       fresh: fresh.value as "fresh" | "stale" | null,
     },
     before,
