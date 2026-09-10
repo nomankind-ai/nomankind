@@ -67,8 +67,10 @@ export type ShareRole = "submitter" | "validator" | "reconfirmer";
  *
  * `available_at` is when the row may leave: the read's day plus the thirty-day
  * holdback for a read share, the reconfirmation's instant plus the same for a
- * bounty accrual, and null for every row that is not waiting on the holdback —
- * a withheld pool row, a clawback, a payout, a reconciliation.
+ * bounty accrual, the negated row's own instant for a clawback — so a clawback
+ * releases with the share it cancels and the two net to zero at one moment
+ * rather than at two — and null for every row that is not waiting on the
+ * holdback: a withheld pool row, a payout, a reconciliation.
  *
  * `seq` and `at` are the position and instant of the event that produced the
  * row, so a reader can find the event a row came from without searching, exactly
@@ -295,8 +297,13 @@ export function clawbackRows(
       reads: row.reads,
       unit: "micros",
       amount: -row.amount,
-      // A clawback is never held: it takes effect the instant it is written.
-      available_at: null,
+      // The negated row's own release instant, not null: a clawback is the
+      // exact negative of a share that is still inside the holdback, so it
+      // waits out the same holdback and the two come to nothing together. A
+      // clawback released early would read as money owed back out of rows that
+      // are not payable yet, and one that never released would leave the share
+      // it cancels payable on its own.
+      available_at: row.available_at,
       seq: event.seq,
       at: event.at,
       ref: { claws_back: row.id },
@@ -369,12 +376,22 @@ export interface PayoutPlan {
   readonly carried_forward: number;
 }
 
-/** Whether a row is released — payable now — at `now`. */
+/** The kinds that carry an amount to or from an operator and wait out the holdback. */
+function isBalanceKind(kind: LedgerKind): boolean {
+  return kind === "read_share" || kind === "bounty_accrual" || kind === "clawback";
+}
+
+/**
+ * Whether a row is released — payable now — at `now`.
+ *
+ * A clawback is counted by its `available_at` like every other row, because it
+ * carries the release instant of the share it negates: the two are released in
+ * the same instant, so a share can never be paid out from under a clawback that
+ * is still held, and a clawback can never be taken out of a cycle before the
+ * share it cancels was payable.
+ */
 function isReleased(row: LedgerRow, now: string): boolean {
-  // A clawback is always released: it is money that has to come back before
-  // anything else leaves, so it can never wait behind a holdback.
-  if (row.kind === "clawback") return true;
-  if (row.kind !== "read_share" && row.kind !== "bounty_accrual") return false;
+  if (!isBalanceKind(row.kind)) return false;
   return row.available_at !== null && row.available_at <= now;
 }
 
@@ -389,9 +406,10 @@ function isReleased(row: LedgerRow, now: string): boolean {
  * they had already left.
  *
  * `released` is what the caller read back as unpaid for this operator; the rule
- * is applied again here rather than trusted from the query, and a clawback
- * always counts however recently it was written, so an operator can never be
- * paid out from under a clawback by a query that missed it.
+ * is applied again here rather than trusted from the query, and a clawback is
+ * counted by its own `available_at` — which is the release instant of the share
+ * it negates — so an operator can never be paid a share whose clawback is still
+ * held, and never be charged a clawback before that share was payable.
  */
 export function payoutPlan(
   operator: string,
@@ -523,15 +541,15 @@ export function reconciliationRow(
 export interface LedgerBalance {
   /** Everything ever accrued: read shares and bounties, clawbacks aside. */
   readonly accrued: number;
-  /** Accrued and still inside the holdback at `now`. */
+  /** Still inside the holdback at `now`, clawbacks netted against what they cancel. */
   readonly held: number;
-  /** Accrued and past the holdback at `now`. */
+  /** Past the holdback at `now`, clawbacks netted against what they cancel. */
   readonly released: number;
-  /** The clawbacks, as they are written: negative. */
+  /** The clawbacks, as they are written: negative, held or not. */
   readonly clawed_back: number;
   /** What has left, through payouts. */
   readonly paid: number;
-  /** Released, less clawbacks, less what has been paid. */
+  /** Released, less what has been paid. */
   readonly carried_forward: number;
 }
 
@@ -542,6 +560,12 @@ export interface LedgerBalance {
  * an entry withheld while stale, owed to whoever reconfirms it next and to
  * nobody until then. They enter the accounting as the `bounty_accrual` row that
  * collects them.
+ *
+ * A clawback is placed by its own `available_at`, exactly as the row it negates
+ * is: a held share and its clawback are both held, so `held` reads zero rather
+ * than a debt that is not owed yet, and `carried_forward` — what is released and
+ * not yet paid — is zero as well. `clawed_back` is the clawbacks as written,
+ * held or released, because it answers what came back and not when.
  */
 export function ledgerBalance(
   rows: readonly LedgerRow[],
@@ -554,17 +578,14 @@ export function ledgerBalance(
   let paid = 0;
 
   for (const row of rows) {
-    if (row.kind === "read_share" || row.kind === "bounty_accrual") {
-      accrued += row.amount;
+    if (isBalanceKind(row.kind)) {
+      if (row.kind === "clawback") clawedBack += row.amount;
+      else accrued += row.amount;
       if (row.available_at !== null && row.available_at > now) {
         held += row.amount;
       } else {
         releasedTotal += row.amount;
       }
-      continue;
-    }
-    if (row.kind === "clawback") {
-      clawedBack += row.amount;
       continue;
     }
     if (row.kind === "payout") paid += row.amount;
@@ -576,6 +597,6 @@ export function ledgerBalance(
     released: releasedTotal,
     clawed_back: clawedBack,
     paid,
-    carried_forward: releasedTotal + clawedBack - paid,
+    carried_forward: releasedTotal - paid,
   };
 }

@@ -44,6 +44,7 @@ import {
 import {
   ASSIGNMENT_WINDOW_HOURS,
   DISPUTE_FILING_FEE_CENTS,
+  DISPUTE_STAKE_STANDING,
   LIST_PAGE_LIMIT,
   REVALIDATION_REQUEST_STAKE_STANDING,
 } from "../src/policy.js";
@@ -53,6 +54,7 @@ import type { StakeRecord } from "../src/stake.js";
 import {
   eventsForEntry,
   ledgerRowsForEntry,
+  setOperatorStanding,
 } from "../src/storage/repository.js";
 import type { SubmissionProposal } from "../src/submit.js";
 import { verifyOffline } from "../src/verify.js";
@@ -385,11 +387,35 @@ function artifact(observer: string, note: string): Record<string, unknown> {
   };
 }
 
+/**
+ * A TEST FIXTURE, and nothing this milestone's rules produce: standing on the
+ * operator rows for the gate to read.
+ *
+ * Section 9 has standing gate the dispute and revalidation stakes, and M20's
+ * world earns almost none of it — five operators approving a handful of entries.
+ * So the column is set directly, exactly as the sweep's standing step would set
+ * it, rather than the gate being weakened to let the fixture through. The sweep
+ * recomputes the column from the log on every run, so it is written again after
+ * each one.
+ */
+const FIXTURE_STANDING = DISPUTE_STAKE_STANDING * 4;
+
+async function fundStanding(): Promise<void> {
+  for (const party of parties) {
+    await setOperatorStanding(
+      world.store.db,
+      party.operator,
+      FIXTURE_STANDING,
+      0,
+    );
+  }
+}
+
 /** Run the sweep the alarm runs, with the fakes standing in for the world. */
 async function sweep(at: Date): Promise<SweepReport> {
   const beacon = new FixtureBeacon("m20");
   await beacon.advance(at.toISOString());
-  return runSweep(world.env, {
+  const report = await runSweep(world.env, {
     now: at,
     beacon,
     witness: new FakeWitnessAdapter(),
@@ -397,6 +423,9 @@ async function sweep(at: Date): Promise<SweepReport> {
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
   });
+  // The standing step just overwrote the fixture with what the log says.
+  await fundStanding();
+  return report;
 }
 
 /** An HttpClient that routes straight into the router, with no network. */
@@ -464,6 +493,7 @@ beforeAll(async () => {
     await name(party);
   }
   await register(maintainerParty);
+  await fundStanding();
 
   overturnedEntry = await verified(
     "Kestrel-1 seat pricing is $40 per seat per month",
@@ -1070,5 +1100,86 @@ describe("the overturned entry", () => {
     const report = await verifyOffline(exported.entry, exported.bundle);
     expect(report.diffs).toEqual([]);
     expect(report.ok).toBe(true);
+  }, 240_000);
+});
+
+// ---------------------------------------------------------------------------
+// (f) Standing at the door (M21): what a filer must be able to cover
+// ---------------------------------------------------------------------------
+
+/**
+ * Whitepaper Section 9: standing "gates everything discretionary, from entry to
+ * and stay in the trusted pool to revalidation-request caps and dispute stakes."
+ * So a registered operator that cannot cover the published stake is refused at
+ * the door, with nothing written; a bare key is not gated, because Section 6 has
+ * it stake a refundable fee instead.
+ */
+describe("a filing an operator cannot cover", () => {
+  it("is refused at the dispute door, and a bare key's is not", async () => {
+    const target = checkedEntry;
+    const id = target["id"] as string;
+    const before = (await eventsForEntry(world.store.db, id)).length;
+
+    // Below the dispute stake, which is what the gate reads.
+    await setOperatorStanding(
+      world.store.db,
+      k3.operator,
+      DISPUTE_STAKE_STANDING - 1,
+      0,
+    );
+    const poor = await correction(
+      k3.agent,
+      target,
+      "Kestrel-3 seat pricing is $44 per seat per month, not $40",
+      k3.operator,
+    );
+    const refused = await file(k3.agent, target, poor);
+    expect([refused.status, refused.body["error"]]).toEqual([
+      422,
+      "insufficient_standing",
+    ]);
+    // Nothing was written: not the correction, not the challenge, not a stake.
+    expect((await eventsForEntry(world.store.db, id)).length).toBe(before);
+
+    // The same filing from a bare key is not gated: its stake is a fee.
+    const bare = await correction(
+      secondChallenger,
+      target,
+      "Kestrel-3 seat pricing is $44 per seat per month, not $40, says a reader",
+    );
+    const filed = await file(secondChallenger, target, bare);
+    expect([filed.status, filed.body["error"] ?? null]).toEqual([201, null]);
+
+    await fundStanding();
+  }, 240_000);
+
+  it("is refused at the revalidate door, and a bare key is refused for being one", async () => {
+    const id = standingEntry["id"] as string;
+
+    await setOperatorStanding(
+      world.store.db,
+      k4.operator,
+      REVALIDATION_REQUEST_STAKE_STANDING - 1,
+      0,
+    );
+    const refused = await post(k4.agent, `/entries/${id}/revalidate`, {});
+    expect([refused.status, refused.body["error"]]).toEqual([
+      422,
+      "insufficient_standing",
+    ]);
+    expect(
+      (await eventsForEntry(world.store.db, id)).some(
+        (event) => event.type === "revalidation_requested",
+      ),
+    ).toBe(false);
+
+    // A bare key never reaches the gate: it has no standing to gate.
+    const bare = await post(challenger, `/entries/${id}/revalidate`, {});
+    expect([bare.status, bare.body["error"]]).toEqual([422, "bare_key"]);
+
+    // And with the stake covered, the same request opens the check.
+    await fundStanding();
+    const opened = await post(k4.agent, `/entries/${id}/revalidate`, {});
+    expect([opened.status, opened.body["error"] ?? null]).toEqual([201, null]);
   }, 240_000);
 });

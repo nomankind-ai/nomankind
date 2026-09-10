@@ -2116,6 +2116,98 @@ export async function ledgerRowsForEntry(
   return rows.results.map((row) => readJson<StakeRecord>(row, "payload_json"));
 }
 
+/** What a filing puts up: the only two kinds that can still be in flight. */
+const STAKE_FILED_KINDS: readonly StakeRecord["kind"][] = Object.freeze([
+  "dispute_stake",
+  "revalidation_stake",
+] as const);
+
+/**
+ * What settles one, per mechanism. A reward is not a settlement — it is paid
+ * beside the refund — so it is in neither list.
+ */
+const DISPUTE_SETTLING_KINDS: readonly StakeRecord["kind"][] = Object.freeze([
+  "dispute_refund",
+  "dispute_forfeit",
+] as const);
+
+const REVALIDATION_SETTLING_KINDS: readonly StakeRecord["kind"][] = Object.freeze([
+  "revalidation_refund",
+  "revalidation_forfeit",
+] as const);
+
+const IN = (kinds: readonly string[]): string =>
+  `(${kinds.map(() => "?").join(", ")})`;
+
+/**
+ * One operator's stakes that are still in flight: filed, and neither refunded
+ * nor forfeited.
+ *
+ * Section 9: standing "gates ... dispute stakes", and what an operator can stake
+ * is what it holds less what its open stakes already hold. That subtraction is
+ * this query's whole purpose, and src/dispute.ts's `checkStakeCover` makes it.
+ *
+ * The unsettledness is asked of the storage rather than paired in memory,
+ * because an operator's stake rows accumulate for its lifetime while its OPEN
+ * stakes never can: a page of the ledger read in log order is the oldest settled
+ * history long before it is the recent filings, and pairing that page would
+ * under-count what is in flight and let an operator hold more stakes than its
+ * standing covers. So the limit here bounds open stakes only, and is a guard
+ * rather than a page — an operator can never have more open stakes than its
+ * standing covers.
+ *
+ * A settlement is matched to what it settles by what the two halves name: a
+ * dispute stake by its target and the correction it was filed with, a
+ * revalidation stake by its target and the position of the request. The
+ * revalidation key deliberately ignores `correction_entry_id` — an upgrade's
+ * refund names the correction the request became, and the stake it refunds names
+ * none, so a key that read that field would never match the two. `IS` rather
+ * than `=` because a dispute filed without a correction names none on either
+ * half, and null never equals null.
+ *
+ * `json_extract` inside `NOT EXISTS` is not the scan it would be in a join: the
+ * subquery is anchored on `settlement.entry_id = stake.entry_id`, which seeks
+ * through 0009's `ledger_entry` index, so the JSON is read only for the handful
+ * of rows one entry's disputes and checks ever wrote.
+ */
+export async function openStakeRowsForOperator(
+  db: D1Like,
+  operator: string,
+  limit: number,
+): Promise<StakeRecord[]> {
+  const rows = await db
+    .prepare(
+      `SELECT stake.payload_json AS payload_json FROM ledger AS stake
+        WHERE stake.operator_id = ?
+          AND stake.kind IN ${IN(STAKE_FILED_KINDS)}
+          AND NOT EXISTS (
+                SELECT 1 FROM ledger AS settlement
+                 WHERE settlement.entry_id = stake.entry_id
+                   AND (
+                     (stake.kind = 'dispute_stake'
+                        AND settlement.kind IN ${IN(DISPUTE_SETTLING_KINDS)}
+                        AND json_extract(settlement.payload_json, '$.correction_entry_id')
+                         IS json_extract(stake.payload_json, '$.correction_entry_id'))
+                     OR
+                     (stake.kind = 'revalidation_stake'
+                        AND settlement.kind IN ${IN(REVALIDATION_SETTLING_KINDS)}
+                        AND json_extract(settlement.payload_json, '$.request_seq')
+                         IS json_extract(stake.payload_json, '$.request_seq'))
+                   )
+              )
+        ORDER BY stake.seq LIMIT ?`,
+    )
+    .bind(
+      operator,
+      ...STAKE_FILED_KINDS,
+      ...DISPUTE_SETTLING_KINDS,
+      ...REVALIDATION_SETTLING_KINDS,
+      limit,
+    )
+    .all<Row>();
+  return rows.results.map((row) => readJson<StakeRecord>(row, "payload_json"));
+}
+
 /**
  * How many overturned entries each operator signed, as submitter or as
  * approver, most first.
@@ -2189,8 +2281,13 @@ const LEDGER_ROW_COLUMNS =
   `id, kind, operator_id, entry_id, seq, created_at, payload_json, ` +
   `amount, unit, role, "date", available_at`;
 
-/** The kinds that accrue money to an operator and wait out the holdback. */
-const ACCRUAL_KINDS = `('read_share', 'bounty_accrual')`;
+/**
+ * The kinds that carry money to or from an operator and wait out the holdback:
+ * the accruals, and the clawbacks that negate them. A clawback carries the
+ * release instant of the share it cancels, so all three are read by one
+ * `available_at` test.
+ */
+const BALANCE_KINDS = `('read_share', 'bounty_accrual', 'clawback')`;
 
 /**
  * One row, as src/ledger.ts built it.
@@ -2408,11 +2505,12 @@ export async function bountyPoolRows(
 
 /**
  * What one operator has coming at `now`: unpaid accruals past the holdback, and
- * every unpaid clawback.
+ * the unpaid clawbacks that are past it too.
  *
- * A clawback is released the instant it is written and carries no
- * `available_at`, so it can never wait behind a holdback — money that has to
- * come back must not be payable out from under. src/ledger.ts's `payoutPlan`
+ * A clawback carries the `available_at` of the read share it negates
+ * (src/ledger.ts, `clawbackRows`), so it is read by the same test as everything
+ * else: the two are released in the same instant, and a share can never be paid
+ * out from under a clawback that is still held. src/ledger.ts's `payoutPlan`
  * applies the same rule again to what comes back.
  */
 export async function releasedUnpaidRows(
@@ -2424,8 +2522,7 @@ export async function releasedUnpaidRows(
     .prepare(
       `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
        WHERE operator_id = ? AND paid_by IS NULL
-         AND (kind = 'clawback'
-              OR (kind IN ${ACCRUAL_KINDS} AND available_at <= ?))
+         AND kind IN ${BALANCE_KINDS} AND available_at <= ?
        ORDER BY seq`,
     )
     .bind(operator, now)

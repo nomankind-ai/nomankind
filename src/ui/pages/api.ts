@@ -291,7 +291,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with { correction, target }: the correction entry as submitted, and the disputed entry as derivation left it. The correction enters the log as its own draft entry and is validated like any other, so nothing about the target moves until the challenge is upheld.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 author_mismatch; then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch, self_dispute; 409 dispute_open; 422 bad_report_link, bad_revalidation_link, schema_invalid.",
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 author_mismatch; then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch, self_dispute; 409 dispute_open; 422 bad_report_link, bad_revalidation_link, insufficient_standing (a registered operator's available standing, less what its open stakes already hold, is below the published dispute stake), schema_invalid.",
   },
   {
     method: "POST",
@@ -300,7 +300,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry, its sidecar carrying the new request. The checker is not chosen here: the next sweep draws one from the beacon and records the deadline.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 422 entry_not_verified, entry_stale, bare_key, cap_exceeded; 409 request_open; 422 schema_invalid.",
+      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 422 entry_not_verified, entry_stale, bare_key, cap_exceeded; 409 request_open; 422 insufficient_standing (the operator's available standing is below the published request stake), schema_invalid.",
   },
   {
     method: "POST",

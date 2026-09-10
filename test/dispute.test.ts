@@ -24,6 +24,8 @@ import {
   checkDisputeFiling,
   checkFailureReport,
   checkRevalidationRequest,
+  checkStakeCover,
+  lockedStanding,
   disputeExclusions,
   failureReportThresholdReached,
   openDispute,
@@ -38,9 +40,12 @@ import type {
   EventType,
 } from "../src/events.js";
 import {
+  DISPUTE_STAKE_STANDING,
   FAILURE_REPORT_THRESHOLD,
   REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW,
+  REVALIDATION_REQUEST_STAKE_STANDING,
 } from "../src/policy.js";
+import type { StakeRecord } from "../src/stake.js";
 
 const TARGET = "nmk_01TARGET";
 const CORRECTION = "nmk_01CORRECT";
@@ -153,6 +158,87 @@ describe("checkDisputeFiling", () => {
   it("covers every refusal in DISPUTE_REFUSALS, in check order", () => {
     expect(cases.map((one) => one.reason)).toEqual([...DISPUTE_REFUSALS]);
     expect(new Set(DISPUTE_REFUSALS).size).toBe(DISPUTE_REFUSALS.length);
+  });
+});
+
+/**
+ * Section 9: standing "gates everything discretionary, from entry to and stay in
+ * the trusted pool to revalidation-request caps and dispute stakes". What an
+ * operator can stake is what it holds less what its open stakes already hold.
+ */
+describe("checkStakeCover", () => {
+  it("passes at exactly the stake and refuses one below it", () => {
+    const stake = DISPUTE_STAKE_STANDING;
+    expect(checkStakeCover({ standing: stake, locked: 0, stake })).toEqual({
+      ok: true,
+    });
+    expect(checkStakeCover({ standing: stake - 1, locked: 0, stake })).toEqual({
+      ok: false,
+      reason: "insufficient_standing",
+    });
+  });
+
+  it("counts what open stakes already hold against what is available", () => {
+    const stake = DISPUTE_STAKE_STANDING;
+    // Standing enough for two filings, one of them already in flight: the
+    // second is covered, the third is not.
+    expect(
+      checkStakeCover({ standing: stake * 2, locked: stake, stake }),
+    ).toEqual({ ok: true });
+    expect(
+      checkStakeCover({ standing: stake * 2, locked: stake + 1, stake }),
+    ).toEqual({ ok: false, reason: "insufficient_standing" });
+  });
+
+  it("refuses an operator with nothing, and one whose standing went negative", () => {
+    const stake = REVALIDATION_REQUEST_STAKE_STANDING;
+    expect(checkStakeCover({ standing: 0, locked: 0, stake })).toEqual({
+      ok: false,
+      reason: "insufficient_standing",
+    });
+    expect(checkStakeCover({ standing: -5, locked: 0, stake })).toEqual({
+      ok: false,
+      reason: "insufficient_standing",
+    });
+  });
+});
+
+describe("lockedStanding", () => {
+  function stakeRow(overrides: Partial<StakeRecord> = {}): StakeRecord {
+    return {
+      kind: "dispute_stake",
+      entry_id: TARGET,
+      correction_entry_id: CORRECTION,
+      request_seq: null,
+      agent: CHALLENGER,
+      operator: AUTHOR_OPERATOR,
+      unit: "standing",
+      amount: DISPUTE_STAKE_STANDING,
+      seq: 4,
+      at: "2026-09-08T12:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  it("adds up the standing rows and nothing else", () => {
+    const rows = [
+      stakeRow(),
+      stakeRow({
+        kind: "revalidation_stake",
+        correction_entry_id: null,
+        request_seq: 9,
+        amount: REVALIDATION_REQUEST_STAKE_STANDING,
+      }),
+      // A bare key's filing fee is money, not standing: two units are never
+      // added together.
+      stakeRow({ unit: "cents", amount: 500, operator: null }),
+      // A reward carries no amount at all.
+      stakeRow({ kind: "dispute_reward", unit: null, amount: null }),
+    ];
+    expect(lockedStanding(rows)).toBe(
+      DISPUTE_STAKE_STANDING + REVALIDATION_REQUEST_STAKE_STANDING,
+    );
+    expect(lockedStanding([])).toBe(0);
   });
 });
 

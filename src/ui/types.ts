@@ -140,6 +140,13 @@ export interface EntryData {
    */
   ledger: StakeRecord[];
   /**
+   * The entry's money rows, oldest first, exactly as `entryLedgerRows` read them
+   * and filtered to the kinds that carry read revenue: `read_share`,
+   * `bounty_pool`, `bounty_accrual`, `clawback`. The stake rows are above, under
+   * `ledger`, because they carry standing and a fee rather than micros.
+   */
+  readShares: LedgerRow[];
+  /**
    * The entry this one was filed as a correction of (Section 6, Dispute), null
    * when it is not a correction. The other direction of `overturned_by`.
    */

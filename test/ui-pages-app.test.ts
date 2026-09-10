@@ -161,6 +161,60 @@ const ledger: StakeRecord[] = [
   },
 ];
 
+/**
+ * The entry's money rows (M21), oldest first, exactly as `entryLedgerRows`
+ * reads them: a share, the half a stale day withheld to the entry's own pool,
+ * and the clawback an upheld dispute wrote against the share. The clawback
+ * carries the share's own available_at, because the two release together.
+ */
+const entryShares: LedgerRow[] = [
+  {
+    id: `read_share:30:${ENTRY_ID}:submitter:k1.example`,
+    kind: "read_share",
+    entry_id: ENTRY_ID,
+    operator: "k1.example",
+    role: "submitter",
+    date: "2026-09-08",
+    reads: 10_000,
+    unit: "micros",
+    amount: 375_000,
+    available_at: "2026-10-08T00:00:00.000Z",
+    seq: 30,
+    at: "2026-09-08T12:00:00.000Z",
+    ref: { price_micros_per_read: 500, share_percent: 15, stale: true },
+  },
+  {
+    id: `bounty_pool:30:${ENTRY_ID}`,
+    kind: "bounty_pool",
+    entry_id: ENTRY_ID,
+    operator: null,
+    role: null,
+    date: "2026-09-08",
+    reads: 10_000,
+    unit: "micros",
+    amount: 375_000,
+    available_at: null,
+    seq: 30,
+    at: "2026-09-08T12:00:00.000Z",
+    ref: { price_micros_per_read: 500, stale: true, withheld_from: [] },
+  },
+  {
+    id: `clawback:44:read_share:30:${ENTRY_ID}:submitter:k1.example`,
+    kind: "clawback",
+    entry_id: ENTRY_ID,
+    operator: "k1.example",
+    role: "submitter",
+    date: "2026-09-08",
+    reads: 10_000,
+    unit: "micros",
+    amount: -375_000,
+    available_at: "2026-10-08T00:00:00.000Z",
+    seq: 44,
+    at: "2026-09-10T18:00:00.000Z",
+    ref: { claws_back: `read_share:30:${ENTRY_ID}:submitter:k1.example` },
+  },
+];
+
 /** The whole entry record, with a derived half and a hostile claim. */
 const entryRecord: Record<string, unknown> = {
   id: ENTRY_ID,
@@ -367,6 +421,7 @@ const entryData: EntryData = {
   superseders: [OTHER_ID],
   stalenessWindowDays: 30,
   ledger,
+  readShares: entryShares,
   disputeOf: DISPUTED_ID,
 };
 
@@ -891,6 +946,29 @@ describe("the entry page's disputes, reports, revalidations and stakes", () => {
     expect(document).toContain("<td class=\"dim\">42</td>");
     // The sentence about the placeholders spells no number of its own.
     expect(document).toContain("No money moves on any of these rows.");
+  });
+
+  it("shows every money row the entry earned, and prices none of them", () => {
+    expect(document).toContain(">Read shares</h2>");
+    // The share, the half the stale day withheld, and the clawback against it.
+    expect(document).toContain("read_share");
+    expect(document).toContain("bounty_pool");
+    expect(document).toContain("clawback");
+    expect(document).toContain("375000 micros");
+    expect(document).toContain("-375000 micros");
+    expect(document).toContain("submitter");
+    expect(document).toContain('href="/operators/k1.example"');
+    // available_at, as the row carries it: the day plus the holdback.
+    expect(document).toContain("2026-10-08 00:00:00Z");
+  });
+
+  it("says no read has been priced rather than showing an empty table", () => {
+    const unread = renderEntry(ctx, { ...entryData, readShares: [] });
+    expect(unread).toContain("No read of this entry has been priced.");
+    expect(unread).not.toContain("<th>available at</th>");
+    // The panel is still a page a browser can render on its own.
+    expect(unread).not.toContain("<script");
+    expect(unread).not.toContain(" style=");
   });
 
   it("links the entry this one was filed against, both ways", () => {

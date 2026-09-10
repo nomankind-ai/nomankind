@@ -28,6 +28,12 @@
  * reports are read off the entry's own arrays and the revalidations off the
  * stored sidecar, so nothing on this page is folded a second time here.
  *
+ * Section 9, Money: what the entry's reads paid, and to whom, is shown as the
+ * ledger rows themselves — shares, the stale pool, the accrual that collected
+ * it, the clawbacks an upheld dispute wrote — because "any operator can
+ * reconcile their payout against the log" and a summary would be a number to
+ * take on trust.
+ *
  * Neutral tone throughout: the page prints what the record says and never
  * characterises it. Pure: no clock, no storage, no derivation.
  */
@@ -658,6 +664,81 @@ function stakes(data: EntryData): Safe {
   </section>`;
 }
 
+/**
+ * What this entry's reads paid, and to whom.
+ *
+ * Whitepaper Section 9, Money: "Thirty percent of paid-read revenue goes to the
+ * contributor pool at launch, fifteen to the submitter and five to each
+ * validator, paid to their operators", held for thirty days "so an upheld
+ * dispute can claw them back before they leave"; Section 7: a stale entry's
+ * withheld half "builds up on the entry as a reconfirmation bounty". Four kinds
+ * of row say those things happened, and all four are shown here in log order:
+ * the shares, the pool the stale rule withheld, the accrual that collected it,
+ * and the clawbacks an upheld dispute wrote.
+ *
+ * Every column is a field of the row as src/ledger.ts built it. Nothing is
+ * summed and nothing is derived: a total on this page would be a second answer
+ * to a question the ledger endpoint already answers from the same rows.
+ */
+function readShares(data: EntryData): Safe {
+  if (data.readShares.length === 0) {
+    return html`<section class="panel">
+      <div class="panel-head"><h2>Read shares</h2></div>
+      <div class="panel-empty">
+        No read of this entry has been priced. Reads are published to the log
+        daily and priced from there, so an entry earns nothing until a day that
+        counted it has been sealed.
+      </div>
+    </section>`;
+  }
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Read shares</h2>
+      <span class="panel-label">ledger rows, derived from the log</span>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>kind</th>
+            <th>operator</th>
+            <th>role</th>
+            <th>date</th>
+            <th>reads</th>
+            <th>amount</th>
+            <th>available at</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.readShares.map(
+            (row) => html`<tr class="row">
+              <td>${row.kind}</td>
+              <td class="break">
+                ${row.operator === null
+                  ? html`<span class="dim">${EM_DASH}</span>`
+                  : html`<a href="/operators/${row.operator}"
+                      >${row.operator}</a
+                    >`}
+              </td>
+              <td>${row.role ?? EM_DASH}</td>
+              <td class="dim">${fmtDate(row.date)}</td>
+              <td class="dim">${row.reads === null ? EM_DASH : `${row.reads}`}</td>
+              <td>${row.amount} ${row.unit}</td>
+              <td class="dim">${fmtInstant(row.available_at)}</td>
+            </tr>`,
+          )}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      A pool row is owed to the entry rather than to a person: whoever reconfirms
+      it next collects it, which is the bounty accrual beside it. A row's
+      available_at is when it may leave, thirty days after the day it accrued;
+      a clawback carries the same instant as the share it negates.
+    </p>
+  </section>`;
+}
+
 /** This entry's own events, each with the route that proves it is in a seal. */
 function events(data: EntryData): Safe {
   return html`<section class="panel">
@@ -811,6 +892,7 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
       <div class="cols">${sidecar(data)} ${seal(data)}</div>
       ${approvers(data)} ${reconfirmations(data)} ${disputes(data)}
       ${failureReports(data)} ${revalidations(data)} ${stakes(data)}
+      ${readShares(data)}
       ${data.superseders.length === 0
         ? raw("")
         : html`<section class="panel">

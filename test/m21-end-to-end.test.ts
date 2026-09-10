@@ -49,6 +49,7 @@ import {
 } from "../src/identity.js";
 import type { LedgerRow } from "../src/ledger.js";
 import {
+  DISPUTE_STAKE_STANDING,
   HOLDBACK_DAYS,
   LIST_PAGE_LIMIT,
   PAYOUT_MINIMUM_MICROS,
@@ -68,6 +69,7 @@ import {
   payoutRows,
   putLedgerRows,
   putOperator,
+  setOperatorStanding,
 } from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
@@ -373,6 +375,18 @@ async function overturn(
 ): Promise<string> {
   const core = await correction(challenger, target, now);
   const signature = await signCore(core, challenger.agent.privateKey);
+  // A TEST FIXTURE: standing on the challenger's row for the dispute door's
+  // gate to read (Section 9: standing gates the dispute stake). The challenger
+  // earns its way into the pool over this run, and its first challenge is filed
+  // before it has earned anything, so the column is set here exactly as the
+  // sweep's standing step sets it — the gate is never weakened for it. The next
+  // sweep recomputes the column from the log and this is forgotten.
+  await setOperatorStanding(
+    world.store.db,
+    challenger.operator,
+    DISPUTE_STAKE_STANDING,
+    0,
+  );
   const filed = await post(
     challenger.agent,
     `/entries/${target["id"] as string}/dispute`,
@@ -925,11 +939,23 @@ describe("a dispute upheld inside the holdback", () => {
       held.map((row) => -row.amount),
     );
 
+    // Every clawback waits with the share it negates, so the two release
+    // together and neither can leave alone.
+    expect(clawbacks.map((row) => row.available_at)).toEqual(
+      held.map((row) => row.available_at),
+    );
+
     // An operator that held a share on this entry and nowhere else: everything
     // it accrued came back.
     const ledger = await ledgerOf(k5.operator, at);
     expect(ledger.balance["accrued"] + ledger.balance["clawed_back"]).toBe(0);
     expect(ledger.balance["accrued"]).toBeGreaterThan(0);
+    // Inside the holdback both rows are held, so they net to nothing: nothing
+    // is owed, nothing is payable, and nothing carries to the next cycle.
+    expect(ledger.balance["held"]).toBe(0);
+    expect(ledger.balance["released"]).toBe(0);
+    expect(ledger.balance["carried_forward"]).toBe(0);
+    expect(ledger.balance["paid"]).toBe(0);
 
     // The reconfirmer signed it too, and burns for it exactly once.
     const reconfirmer = await standingOfOperator(k6.operator, at);

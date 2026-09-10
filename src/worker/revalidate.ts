@@ -35,26 +35,36 @@
  *
  * No policy number lives here: the bare integers are HTTP status codes, the cap
  * is REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW inside src/dispute.ts, the
- * stake amount is src/policy.ts's inside src/stake.ts, and the timestamp window
- * is REQUEST_CLOCK_SKEW_SECONDS. The id pattern is read out of the entry schema.
+ * stake amount is src/policy.ts's — src/stake.ts writes it into the ledger row
+ * and the standing gate reads the same constant to say what a requester must be
+ * able to cover — and the timestamp window is REQUEST_CLOCK_SKEW_SECONDS. The id
+ * pattern is read out of the entry schema.
  */
 
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
 import {
   checkRevalidationRequest,
+  checkStakeCover,
+  lockedStanding,
   openRevalidation,
   requestsByOperatorInWindow,
 } from "../dispute.js";
 import type { ReconfirmationRecord } from "../events.js";
-import { REQUEST_CLOCK_SKEW_SECONDS } from "../policy.js";
+import {
+  LIST_PAGE_LIMIT,
+  REQUEST_CLOCK_SKEW_SECONDS,
+  REVALIDATION_REQUEST_STAKE_STANDING,
+} from "../policy.js";
 import { verifyRecordSignature } from "../records.js";
 import { validateEntry, type ValidationError } from "../schema.js";
 import { revalidationOutcomeStakes, revalidationStake } from "../stake.js";
 import {
   getEntry,
   openRevalidationAssignment,
+  openStakeRowsForOperator,
   operatorForAgent,
+  operatorStanding,
   recordRevalidationRequest,
   recordRevalidationResolution,
 } from "../storage/repository.js";
@@ -174,6 +184,27 @@ async function request_(
     // than a malformed ask: 409, as every other "already open" refusal is.
     const status = verdict.reason === "request_open" ? 409 : 422;
     return refuse(status, verdict.reason);
+  }
+
+  // Section 6: the request is made "by staking a small amount of standing", and
+  // Section 9 has standing gate "revalidation-request caps and dispute stakes".
+  // The requester is an operator by here (`bare_key` refused the other case), so
+  // it must be able to cover the stake: its standing less what its still-open
+  // stakes already hold. The gate reads the standing the sweep stored, which is
+  // the published formula folded to the last sealed head and so at most one
+  // interval behind the log.
+  // A bare key never reaches this: `bare_key` above refused it, and its own door
+  // into Section 6 is the dispute's refundable fee.
+  if (operator !== null) {
+    const stored = await operatorStanding(env.DB, operator);
+    const cover = checkStakeCover({
+      standing: stored?.standing ?? 0,
+      locked: lockedStanding(
+        await openStakeRowsForOperator(env.DB, operator, LIST_PAGE_LIMIT),
+      ),
+      stake: REVALIDATION_REQUEST_STAKE_STANDING,
+    });
+    if (!cover.ok) return refuse(422, cover.reason);
   }
 
   const at = deps.now.toISOString();

@@ -48,6 +48,7 @@ import {
   countSeals,
   countTrustedOperators,
   disputeOf,
+  entryLedgerRows,
   eventsForEntry,
   getEntry,
   getOperator,
@@ -340,6 +341,17 @@ async function entry(
   const seal = await sealCovering(db, stored.submittedSeq);
   const superseders = await supersedersOf(db, id, LIST_PAGE_LIMIT);
   const ledger = await ledgerRowsForEntry(db, id, LIST_PAGE_LIMIT);
+  // Section 9's money rows for this entry: everything the ledger holds about it
+  // that is not a stake, in log order, one page of them. The kinds are named
+  // rather than "everything else" so a kind added later has to be looked at
+  // before it appears on a page that says what an entry earned.
+  const readShares = (await entryLedgerRows(db, id, LIST_PAGE_LIMIT)).filter(
+    (row) =>
+      row.kind === "read_share" ||
+      row.kind === "bounty_pool" ||
+      row.kind === "bounty_accrual" ||
+      row.kind === "clawback",
+  );
   // The other direction of overturned_by: what this entry was filed against,
   // when it is itself a correction. Null for every entry that is not one.
   const disputeTarget = await disputeOf(db, id);
@@ -423,6 +435,7 @@ async function entry(
       superseders,
       stalenessWindowDays: typeof window === "number" ? window : null,
       ledger,
+      readShares,
       disputeOf: disputeTarget,
     }),
   );
