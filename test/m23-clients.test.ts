@@ -315,6 +315,52 @@ async function copyOfMirror(name: string): Promise<string> {
   return target;
 }
 
+/**
+ * A copy of the pristine export rewritten as the layout `nomankind-mirror-v1`
+ * was: the seven files, and entry sidecars without the key v1 never had.
+ *
+ * Built from a v2 export rather than checked in, so it is the real thing on
+ * every run and cannot drift from what the kernel derives. Three families go
+ * (#58) and the sidecar's source class goes (#59), which is exactly what the
+ * public demo mirror at a02c866 is missing and exactly what made it fail.
+ *
+ * `manifest: "v2"` leaves the manifest claiming the current layout over the
+ * older files, which is the directory that must still be refused: what is
+ * accepted is a v1 mirror, never a v2 one with three families missing.
+ */
+async function v1CopyOfMirror(
+  name: string,
+  options: { readonly manifest?: "v1" | "v2" } = {},
+): Promise<string> {
+  const dir = join(await copyOfMirror(name), ENVIRONMENT);
+  await rm(join(dir, "attestations"), { recursive: true, force: true });
+  await rm(join(dir, "standing.json"), { force: true });
+  await rm(join(dir, "ledger.jsonl"), { force: true });
+
+  for (const file of await readdir(join(dir, "entries"))) {
+    const path = join(dir, "entries", file);
+    const held = JSON.parse(await readFile(path, "utf8")) as {
+      sidecar: Record<string, unknown>;
+    };
+    delete held.sidecar["source"];
+    await writeFile(path, `${JSON.stringify(held, null, 2)}\n`, "utf8");
+  }
+
+  const manifestPath = join(dir, "mirror.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  if (options.manifest !== "v2") {
+    manifest["format"] = "nomankind-mirror-v1";
+    delete manifest["attestations"];
+    delete manifest["standing_position"];
+    delete manifest["ledger_rows"];
+  }
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  return dir;
+}
+
 /** The day the seeded read counts are published for, and how many. */
 const READ_DAY = "2026-09-09";
 const READS = 10_000;
@@ -957,6 +1003,67 @@ describe("verify-mirror checks a fresh clone end to end", () => {
     const io = recorder();
     expect(await verifyMirror([], io.io, new InProcessHttp())).toBe(2);
   });
+
+  it("checks a v1 directory as what v1 was, and passes it", async () => {
+    // The bug this pins: the public demo mirror was exported before the three
+    // families and the source class, and the verifier refused it. A copy in
+    // somebody's hands is their exit, and taking it back is not on offer.
+    const dir = await v1CopyOfMirror("v1");
+    const io = recorder();
+    const code = await verifyMirror([dir], io.io, new InProcessHttp());
+    expect([code, io.out.join("\n")]).toEqual([0, io.out.join("\n")]);
+    expect(io.out).toContain("ok mirror.json");
+    expect(io.out).toContain("ok events");
+    expect(io.out).toContain(`ok ${entryId}`);
+    // The three families are not asked of a directory that never carried them.
+    expect(io.out).not.toContain("ok standing");
+    expect(io.out).not.toContain("ok ledger");
+    expect(io.out.some((line) => line.includes("attestation"))).toBe(false);
+    expect(io.out.filter((line) => line.startsWith("FAIL"))).toEqual([]);
+  }, 600_000);
+
+  it("exits 1 and names the check when a v1 entry file is edited", async () => {
+    const dir = await v1CopyOfMirror("v1-edited-entry");
+    const path = join(dir, "entries", `${entryId}.json`);
+    const file = JSON.parse(await readFile(path, "utf8")) as {
+      sidecar: Record<string, unknown>;
+    };
+    file.sidecar["effective_tier"] = "observed";
+    await writeFile(path, `${JSON.stringify(file, null, 2)}\n`, "utf8");
+
+    const io = recorder();
+    const code = await verifyMirror([dir], io.io, new InProcessHttp());
+    expect(code).toBe(1);
+    expect(io.out).toContain(
+      `FAIL ${entryId} derived /sidecar/effective_tier mismatch`,
+    );
+  }, 600_000);
+
+  it("exits 1 when a v2 manifest is missing the three families", async () => {
+    const dir = await v1CopyOfMirror("v2-missing-families", { manifest: "v2" });
+    const io = recorder();
+    const code = await verifyMirror([dir], io.io, new InProcessHttp());
+    expect(code).toBe(1);
+    // The v2 layout is checked whole, source class and all: the older files are
+    // only what v1 was, and a directory claiming v2 is held to v2.
+    expect(io.out).toContain(`FAIL ${entryId} derived /sidecar/source missing`);
+  }, 600_000);
+
+  it("exits 1 on a format nobody knows, without checking it as anything", async () => {
+    const dir = join(await copyOfMirror("unknown-format"), ENVIRONMENT);
+    const path = join(dir, "mirror.json");
+    const manifest = JSON.parse(await readFile(path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    manifest["format"] = "nomankind-mirror-v9";
+    await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+    const io = recorder();
+    const code = await verifyMirror([dir], io.io, new InProcessHttp());
+    expect(code).toBe(1);
+    expect(io.out).toContain("FAIL mirror.json mirror /format unsupported_format");
+  }, 600_000);
 
   it("exits 1 on a directory that holds no mirror, without a stack trace", async () => {
     const io = recorder();

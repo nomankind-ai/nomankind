@@ -83,7 +83,50 @@ import type { Entry } from "./schema.js";
 import type { Seal } from "./seal.js";
 
 /** What a reader finds in `mirror.json` and checks the directory against. */
-export const MIRROR_FORMAT = "nomankind-mirror-v1";
+export const MIRROR_FORMAT = "nomankind-mirror-v2";
+
+/**
+ * Every layout a reader may be handed, oldest first.
+ *
+ * A mirror is CC0 and already cloned: the copies pushed before the attestations,
+ * the standing, the ledger (#58) and the sidecar's source class (#59) joined the
+ * export are still somebody's exit, and a verifier that refused them would be
+ * taking the exit back. So there are two formats rather than one moving one —
+ * `v1` is the seven-item layout as it was, `v2` is what `buildMirror` writes now
+ * — and each directory is checked as what it claims to be.
+ */
+export const MIRROR_FORMATS: readonly string[] = Object.freeze([
+  "nomankind-mirror-v1",
+  MIRROR_FORMAT,
+]);
+
+/** Which layout a directory claims, in the word this code reasons in. */
+export type MirrorFormat = "v1" | "v2";
+
+/** The layout one manifest's `format` names, or null when it names none. */
+export function mirrorFormatOf(format: unknown): MirrorFormat | null {
+  if (format === MIRROR_FORMATS[0]) return "v1";
+  if (format === MIRROR_FORMAT) return "v2";
+  return null;
+}
+
+/**
+ * One sidecar as v1 carried it: every key but `source`.
+ *
+ * The source class is derived from the entry's own citation against the domain's
+ * published tables (D-080, #59), so a v1 file simply has no such key and a
+ * re-derivation always does. Dropping it from both sides is what "compared on
+ * the keys the v1 sidecar carried" means, and it is the only difference the two
+ * layouts have inside an entry file.
+ */
+export function v1Sidecar(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value;
+  }
+  const copy = { ...(value as Record<string, unknown>) };
+  delete copy["source"];
+  return copy;
+}
 
 /**
  * The public origin each environment serves from, and so where the captures a
