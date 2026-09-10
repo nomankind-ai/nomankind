@@ -22,7 +22,12 @@ import { base64urlDecode, base64urlEncode } from "./encoding.js";
 import type { Attestation } from "./events.js";
 import { canonicalize } from "./hash.js";
 import { publicKeyFromAgentId, signBytes, verifyBytes } from "./identity.js";
-import { MODEL_PROVIDER_DOMAINS } from "./policy.js";
+import {
+  attestationFor,
+  DEFAULT_DOMAIN,
+  excludedPartyDomains,
+  isRegisteredDomain,
+} from "./policy.js";
 
 const encoder = new TextEncoder();
 
@@ -35,20 +40,24 @@ const ISO_DATE_TIME =
 // ---------------------------------------------------------------------------
 
 /**
- * The version of the attestation an operator signs. A format constant, not a
- * policy number: it names the shape of what was signed. Exactly one version
- * exists, so any other version is unknown rather than older.
+ * The version and the sentence of the default domain's attestation.
+ *
+ * Decision D-071: the attestation is per domain now
+ * (schema/nomankind-domain-registry-v1.md, and `DOMAINS` in src/policy.ts).
+ * These two constants are the ai-ecosystem domain's, kept under their old names
+ * because that is exactly what every attestation sealed before v0.7 was signed
+ * under: a record carrying no domain is the ai-ecosystem attestation, verified
+ * against these bytes, and stays valid forever.
  */
-export const ATTESTATION_VERSION = "nomankind-independence-v1";
+export const ATTESTATION_VERSION = attestationFor(DEFAULT_DOMAIN).version;
 
 /**
- * The attestation itself, Section 10: "registration requires a signed
- * attestation that no model provider holds control or a beneficial stake". One
- * fixed sentence, signed verbatim, so what an operator put their key to is the
- * same string every reader can recheck years later.
+ * Section 10: "registration requires a signed attestation that no model
+ * provider holds control or a beneficial stake". One fixed sentence per domain,
+ * signed verbatim, so what an operator put their key to is the same string every
+ * reader can recheck years later.
  */
-export const ATTESTATION_TEXT =
-  "No model provider holds control of, or a beneficial stake in, this operator.";
+export const ATTESTATION_TEXT = attestationFor(DEFAULT_DOMAIN).text;
 
 /**
  * Domain-separation tag for the attestation signature. A format constant: it
@@ -63,6 +72,12 @@ export interface AttestationSubject {
   readonly agent: string;
   readonly version: string;
   readonly signed_at: string;
+  /**
+   * The domain the attestation is for. Absent means the ai-ecosystem
+   * attestation as it was signed before v0.7: the signed object then held no
+   * domain key at all, so an old signature stays verifiable byte for byte.
+   */
+  readonly domain?: string;
 }
 
 /**
@@ -74,11 +89,14 @@ export interface AttestationSubject {
 export function attestationSigningBytes(
   subject: AttestationSubject,
 ): Uint8Array {
+  const domain = subject.domain;
+  const text = attestationFor(domain ?? DEFAULT_DOMAIN).text;
   const canonical = canonicalize({
     agent: subject.agent,
+    ...(domain === undefined ? {} : { domain }),
     operator: subject.operator,
     signed_at: subject.signed_at,
-    text: ATTESTATION_TEXT,
+    text,
     version: subject.version,
   });
   return encoder.encode(`${HASH_TAG_ATTESTATION}\n${canonical}`);
@@ -90,17 +108,27 @@ export function attestationSigningBytes(
  */
 export async function signAttestation(
   privateKey: CryptoKey,
-  input: { operator: string; agent: string; signed_at: string },
+  input: {
+    operator: string;
+    agent: string;
+    signed_at: string;
+    /** The domain whose attestation is signed; the default domain when absent. */
+    domain?: string;
+  },
 ): Promise<Attestation> {
+  const domain = input.domain ?? DEFAULT_DOMAIN;
+  const { version } = attestationFor(domain);
   const bytes = attestationSigningBytes({
     operator: input.operator,
     agent: input.agent,
-    version: ATTESTATION_VERSION,
+    version,
     signed_at: input.signed_at,
+    domain,
   });
   const signature = await signBytes(privateKey, bytes);
   return {
-    version: ATTESTATION_VERSION,
+    version,
+    domain,
     signed_at: input.signed_at,
     signature: base64urlEncode(signature),
   };
@@ -119,6 +147,7 @@ export async function verifyAttestation(
   operator: string,
   agent: string,
   attestation: unknown,
+  expectedDomain?: string,
 ): Promise<boolean> {
   if (
     typeof attestation !== "object" ||
@@ -128,7 +157,16 @@ export async function verifyAttestation(
     return false;
   }
   const record = attestation as Record<string, unknown>;
-  if (record["version"] !== ATTESTATION_VERSION) return false;
+
+  // The domain the record says it is for. Absent is ai-ecosystem, because that
+  // is what a pre-v0.7 record was signed as; a domain nobody registered is not
+  // an attestation at all.
+  const declared = record["domain"];
+  if (declared !== undefined && !isRegisteredDomain(declared)) return false;
+  const domain = declared === undefined ? DEFAULT_DOMAIN : (declared as string);
+  if (expectedDomain !== undefined && domain !== expectedDomain) return false;
+
+  if (record["version"] !== attestationFor(domain).version) return false;
   const signedAt = record["signed_at"];
   if (typeof signedAt !== "string" || !ISO_DATE_TIME.test(signedAt)) {
     return false;
@@ -142,13 +180,32 @@ export async function verifyAttestation(
     const bytes = attestationSigningBytes({
       operator,
       agent,
-      version: ATTESTATION_VERSION,
+      version: attestationFor(domain).version,
       signed_at: signedAt,
+      // Absent stays absent: the pre-v0.7 signing bytes carried no domain key,
+      // so re-adding one here would fail every attestation ever signed.
+      ...(declared === undefined ? {} : { domain }),
     });
     return await verifyBytes(publicKey, bytes, base64urlDecode(signature));
   } catch {
     return false;
   }
+}
+
+/**
+ * The domain an attestation record is for: what it declares, or ai-ecosystem
+ * when it declares nothing. Says nothing about whether the record verifies.
+ */
+export function attestationDomain(attestation: unknown): string {
+  if (
+    typeof attestation !== "object" ||
+    attestation === null ||
+    Array.isArray(attestation)
+  ) {
+    return DEFAULT_DOMAIN;
+  }
+  const declared = (attestation as Record<string, unknown>)["domain"];
+  return typeof declared === "string" ? declared : DEFAULT_DOMAIN;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,21 +274,37 @@ export function isOperatorDomain(value: unknown): value is string {
 }
 
 /**
- * Whether a domain belongs to a model provider, itself or as a subdomain.
+ * Whether an operator domain belongs to a party excluded from a record's
+ * domain, itself or as a subdomain.
  *
- * Section 10: "No lab or model provider may be a maintainer, funder, or trusted
- * operator." The list is published policy (src/policy.ts) and is passed in so a
- * fork can run its own; the suffix test is what makes a subdomain no cheaper a
- * door than the domain.
+ * Section 10, in its neutral form (decision D-071): no party whose products or
+ * conduct the record checks may control, fund, or validate it in that domain.
+ * Which parties those are is the record domain's own published list
+ * (schema/nomankind-domain-registry-v1.md, `DOMAINS` in src/policy.ts) and is
+ * passed in so a fork can run its own; the suffix test is what makes a
+ * subdomain no cheaper a door than the domain. An operator excluded in one
+ * domain stays eligible in another, which is the whole point of keying it.
+ */
+export function isExcludedParty(
+  recordDomain: string,
+  operator: string,
+  parties: readonly string[] = excludedPartyDomains(recordDomain),
+): boolean {
+  if (typeof operator !== "string") return false;
+  return parties.some(
+    (party) => operator === party || operator.endsWith(`.${party}`),
+  );
+}
+
+/**
+ * The same question asked of the default domain, under the name every caller
+ * before v0.7 knew it by: whether an operator domain is a model provider's.
  */
 export function isProviderDomain(
-  domain: string,
-  providers: readonly string[] = MODEL_PROVIDER_DOMAINS,
+  operator: string,
+  parties: readonly string[] = excludedPartyDomains(DEFAULT_DOMAIN),
 ): boolean {
-  if (typeof domain !== "string") return false;
-  return providers.some(
-    (provider) => domain === provider || domain.endsWith(`.${provider}`),
-  );
+  return isExcludedParty(DEFAULT_DOMAIN, operator, parties);
 }
 
 // ---------------------------------------------------------------------------
@@ -241,8 +314,21 @@ export function isProviderDomain(
 /** What a registration request carries, once it has been recognised as one. */
 export interface RegistrationBody {
   readonly operator: string;
+  /**
+   * The domain the operator registers into: its first, the one its attestation
+   * is signed for (decision D-071). Null when the body names none, which is
+   * what a client written before v0.7 sends and reads as the default domain --
+   * the only domain there was.
+   */
+  readonly domain: string | null;
   readonly attestation: unknown;
   readonly payout: { readonly reference: string };
+}
+
+/** What a domain join carries: the domain, and the attestation signed for it. */
+export interface DomainJoinBody {
+  readonly domain: string;
+  readonly attestation: unknown;
 }
 
 /** What a genesis naming carries. */
@@ -300,11 +386,16 @@ export function parseRegistrationBody(
   const refused = { ok: false, reason: "bad_body" } as const;
   const object = asObject(body);
   if (object === null) return refused;
-  if (!hasKeys(object, ["operator", "payout"], ["attestation"])) {
+  if (!hasKeys(object, ["operator", "payout"], ["attestation", "domain"])) {
     return refused;
   }
   const operator = object["operator"];
   if (typeof operator !== "string") return refused;
+  const suppliedDomain = object["domain"];
+  if (suppliedDomain !== undefined && typeof suppliedDomain !== "string") {
+    return refused;
+  }
+  const domain = suppliedDomain === undefined ? null : suppliedDomain;
   const supplied = object["attestation"];
   let attestation: unknown = null;
   if (supplied !== undefined && supplied !== null) {
@@ -317,8 +408,30 @@ export function parseRegistrationBody(
   if (typeof reference !== "string" || reference.length === 0) return refused;
   return {
     ok: true,
-    value: { operator, attestation, payout: { reference } },
+    value: { operator, domain, attestation, payout: { reference } },
   };
+}
+
+/**
+ * Read a domain-join body: the domain, and the attestation signed for it.
+ *
+ * The attestation stays `unknown` for the reason a registration's does: an
+ * absent or null one parses as null so `checkDomainJoin` can refuse it by name.
+ */
+export function parseDomainJoinBody(body: unknown): ParseResult<DomainJoinBody> {
+  const refused = { ok: false, reason: "bad_body" } as const;
+  const object = asObject(body);
+  if (object === null) return refused;
+  if (!hasKeys(object, ["domain"], ["attestation"])) return refused;
+  const domain = object["domain"];
+  if (typeof domain !== "string") return refused;
+  const supplied = object["attestation"];
+  let attestation: unknown = null;
+  if (supplied !== undefined && supplied !== null) {
+    attestation = asObject(supplied);
+    if (attestation === null) return refused;
+  }
+  return { ok: true, value: { domain, attestation } };
 }
 
 /** Read a genesis naming body: an operator, and nothing else. */
@@ -343,9 +456,11 @@ export function parseGenesisBody(body: unknown): ParseResult<GenesisBody> {
  */
 export const REGISTRATION_REFUSALS = [
   "bad_domain",
+  "unregistered_domain",
   "provider_operator",
   "missing_attestation",
   "bad_attestation",
+  "attestation_domain_mismatch",
   "operator_exists",
   "agent_bound",
 ] as const;
@@ -356,6 +471,11 @@ export type RegistrationRefusal = (typeof REGISTRATION_REFUSALS)[number];
 export interface RegistrationInput {
   readonly operator: string;
   readonly agent: string;
+  /**
+   * The registered domain this operator joins first. Null or absent reads as
+   * the default domain: that is what a registration sealed before v0.7 meant.
+   */
+  readonly domain?: string | null;
   readonly attestation: unknown;
   /** The maintainer's own agent, or null when none is configured. */
   readonly maintainerAgentId: string | null;
@@ -366,7 +486,7 @@ export interface RegistrationInput {
 }
 
 export type RegistrationCheck =
-  | { ok: true; maintainer: boolean }
+  | { ok: true; maintainer: boolean; domain: string }
   | { ok: false; reason: RegistrationRefusal };
 
 /**
@@ -390,7 +510,11 @@ export async function checkRegistration(
   if (!isOperatorDomain(input.operator)) {
     return { ok: false, reason: "bad_domain" };
   }
-  if (isProviderDomain(input.operator, input.providers)) {
+  const domain = input.domain ?? DEFAULT_DOMAIN;
+  if (!isRegisteredDomain(domain)) {
+    return { ok: false, reason: "unregistered_domain" };
+  }
+  if (isExcludedParty(domain, input.operator, input.providers)) {
     return { ok: false, reason: "provider_operator" };
   }
   if (input.attestation === null || input.attestation === undefined) {
@@ -404,6 +528,9 @@ export async function checkRegistration(
   if (!signed) {
     return { ok: false, reason: "bad_attestation" };
   }
+  if (attestationDomain(input.attestation) !== domain) {
+    return { ok: false, reason: "attestation_domain_mismatch" };
+  }
   if (input.operatorExists) {
     return { ok: false, reason: "operator_exists" };
   }
@@ -412,9 +539,92 @@ export async function checkRegistration(
   }
   return {
     ok: true,
+    domain,
     maintainer:
       input.maintainerAgentId !== null && input.agent === input.maintainerAgentId,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Joining a second domain
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a domain join was refused, in the order the checks run. The same shape as
+ * a registration's, minus everything registration already settled and plus the
+ * one thing a join is: an attestation for a domain this operator is not in yet.
+ */
+export const JOIN_REFUSALS = [
+  "unregistered_operator",
+  "unregistered_domain",
+  "excluded_party",
+  "already_joined",
+  "missing_attestation",
+  "bad_attestation",
+  "attestation_domain_mismatch",
+] as const;
+
+export type JoinRefusal = (typeof JOIN_REFUSALS)[number];
+
+/** What deciding a join needs, all of it already gathered. */
+export interface DomainJoinInput {
+  readonly operator: string;
+  readonly agent: string;
+  readonly domain: string;
+  readonly attestation: unknown;
+  /** Whether the operator is registered at all. */
+  readonly registered: boolean;
+  /** The domains it is already attested in (src/derive.ts, operatorDomainsAt). */
+  readonly domains: readonly string[];
+  readonly providers?: readonly string[];
+}
+
+export type DomainJoinCheck = { ok: true } | { ok: false; reason: JoinRefusal };
+
+/**
+ * Decide whether this operator may take on this domain.
+ *
+ * Decision D-071: registration binds an operator to its first domain's
+ * attestation, and a later domain is joined by signing that domain's
+ * attestation. Every rule here is one of registration's, read for the second
+ * domain rather than the first: the operator exists, the domain is registered,
+ * the operator is not an excluded party *of that domain*, it is not already in,
+ * and the attestation is present, really signed by this agent's key, and for
+ * this domain rather than another.
+ *
+ * The exclusion is keyed by the domain being joined and by nothing else, which
+ * is what makes an operator excluded in one domain eligible in another.
+ */
+export async function checkDomainJoin(
+  input: DomainJoinInput,
+): Promise<DomainJoinCheck> {
+  if (!input.registered) {
+    return { ok: false, reason: "unregistered_operator" };
+  }
+  if (!isRegisteredDomain(input.domain)) {
+    return { ok: false, reason: "unregistered_domain" };
+  }
+  if (isExcludedParty(input.domain, input.operator, input.providers)) {
+    return { ok: false, reason: "excluded_party" };
+  }
+  if (input.domains.includes(input.domain)) {
+    return { ok: false, reason: "already_joined" };
+  }
+  if (input.attestation === null || input.attestation === undefined) {
+    return { ok: false, reason: "missing_attestation" };
+  }
+  const signed = await verifyAttestation(
+    input.operator,
+    input.agent,
+    input.attestation,
+  );
+  if (!signed) {
+    return { ok: false, reason: "bad_attestation" };
+  }
+  if (attestationDomain(input.attestation) !== input.domain) {
+    return { ok: false, reason: "attestation_domain_mismatch" };
+  }
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------

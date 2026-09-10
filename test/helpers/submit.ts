@@ -16,6 +16,7 @@ import type { Core } from "../../src/core.js";
 import { snapshotHash } from "../../src/normalize.js";
 import { FETCH_MAX_REDIRECTS } from "../../src/policy.js";
 import { signCore } from "../../src/sign.js";
+import { DEFAULT_DOMAIN } from "../../src/policy.js";
 import { buildSubmittedCore, type SubmissionProposal } from "../../src/submit.js";
 import { signedPost, type TestAgent } from "./registry.js";
 
@@ -107,12 +108,26 @@ export class FixtureFetcher implements SnapshotFetcher {
   }
 }
 
-/** The core an agent is about to sign, built by the real submit kernel. */
+/**
+ * The core an agent is about to sign, built by the real submit kernel.
+ *
+ * `domain` defaults to ai-ecosystem so a test that is not about domains does not
+ * have to name one; a test that is about them passes its own (decision D-071).
+ */
 export function submittedCore(
   agent: TestAgent,
-  proposal: Omit<SubmissionProposal, "author">,
+  proposal: Omit<SubmissionProposal, "author" | "domain"> & {
+    readonly domain?: string;
+  },
 ): Promise<Core> {
-  return buildSubmittedCore({ ...proposal, author: agent.agentId }, SUBMIT_CLOCK);
+  return buildSubmittedCore(
+    {
+      domain: DEFAULT_DOMAIN,
+      ...proposal,
+      author: agent.agentId,
+    },
+    SUBMIT_CLOCK,
+  );
 }
 
 /**

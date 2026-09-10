@@ -32,11 +32,13 @@
 import type { ApproverRecord, Event, EventType } from "./events.js";
 import {
   deriveEntry,
+  operatorDomainsAt,
   registeredOperatorsAt,
   trustedOperatorsAt,
 } from "./derive.js";
-import { isProviderDomain } from "./registry.js";
+import { isExcludedParty } from "./registry.js";
 import {
+  DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
   REVALIDATION_REQUEST_STAKE_STANDING,
   STANDING_ASSIGNMENT_MISSED,
@@ -440,6 +442,22 @@ export function standingOf(
   return standingAt(events, position).get(operator) ?? zeroStanding(operator, position);
 }
 
+/**
+ * Whether an operator is an excluded party of any domain it is attested in.
+ *
+ * Section 10, in its neutral form: no party whose products or conduct the record
+ * checks may control, fund, or validate it in that domain. An operator attested
+ * in a domain whose excluded list it is on is not trusted at all -- the trusted
+ * pool is global (D-071 item 4), so one bad domain is enough.
+ */
+function isExcludedPartyOfItsOwnDomain(
+  domains: ReadonlyMap<string, readonly string[]>,
+  operator: string,
+): boolean {
+  const attestedIn = domains.get(operator) ?? [DEFAULT_DOMAIN];
+  return attestedIn.some((domain) => isExcludedParty(domain, operator));
+}
+
 /** What the sweep should change about the trusted pool at a position. */
 export interface TrustChanges {
   readonly trust: string[];
@@ -466,6 +484,7 @@ export function trustChangesAt(
   const standings = standingAt(events, position);
   const registered = registeredOperatorsAt(events, position);
   const trusted = trustedOperatorsAt(events, position);
+  const domains = operatorDomainsAt(events, position);
 
   const standingOfOperator = (operator: string): number =>
     standings.get(operator)?.standing ?? 0;
@@ -474,7 +493,10 @@ export function trustChangesAt(
   for (const operator of registered.operators) {
     if (trusted.has(operator)) continue;
     if (registered.maintainers.has(operator)) continue;
-    if (isProviderDomain(operator)) continue;
+    // Decision D-071: the exclusion is keyed by the domain the operator
+    // registered into, so a party excluded there is never trusted, and a party
+    // excluded somewhere else is untouched by that domain's list.
+    if (isExcludedPartyOfItsOwnDomain(domains, operator)) continue;
     if (standingOfOperator(operator) < STANDING_TRUSTED_ENTRY) continue;
     trust.push(operator);
   }

@@ -16,7 +16,7 @@ import {
   exportPublicKeyRaw,
   generateKeypair,
 } from "../src/identity.js";
-import { MODEL_PROVIDER_DOMAINS } from "../src/policy.js";
+import { DEFAULT_DOMAIN, excludedPartyDomains } from "../src/policy.js";
 import {
   ATTESTATION_TEXT,
   ATTESTATION_VERSION,
@@ -256,7 +256,7 @@ describe("domain control", () => {
     // Not a suffix at a label boundary, so not a provider.
     expect(isProviderDomain("notopenai.com")).toBe(false);
     expect(isProviderDomain("openai.com.example")).toBe(false);
-    for (const provider of MODEL_PROVIDER_DOMAINS) {
+    for (const provider of excludedPartyDomains(DEFAULT_DOMAIN)) {
       expect(isProviderDomain(provider)).toBe(true);
     }
     // A fork runs its own list.
@@ -278,6 +278,7 @@ describe("request bodies", () => {
       ok: true,
       value: {
         operator: OPERATOR,
+        domain: null,
         attestation,
         payout: { reference: "acct_123" },
       },
@@ -320,6 +321,7 @@ describe("request bodies", () => {
         ok: true,
         value: {
           operator: OPERATOR,
+          domain: null,
           attestation: null,
           payout: { reference: "acct_123" },
         },
@@ -361,9 +363,11 @@ describe("checkRegistration", () => {
   it("names its refusals in check order", () => {
     expect(REGISTRATION_REFUSALS).toEqual([
       "bad_domain",
+      "unregistered_domain",
       "provider_operator",
       "missing_attestation",
       "bad_attestation",
+      "attestation_domain_mismatch",
       "operator_exists",
       "agent_bound",
     ]);
@@ -373,6 +377,7 @@ describe("checkRegistration", () => {
     expect(await checkRegistration(registration())).toEqual({
       ok: true,
       maintainer: false,
+      domain: DEFAULT_DOMAIN,
     });
   });
 
@@ -386,15 +391,16 @@ describe("checkRegistration", () => {
       await checkRegistration(
         registration({ agent: maintainerAgent.id, attestation: theirs }),
       ),
-    ).toEqual({ ok: true, maintainer: true });
+    ).toEqual({ ok: true, maintainer: true, domain: DEFAULT_DOMAIN });
     expect(await checkRegistration(registration())).toEqual({
       ok: true,
       maintainer: false,
+      domain: DEFAULT_DOMAIN,
     });
     // No maintainer configured: nobody is the maintainer.
     expect(
       await checkRegistration(registration({ maintainerAgentId: null })),
-    ).toEqual({ ok: true, maintainer: false });
+    ).toEqual({ ok: true, maintainer: false, domain: DEFAULT_DOMAIN });
   });
 
   it("refuses a bad domain", async () => {

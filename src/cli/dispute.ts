@@ -36,6 +36,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
+import { DEFAULT_DOMAIN } from "../policy.js";
 import { signCore } from "../sign.js";
 import { buildAuthoredCore } from "./submit.js";
 import {
@@ -62,7 +63,10 @@ export const CORRECTION = "correction";
 /**
  * The fields a challenger chooses. `subject` is here because a challenger may
  * state it, and it defaults to the target's when they do not; `category` is not,
- * because a challenge has only one.
+ * because a challenge has only one, and neither is `domain` (decision D-071),
+ * because a challenge belongs to the domain of the fact it challenges and to no
+ * other -- a challenger who could name it could file the correction somewhere
+ * the entry's own validators are not.
  */
 export const DISPUTE_FIELDS: readonly string[] = Object.freeze([
   "subject",
@@ -165,6 +169,7 @@ export type DisputeFieldsVerdict =
 export function checkDisputeFields(
   fields: unknown,
   targetSubject: string,
+  targetDomain: string = DEFAULT_DOMAIN,
 ): DisputeFieldsVerdict {
   if (!isRecord(fields)) {
     return { ok: false, reason: BAD_FIELDS, detail: "not a JSON object" };
@@ -191,6 +196,10 @@ export function checkDisputeFields(
       // that is not (`subject_mismatch`).
       subject: subject ?? targetSubject,
       category: CORRECTION,
+      // The target's own domain (decision D-071). A legacy v0.6 target carries
+      // none and reads as ai-ecosystem -- though the Worker refuses a new
+      // decision on one anyway, so such a filing never gets far.
+      domain: targetDomain,
     },
   };
 }
@@ -254,8 +263,13 @@ export async function runDispute(input: {
   }
   const subject = isRecord(read.body) ? read.body["subject"] : undefined;
   if (typeof subject !== "string") return stopped("entry_malformed");
+  const domain = isRecord(read.body) ? read.body["domain"] : undefined;
 
-  const checked = checkDisputeFields(input.fields, subject);
+  const checked = checkDisputeFields(
+    input.fields,
+    subject,
+    typeof domain === "string" ? domain : DEFAULT_DOMAIN,
+  );
   if (!checked.ok) {
     deps.io.stderr(`${checked.reason}: ${checked.detail}`);
     return { ...stopped(checked.reason), status: null };

@@ -11,7 +11,7 @@
  * Freshness and decay sections, cited on each rule below.
  */
 
-import { CORE_KEYS, type Core } from "./core.js";
+import { CORE_KEYS, domainOf, type Core } from "./core.js";
 import {
   evidenceGate,
   type EvidenceTier,
@@ -20,12 +20,12 @@ import {
 import {
   APPROVALS_TO_VERIFY_LARGE_POOL,
   APPROVALS_TO_VERIFY_SMALL_POOL,
+  DEFAULT_DOMAIN,
   REJECTIONS_TO_REJECT,
   SLOT_COUNT,
-  STALENESS_WINDOW_DAYS,
+  stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
-  type Category,
 } from "./policy.js";
 import type { Entry } from "./schema.js";
 import type { EntrySeal } from "./seal.js";
@@ -271,6 +271,53 @@ export function agentOperatorsAt(
     operators.set(event.payload.agent, event.payload.operator);
   }
   return operators;
+}
+
+/**
+ * Which domains each operator is attested in, as of `position`.
+ *
+ * Decision D-071: the independence attestation is per domain, so eligibility is
+ * too. An operator is attested in the domain it registered under, plus every
+ * domain it has since joined by signing that domain's attestation
+ * (`operator_joined_domain`). A registration sealed before v0.7 carries no
+ * domain and reads as ai-ecosystem, because that was the only domain there was.
+ *
+ * Only events with seq <= position are folded, exactly as every other fold here,
+ * so a join sealed later can never change what a past decision saw.
+ */
+export function operatorDomainsAt(
+  events: readonly Event[],
+  position: number,
+): Map<string, string[]> {
+  const domains = new Map<string, string[]>();
+  const add = (operator: string, domain: string): void => {
+    const held = domains.get(operator);
+    if (held === undefined) {
+      domains.set(operator, [domain]);
+      return;
+    }
+    if (!held.includes(domain)) held.push(domain);
+  };
+  for (const event of inSeqOrder(events)) {
+    if (event.seq > position) break;
+    if (isType(event, "operator_registered")) {
+      add(event.payload.operator, event.payload.domain ?? DEFAULT_DOMAIN);
+      continue;
+    }
+    if (isType(event, "operator_joined_domain")) {
+      add(event.payload.operator, event.payload.domain);
+    }
+  }
+  return domains;
+}
+
+/** The domains one operator is attested in at `position`; empty when unknown. */
+export function operatorDomainsOf(
+  events: readonly Event[],
+  operator: string,
+  position: number,
+): readonly string[] {
+  return operatorDomainsAt(events, position).get(operator) ?? [];
 }
 
 /** The outcome of folding an entry's validation events, and nothing else. */
@@ -648,7 +695,7 @@ function freshnessOf(
       ? dateOf(core["submitted_at"] as string)
       : dateOf((latest as unknown as ReconfirmationFields).signed_at);
 
-  const window = STALENESS_WINDOW_DAYS[core["category"] as Category] ?? null;
+  const window = stalenessWindowDays(domainOf(core), core["category"]);
   const expiresAt = window === null ? null : datePlusDays(lastConfirmed, window);
   // The schema: stale is "True when expires_at is in the past". `expires_at` is
   // a calendar date, so the expiry date itself is still fresh (day 90) and the

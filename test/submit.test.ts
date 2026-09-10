@@ -16,7 +16,11 @@ import {
   exportPublicKeyRaw,
   generateKeypair,
 } from "../src/identity.js";
-import { NORM_VERSION, REQUEST_CLOCK_SKEW_SECONDS } from "../src/policy.js";
+import {
+  DEFAULT_DOMAIN,
+  NORM_VERSION,
+  REQUEST_CLOCK_SKEW_SECONDS,
+} from "../src/policy.js";
 import { signCore, verifyEntrySignature } from "../src/sign.js";
 import {
   HASH_TAG_ENTRY_ID,
@@ -40,6 +44,7 @@ function proposal(
   return {
     subject: "kestrel/kestrel-2",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim: "Kestrel-2 seat pricing rose to $25 per seat per month",
     before: "$20 per seat per month",
     after: "$25 per seat per month",
@@ -128,8 +133,45 @@ describe("entryIdFor", () => {
   });
 });
 
+describe("the domain in the signed core (D-071)", () => {
+  it("gives two cores differing only in domain different ids", async () => {
+    const core = await buildSubmittedCore(proposal(), { now: NOW });
+    const elsewhere = { ...core, domain: "some-other-domain" };
+
+    expect(await entryIdFor(elsewhere)).not.toBe(await entryIdFor(core));
+  });
+
+  it("gives a legacy seventeen-key core a different id again", async () => {
+    const core = await buildSubmittedCore(proposal(), { now: NOW });
+    const legacy: Record<string, unknown> = { ...core };
+    delete legacy["domain"];
+
+    expect(await entryIdFor(legacy as Core)).not.toBe(await entryIdFor(core));
+  });
+
+  it("keeps the author's signature over the domain", async () => {
+    const keys = await generateKeypair();
+    const author = agentIdFromPublicKey(
+      await exportPublicKeyRaw(keys.publicKey),
+    );
+    const core = await buildSubmittedCore(proposal({ author }), { now: NOW });
+    const signature = await signCore(core, keys.privateKey);
+
+    expect(await verifyEntrySignature({ ...core, signature })).toBe(true);
+    // Move the entry to another domain and the signature stops verifying: the
+    // field is inside the signed bytes, so an entry can never be re-homed.
+    expect(
+      await verifyEntrySignature({
+        ...core,
+        domain: "some-other-domain",
+        signature,
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("buildSubmittedCore", () => {
-  it("returns all seventeen core keys, in the schema's order", async () => {
+  it("returns all eighteen core keys, in the schema's order", async () => {
     const core = await buildSubmittedCore(proposal(), { now: NOW });
 
     expect(Object.keys(core)).toEqual([...CORE_KEYS]);
@@ -242,6 +284,9 @@ describe("checkSubmission", () => {
     expect([...SUBMISSION_REFUSALS]).toEqual([
       "bad_id",
       "bad_norm_version",
+      "missing_domain",
+      "unregistered_domain",
+      "category_not_in_domain",
       "bad_submitted_at",
       "author_mismatch",
       "author_operator_mismatch",
@@ -323,6 +368,47 @@ describe("checkSubmission", () => {
 
     expect(checkSubmission(core, await contextFor(core, { now: NOW }))).toEqual({
       ok: true,
+    });
+  });
+
+  it("refuses missing_domain for a seventeen-key v0.6 core", async () => {
+    const core = await buildSubmittedCore(proposal(), { now: NOW });
+    const legacy = { ...core };
+    delete (legacy as Record<string, unknown>)["domain"];
+    const renamedLegacy = await renamed(legacy as Core);
+
+    expect(Object.keys(renamedLegacy)).toHaveLength(17);
+    expect(
+      checkSubmission(renamedLegacy, await contextFor(renamedLegacy)),
+    ).toEqual({ ok: false, reason: "missing_domain" });
+  });
+
+  it("refuses unregistered_domain for a slug no registry names", async () => {
+    const core = await renamed(
+      (await buildSubmittedCore(proposal({ domain: "biotech" }), {
+        now: NOW,
+      })) as Core,
+    );
+
+    expect(checkSubmission(core, await contextFor(core))).toEqual({
+      ok: false,
+      reason: "unregistered_domain",
+    });
+  });
+
+  it("refuses category_not_in_domain for a category the domain does not admit", async () => {
+    // Every schema category is an ai-ecosystem category today, so the refusal
+    // is shown with a category the schema enum does not hold either: the rule
+    // is "this domain admits it", not "the enum holds it".
+    const core = await renamed(
+      (await buildSubmittedCore(proposal({ category: "clinical_trial" }), {
+        now: NOW,
+      })) as Core,
+    );
+
+    expect(checkSubmission(core, await contextFor(core))).toEqual({
+      ok: false,
+      reason: "category_not_in_domain",
     });
   });
 

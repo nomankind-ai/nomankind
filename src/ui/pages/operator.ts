@@ -34,10 +34,16 @@ import {
   fmtInstant,
   html,
   layout,
+  raw,
   shortHash,
   type Safe,
 } from "../html.js";
-import type { AttestationRow, OperatorData, PageContext } from "../types.js";
+import type {
+  AttestationRow,
+  OperatorData,
+  OperatorDomainRow,
+  PageContext,
+} from "../types.js";
 
 const EM_DASH = "—";
 
@@ -69,6 +75,30 @@ function amount(row: LedgerRow): Safe {
     return html`${row.amount} <span class="dim">${dollars(row.amount)}</span>`;
   }
   return html`${row.amount} <span class="dim">${row.unit}</span>`;
+}
+
+/**
+ * The domains this operator is attested in, each with the version of the
+ * attestation it signed for that one (decision D-071).
+ *
+ * One line rather than a panel: an operator's domains are part of what the
+ * registry record says about it, exactly as its agents count is, and the
+ * attestation panel beside it shows the registration's own signed bytes. The
+ * version is printed per domain because the two need not be the same — a domain
+ * registered later publishes its own attestation version — and an operator
+ * attested in nothing is a row that predates the join route rather than a blank.
+ */
+function domains(rows: readonly OperatorDomainRow[]): Safe {
+  if (rows.length === 0) return html`${EM_DASH}`;
+  return html`${rows.map(
+    (each, index) =>
+      html`${index === 0 ? raw("") : raw(" · ")}<span class="mono"
+          >${each.domain}</span
+        >
+        <span class="dim"
+          >${each.attestationVersion ?? "no attestation stored"}</span
+        >`,
+  )}`;
 }
 
 function attestation(record: Record<string, unknown> | null): Safe {
@@ -426,6 +456,8 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
               <dd>${row.registeredSeq}</dd>
               <dt>trusted seq</dt>
               <dd>${row.trustedSeq === null ? EM_DASH : row.trustedSeq}</dd>
+              <dt>domains</dt>
+              <dd class="break">${domains(data.domains)}</dd>
               <dt>named by</dt>
               <dd class="break">${data.namedBy ?? EM_DASH}</dd>
               <dt>payout status</dt>

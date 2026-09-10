@@ -18,6 +18,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { SCHEMA_VERSION } from "../policy.js";
 import { verifyOffline, type Diff, type VerifyReport } from "../verify.js";
 
 export interface VerifyIo {
@@ -100,6 +101,12 @@ export async function verify(
     io.stderr(`${entryPath}: cannot verify: ${reasonOf(error)}`);
     return 1;
   }
+  // Which rules this run held the entry to (decision D-071). A reader checking
+  // a v0.6 record with a v0.7 verifier is told what it was checked against
+  // before it is told the verdict, so "unsupported_schema_version" reads as an
+  // answer about versions rather than as a mystery.
+  io.stdout(`schema ${SCHEMA_VERSION}`);
+
   if (report.ok) {
     io.stdout(`ok ${report.entry_id}`);
     return 0;

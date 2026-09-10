@@ -26,29 +26,25 @@
  * recomputes it from the events every time.
  */
 
-import type { Core } from "./core.js";
+import { domainOf, type Core } from "./core.js";
 import type { ApproverRecord } from "./events.js";
-import { REPRODUCTION_HOLDS, REPRODUCTION_RUNS, type Category } from "./policy.js";
+import {
+  isTranscriptCategory,
+  REPRODUCTION_HOLDS,
+  REPRODUCTION_RUNS,
+} from "./policy.js";
+
+/**
+ * Which categories carry a transcript is a domain's table and not a global one
+ * (decision D-071): it is published per domain in
+ * schema/nomankind-domain-registry-v1.md and held in src/policy.ts's `DOMAINS`.
+ * The accessor is re-exported here because this is the module the rule belongs
+ * to; the table it reads is policy's, as every number here already was.
+ */
+export { isTranscriptCategory };
 
 /** The two tiers the schema's evidence_tier enum names. */
 export type EvidenceTier = "stated" | "observed";
-
-/**
- * The categories that carry a transcript artifact in `evidence`. The schema says
- * behavior and misbehavior are always observed and always carry it; every other
- * category carries its measurement in `observation` instead.
- */
-export const TRANSCRIPT_CATEGORIES: readonly Category[] = Object.freeze([
-  "behavior",
-  "misbehavior",
-] as const);
-
-const TRANSCRIPT_CATEGORY_SET = new Set<string>(TRANSCRIPT_CATEGORIES);
-
-/** Whether this category carries its evidence as a frozen transcript artifact. */
-export function isTranscriptCategory(category: unknown): boolean {
-  return typeof category === "string" && TRANSCRIPT_CATEGORY_SET.has(category);
-}
 
 /**
  * The rejection reason a validator writes when rejecting at draft because the
@@ -80,7 +76,7 @@ function text(value: unknown): string | null {
  * returns null. Presence only, never judgment (D-031).
  */
 export function proposedTest(core: Core): string | null {
-  if (isTranscriptCategory(core.category)) {
+  if (isTranscriptCategory(domainOf(core), core.category)) {
     return text(asObject(core.evidence)?.predicate);
   }
   if (core.evidence_tier !== "observed") {
@@ -205,7 +201,7 @@ function present(value: unknown): boolean {
  */
 export function checkRecordEvidence(record: ApproverRecord, core: Core): RecordEvidenceVerdict {
   const observed = core.evidence_tier === "observed";
-  const transcript = isTranscriptCategory(core.category);
+  const transcript = isTranscriptCategory(domainOf(core), core.category);
 
   if (observed) {
     if (typeof record.test_accepted !== "boolean") {
@@ -302,7 +298,7 @@ export function evidenceGate(core: Core, records: readonly ApproverRecord[]): Ev
   const verdict = testVerdict(records);
   const approvals = records.filter((record) => record.decision === "approve");
 
-  if (!isTranscriptCategory(core.category)) {
+  if (!isTranscriptCategory(domainOf(core), core.category)) {
     if (verdict === "rejected") {
       return { test_verdict: verdict, verifiable: true, effective_tier: "stated" };
     }

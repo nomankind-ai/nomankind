@@ -38,6 +38,7 @@ import type { Core } from "../src/core.js";
 import { base64urlDecode, base64urlEncode } from "../src/encoding.js";
 import { appendEvent, type ApproverRecord, type Event } from "../src/events.js";
 import {
+  DEFAULT_DOMAIN,
   APPROVALS_TO_VERIFY_SMALL_POOL,
   ASSIGNMENT_WINDOW_HOURS,
   LIST_PAGE_LIMIT,
@@ -234,6 +235,7 @@ function pricing(
   return {
     subject: "harrier/harrier-1",
     category: "pricing",
+    domain: DEFAULT_DOMAIN,
     claim,
     before: "$25 per seat per month",
     after: "$30 per seat per month",

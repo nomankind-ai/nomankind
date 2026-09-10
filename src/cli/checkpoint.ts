@@ -25,7 +25,7 @@ import { resolve } from "node:path";
 
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import type { Event } from "../events.js";
-import { SEAL_INTERVAL_MINUTES } from "../policy.js";
+import { DEFAULT_DOMAIN, SEAL_INTERVAL_MINUTES } from "../policy.js";
 import { signAttestation } from "../registry.js";
 import { signCore } from "../sign.js";
 import { buildSubmittedCore } from "../submit.js";
@@ -272,9 +272,12 @@ export async function runCheckpoint(input: {
   for (let index = 0; index < CHECKPOINT_DOMAINS.length; index += 1) {
     const operator = CHECKPOINT_DOMAINS[index]!;
     const key = keys.fixtures[index]!;
+    // The seeded world is ai-ecosystem's, which is the only registered domain
+    // at launch (decision D-071, schema/nomankind-domain-registry-v1.md).
     const attestation = await signAttestation(key.privateKey, {
       operator,
       agent: key.agentId,
+      domain: DEFAULT_DOMAIN,
       signed_at: at,
     });
     const answer = await post(
@@ -283,6 +286,7 @@ export async function runCheckpoint(input: {
       "/operators",
       {
         operator,
+        domain: DEFAULT_DOMAIN,
         attestation,
         payout: { reference: CHECKPOINT_PAYOUT_REFERENCE },
       },
@@ -337,6 +341,7 @@ export async function runCheckpoint(input: {
     {
       subject: CHECKPOINT_SUBJECT,
       category: "limit",
+      domain: DEFAULT_DOMAIN,
       claim: `${SEED}: ${CHECKPOINT_SUBJECT} request limit is documented at its cited page`,
       before: `${SEED}: no documented request limit`,
       after: `${SEED}: the cited page is the documented request limit`,

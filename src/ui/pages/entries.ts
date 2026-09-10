@@ -20,6 +20,7 @@
 
 import {
   ENTRY_CATEGORIES,
+  ENTRY_DOMAINS,
   ENTRY_STATUSES,
   ENTRY_TIERS,
   FRESHNESS_VALUES,
@@ -40,13 +41,22 @@ import type {
   PageContext,
 } from "../types.js";
 
-/** The four filter parameters, and which field of the filter each reads. */
+/**
+ * The five filter parameters, and which field of the filter each reads.
+ *
+ * `domain` sits where src/ui/query.ts puts it, after status: the order here is
+ * the order the chips appear and the order the query string is written in, and
+ * two orders for one filter would be two things to keep in step. Its values are
+ * the schema's own domain enum, exactly as the category chips are the schema's
+ * categories — the registered domains, never a list retyped in a page.
+ */
 const GROUPS: readonly {
   readonly name: keyof EntriesFilter;
   readonly values: readonly string[];
 }[] = [
   { name: "category", values: ENTRY_CATEGORIES },
   { name: "status", values: ENTRY_STATUSES },
+  { name: "domain", values: ENTRY_DOMAINS },
   { name: "tier", values: ENTRY_TIERS },
   { name: "fresh", values: FRESHNESS_VALUES },
 ];
@@ -97,7 +107,7 @@ function group(
   </div>`;
 }
 
-/** The whole panel: four groups and the button that applies them. */
+/** The whole panel: five groups and the button that applies them. */
 function filters(filter: EntriesFilter): Safe {
   return html`<form class="filters" method="get" action="/entries">
     ${GROUPS.map((each) => group(filter, each.name, each.values))}
@@ -167,7 +177,7 @@ export function renderEntries(ctx: PageContext, data: EntriesData): string {
         <h1>Entries</h1>
         <span
           class="mono note"
-          title="The total counts every entry with this status; the category, tier and freshness filters narrow the page, not the total."
+          title="The total counts every entry with this status and in this domain; the category, tier and freshness filters narrow the page, not the total."
           >${data.rows.length} of ${data.total} · ordered by sealed
           position</span
         >

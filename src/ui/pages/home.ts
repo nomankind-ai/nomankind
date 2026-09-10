@@ -26,6 +26,32 @@ import {
 } from "../html.js";
 import type { EntryRow, HomeCounters, HomeData, PageContext } from "../types.js";
 
+/**
+ * Which domain the numbers above and the rows below were counted in
+ * (decision D-071).
+ *
+ * The line is not decoration: a four that counted one domain and a four that
+ * counted the log look exactly the same, so a page that filtered silently would
+ * be a page whose counters cannot be checked. The seal head and the seal count
+ * are the whole log's either way — a seal covers events, not a domain — and the
+ * line says that too rather than leaving a reader to work it out.
+ */
+function domainLine(domain: string | null): Safe {
+  if (domain === null) {
+    return html`<p class="note">
+      Counting all domains. Narrow with
+      <span class="mono">?domain=&lt;slug&gt;</span>, which filters the verified,
+      stale and trusted-pool counters and the entries below.
+    </p>`;
+  }
+  return html`<p class="note">
+    Counting the <span class="mono">${domain}</span> domain only: the verified,
+    stale and trusted-pool counters and the entries below are this domain's.
+    The head and the seal count are the whole log's, because a seal covers
+    events and not a domain. <a href="/">All domains</a>.
+  </p>`;
+}
+
 /** One counter tile: the label, the number, and the line under it. */
 function counter(label: string, value: string, note: Safe): Safe {
   return html`<div class="counter">
@@ -147,7 +173,9 @@ export function renderHome(ctx: PageContext, data: HomeData): string {
             <a class="btn" href="/api">Read the API</a>
           </div>
         </div>
-        ${counters(data.counters)}
+        <div class="stack">
+          ${counters(data.counters)} ${domainLine(data.domain)}
+        </div>
       </div>
 
       <div class="cols-side">

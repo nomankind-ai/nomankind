@@ -161,9 +161,17 @@ export async function readRegistry(
       `/operators/${encodeURIComponent(id)}`,
     );
     if (!isRecord(full)) continue;
+    // Decision D-071: the domains the operator is attested in, exactly as
+    // GET /operators/{id} lists them. The offline exclusions check reruns
+    // `checkValidation` against them, so a bundle without them would rerun a
+    // different rule from the one the Worker applied.
+    const domains = full["domains"];
     operators[id] = {
       maintainer: full["maintainer"] === true,
       provider: full["provider"] === true,
+      ...(Array.isArray(domains)
+        ? { domains: domains.filter((d): d is string => typeof d === "string") }
+        : {}),
     };
     const bound = full["agents"];
     if (!Array.isArray(bound)) continue;

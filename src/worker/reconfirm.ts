@@ -45,7 +45,11 @@ import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: 
 
 import { bountyAccrual } from "../bounty.js";
 import type { Core } from "../core.js";
-import { agentOperatorsAt, trustedOperatorsAt } from "../derive.js";
+import {
+  agentOperatorsAt,
+  operatorDomainsOf,
+  trustedOperatorsAt,
+} from "../derive.js";
 import type { Event, ReconfirmationRecord } from "../events.js";
 import { REQUEST_CLOCK_SKEW_SECONDS } from "../policy.js";
 import { checkReconfirmation } from "../reconfirm.js";
@@ -259,6 +263,10 @@ async function reconfirm(
     },
     agentOperators: Object.fromEntries(agentOperatorsAt(world.registry, head)),
     trustedOperators: [...trustedOperatorsAt(world.registry, head)],
+    // Decision D-071: the reconfirmer's own domains, folded out of the same
+    // events. The check compares them against the entry's domain, which it
+    // reads off the signed core it was handed.
+    operatorDomains: operatorDomainsOf(world.registry, record.operator, head),
     status: before.derived.status,
     effectiveTier: before.sidecar.effective_tier,
   });

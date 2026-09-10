@@ -58,6 +58,12 @@ export type ReconfirmationRecord = {
  */
 export type Attestation = {
   version: string;
+  /**
+   * The domain this attestation is about (decision D-071). Absent on every
+   * attestation sealed before schema v0.7, which reads as the ai-ecosystem
+   * attestation under its existing version -- the only domain there was.
+   */
+  domain?: string;
   signed_at: string;
   signature: string;
 };
@@ -104,7 +110,17 @@ export interface AttestationScoreRecord {
 
 /** The payload shape carried by each event type. */
 export type EventPayloads = {
-  operator_registered: { operator: string; maintainer: boolean };
+  /**
+   * An operator joined the registry. `domain` is the first domain it is
+   * attested in -- the one its registration attestation was signed for
+   * (decision D-071) -- and is absent on every registration sealed before
+   * schema v0.7, which reads as ai-ecosystem.
+   */
+  operator_registered: {
+    operator: string;
+    maintainer: boolean;
+    domain?: string;
+  };
   operator_trusted: { operator: string };
   operator_untrusted: { operator: string };
   /**
@@ -113,6 +129,24 @@ export type EventPayloads = {
    * into nomankind's log and you can validate."
    */
   agent_bound: { operator: string; agent: string; attestation: Attestation };
+  /**
+   * An operator took on a second domain.
+   *
+   * Decision D-071: registration binds an operator to its first domain's
+   * independence attestation, and working in another domain means signing that
+   * domain's attestation too. The join is a public event for the same reason
+   * the registration is: eligibility per domain has to be recomputable from the
+   * log alone (src/derive.ts, `operatorDomainsAt`).
+   *
+   * `agent` is the key that signed the attestation, which must be one of the
+   * operator's own; the attestation carries the domain it is for.
+   */
+  operator_joined_domain: {
+    operator: string;
+    agent: string;
+    domain: string;
+    attestation: Attestation;
+  };
   /** Sorted trusted pool at this position in the log (M4 draws assignments from it). */
   pool_snapshot: { operators: string[] };
   /** The sealed submission: the immutable core and the author's signature over it. */
@@ -305,6 +339,8 @@ export type EventPayloads = {
    */
   attestation_requested: {
     attestation: string;
+    /** The domain the probes are drawn from and the scorers are attested in. */
+    domain: string;
     model: string;
     model_operator: string | null;
     probes: readonly Probe[];
@@ -366,6 +402,7 @@ export const EVENT_TYPES: readonly EventType[] = [
   "operator_registered",
   "operator_trusted",
   "operator_untrusted",
+  "operator_joined_domain",
   "agent_bound",
   "pool_snapshot",
   "entry_submitted",

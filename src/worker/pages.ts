@@ -59,6 +59,7 @@ import {
   ledgerRowsForOperator,
   listEntriesPage,
   listOperators,
+  operatorDomains,
   operatorStanding,
   overturnedCountsByOperator,
   payoutRows,
@@ -87,7 +88,7 @@ import { LANDING_CSS, renderLanding } from "../ui/pages/landing.js";
 import { renderOperator } from "../ui/pages/operator.js";
 import { renderOperators } from "../ui/pages/operators.js";
 import { renderPolicy } from "../ui/pages/policy.js";
-import { parseEntriesQuery } from "../ui/query.js";
+import { ENTRY_DOMAINS, parseEntriesQuery } from "../ui/query.js";
 import { APP_CSS } from "../ui/styles.js";
 import type {
   ApproverRow,
@@ -258,16 +259,46 @@ async function landing(db: D1Like, ctx: PageContext): Promise<Response> {
   return htmlResponse(renderLanding(ctx, data));
 }
 
-async function home(db: D1Like, ctx: PageContext): Promise<Response> {
-  const verified = await countEntries(db, { status: "verified" });
-  const stale = await countEntries(db, { stale: true });
-  const trusted = await countTrustedOperators(db);
+/**
+ * The home page, optionally narrowed to one registered domain (decision D-071).
+ *
+ * `?domain=` is checked against the schema's own domain enum and refused by name
+ * rather than ignored, exactly as the entries listing refuses a filter it cannot
+ * read: a reader who mistyped a slug and got the whole log's counters back would
+ * believe they had narrowed them. The verified, stale and trusted counters and
+ * the latest rows are gathered under it; the head and the seal count are not,
+ * because a seal covers events and not a domain, and the page says so.
+ */
+async function home(
+  db: D1Like,
+  ctx: PageContext,
+  url: URL,
+): Promise<Response> {
+  const asked = url.searchParams.get("domain");
+  if (asked !== null && !ENTRY_DOMAINS.includes(asked)) {
+    return htmlResponse(renderBadQuery(ctx, "unknown_domain"), 400);
+  }
+  const narrowed = asked === null ? {} : { domain: asked };
+
+  const verified = await countEntries(db, {
+    ...narrowed,
+    status: "verified",
+  });
+  const stale = await countEntries(db, { ...narrowed, stale: true });
+  const trusted =
+    asked === null
+      ? await countTrustedOperators(db)
+      : await countTrustedOperators(db, asked);
   const seal = await latestSeal(db);
   const seals = await countSeals(db);
-  const latest = await listEntriesPage(db, { limit: HOME_LATEST_ENTRIES });
+  const latest = await listEntriesPage(db, {
+    ...narrowed,
+    limit: HOME_LATEST_ENTRIES,
+  });
 
   return htmlResponse(
     renderHome(ctx, {
+      domain: asked,
       counters: {
         verified,
         stale,
@@ -296,19 +327,21 @@ async function entries(
   const page = await listEntriesPage(db, {
     ...(filter.category === null ? {} : { category: filter.category }),
     ...(filter.status === null ? {} : { status: filter.status }),
+    ...(filter.domain === null ? {} : { domain: filter.domain }),
     ...(filter.tier === null ? {} : { tier: filter.tier }),
     ...(filter.fresh === null ? {} : { stale: filter.fresh === "stale" }),
     limit: LIST_PAGE_LIMIT,
     ...(parsed.before === null ? {} : { beforeSubmittedSeq: parsed.before }),
   });
-  // The total is by status only, which is what the page's title attribute says:
-  // the tier filter is a JSON extraction and the freshness filter is a derived
-  // boolean, and a total that counted either would be a second query whose cost
-  // grows with the log for a number nobody asked for.
-  const total = await countEntries(
-    db,
-    filter.status === null ? {} : { status: filter.status },
-  );
+  // The total is by status and domain, which is what the page's title attribute
+  // says: both are indexed columns (0001_init, 0012_domains), while the tier
+  // filter is a JSON extraction and the freshness filter is a derived boolean,
+  // and a total that counted either would be a second query whose cost grows
+  // with the log for a number nobody asked for.
+  const total = await countEntries(db, {
+    ...(filter.status === null ? {} : { status: filter.status }),
+    ...(filter.domain === null ? {} : { domain: filter.domain }),
+  });
 
   const rows = page.map(toRow);
   const last = rows[rows.length - 1];
@@ -527,6 +560,11 @@ async function operator(
   // record is carried through as the row: the page picks columns off it and
   // folds nothing.
   const attestations = await attestationsForOperator(db, id, LIST_PAGE_LIMIT);
+  // The domains this operator is attested in (decision D-071): registration's
+  // own, then every join, in the order the log put them in. The row carries the
+  // signed attestation, so the version beside each domain is that attestation's
+  // and never the environment's default.
+  const domains = await operatorDomains(db, id);
   const balance = ledgerBalance(ledger, now.toISOString());
   const attestation = record.details["attestation"];
   const namedBy = record.details["named_by"];
@@ -545,6 +583,11 @@ async function operator(
       payouts,
       balance,
       agents: agents.map((each) => each.agentId),
+      domains: domains.map((each) => ({
+        domain: each.domain,
+        attestationVersion:
+          each.attestation === null ? null : each.attestation.version,
+      })),
       attestation:
         attestation !== null && typeof attestation === "object"
           ? (attestation as Record<string, unknown>)
@@ -624,7 +667,7 @@ async function route(
     const apex = env.APEX_HOST;
     return apex !== undefined && apex !== "" && apex === url.hostname
       ? landing(db, ctx)
-      : home(db, ctx);
+      : home(db, ctx, url);
   }
 
   if (path === "/landing") return landing(db, ctx);

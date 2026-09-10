@@ -31,6 +31,9 @@ import type { Entry } from "./schema.js";
 /** The schema's category enum. */
 const CATEGORIES: readonly string[] = entrySchema.properties.category.enum;
 
+/** The schema's domain enum: every registered domain, from the schema itself. */
+const DOMAINS: readonly string[] = entrySchema.properties.domain.enum;
+
 /** The schema's evidence_tier enum. */
 const EVIDENCE_TIERS: readonly string[] =
   entrySchema.properties.evidence_tier.enum;
@@ -40,6 +43,7 @@ export const READ_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "entry_id",
   "subject",
   "category",
+  "domain",
   "min_tier",
   "max_age",
 ]);
@@ -59,6 +63,11 @@ export type ReadQuery =
       readonly by: "subject";
       readonly subject: string;
       readonly category: Category;
+      /**
+       * The registered domain to answer from. Absent means the reader named no
+       * domain and every domain's entries about that subject are candidates.
+       */
+      readonly domain?: string;
       readonly min_tier?: EvidenceTier;
       /** Whole calendar days. Absent means the reader set no age demand. */
       readonly max_age?: number;
@@ -72,6 +81,7 @@ export const READ_QUERY_REFUSALS = [
   "missing_subject",
   "missing_category",
   "bad_category",
+  "unknown_domain",
   "bad_min_tier",
   "bad_max_age",
 ] as const;
@@ -132,6 +142,11 @@ export function parseReadQuery(params: URLSearchParams): ReadQueryResult {
     return { ok: false, reason: "bad_category" };
   }
 
+  const domain = params.get("domain");
+  if (domain !== null && !DOMAINS.includes(domain)) {
+    return { ok: false, reason: "unknown_domain" };
+  }
+
   const minTier = params.get("min_tier");
   if (minTier !== null && !EVIDENCE_TIERS.includes(minTier)) {
     return { ok: false, reason: "bad_min_tier" };
@@ -152,6 +167,7 @@ export function parseReadQuery(params: URLSearchParams): ReadQueryResult {
       by: "subject",
       subject,
       category: category as Category,
+      ...(domain === null ? {} : { domain }),
       ...(minTier === null ? {} : { min_tier: minTier as EvidenceTier }),
       ...(maxAgeDays === undefined ? {} : { max_age: maxAgeDays }),
     },

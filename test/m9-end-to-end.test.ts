@@ -22,6 +22,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { verifyOffline, verifyRecordSignature } from "../src/index.js";
 import { verify } from "../src/cli/verify.js";
 import { buildVerifyWorld, type VerifyWorld } from "./helpers/verify-world.js";
+import { SCHEMA_VERSION } from "../src/policy.js";
 
 type Json = Record<string, unknown>;
 
@@ -76,14 +77,15 @@ describe("M9: two files and one script", () => {
   it("checks the verified entry against the log beside it", async () => {
     const { out, err, io } = capture();
     expect(await verify(entryPath, bundlePath, io)).toBe(0);
-    expect(out).toEqual([`ok ${world.entryId}`]);
+    // Decision D-071: the schema version this run checked against, first.
+    expect(out).toEqual([`schema ${SCHEMA_VERSION}`, `ok ${world.entryId}`]);
     expect(err).toEqual([]);
   });
 
   it("checks the unsealed draft the same way", async () => {
     const { out, err, io } = capture();
     expect(await verify(draftPath, bundlePath, io)).toBe(0);
-    expect(out).toEqual([`ok ${world.draftEntryId}`]);
+    expect(out).toEqual([`schema ${SCHEMA_VERSION}`, `ok ${world.draftEntryId}`]);
     expect(err).toEqual([]);
   });
 
@@ -99,7 +101,8 @@ describe("M9: two files and one script", () => {
     expect(out.some((line) => line.startsWith("derived /status mismatch"))).toBe(
       true,
     );
-    expect(out[out.length - 1]).toBe(`${out.length - 1} diff(s)`);
+    expect(out[0]).toBe(`schema ${SCHEMA_VERSION}`);
+    expect(out[out.length - 1]).toBe(`${out.length - 2} diff(s)`);
   });
 
   it("names an event payload rewritten in the log file", async () => {

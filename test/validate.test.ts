@@ -13,6 +13,7 @@ import {
   type ValidationRefusal,
 } from "../src/validate.js";
 import type { ApproverRecord } from "../src/events.js";
+import { DEFAULT_DOMAIN } from "../src/policy.js";
 
 const SUBMITTER_AGENT = "1F916:aG9tZUJhc2U";
 /** A second agent under the submitter's own operator: Section 5 counts them as one. */
@@ -42,15 +43,19 @@ const AGENT_OPERATORS: Readonly<Record<string, string>> = Object.freeze({
   [PROVIDER_AGENT]: PROVIDER_OPERATOR,
 });
 
-const PLAIN: OperatorInfo = { maintainer: false, provider: false };
+const PLAIN: OperatorInfo = {
+  maintainer: false,
+  provider: false,
+  domains: [DEFAULT_DOMAIN],
+};
 
 /** Registered operators. op_v3 is deliberately absent. */
 const OPERATORS: Readonly<Record<string, OperatorInfo>> = Object.freeze({
   [SUBMITTER_OPERATOR]: PLAIN,
   op_v1: PLAIN,
   op_v2: PLAIN,
-  [MAINTAINER_OPERATOR]: { maintainer: true, provider: false },
-  [PROVIDER_OPERATOR]: { maintainer: false, provider: true },
+  [MAINTAINER_OPERATOR]: { ...PLAIN, maintainer: true },
+  [PROVIDER_OPERATOR]: { ...PLAIN, provider: true },
 });
 
 const HASH = `sha256:${"a".repeat(64)}`;
@@ -142,6 +147,12 @@ const REFUSAL_CASES: readonly {
     context: context(),
   },
   {
+    // Decision D-071: attested in some domain, but not in this entry's.
+    reason: "operator_not_in_domain",
+    record: approval(V1_AGENT, "op_v1"),
+    context: context({ domain: "some-other-domain" }),
+  },
+  {
     reason: "missing_snapshot_hash",
     record: {
       agent: V1_AGENT,
@@ -191,6 +202,7 @@ describe("checkValidation refusals", () => {
       "original_signer",
       "maintainer_operator",
       "provider_operator",
+      "operator_not_in_domain",
       "missing_snapshot_hash",
       "missing_reason",
       "duplicate_operator",
@@ -204,6 +216,41 @@ describe("checkValidation refusals", () => {
     const covered = REFUSAL_CASES.map((testCase) => testCase.reason);
     expect(new Set(covered).size).toBe(covered.length);
     expect([...covered].sort()).toEqual([...VALIDATION_REFUSALS].sort());
+  });
+
+  it("lets an operator attested in the entry's domain through", () => {
+    // The same record and the same operator, judged in the domain it attested
+    // in: eligibility is per domain, so one refusal is exactly the absence of
+    // the other (decision D-071).
+    expect(
+      checkValidation(approval(V1_AGENT, "op_v1"), context({ domain: DEFAULT_DOMAIN })),
+    ).toEqual({ ok: true, record: approval(V1_AGENT, "op_v1") });
+  });
+
+  it("reads a context that names no domains as the default domain", () => {
+    // A caller written before v0.7 built neither field; its world was
+    // ai-ecosystem and reads as ai-ecosystem.
+    expect(checkValidation(approval(V1_AGENT, "op_v1"), context()).ok).toBe(true);
+  });
+
+  it("keeps an operator excluded in one domain eligible in another", () => {
+    const operators = {
+      ...OPERATORS,
+      op_v1: { maintainer: false, provider: false, domains: ["elsewhere"] },
+    };
+
+    expect(
+      checkValidation(
+        approval(V1_AGENT, "op_v1"),
+        context({ operators, domain: "elsewhere" }),
+      ).ok,
+    ).toBe(true);
+    expect(
+      checkValidation(
+        approval(V1_AGENT, "op_v1"),
+        context({ operators, domain: DEFAULT_DOMAIN }),
+      ),
+    ).toEqual({ ok: false, reason: "operator_not_in_domain" });
   });
 
   it("refuses an approve whose snapshot_hash is malformed", () => {

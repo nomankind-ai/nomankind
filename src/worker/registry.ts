@@ -32,13 +32,16 @@ import { appendEvent, type Attestation, type Event } from "../events.js";
 import { publicKeyFromAgentId } from "../identity.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
 import {
+  checkDomainJoin,
   checkGenesisNaming,
   checkRegistration,
+  parseDomainJoinBody,
   parseGenesisBody,
   parseRegistrationBody,
   txtMatches,
   txtRecordName,
   type GenesisRefusal,
+  type JoinRefusal,
   type RegistrationRefusal,
 } from "../registry.js";
 import { HEADER_AGENT, verifyRequest } from "../request.js";
@@ -55,7 +58,9 @@ import {
   getOperator,
   headSeq,
   listOperators,
+  operatorDomains,
   operatorForAgent,
+  recordDomainJoin,
   registerOperator,
   trustOperator,
   type AgentRecord,
@@ -104,18 +109,39 @@ export function methodNotAllowed(allow: string): Response {
 /**
  * The status each registration refusal answers with.
  *
- * A model provider at the door is 403: the request was understood, the identity
+ * An excluded party at the door is 403: the request was understood, the identity
  * was proved, and the answer is still no (Section 10). A domain that is not a
- * domain and an attestation that does not verify are 422 — the request was well
- * formed and its contents were not. A name already taken is 409.
+ * domain, a record domain nobody registered, and an attestation that does not
+ * verify or is for another domain are 422 — the request was well formed and its
+ * contents were not. A name already taken is 409.
  */
 const REGISTRATION_STATUS: Record<RegistrationRefusal, number> = {
   bad_domain: 422,
+  unregistered_domain: 422,
   provider_operator: 403,
   missing_attestation: 422,
   bad_attestation: 422,
+  attestation_domain_mismatch: 422,
   operator_exists: 409,
   agent_bound: 409,
+};
+
+/**
+ * The status each domain-join refusal answers with, the same shape and for the
+ * same reasons as a registration's: an excluded party is 403, a domain already
+ * held is 409, and everything else is a well-formed request whose contents do
+ * not hold up (422). An unregistered operator is 422 rather than 404 because
+ * the route's own 404 is about the operator the path names, and this refusal is
+ * about the log not carrying its registration.
+ */
+const JOIN_STATUS: Record<JoinRefusal, number> = {
+  unregistered_operator: 422,
+  unregistered_domain: 422,
+  excluded_party: 403,
+  already_joined: 409,
+  missing_attestation: 422,
+  bad_attestation: 422,
+  attestation_domain_mismatch: 422,
 };
 
 /**
@@ -315,17 +341,25 @@ async function tail(env: Env): Promise<Event[]> {
 }
 
 /**
- * The three attested fields, and only those.
+ * The attested fields, and only those.
  *
- * The signature is over the operator, the agent, the version, the timestamp and
- * the fixed sentence (src/registry.ts). Copying the request's object verbatim
- * would seal whatever unsigned keys it also carried into the log beside them,
- * so the event carries exactly what was signed.
+ * The signature is over the operator, the agent, the version, the domain when
+ * the record carries one, the timestamp and that domain's fixed sentence
+ * (src/registry.ts). Copying the request's object verbatim would seal whatever
+ * unsigned keys it also carried into the log beside them, so the event carries
+ * exactly what was signed.
+ *
+ * `domain` is copied only when the record actually declares one (decision
+ * D-071). Absent stays absent rather than becoming the default slug: the
+ * pre-v0.7 signing bytes carried no domain key at all, so adding one would make
+ * a legacy attestation stop verifying against its own signature.
  */
 function attestationOf(value: unknown): Attestation {
   const record = value as Record<string, unknown>;
+  const domain = record["domain"];
   return {
     version: String(record["version"]),
+    ...(typeof domain === "string" ? { domain } : {}),
     signed_at: String(record["signed_at"]),
     signature: String(record["signature"]),
   };
@@ -346,12 +380,15 @@ async function register(
 
   const parsed = parseRegistrationBody(auth.body);
   if (!parsed.ok) return refuse(400, parsed.reason);
-  const { operator, attestation, payout } = parsed.value;
+  const { operator, domain, attestation, payout } = parsed.value;
   const agent = auth.agent;
 
   const check = await checkRegistration({
     operator,
     agent,
+    // The body's domain, or null when the client wrote none — which is what a
+    // client written before v0.7 sends, and reads as the default domain.
+    domain,
     attestation,
     maintainerAgentId: maintainerOf(env),
     operatorExists: (await getOperator(env.DB, operator)) !== null,
@@ -391,7 +428,10 @@ async function register(
     at,
     type: "operator_registered",
     entry_id: null,
-    payload: { operator, maintainer: check.maintainer },
+    // The domain the check settled on, written into the event rather than left
+    // to the row: an offline reader folds `operatorDomainsAt` out of the log
+    // alone, so the first domain has to be in the log alone (decision D-071).
+    payload: { operator, maintainer: check.maintainer, domain: check.domain },
   });
   const withBinding = await appendEvent(withOperator, {
     at,
@@ -431,9 +471,89 @@ async function register(
     operatorId: operator,
     registeredSeq: bound.seq,
   };
-  await registerOperator(env.DB, { events, operator: record, agent: agentRecord });
+  await registerOperator(env.DB, {
+    events,
+    operator: record,
+    agent: agentRecord,
+    domain: { domain: check.domain, attestation: attestationOf(attestation) },
+  });
 
-  return json({ ...record, agents: [agent] }, 201);
+  return json({ ...record, agents: [agent], domains: [check.domain] }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// POST /operators/{id}/domains
+// ---------------------------------------------------------------------------
+
+/**
+ * Take on a second domain.
+ *
+ * Decision D-071: registration binds an operator to the domain its attestation
+ * was signed for, and a later domain is joined by signing that domain's own
+ * attestation. The order here is the order every other write takes: the path,
+ * then the body, then the request signature, then the store, then the pure
+ * check — so a malformed request never costs a signature verification and
+ * nothing is written until every check has passed.
+ *
+ * The join is the operator's own act, so the signing key has to be an agent of
+ * the operator the path names. An agent registered to somebody else is 403 and
+ * not 404: the operator exists, and this key is simply not it.
+ */
+async function joinDomain(
+  request: Request,
+  env: Env,
+  deps: RegistryDeps,
+  path: string,
+  operator: string,
+): Promise<Response> {
+  const auth = await authenticate(request, env, deps, path);
+  if (!auth.ok) return auth.response;
+
+  const parsed = parseDomainJoinBody(auth.body);
+  if (!parsed.ok) return refuse(400, parsed.reason);
+  const { domain, attestation } = parsed.value;
+
+  const record = await getOperator(env.DB, operator);
+  if (record === null) return refuse(404, "not_found");
+  if ((await operatorForAgent(env.DB, auth.agent)) !== operator) {
+    return refuse(403, "agent_mismatch");
+  }
+
+  const held = await operatorDomains(env.DB, operator);
+  const check = await checkDomainJoin({
+    operator,
+    agent: auth.agent,
+    domain,
+    attestation,
+    registered: true,
+    domains: held.map((row) => row.domain),
+  });
+  if (!check.ok) return refuse(JOIN_STATUS[check.reason], check.reason);
+
+  // The event is the record and the row is the index into it, written in one
+  // batch (recordDomainJoin), so a join is either fully in the log and visible
+  // to the next draw or not there at all.
+  const joined = await recordDomainJoin(env.DB, {
+    at: deps.now.toISOString(),
+    type: "operator_joined_domain",
+    entry_id: null,
+    payload: {
+      operator,
+      agent: auth.agent,
+      domain,
+      attestation: attestationOf(attestation),
+    },
+  });
+
+  const agents = await agentsForOperator(env.DB, operator, LIST_PAGE_LIMIT);
+  return json(
+    {
+      ...record,
+      agents: agents.map((agent) => agent.agentId),
+      domains: [...held.map((row) => row.domain), joined.payload.domain],
+    },
+    201,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +641,18 @@ async function operatorById(env: Env, id: string): Promise<Response> {
   const record = await getOperator(env.DB, id);
   if (record === null) return refuse(404, "not_found");
   const agents = await agentsForOperator(env.DB, id, LIST_PAGE_LIMIT);
-  return json({ ...record, agents: agents.map((agent) => agent.agentId) }, 200);
+  // The domains it is attested in, in the order it took them on (decision
+  // D-071). This is what the offline verifier's export reads to rerun the
+  // eligibility check, so it is a field of the record and not of a side route.
+  const domains = await operatorDomains(env.DB, id);
+  return json(
+    {
+      ...record,
+      agents: agents.map((agent) => agent.agentId),
+      domains: domains.map((row) => row.domain),
+    },
+    200,
+  );
 }
 
 async function agentById(env: Env, agentId: string): Promise<Response> {
@@ -549,6 +680,27 @@ function segmentAfter(path: string, prefix: string): string | null {
     return decodeURIComponent(rest);
   } catch {
     return null;
+  }
+}
+
+/**
+ * The operator id in `/operators/{id}/domains`, or null when the path is not
+ * that shape — including `/operators/domains`, which names an operator called
+ * "domains" and belongs to the read below rather than here. An id that will not
+ * percent-decode comes back as the empty string, so the route answers `bad_id`
+ * rather than a 404 that would claim the path does not exist at all.
+ */
+function domainsPathOperator(path: string): string | null {
+  const prefix = "/operators/";
+  const suffix = "/domains";
+  if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+  if (path.length <= prefix.length + suffix.length) return null;
+  const middle = path.slice(prefix.length, -suffix.length);
+  if (middle.includes("/")) return null;
+  try {
+    return decodeURIComponent(middle);
+  } catch {
+    return "";
   }
 }
 
@@ -596,6 +748,13 @@ async function route(
   if (path === "/genesis") {
     if (request.method === "POST") return genesis(request, env, deps, path);
     return methodNotAllowed("POST");
+  }
+
+  const joiner = domainsPathOperator(path);
+  if (joiner !== null) {
+    if (joiner === "") return refuse(400, "bad_id");
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return joinDomain(request, env, deps, path, joiner);
   }
 
   const operatorId = segmentAfter(path, "/operators/");

@@ -11,7 +11,12 @@
  * wrong can fix it; a caller handed the last one has to guess what came before.
  */
 
-import { DISPUTE_FILING_FEE_CENTS, LIST_PAGE_LIMIT } from "../../policy.js";
+import { CORE_KEYS } from "../../core.js";
+import {
+  DISPUTE_FILING_FEE_CENTS,
+  LIST_PAGE_LIMIT,
+  SCHEMA_VERSION,
+} from "../../policy.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
 import type { PageContext } from "../types.js";
@@ -154,28 +159,46 @@ const READ_PATH: readonly Endpoint[] = [
     method: "GET",
     path: "/read",
     parameters:
-      "subject=<s>, category=<c>, min_tier=stated|observed, max_age=<days>; entry_id=<id> as the query form of /read/{id}",
+      "subject=<s>, category=<c>, domain=<slug>, min_tier=stated|observed, max_age=<days>; entry_id=<id> as the query form of /read/{id}",
     answers:
-      "The newest verified submission about one subject in one category that passes the reader's demands. The tier compared is the effective one the entry verified at, never the tier its core claimed, and the age is whole UTC days against last_confirmed.",
+      "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed, and the age is whole UTC days against last_confirmed.",
     refusals:
-      "400 unknown_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, bad_min_tier, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
     path: "/sync",
     parameters:
-      `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed`,
+      `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, domain=<slug>`,
     answers:
-      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; neither can touch an unlearn.",
+      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the three can touch an unlearn.",
     refusals:
-      "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+  },
+  {
+    method: "GET",
+    path: "/",
+    parameters: "domain=<slug>",
+    answers:
+      "The home page. domain narrows the verified, stale and trusted-pool counters and the latest entries to one registered domain; the head and the seal count are the whole log's either way, because a seal covers events and not a domain.",
+    refusals: "400 unknown_domain.",
+  },
+  {
+    method: "GET",
+    path: "/entries",
+    parameters:
+      "category=<c>, status=<s>, domain=<slug>, tier=stated|observed, fresh=fresh|stale, before=<position>",
+    answers:
+      "The browsing listing, newest sealed position first, one keyset page. A chip group carries each filter, domain among them, and every chip and the pager keep the rest of the query as it stands. HTML only: the JSON twin of a listing is GET /events.",
+    refusals:
+      "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_tier, bad_fresh, bad_before. An empty value (?category=) is a refusal and not an absence.",
   },
   {
     method: "GET",
     path: "/policy",
     parameters: "—",
     answers:
-      "The published policy object, served from the same module the kernel reads. Every number on the policy page, as JSON.",
+      "The published policy object, served from the same module the kernel reads. Every number on the policy page, as JSON, DOMAINS among them — each registered domain's categories, staleness windows, transcript categories, excluded parties, attestation and subject convention.",
     refusals: "405 with Allow: GET.",
   },
   {
@@ -217,11 +240,11 @@ const WRITE_PATH: readonly Endpoint[] = [
     method: "POST",
     path: "/operators",
     parameters:
-      "operator, attestation { version, signed_at, signature }, payout { reference }; no other keys",
+      "operator, domain (the registered domain this operator joins first, and the one its attestation is signed for), attestation { version, domain, signed_at, signature }, payout { reference }; no other keys",
     answers:
-      "201 with the operator record: id, maintainer, provider, registered_seq, details (registered_by, attestation, trusted, trusted_seq, named_by, payout_status), agents. The events operator_registered and agent_bound are appended atomically with the rows.",
+      "201 with the operator record: id, maintainer, provider, registered_seq, details (registered_by, attestation, trusted, trusted_seq, named_by, payout_status), agents, domains. The events operator_registered and agent_bound are appended atomically with the rows.",
     refusals:
-      "400 bad body shape; 401 authentication; 422 bad_domain, provider_operator, missing_attestation, bad_attestation; 409 operator_exists, agent_bound; 422 dns_no_record, dns_mismatch and 503 dns_unavailable; 422 payout_not_verified and 503 payout_unavailable.",
+      "400 bad body shape; 401 authentication; 422 bad_domain, unregistered_domain, provider_operator (decided against that domain's excluded parties), missing_attestation, bad_attestation, attestation_domain_mismatch; 409 operator_exists, agent_bound; 422 dns_no_record, dns_mismatch and 503 dns_unavailable; 422 payout_not_verified and 503 payout_unavailable.",
   },
   {
     method: "GET",
@@ -234,8 +257,19 @@ const WRITE_PATH: readonly Endpoint[] = [
     method: "GET",
     path: "/operators/{id}",
     parameters: "—",
-    answers: "One operator record with its bound agents.",
+    answers:
+      "One operator record with its bound agents and its domains — every registered domain this operator is attested in, registration's first and then each join, with the attestation signed for it.",
     refusals: "404 not_found.",
+  },
+  {
+    method: "POST",
+    path: "/operators/{id}/domains",
+    parameters:
+      "domain, attestation { version, domain, signed_at, signature }; signed by one of the operator's own agents",
+    answers:
+      "201 with the operator record, its domains now including this one. The event operator_joined_domain is appended atomically with the row. The attestation is per domain and never per operator: an operator signs the sentence of the domain it is joining, so joining a second domain is signing a second attestation and nothing about the first changes.",
+    refusals:
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 agent_mismatch; then 422 unregistered_operator, unregistered_domain, 403 excluded_party, 409 already_joined, 422 missing_attestation, bad_attestation, attestation_domain_mismatch.",
   },
   {
     method: "GET",
@@ -257,11 +291,11 @@ const WRITE_PATH: readonly Endpoint[] = [
     method: "POST",
     path: "/entries",
     parameters:
-      "entry (the 17 signed core keys plus signature), and receipt only when observation is non-null",
+      `entry (the ${CORE_KEYS.length} signed core keys, domain among them, plus signature), and receipt only when observation is non-null`,
     answers:
       "201 with the derived entry and a Location header. The entry is draft: status is recomputed from the log and is never sent in. The Worker fetches the citation itself under the norm rule and refuses unless what it fetched hashes to the snapshot_hash the author signed.",
     refusals:
-      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 schema_invalid; 409 chain_moved.",
+      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 schema_invalid; 409 chain_moved.",
   },
   {
     method: "POST",
@@ -271,7 +305,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation.",
     refusals:
-      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, schema_invalid.",
+      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, operator_not_in_domain (the operator is not attested in the entry's own domain), missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, schema_invalid.",
   },
   {
     method: "POST",
@@ -281,7 +315,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry: last_confirmed advanced to the record's date, the window reopened, a read-share slot seated or rotated, and the accrued bounty written to the ledger in the same batch as the event that earned it.",
     refusals:
-      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature, entry_not_verified, unregistered_agent, operator_mismatch, submitter_agent, submitter_operator, untrusted_operator, missing_snapshot_hash, unexpected_reproduction, unexpected_observation, missing_reproduction, bad_reproduction, failed_reproduction, missing_observation, bad_observation, failed_observation; 409 entry_not_stale; 422 schema_invalid.",
+      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature, entry_not_verified, unregistered_agent, operator_mismatch, submitter_agent, submitter_operator, untrusted_operator, operator_not_in_domain, missing_snapshot_hash, unexpected_reproduction, unexpected_observation, missing_reproduction, bad_reproduction, failed_reproduction, missing_observation, bad_observation, failed_observation; 409 entry_not_stale; 422 schema_invalid.",
   },
   {
     method: "POST",
@@ -300,7 +334,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry, its sidecar carrying the new request. The checker is not chosen here: the next sweep draws one from the beacon and records the deadline.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 422 entry_not_verified, entry_stale, bare_key, cap_exceeded; 409 request_open; 422 insufficient_standing (the operator's available standing is below the published request stake), schema_invalid.",
+      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 422 entry_not_verified, entry_stale, bare_key, operator_not_in_domain, cap_exceeded; 409 request_open; 422 insufficient_standing (the operator's available standing is below the published request stake), schema_invalid.",
   },
   {
     method: "POST",
@@ -337,7 +371,7 @@ const ATTESTATION_PATH: readonly Endpoint[] = [
   {
     method: "POST",
     path: "/attestations",
-    parameters: "{} — an empty body; signed by the model agent",
+    parameters: "domain — the registered domain to attest in; signed by the model agent",
     answers:
       "201 with the derived attestation: the probe set drawn from verified, observed, fresh entries by the beacon and a published pool snapshot, the probe hash, the scorers drawn from the trusted pool, and the deadline. Neither the model's operator nor the maintainer picks the questions, and one model attests at most once per beacon round.",
     refusals:
@@ -361,7 +395,7 @@ const ATTESTATION_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived attestation. The published score is the median of the scorers' agreed counts over the probe count, and it appears only once every drawn scorer has signed.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature; then 409 not_open, 422 deadline_passed, 403 not_a_scorer, 422 operator_mismatch, 403 model_operator, 409 duplicate_scorer, 422 probe_hash_mismatch, answers_hash_mismatch, bad_agreed.",
+      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature; then 409 not_open, 422 deadline_passed, 403 not_a_scorer, 422 operator_mismatch, 403 model_operator, 403 operator_not_in_domain (a scorer must be attested in the attestation's own domain), 409 duplicate_scorer, 422 probe_hash_mismatch, answers_hash_mismatch, bad_agreed.",
   },
   {
     method: "GET",
@@ -481,8 +515,11 @@ POST
           <span class="mono">npm run keygen -- &lt;path&gt;</span>, which writes a
           0600 JSON file holding agent_id, public_key, private_key_pkcs8 and
           created_at. An entry's own <span class="mono">signature</span> field is
-          separate: base64 Ed25519 over the JCS of the seventeen-key core,
-          verified against the key in <span class="mono">author</span>.
+          separate: base64 Ed25519 over the JCS of the
+          ${CORE_KEYS.length}-key core, verified against the key in
+          <span class="mono">author</span>. A core sealed under schema v0.6
+          carries seventeen keys and no <span class="mono">domain</span> at all,
+          so its hash and its signature stay exactly what they were.
         </p>
       </section>
 
@@ -562,6 +599,26 @@ npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt;
           <span class="mono">receipt</span>.
         </p>
         <pre class="block mono">npm run submit -- &lt;key.json&gt; ${origin} &lt;fields.json&gt; --receipt &lt;receipt.json&gt;</pre>
+        <p class="note">
+          The fields file carries <span class="mono">domain</span> beside
+          subject and category: the author names the domain they sign, and a
+          fields file without one is <span class="mono">bad_fields</span> before
+          any I/O rather than a default nobody chose.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Registering and joining a domain</h2>
+        <p class="note">
+          Registration names the operator's first domain and signs that domain's
+          attestation; <span class="mono">--domain</span> defaults to the only
+          domain there is today. A registered operator takes on a further domain
+          with <span class="mono">--join</span>, which signs that slug's
+          attestation and posts it to
+          <span class="mono">POST /operators/{id}/domains</span>.
+        </p>
+        <pre class="block mono">npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; [--domain &lt;slug&gt;] [--genesis &lt;key.json&gt;]
+npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; --join &lt;slug&gt;</pre>
       </section>
 
       <section class="panel">
@@ -636,14 +693,25 @@ npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt;
         <pre class="block mono">npm run export -- ${origin} &lt;entry-id&gt; ./bundle
 npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
         <p class="note">
+          The verifier prints the schema version it checked against
+          (<span class="mono">${SCHEMA_VERSION}</span>) and refuses a core that
+          carries no <span class="mono">domain</span> with
+          <span class="mono">unsupported_schema_version</span>, naming that
+          version — exactly as it refuses an unknown normalization rule with
+          <span class="mono">unsupported_norm_version</span>. The exclusions
+          check reruns the eligibility rules with each operator's domains from
+          the bundle's registry, an operator carrying none reading as the domain
+          that was the only one there was.
+        </p>
+        <p class="note">
           The read and sync paths have commands of their own, which check what
           came back rather than trusting it: the receipt's signature against the
           key inside its own issuer id, the receipt's entry_hash against the hash
           recomputed from the entry's core, and the inclusion proof against the
           covering seal's root.
         </p>
-        <pre class="block mono">npm run read -- ${origin} &lt;entry-id&gt;
-npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT}</pre>
+        <pre class="block mono">npm run read -- ${origin} &lt;entry-id&gt; [--domain &lt;slug&gt;]
+npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT} [--domain &lt;slug&gt;]</pre>
         <p class="note">
           Standing has a command of the same shape: it folds the sealed events by
           the published formula itself and compares its own answer with the

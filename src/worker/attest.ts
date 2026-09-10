@@ -51,14 +51,24 @@ import {
   type ScoreRefusal,
 } from "../attest.js";
 import { confidenceInputs } from "../confidence.js";
-import { registeredOperatorsAt, type Clock } from "../derive.js";
+import {
+  operatorDomainsAt,
+  operatorDomainsOf,
+  registeredOperatorsAt,
+  type Clock,
+} from "../derive.js";
 import type {
   AttestationScorer,
   AttestationScoreRecord,
   Event,
 } from "../events.js";
 import { entryHash } from "../hash.js";
-import { LIST_PAGE_LIMIT, REQUEST_CLOCK_SKEW_SECONDS } from "../policy.js";
+import {
+  DEFAULT_DOMAIN,
+  isRegisteredDomain,
+  LIST_PAGE_LIMIT,
+  REQUEST_CLOCK_SKEW_SECONDS,
+} from "../policy.js";
 import {
   answersHash,
   checkAnswers,
@@ -74,6 +84,7 @@ import {
   eventsForAttestation,
   getAttestation,
   getEntry,
+  headSeq,
   listAttestations,
   openAttestationForModel,
   operatorForAgent,
@@ -133,6 +144,9 @@ const SCORE_STATUS: Readonly<Record<ScoreRefusal, number>> = Object.freeze({
   not_a_scorer: 403,
   operator_mismatch: 422,
   model_operator: 403,
+  // A scorer that never attested in this attestation's domain is 403 for the
+  // reason the model's own operator is: understood, proved, and still no.
+  operator_not_in_domain: 403,
   duplicate_scorer: 409,
   probe_hash_mismatch: 422,
   answers_hash_mismatch: 422,
@@ -189,15 +203,18 @@ async function derivedAttestation(
  * receipts name, so a scorer years later can tell which version of the fact was
  * asked about.
  */
-async function candidatesFor(db: D1Like): Promise<ProbeCandidate[]> {
+async function candidatesFor(
+  db: D1Like,
+  domain: string,
+): Promise<ProbeCandidate[]> {
   const candidates: ProbeCandidate[] = [];
   let afterId: string | undefined;
   for (;;) {
     const page = await probeCandidates(
       db,
       afterId === undefined
-        ? { limit: LIST_PAGE_LIMIT }
-        : { limit: LIST_PAGE_LIMIT, afterId },
+        ? { limit: LIST_PAGE_LIMIT, domain }
+        : { limit: LIST_PAGE_LIMIT, domain, afterId },
     );
     if (page.length === 0) break;
     for (const stored of page) {
@@ -218,8 +235,9 @@ async function request_(
   deps: AttestDeps,
   path: string,
 ): Promise<Response> {
-  // Nothing is asked for: the probes are drawn by public randomness and the
-  // scorers with them, so a body carrying anything at all is a request about
+  // One thing is asked for and one only: the domain to attest in (decision
+  // D-071). The probes are drawn by public randomness and the scorers with
+  // them, so a body carrying anything beyond the domain is a request about
   // something this door does not do.
   let raw: unknown;
   try {
@@ -227,9 +245,14 @@ async function request_(
   } catch {
     return refuse(400, "bad_body");
   }
-  if (!isRecord(raw) || Object.keys(raw).length > 0) {
-    return refuse(400, "bad_body");
+  if (!isRecord(raw)) return refuse(400, "bad_body");
+  for (const key of Object.keys(raw)) {
+    if (key !== "domain") return refuse(400, "bad_body");
   }
+  const asked = raw["domain"];
+  const domain = asked === undefined ? DEFAULT_DOMAIN : asked;
+  if (typeof domain !== "string") return refuse(400, "bad_body");
+  if (!isRegisteredDomain(domain)) return refuse(422, "unregistered_domain");
 
   const auth = await authenticate(request, env, deps, path);
   if (!auth.ok) return auth.response;
@@ -255,7 +278,11 @@ async function request_(
   // can read precedes the snapshot it would draw against, so the client comes
   // back for a later round rather than drawing against a commitment made after
   // it. `insufficient_candidates` is the thin observed tier at genesis.
-  const probes = await probeSet({ candidates: await candidatesFor(db), snapshot: pool, beacon });
+  const probes = await probeSet({
+    candidates: await candidatesFor(db, domain),
+    snapshot: pool,
+    beacon,
+  });
   if (!probes.ok) return refuse(422, probes.reason);
 
   // Section 5: anyone may hold a key, and null is the truth about a bare one. A
@@ -263,6 +290,12 @@ async function request_(
   // behind it whose control the exclusion exists to answer.
   const modelOperator = await operatorForAgent(db, auth.agent);
   const { maintainers } = registeredOperatorsAt(registry, headPosition(registry));
+  // Decision D-071: the draw itself stays domain-blind and recomputable, so the
+  // caller hands it every pool operator that is not attested in this domain.
+  const attested = operatorDomainsAt(registry, headPosition(registry));
+  const outsideDomain = pool.operators.filter(
+    (operator) => !(attested.get(operator) ?? [DEFAULT_DOMAIN]).includes(domain),
+  );
   const draw = await drawScorers({
     model: auth.agent,
     probe_hash: probes.probe_hash,
@@ -271,6 +304,7 @@ async function request_(
     exclude: [
       ...(modelOperator === null ? [] : [modelOperator]),
       ...maintainers,
+      ...outsideDomain,
     ],
   });
   if (!draw.ok) return refuse(422, draw.reason);
@@ -310,6 +344,7 @@ async function request_(
       entry_id: null,
       payload: {
         attestation: id,
+        domain,
         model: auth.agent,
         model_operator: modelOperator,
         probes: probes.probes,
@@ -523,6 +558,14 @@ async function score(
     // The operator the registry puts behind the signing key, which the kernel
     // cannot resolve because it does not read the log.
     scorerOperator: await operatorForAgent(db, auth.agent),
+    // The domains that operator is attested in, folded out of the registry
+    // events at the head; the kernel compares them against the attestation's
+    // own domain.
+    scorerDomains: operatorDomainsOf(
+      await registryEvents(db),
+      record.operator,
+      (await headSeq(db)) ?? 0,
+    ),
     now: deps.now.toISOString(),
   });
   if (!allowed.ok) return refuse(SCORE_STATUS[allowed.reason], allowed.reason);

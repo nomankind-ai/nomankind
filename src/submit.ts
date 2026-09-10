@@ -8,7 +8,7 @@
  *
  * `buildSubmittedCore` is the client-side half, run before signing: it fills in
  * the fields the submitter does not choose — the id, the submission time, the
- * norm version in force, the default tier — so that every one of the seventeen
+ * norm version in force, the default tier — so that every one of the eighteen
  * core keys is present and the JCS canonical form the author signs is
  * unambiguous. It never signs; the key stays with the caller.
  *
@@ -34,7 +34,12 @@ import {
   type EvidenceTier,
 } from "./evidence.js";
 import { canonicalize, taggedSha256Hex } from "./hash.js";
-import { NORM_VERSION, REQUEST_CLOCK_SKEW_SECONDS } from "./policy.js";
+import {
+  isDomainCategory,
+  isRegisteredDomain,
+  NORM_VERSION,
+  REQUEST_CLOCK_SKEW_SECONDS,
+} from "./policy.js";
 
 /**
  * Domain-separation tag for the entry id. A format constant, not a policy
@@ -83,6 +88,13 @@ export async function entryIdFor(core: Core): Promise<string> {
 export interface SubmissionProposal {
   readonly subject: string;
   readonly category: string;
+  /**
+   * The registered domain the fact belongs to. Required and never defaulted:
+   * the domain is part of the signed core, so it is the author's own assertion
+   * about where the fact is filed and not something a tool fills in for them
+   * (decision D-071).
+   */
+  readonly domain: string;
   readonly claim: string;
   readonly before: string;
   readonly after: string;
@@ -112,7 +124,10 @@ function orNull(value: unknown): unknown {
  * stated.
  */
 function defaultTier(proposal: SubmissionProposal): EvidenceTier {
-  if (isTranscriptCategory(proposal.category)) {
+  if (
+    isRegisteredDomain(proposal.domain) &&
+    isTranscriptCategory(proposal.domain, proposal.category)
+  ) {
     return "observed";
   }
   return orNull(proposal.observation) === null ? "stated" : "observed";
@@ -121,7 +136,7 @@ function defaultTier(proposal: SubmissionProposal): EvidenceTier {
 /**
  * Build the core the author is about to sign, from what the submitter chose.
  *
- * Returns all seventeen keys in the schema's order, with the four nullable ones
+ * Returns all eighteen keys in the schema's order, with the four nullable ones
  * explicitly null when absent. `submitted_at` is the injected clock and nothing
  * else, `norm_version` is the version in force from policy (the kernel
  * implements exactly one), and `id` is derived from the finished core, so the
@@ -139,6 +154,7 @@ export async function buildSubmittedCore(
     id: null,
     subject: proposal.subject,
     category: proposal.category,
+    domain: proposal.domain,
     claim: proposal.claim,
     before: proposal.before,
     after: proposal.after,
@@ -161,6 +177,9 @@ export async function buildSubmittedCore(
 export type SubmissionRefusal =
   | "bad_id"
   | "bad_norm_version"
+  | "missing_domain"
+  | "unregistered_domain"
+  | "category_not_in_domain"
   | "bad_submitted_at"
   | "author_mismatch"
   | "author_operator_mismatch"
@@ -170,6 +189,9 @@ export type SubmissionRefusal =
 export const SUBMISSION_REFUSALS: readonly SubmissionRefusal[] = Object.freeze([
   "bad_id",
   "bad_norm_version",
+  "missing_domain",
+  "unregistered_domain",
+  "category_not_in_domain",
   "bad_submitted_at",
   "author_mismatch",
   "author_operator_mismatch",
@@ -222,6 +244,18 @@ function instant(value: unknown): number {
  * kernel implements exactly one, and an entry is refused rather than checked
  * against rules it never claimed.
  *
+ * missing_domain: a seventeen-key core, sealed under schema v0.6. Such a core is
+ * still served, listed and synced exactly as it always was, but nothing new
+ * enters the log without naming its domain: a new entry is a v0.7 entry.
+ *
+ * unregistered_domain: a slug no domain registry entry names
+ * (schema/nomankind-domain-registry-v1.md). A domain is added by decision, never
+ * by a submission that invents one.
+ *
+ * category_not_in_domain: a category the schema's union enum holds but this
+ * domain does not admit. The schema cannot express a per-domain enum, so this is
+ * where that rule is actually enforced.
+ *
  * bad_submitted_at: not a date-time at all, or further from the verifier's clock
  * than the skew window allows, in either direction. The paper has the source
  * snapshotted at the moment of submission, so a submission time far from now
@@ -250,6 +284,16 @@ export function checkSubmission(
   }
   if (core.norm_version !== NORM_VERSION) {
     return { ok: false, reason: "bad_norm_version" };
+  }
+
+  if (core.domain === undefined) {
+    return { ok: false, reason: "missing_domain" };
+  }
+  if (!isRegisteredDomain(core.domain)) {
+    return { ok: false, reason: "unregistered_domain" };
+  }
+  if (!isDomainCategory(core.domain, core.category)) {
+    return { ok: false, reason: "category_not_in_domain" };
   }
 
   const submittedAt = instant(core.submitted_at);

@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 
 import { appendEvent, type ApproverRecord, type Event } from "../src/index.js";
+import { SCHEMA_VERSION } from "../src/policy.js";
 import { CHECKS, verifyOffline, type Diff, type VerifyReport } from "../src/verify.js";
 import { signRecord } from "../src/records.js";
 import {
@@ -238,6 +239,27 @@ describe("verifyOffline: one edited field at a time", () => {
     expect(diffs[0]!.reason).toBe("unsupported_norm_version");
     // The recompute is refused, not faked: no snapshot_hash diff is invented.
     expect(find(report, "snapshot", "/snapshot_hash")).toHaveLength(0);
+  });
+
+  it("refuses a v0.6 core, naming the schema version it checks against", async () => {
+    // Decision D-071: a core without `domain` was sealed under v0.7's
+    // predecessor. It is still served, listed and synced exactly as it always
+    // was; what the verifier will not do is check it against rules it never
+    // claimed, so it says which version it checks against, exactly as
+    // `unsupported_norm_version` does for the normalization rule.
+    const { entry, bundle } = await files();
+    delete entry["domain"];
+
+    const report = await verifyOffline(entry, bundle);
+    expectWellFormed(report);
+    const diffs = find(report, "schema", "/domain").filter(
+      (diff) => diff.reason === "unsupported_schema_version",
+    );
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0]!.expected).toBe(SCHEMA_VERSION);
+    expect(diffs[0]!.expected).toBe("v0.7");
+    expect(diffs[0]!.actual).toBe("v0.6");
+    expect(report.ok).toBe(false);
   });
 
   it("names a seal whose root no longer commits to the batch", async () => {

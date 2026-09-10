@@ -30,7 +30,7 @@
  * slot all stay derivation's job (src/derive.ts), recomputed from the events.
  */
 
-import type { Core } from "./core.js";
+import { domainOf, type Core } from "./core.js";
 import type { EntryStatus } from "./derive.js";
 import type { ReconfirmationRecord } from "./events.js";
 import {
@@ -39,6 +39,7 @@ import {
   measurementPasses,
   type EvidenceTier,
 } from "./evidence.js";
+import { DEFAULT_DOMAIN } from "./policy.js";
 
 /**
  * Everything the check needs, gathered by the caller at the record's position
@@ -51,6 +52,12 @@ export interface ReconfirmationContext {
   readonly agentOperators: Readonly<Record<string, string>>;
   /** The trusted pool as of the record's position. The maintainer's operator is never in it. */
   readonly trustedOperators: readonly string[];
+  /**
+   * The domains this reconfirmer's operator is attested in (src/derive.ts,
+   * `operatorDomainsAt`). Absent reads as the default domain, which is what a
+   * registration sealed before v0.7 meant.
+   */
+  readonly operatorDomains?: readonly string[];
   /** The entry's derived status at that position. */
   readonly status: EntryStatus;
   /** The entry's sidecar effective_tier at that position (null only while unverified). */
@@ -65,6 +72,7 @@ export type ReconfirmationRefusal =
   | "submitter_agent"
   | "submitter_operator"
   | "untrusted_operator"
+  | "operator_not_in_domain"
   | "missing_snapshot_hash"
   | "unexpected_reproduction"
   | "unexpected_observation"
@@ -83,6 +91,7 @@ export const RECONFIRMATION_REFUSALS: readonly ReconfirmationRefusal[] = Object.
   "submitter_agent",
   "submitter_operator",
   "untrusted_operator",
+  "operator_not_in_domain",
   "missing_snapshot_hash",
   "unexpected_reproduction",
   "unexpected_observation",
@@ -162,6 +171,15 @@ export function checkReconfirmation(
     return refuse("untrusted_operator");
   }
 
+  // 6a. Decision D-071: eligibility is per domain, because the independence
+  // attestation is. A trusted operator refreshes an entry only in a domain it
+  // has attested in; being trusted is not being attested everywhere.
+  const entryDomain = domainOf(core);
+  const attestedIn = context.operatorDomains ?? [DEFAULT_DOMAIN];
+  if (!attestedIn.includes(entryDomain)) {
+    return refuse("operator_not_in_domain");
+  }
+
   // 7. Section 6: the attestation rests on a fresh snapshot hash, over the
   // fetched source or over the reconfirmer's own transcript or receipt. Every
   // shape carries one; for a stated entry it is the whole attestation.
@@ -179,7 +197,7 @@ export function checkReconfirmation(
   const hasReproduction = present(record.reproduction);
   const hasObservation = present(record.observation);
 
-  if (isTranscriptCategory(core.category)) {
+  if (isTranscriptCategory(entryDomain, core.category)) {
     // Section 4: reconfirmation for behavior and misbehavior means reproduction,
     // rerunning the frozen prompt under the same n-of-k rule. That holds at
     // either effective tier: a transcript entry that verified as stated on a

@@ -10,6 +10,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+import { DEFAULT_DOMAIN } from "../src/policy.js";
 import {
   ENTRIES_QUERY_PARAMETERS,
   ENTRIES_QUERY_REFUSALS,
@@ -44,10 +46,11 @@ describe("the accepted values come from the schema", () => {
     expect([...ENTRY_TIERS]).toEqual(schema.properties.evidence_tier.enum);
   });
 
-  it("accepts exactly five parameters", () => {
+  it("accepts exactly six parameters", () => {
     expect([...ENTRIES_QUERY_PARAMETERS]).toEqual([
       "category",
       "status",
+      "domain",
       "tier",
       "fresh",
       "before",
@@ -60,6 +63,7 @@ describe("the accepted values come from the schema", () => {
       "repeated_parameter",
       "bad_category",
       "bad_status",
+      "unknown_domain",
       "bad_tier",
       "bad_fresh",
       "bad_before",
@@ -71,24 +75,33 @@ describe("what parses", () => {
   it("takes the empty query as no filter at all", () => {
     expect(parse("")).toEqual({
       ok: true,
-      filter: { category: null, status: null, tier: null, fresh: null },
+      filter: {
+        category: null,
+        status: null,
+        domain: null,
+        tier: null,
+        fresh: null,
+      },
       before: null,
     });
   });
 
   it("parses a full query", () => {
-    expect(parse("category=pricing&status=verified&tier=observed&fresh=stale&before=48213")).toEqual(
-      {
-        ok: true,
-        filter: {
-          category: "pricing",
-          status: "verified",
-          tier: "observed",
-          fresh: "stale",
-        },
-        before: 48213,
+    expect(
+      parse(
+        `category=pricing&status=verified&domain=${DEFAULT_DOMAIN}&tier=observed&fresh=stale&before=48213`,
+      ),
+    ).toEqual({
+      ok: true,
+      filter: {
+        category: "pricing",
+        status: "verified",
+        domain: DEFAULT_DOMAIN,
+        tier: "observed",
+        fresh: "stale",
       },
-    );
+      before: 48213,
+    });
   });
 
   it("parses before as an integer, and accepts position zero", () => {

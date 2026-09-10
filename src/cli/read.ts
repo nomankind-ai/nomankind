@@ -53,7 +53,7 @@ import {
 } from "./validator.js";
 
 const USAGE =
-  "usage: read <base-url> <entry-id> | read <base-url> --subject <subject> --category <category> [--min-tier <tier>] [--max-age <days>]";
+  "usage: read <base-url> <entry-id> | read <base-url> --subject <subject> --category <category> [--domain <slug>] [--min-tier <tier>] [--max-age <days>]";
 
 /** The checks, in the order they are made. The order is the contract. */
 export const READ_CHECKS = [
@@ -104,7 +104,13 @@ export function readPath(args: readonly string[]): string | null {
     values.set(flag, value);
   }
 
-  const known = ["--subject", "--category", "--min-tier", "--max-age"];
+  const known = [
+    "--subject",
+    "--category",
+    "--domain",
+    "--min-tier",
+    "--max-age",
+  ];
   for (const flag of values.keys()) {
     if (!known.includes(flag)) return null;
   }
@@ -117,6 +123,11 @@ export function readPath(args: readonly string[]): string | null {
   const params = new URLSearchParams();
   params.set("subject", subject);
   params.set("category", category);
+  // Decision D-071: absent means the reader named no domain and every domain's
+  // entries about that subject are candidates, which is what a client written
+  // before v0.7 asks for.
+  const domain = values.get("--domain");
+  if (domain !== undefined) params.set("domain", domain);
   const minTier = values.get("--min-tier");
   if (minTier !== undefined) params.set("min_tier", minTier);
   const maxAge = values.get("--max-age");

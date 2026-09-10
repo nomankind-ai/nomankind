@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_DOMAIN, DOMAINS } from "../src/policy.js";
+
 import { extractCore, type Core } from "../src/core.js";
 import type { ApproverRecord } from "../src/events.js";
 import { REPRODUCTION_HOLDS, REPRODUCTION_RUNS } from "../src/policy.js";
@@ -18,7 +20,6 @@ import {
   CORE_EVIDENCE_REFUSALS,
   NO_PREDICATE,
   RECORD_EVIDENCE_REFUSALS,
-  TRANSCRIPT_CATEGORIES,
   checkCoreEvidence,
   checkRecordEvidence,
   evidenceGate,
@@ -154,16 +155,23 @@ function record(overrides: Partial<ApproverRecord> = {}): ApproverRecord {
 }
 
 describe("transcript categories", () => {
-  it("names behavior and misbehavior, and nothing else", () => {
-    expect(TRANSCRIPT_CATEGORIES).toEqual(["behavior", "misbehavior"]);
-    expect(isTranscriptCategory("behavior")).toBe(true);
-    expect(isTranscriptCategory("misbehavior")).toBe(true);
+  it("names behavior and misbehavior of the default domain, and nothing else", () => {
+    expect(DOMAINS[DEFAULT_DOMAIN]!.transcript_categories).toEqual([
+      "behavior",
+      "misbehavior",
+    ]);
+    expect(isTranscriptCategory(DEFAULT_DOMAIN, "behavior")).toBe(true);
+    expect(isTranscriptCategory(DEFAULT_DOMAIN, "misbehavior")).toBe(true);
     for (const category of ["release", "deprecation", "pricing", "limit", "outage", "correction"]) {
-      expect(isTranscriptCategory(category)).toBe(false);
+      expect(isTranscriptCategory(DEFAULT_DOMAIN, category)).toBe(false);
     }
-    expect(isTranscriptCategory(null)).toBe(false);
-    expect(isTranscriptCategory(undefined)).toBe(false);
-    expect(isTranscriptCategory(42)).toBe(false);
+    expect(isTranscriptCategory(DEFAULT_DOMAIN, null)).toBe(false);
+    expect(isTranscriptCategory(DEFAULT_DOMAIN, undefined)).toBe(false);
+    expect(isTranscriptCategory(DEFAULT_DOMAIN, 42)).toBe(false);
+  });
+
+  it("answers no for a domain nobody registered", () => {
+    expect(isTranscriptCategory("biotech", "behavior")).toBe(false);
   });
 });
 

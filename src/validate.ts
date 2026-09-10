@@ -20,9 +20,19 @@
  */
 
 import type { ApproverRecord } from "./events.js";
+import { DEFAULT_DOMAIN } from "./policy.js";
 
-/** What the registry knows about an operator at the decision's position in the log. */
-export type OperatorInfo = { readonly maintainer: boolean; readonly provider: boolean };
+/**
+ * What the registry knows about an operator at the decision's position in the
+ * log. `domains` is every domain the operator is attested in (src/derive.ts,
+ * `operatorDomainsAt`); a context built before v0.7 carries none and reads as
+ * the default domain, which is what its registration meant.
+ */
+export type OperatorInfo = {
+  readonly maintainer: boolean;
+  readonly provider: boolean;
+  readonly domains?: readonly string[];
+};
 
 /**
  * Everything the check needs, gathered by the caller at the decision's position
@@ -35,6 +45,11 @@ export interface ValidationContext {
   readonly agentOperators: Readonly<Record<string, string>>;
   /** Registered operators as of the decision's position. */
   readonly operators: Readonly<Record<string, OperatorInfo>>;
+  /**
+   * The entry's domain, read from its signed core (`domainOf(core)`). Absent
+   * reads as the default domain, exactly as a legacy v0.6 core does.
+   */
+  readonly domain?: string;
   /** Decisions already on this entry, in log order. */
   readonly priorRecords: readonly ApproverRecord[];
   /** The open assignment for this entry, or null. */
@@ -63,6 +78,7 @@ export type ValidationRefusal =
   | "original_signer"
   | "maintainer_operator"
   | "provider_operator"
+  | "operator_not_in_domain"
   | "missing_snapshot_hash"
   | "missing_reason"
   | "duplicate_operator"
@@ -79,6 +95,7 @@ export const VALIDATION_REFUSALS: readonly ValidationRefusal[] = Object.freeze([
   "original_signer",
   "maintainer_operator",
   "provider_operator",
+  "operator_not_in_domain",
   "missing_snapshot_hash",
   "missing_reason",
   "duplicate_operator",
@@ -158,6 +175,17 @@ export function checkValidation(
   // model provider may register as an operator at all.
   if (operator.maintainer) return refuse("maintainer_operator");
   if (operator.provider) return refuse("provider_operator");
+
+  // 8a. Decision D-071: the independence attestation is per domain, so
+  // eligibility is too. An operator judges an entry only in a domain it has
+  // signed that domain's attestation for -- and an operator excluded from one
+  // domain stays eligible in another, which is exactly what a per-domain check
+  // and a global one differ about.
+  const entryDomain = context.domain ?? DEFAULT_DOMAIN;
+  const attestedIn = operator.domains ?? [DEFAULT_DOMAIN];
+  if (!attestedIn.includes(entryDomain)) {
+    return refuse("operator_not_in_domain");
+  }
 
   // 9-10. Section 6: an approval carries the validator's own snapshot hash, so
   // the capture at submission is never the only witness to what the page said;

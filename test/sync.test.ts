@@ -17,6 +17,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
   SYNC_QUERY_PARAMETERS,
   SYNC_QUERY_REFUSALS,
@@ -39,6 +40,7 @@ function query(overrides: Partial<SyncQuery> = {}): SyncQuery {
     limit: LIST_PAGE_LIMIT,
     flatten: false,
     min_tier: null,
+    domain: null,
     ...overrides,
   };
 }
@@ -60,8 +62,9 @@ function event(overrides: Partial<Event> = {}): Event {
 function state(
   status: SyncEntryState["status"],
   tier: SyncEntryState["effective_tier"] = "observed",
+  domain: string = DEFAULT_DOMAIN,
 ): SyncEntryState {
-  return { status, effective_tier: tier };
+  return { status, effective_tier: tier, domain };
 }
 
 function parsed(search: string): SyncQuery {
@@ -83,6 +86,7 @@ describe("parseSyncQuery", () => {
       "limit",
       "flatten",
       "min_tier",
+      "domain",
     ]);
     expect(SYNC_QUERY_REFUSALS).toEqual([
       "unknown_parameter",
@@ -90,6 +94,7 @@ describe("parseSyncQuery", () => {
       "bad_limit",
       "bad_flatten",
       "bad_min_tier",
+      "unknown_domain",
     ]);
   });
 
@@ -99,15 +104,21 @@ describe("parseSyncQuery", () => {
       limit: LIST_PAGE_LIMIT,
       flatten: false,
       min_tier: null,
+      domain: null,
     });
   });
 
   it("reads every parameter a trainer wrote", () => {
-    expect(parsed("from=41&limit=5&flatten=true&min_tier=observed")).toEqual({
+    expect(
+      parsed(
+        `from=41&limit=5&flatten=true&min_tier=observed&domain=${DEFAULT_DOMAIN}`,
+      ),
+    ).toEqual({
       from: 41,
       limit: 5,
       flatten: true,
       min_tier: "observed",
+      domain: DEFAULT_DOMAIN,
     });
     expect(parsed("flatten=false&min_tier=stated").flatten).toBe(false);
   });
@@ -157,12 +168,63 @@ describe("parseSyncQuery", () => {
     expect(refusal("min_tier=stated&min_tier=observed")).toBe("bad_min_tier");
   });
 
+  it("refuses a domain the schema does not register, last of all", () => {
+    for (const bad of ["", "biotech", "Ai-Ecosystem"]) {
+      expect(refusal(`domain=${bad}`)).toBe("unknown_domain");
+    }
+    expect(refusal(`domain=${DEFAULT_DOMAIN}&domain=${DEFAULT_DOMAIN}`)).toBe(
+      "unknown_domain",
+    );
+    // Last: every earlier fault wins over it.
+    expect(refusal("min_tier=gold&domain=biotech")).toBe("bad_min_tier");
+    expect(parsed(`domain=${DEFAULT_DOMAIN}`).domain).toBe(DEFAULT_DOMAIN);
+  });
+
   it("checks the four in the declared order", () => {
     expect(refusal("from=-1&limit=0&flatten=yes&min_tier=gold")).toBe(
       "bad_from",
     );
     expect(refusal("limit=0&flatten=yes&min_tier=gold")).toBe("bad_limit");
     expect(refusal("flatten=yes&min_tier=gold")).toBe("bad_flatten");
+  });
+});
+
+describe("keepSyncItem and the domain filter (D-071)", () => {
+  it("drops an entry of another domain, and keeps the demanded one", () => {
+    const asked = query({ domain: DEFAULT_DOMAIN });
+
+    expect(keepSyncItem("entry", state("verified"), asked)).toBe(true);
+    expect(
+      keepSyncItem("entry", state("verified", "observed", "elsewhere"), asked),
+    ).toBe(false);
+  });
+
+  it("drops an unlearn of another domain too, and keeps this domain's", () => {
+    // The one filter an unlearn is subject to: an entry of another domain was
+    // never delivered, so being told it was overturned is noise about a fact
+    // this trainer does not hold.
+    const asked = query({ domain: DEFAULT_DOMAIN });
+
+    expect(keepSyncItem("unlearn", state("overturned"), asked)).toBe(true);
+    expect(
+      keepSyncItem("unlearn", state("overturned", null, "elsewhere"), asked),
+    ).toBe(false);
+  });
+
+  it("never drops an event, whatever domain was asked for", () => {
+    const asked = query({ domain: DEFAULT_DOMAIN });
+
+    expect(keepSyncItem("event", null, asked)).toBe(true);
+  });
+
+  it("reads an entry that names no domain as the default one", () => {
+    const asked = query({ domain: DEFAULT_DOMAIN });
+    const legacy: SyncEntryState = {
+      status: "verified",
+      effective_tier: "stated",
+    };
+
+    expect(keepSyncItem("entry", legacy, asked)).toBe(true);
   });
 });
 

@@ -23,14 +23,21 @@ import type { Sidecar } from "../src/derive.js";
 import type { Entry } from "../src/schema.js";
 import type { Event } from "../src/events.js";
 import { ledgerBalance, type LedgerRow } from "../src/ledger.js";
-import { LIST_PAGE_LIMIT, TRUSTED_POOL_SWITCH } from "../src/policy.js";
+import {
+  attestationFor,
+  DEFAULT_DOMAIN,
+  LIST_PAGE_LIMIT,
+  TRUSTED_POOL_SWITCH,
+} from "../src/policy.js";
 import type { Seal } from "../src/seal.js";
 import type { StakeRecord } from "../src/stake.js";
 import { renderEntries } from "../src/ui/pages/entries.js";
 import { renderEntry } from "../src/ui/pages/entry.js";
+import { renderBadQuery } from "../src/ui/pages/errors.js";
 import { renderHome } from "../src/ui/pages/home.js";
 import { renderOperator } from "../src/ui/pages/operator.js";
 import { renderOperators } from "../src/ui/pages/operators.js";
+import { ENTRIES_QUERY_PARAMETERS, ENTRY_DOMAINS } from "../src/ui/query.js";
 import {
   APP_CSS_HREF,
   assetVersion,
@@ -47,6 +54,19 @@ import type {
   OperatorRow,
   PageContext,
 } from "../src/ui/types.js";
+
+/**
+ * The domains an operator is attested in, as the route hands them to the page
+ * (decision D-071): registration's own, with the version of the attestation
+ * signed for it. Read from the policy module rather than spelt out, for the same
+ * reason every other published value in these tests is.
+ */
+const OPERATOR_DOMAINS = [
+  {
+    domain: DEFAULT_DOMAIN,
+    attestationVersion: attestationFor(DEFAULT_DOMAIN).version,
+  },
+];
 
 /** The payload a hostile submitter would put in a claim. */
 const HOSTILE = `<script>alert(1)</script>`;
@@ -224,6 +244,7 @@ const entryRecord: Record<string, unknown> = {
   id: ENTRY_ID,
   subject: row.subject,
   category: "behavior",
+  domain: DEFAULT_DOMAIN,
   claim: row.claim,
   before: "the model answered",
   after: "the model refuses",
@@ -583,9 +604,16 @@ function everyPage(): Record<string, string> {
         seals: 2,
       },
       latest: [row],
+      domain: DEFAULT_DOMAIN,
     }),
     entries: renderEntries(ctx, {
-      filter: { category: null, status: "verified", tier: null, fresh: null },
+      filter: {
+        category: null,
+        status: "verified",
+        domain: DEFAULT_DOMAIN,
+        tier: null,
+        fresh: null,
+      },
       rows: [row],
       total: 9,
       nextBefore: 12,
@@ -597,6 +625,7 @@ function everyPage(): Record<string, string> {
     operator: renderOperator(ctx, {
       row: operatorRow,
       agents: ["1F916:k1", "1F916:k1b"],
+      domains: OPERATOR_DOMAINS,
       attestation: {
         version: "nomankind-independence-v1",
         signed_at: "2026-08-01T00:00:00.000Z",
@@ -662,6 +691,7 @@ describe("the home page", () => {
       seals: 2,
     },
     latest: [row, unsealedRow],
+    domain: null,
   });
 
   it("shows the four counters and what each one means", () => {
@@ -695,6 +725,34 @@ describe("the home page", () => {
     );
   });
 
+  it("says it is counting all domains when it was narrowed to none", () => {
+    expect(document).toContain("Counting all domains.");
+    expect(document).toContain("?domain=&lt;slug&gt;");
+  });
+
+  it("names the domain it was narrowed to, and offers the way back", () => {
+    const narrowed = renderHome(ctx, {
+      counters: {
+        verified: 1,
+        stale: 0,
+        trusted: 2,
+        sealedHead: 20,
+        sealedAt: "2026-09-08T12:05:00.000Z",
+        witnesses: 1,
+        seals: 2,
+      },
+      latest: [row],
+      domain: DEFAULT_DOMAIN,
+    });
+    expect(narrowed).toContain(`Counting the <span class="mono">${DEFAULT_DOMAIN}</span> domain only`);
+    expect(narrowed).toContain('<a href="/">All domains</a>');
+    expect(narrowed).not.toContain("Counting all domains.");
+    // The counters are what the route counted under that domain, printed and
+    // never recomputed here.
+    expect(narrowed).toContain('<div class="counter-value">1</div>');
+    expect(narrowed).toContain('<div class="counter-value">2</div>');
+  });
+
   it("says so plainly when nothing has been sealed", () => {
     const empty = renderHome(ctx, {
       counters: {
@@ -707,6 +765,7 @@ describe("the home page", () => {
         seals: 0,
       },
       latest: [],
+      domain: null,
     });
     expect(empty).toContain("no seal yet");
     expect(empty).toContain("Nothing has been submitted yet.");
@@ -716,7 +775,13 @@ describe("the home page", () => {
 
 describe("the entries listing", () => {
   const document = renderEntries(ctx, {
-    filter: { category: "behavior", status: "verified", tier: null, fresh: "stale" },
+    filter: {
+      category: "behavior",
+      status: "verified",
+      domain: null,
+      tier: null,
+      fresh: "stale",
+    },
     rows: [row, unsealedRow],
     total: 9,
     nextBefore: 12,
@@ -769,15 +834,81 @@ describe("the entries listing", () => {
     );
   });
 
+  it("gives domain a chip group of its own, from the schema's enum", () => {
+    // The chips are the registered domains and never a list typed into a page:
+    // the same enum the parser accepts is the one a reader can click.
+    expect(document).toContain('<span class="filter-name">domain</span>');
+    for (const slug of ENTRY_DOMAINS) {
+      expect(document, `${slug} has no chip`).toContain(
+        `<input type="radio" name="domain" value="${slug}" />`,
+      );
+    }
+  });
+
+  it("checks the domain chip that is on, and carries it in every link", () => {
+    const narrowed = renderEntries(ctx, {
+      filter: {
+        category: "behavior",
+        status: "verified",
+        domain: DEFAULT_DOMAIN,
+        tier: null,
+        fresh: "stale",
+      },
+      rows: [row, unsealedRow],
+      total: 9,
+      nextBefore: 12,
+    });
+    expect(narrowed).toContain(
+      `<input type="radio" name="domain" value="${DEFAULT_DOMAIN}" checked />`,
+    );
+    // The pager keeps the whole filter, domain among it: a next page that
+    // dropped one filter would be a different query wearing the same word.
+    expect(narrowed).toContain(
+      `href="/entries?category=behavior&amp;status=verified&amp;domain=${DEFAULT_DOMAIN}&amp;fresh=stale&amp;before=12"`,
+    );
+    // And domain's own "all" chip drops only domain, exactly as every other
+    // group's does.
+    expect(narrowed).toContain(
+      'href="/entries?category=behavior&amp;status=verified&amp;fresh=stale"',
+    );
+  });
+
   it("refuses to pretend an empty page is a page", () => {
     const empty = renderEntries(ctx, {
-      filter: { category: null, status: null, tier: null, fresh: null },
+      filter: {
+        category: null,
+        status: null,
+        domain: null,
+        tier: null,
+        fresh: null,
+      },
       rows: [],
       total: 0,
       nextBefore: null,
     });
     expect(empty).toContain("No entries match these filters.");
     expect(empty).not.toContain("Next page");
+  });
+});
+
+describe("the listing's own refusal", () => {
+  const document = renderBadQuery({ ...ctx, path: "/entries?nope=1" }, "unknown_parameter");
+
+  it("names the refusal and the path in the reader's own words", () => {
+    expect(document).toContain("unknown_parameter");
+    expect(document).toContain("/entries?nope=1");
+  });
+
+  it("lists every parameter the parser accepts, and invents none", () => {
+    // Read off the parser rather than retyped: a page that told a reader
+    // `domain` was not accepted, while the listing accepted it, would be the
+    // refusal lying about the very thing it exists to explain.
+    const listed = /Accepted parameters: ([^.]+)\./.exec(document);
+    expect(listed).not.toBeNull();
+    expect(
+      listed![1]!.split(",").map((name) => name.trim()),
+    ).toEqual([...ENTRIES_QUERY_PARAMETERS]);
+    expect(ENTRIES_QUERY_PARAMETERS).toContain("domain");
   });
 });
 
@@ -815,6 +946,25 @@ describe("the entry page", () => {
     }
     // The nested core objects are shown whole, as JSON.
     expect(document).toContain("&quot;predicate&quot;");
+  });
+
+  it("shows the domain the core names, as a core row of its own", () => {
+    expect(document).toContain("<dt>domain</dt>");
+    const at = document.indexOf("<dt>domain</dt>");
+    expect(document.slice(at, at + 200)).toContain(DEFAULT_DOMAIN);
+  });
+
+  it("says a legacy core's domain is absent, and what the log reads it as", () => {
+    // A v0.6 core carries seventeen keys and no `domain` at all: the key was
+    // never in the bytes the author signed, so the row says absent rather than
+    // showing the dash an empty field would get (decision D-071).
+    const { domain: _dropped, ...legacyCore } = entryData.entry;
+    expect(Object.keys(legacyCore)).not.toContain("domain");
+    const legacy = renderEntry(ctx, { ...entryData, entry: legacyCore });
+    expect(legacy).toContain("<dt>domain</dt>");
+    expect(legacy).toContain(
+      `absent (v0.6 record, read as ${DEFAULT_DOMAIN})`,
+    );
   });
 
   it("shows every derived field name and never a confidence number", () => {
@@ -1173,6 +1323,7 @@ describe("the operator pages", () => {
       standing: null,
     },
     agents: [],
+    domains: [],
     attestation: null,
     namedBy: null,
     payoutStatus: null,
@@ -1244,6 +1395,7 @@ describe("the operator pages", () => {
     const one = renderOperator(ctx, {
       row: operatorRow,
       agents: ["1F916:k1"],
+      domains: OPERATOR_DOMAINS,
       attestation: {
         version: "nomankind-independence-v1",
         signed_at: "2026-08-01T00:00:00.000Z",
@@ -1274,6 +1426,36 @@ describe("the operator pages", () => {
     expect(one).toContain(`<dd class="danger">\n                2\n              </dd>`);
   });
 
+  it("lists the domains an operator is attested in, each with its version", () => {
+    const one = renderOperator(ctx, {
+      row: operatorRow,
+      agents: ["1F916:k1"],
+      domains: [
+        ...OPERATOR_DOMAINS,
+        { domain: "second-domain", attestationVersion: "second-v1" },
+        { domain: "third-domain", attestationVersion: null },
+      ],
+      attestation: null,
+      namedBy: null,
+      payoutStatus: null,
+      validations: [],
+      ledger: [],
+      payouts: [],
+      balance: ledgerBalance([], LEDGER_NOW),
+      attestations: NO_ATTESTATIONS,
+    });
+    expect(one).toContain("<dt>domains</dt>");
+    expect(one).toContain(DEFAULT_DOMAIN);
+    expect(one).toContain(attestationFor(DEFAULT_DOMAIN).version);
+    expect(one).toContain("second-domain");
+    expect(one).toContain("second-v1");
+    // A row with no stored attestation says so; it is not the same fact as a
+    // domain nobody joined.
+    expect(one).toContain("no attestation stored");
+    // An operator attested in nothing is a dash and never an empty line.
+    expect(quiet).toContain("<dt>domains</dt>\n              <dd class=\"break\">—</dd>");
+  });
+
   it("says an operator has signed nothing rather than showing an empty table", () => {
     expect(quiet).toContain("This operator has signed no decisions.");
     expect(quiet).toContain("No agent is bound.");
@@ -1290,6 +1472,7 @@ describe("the operator pages", () => {
     const one = renderOperator(ctx, {
       row: operatorRow,
       agents: ["1F916:k1"],
+      domains: OPERATOR_DOMAINS,
       attestation: null,
       namedBy: null,
       payoutStatus: null,
@@ -1323,6 +1506,7 @@ describe("the operator pages", () => {
     const one = renderOperator(ctx, {
       row: operatorRow,
       agents: [],
+      domains: OPERATOR_DOMAINS,
       attestation: null,
       namedBy: null,
       payoutStatus: null,
@@ -1366,6 +1550,7 @@ describe("the operator pages", () => {
     const one = renderOperator(ctx, {
       row: operatorRow,
       agents: [],
+      domains: OPERATOR_DOMAINS,
       attestation: null,
       namedBy: null,
       payoutStatus: null,
@@ -1405,6 +1590,7 @@ describe("the operator page's attestations", () => {
   const base = {
     row: operatorRow,
     agents: ["1F916:k1"],
+    domains: OPERATOR_DOMAINS,
     attestation: null,
     namedBy: null,
     payoutStatus: null,

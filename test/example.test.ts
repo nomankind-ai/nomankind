@@ -9,23 +9,32 @@
  * never re-sign it.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { isAgentId, publicKeyFromAgentId } from "../src/identity.js";
+import { extractCore } from "../src/core.js";
+import {
+  agentIdFromPublicKey,
+  exportPublicKeyRaw,
+  generateKeypair,
+  isAgentId,
+  publicKeyFromAgentId,
+} from "../src/identity.js";
+import { DEFAULT_DOMAIN } from "../src/policy.js";
 import { validateEntry } from "../src/schema.js";
-import { verifyEntrySignature } from "../src/sign.js";
+import { signCore, verifyEntrySignature } from "../src/sign.js";
 
 const examplePath = fileURLToPath(
   new URL("../schema/nomankind-entry-example.json", import.meta.url),
 );
 
-const exampleText = readFileSync(examplePath, "utf8");
-
 function exampleEntry(): Record<string, unknown> {
-  return JSON.parse(exampleText) as Record<string, unknown>;
+  return JSON.parse(readFileSync(examplePath, "utf8")) as Record<
+    string,
+    unknown
+  >;
 }
 
 /**
@@ -50,6 +59,52 @@ function agentHandles(value: unknown): string[] {
 
 /** Raw Ed25519 public keys are exactly this many bytes. */
 const PUBLIC_KEY_BYTES = 32;
+
+/**
+ * The generator that writes the file, guarded exactly as the verify fixtures'
+ * is (test/verify-fixtures.test.ts): the committed example is the fixture, and
+ * a test run must not rewrite it, because a fresh key every run would churn the
+ * repository. Regenerate deliberately, after a schema change:
+ *
+ *   NOMANKIND_WRITE_EXAMPLE=1 npm test -- example
+ *
+ * Decision D-027: the key is a throwaway. It is generated here, used to sign
+ * the core once, and its private half is never written anywhere and is gone the
+ * moment the process exits -- the example is a real entry that verifies, and
+ * nobody holds the key that made it.
+ */
+describe("the shipped example entry (generation)", () => {
+  it.skipIf(!process.env["NOMANKIND_WRITE_EXAMPLE"])(
+    "re-signs it under the current schema with a fresh throwaway key",
+    async () => {
+      const entry = exampleEntry();
+
+      // The eighteenth core key, in the schema's own order: after `category`.
+      const rebuilt: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(entry)) {
+        rebuilt[key] = value;
+        if (key === "category") rebuilt["domain"] = DEFAULT_DOMAIN;
+      }
+
+      const keys = await generateKeypair();
+      const author = agentIdFromPublicKey(
+        await exportPublicKeyRaw(keys.publicKey),
+      );
+      rebuilt["author"] = author;
+      rebuilt["signature"] = await signCore(
+        extractCore(rebuilt),
+        keys.privateKey,
+      );
+
+      writeFileSync(examplePath, `${JSON.stringify(rebuilt, null, 2)}\n`, "utf8");
+
+      // What was just written has to validate and verify, or it is not an
+      // example of anything.
+      expect(validateEntry(rebuilt).errors).toEqual([]);
+      expect(await verifyEntrySignature(rebuilt)).toBe(true);
+    },
+  );
+});
 
 describe("the shipped example entry", () => {
   it("validates against the entry schema", () => {

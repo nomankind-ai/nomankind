@@ -11,6 +11,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_DOMAIN } from "../src/policy.js";
+
 import { CORE_KEYS, type Core } from "../src/core.js";
 import { deriveEntry, type Clock } from "../src/derive.js";
 import type { ApproverRecord, Event, EventType } from "../src/events.js";
@@ -88,12 +90,13 @@ function baseLog(): Log {
   return log;
 }
 
-/** A stated release core: the seventeen keys, exactly as the schema names them. */
+/** A stated release core: the eighteen keys, exactly as the schema names them. */
 function statedCore(overrides: Record<string, unknown> = {}): Core {
   return {
     id: "nmk_01STATED01",
     subject: "openai/gpt-5",
     category: "release",
+    domain: DEFAULT_DOMAIN,
     claim: "GPT-5 announced on the OpenAI blog",
     before: null,
     after: "available",

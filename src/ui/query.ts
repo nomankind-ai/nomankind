@@ -23,6 +23,11 @@ export const ENTRY_CATEGORIES: readonly string[] = Object.freeze([
   ...entrySchema.properties.category.enum,
 ]);
 
+/** The schema's domain enum: every registered domain, from the schema itself. */
+export const ENTRY_DOMAINS: readonly string[] = Object.freeze([
+  ...entrySchema.properties.domain.enum,
+]);
+
 /** The schema's status enum. */
 export const ENTRY_STATUSES: readonly string[] = Object.freeze([
   ...entrySchema.properties.status.enum,
@@ -47,6 +52,7 @@ export const FRESHNESS_VALUES: readonly ["fresh", "stale"] = Object.freeze([
 export const ENTRIES_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "category",
   "status",
+  "domain",
   "tier",
   "fresh",
   "before",
@@ -62,6 +68,7 @@ export const ENTRIES_QUERY_REFUSALS = [
   "repeated_parameter",
   "bad_category",
   "bad_status",
+  "unknown_domain",
   "bad_tier",
   "bad_fresh",
   "bad_before",
@@ -69,8 +76,17 @@ export const ENTRIES_QUERY_REFUSALS = [
 
 export type EntriesQueryRefusal = (typeof ENTRIES_QUERY_REFUSALS)[number];
 
+/**
+ * The filter a listing applies. `domain` is carried beside the fields
+ * src/ui/types.ts already declares (decision D-071): a chip group filters the
+ * listing and the counters by domain, and "all" is the absent value.
+ */
+export type EntriesQueryFilter = EntriesFilter & {
+  readonly domain: string | null;
+};
+
 export type EntriesQueryResult =
-  | { ok: true; filter: EntriesFilter; before: number | null }
+  | { ok: true; filter: EntriesQueryFilter; before: number | null }
   | { ok: false; reason: EntriesQueryRefusal };
 
 /**
@@ -113,6 +129,8 @@ export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
   if (!category.ok) return { ok: false, reason: "bad_category" };
   const status = readEnum(params, "status", ENTRY_STATUSES);
   if (!status.ok) return { ok: false, reason: "bad_status" };
+  const domain = readEnum(params, "domain", ENTRY_DOMAINS);
+  if (!domain.ok) return { ok: false, reason: "unknown_domain" };
   const tier = readEnum(params, "tier", ENTRY_TIERS);
   if (!tier.ok) return { ok: false, reason: "bad_tier" };
   const fresh = readEnum(params, "fresh", FRESHNESS_VALUES);
@@ -132,6 +150,7 @@ export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
     filter: {
       category: category.value,
       status: status.value,
+      domain: domain.value,
       tier: tier.value,
       fresh: fresh.value as "fresh" | "stale" | null,
     },

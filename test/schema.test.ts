@@ -25,7 +25,7 @@ function pathsOf(errors: readonly { path: string }[]): string[] {
 
 describe("validateEntry", () => {
   it("exposes the schema $id", () => {
-    expect(SCHEMA_ID).toBe("https://nomankind.ai/schemas/entry-v0.6.json");
+    expect(SCHEMA_ID).toBe("https://nomankind.ai/schemas/entry-v0.7.json");
   });
 
   it("accepts the example entry, with no errors", () => {
@@ -36,6 +36,28 @@ describe("validateEntry", () => {
     if (result.ok) {
       expect(result.entry["id"]).toBe("nmk_01J8ZQ2K7");
     }
+  });
+
+  it("rejects an entry that names no domain", () => {
+    const entry = exampleCopy();
+    delete entry["domain"];
+
+    const result = validateEntry(entry);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(pathsOf(result.errors)).toContain("/domain");
+  });
+
+  it("rejects an entry whose domain is not a registered one", () => {
+    const entry = exampleCopy();
+    entry["domain"] = "biotech";
+
+    const result = validateEntry(entry);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(pathsOf(result.errors)).toContain("/domain");
   });
 
   it("rejects an entry missing evidence_tier, naming the field in the path", () => {

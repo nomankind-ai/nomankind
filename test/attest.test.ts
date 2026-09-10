@@ -7,6 +7,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_DOMAIN } from "../src/policy.js";
+
 import {
   ANSWER_REFUSALS,
   SCORE_REFUSALS,
@@ -97,6 +99,7 @@ function requested(at: string = REQUESTED_AT): EventInput {
     entry_id: null,
     payload: {
       attestation: ATTESTATION,
+      domain: DEFAULT_DOMAIN,
       model: MODEL,
       model_operator: MODEL_OPERATOR,
       probes: PROBES,
@@ -446,6 +449,7 @@ describe("scoring", () => {
       "not_a_scorer",
       "operator_mismatch",
       "model_operator",
+      "operator_not_in_domain",
       "duplicate_scorer",
       "probe_hash_mismatch",
       "answers_hash_mismatch",
@@ -533,6 +537,18 @@ describe("scoring", () => {
         },
       ],
       [
+        // Decision D-071: a scorer signs about an attestation only in a domain
+        // it has attested in.
+        "operator_not_in_domain",
+        {
+          attestation,
+          record: scoreRecord("op_s1", 4, NOW),
+          scorerOperator: "op_s1",
+          scorerDomains: ["elsewhere"],
+          now: NOW,
+        },
+      ],
+      [
         "duplicate_scorer",
         {
           attestation: oneScored,
@@ -581,6 +597,20 @@ describe("scoring", () => {
     }
     // Every declared reason has a fixture, in the order they are declared.
     expect(cases.map(([reason]) => reason)).toEqual([...SCORE_REFUSALS]);
+  });
+
+  it("reads a caller that names no domains as the default domain", async () => {
+    const attestation = await derive([requested(), answered()]);
+
+    expect(attestation.domain).toBe(DEFAULT_DOMAIN);
+    expect(
+      checkScore({
+        attestation,
+        record: scoreRecord("op_s1", 4, NOW),
+        scorerOperator: "op_s1",
+        now: NOW,
+      }),
+    ).toEqual({ ok: true });
   });
 
   it("refuses a record whose operator is not the one behind its key", async () => {

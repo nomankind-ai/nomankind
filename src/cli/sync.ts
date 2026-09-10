@@ -51,7 +51,7 @@ import {
 } from "./validator.js";
 
 const USAGE =
-  "usage: sync <base-url> [--from <n>] [--limit <n>] [--flatten] [--min-tier <tier>] [--twice]";
+  "usage: sync <base-url> [--from <n>] [--limit <n>] [--domain <slug>] [--flatten] [--min-tier <tier>] [--twice]";
 
 /** The checks, in the order they are made. The order is the contract. */
 export const SYNC_CHECKS = [
@@ -70,7 +70,7 @@ const FAILED = 1;
 const BAD_ARGUMENTS = 2;
 
 /** Flags that carry a value, and flags that are their own answer. */
-const VALUED_FLAGS = ["--from", "--limit", "--min-tier"];
+const VALUED_FLAGS = ["--from", "--limit", "--domain", "--min-tier"];
 const BARE_FLAGS = ["--flatten", "--twice"];
 
 /** A non-negative integer in plain decimal, as src/sync.ts reads one. */
@@ -133,6 +133,10 @@ export function syncPlan(args: readonly string[]): SyncPlan | null {
   if (from !== undefined) params.set("from", from);
   const limit = values.get("--limit");
   if (limit !== undefined) params.set("limit", limit);
+  // Decision D-071: one registered domain's stream. Absent is every domain,
+  // which is what a trainer written before v0.7 asks for and gets.
+  const domain = values.get("--domain");
+  if (domain !== undefined) params.set("domain", domain);
   if (switches.has("--flatten")) params.set("flatten", "true");
   const minTier = values.get("--min-tier");
   if (minTier !== undefined) params.set("min_tier", minTier);
