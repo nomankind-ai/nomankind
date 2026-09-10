@@ -120,6 +120,47 @@ export interface Sidecar {
    * to null, superseded and overturned included — the entry still earns.
    */
   readonly read_share_slots: readonly ReadShareSlot[] | null;
+  /**
+   * Whitepaper Section 6, "Revalidate": "Any operator can also request
+   * revalidation of an entry inside its window ... It is assigned at random to a
+   * trusted operator", and Section 8: a threshold of failure reports "auto-opens
+   * a revalidation at nomankind's expense".
+   *
+   * The schema has no field for these — a request is not a claim about the world
+   * and the signed record says nothing about it — so they live in the sidecar,
+   * exactly as the read-share slots do. Empty when nobody has ever asked for a
+   * check of this entry.
+   */
+  readonly revalidations: readonly RevalidationView[];
+}
+
+/**
+ * One revalidation request, folded from the target's own events.
+ *
+ * `request_seq` is the `revalidation_requested` event's position, which is what
+ * every later event about it names. `requester` and `operator` are both null
+ * when the check was auto-opened by failure reports at nomankind's expense
+ * (Section 8), which is also what `source` says.
+ *
+ * `assigned` is the draw currently in force, or null when none is: a missed
+ * assignment closes the assignment and not the request, so the field goes back
+ * to null and the next draw fills it again.
+ */
+export interface RevalidationView {
+  readonly request_seq: number;
+  readonly requester: string | null;
+  readonly operator: string | null;
+  readonly source: "operator" | "failure_reports";
+  readonly requested_at: string;
+  readonly assigned: {
+    readonly agent: string;
+    readonly operator: string;
+    readonly deadline: string;
+  } | null;
+  readonly outcome: "open" | "held" | "changed" | "upgraded";
+  readonly resolved_at: string | null;
+  readonly checker: string | null;
+  readonly correction_entry_id: string | null;
 }
 
 /** An entry, its derived fields, and the sidecar the schema cannot hold. */
@@ -661,6 +702,190 @@ function supersededBy(
 }
 
 /**
+ * The schema's `disputes[]` array, folded from the target's own events.
+ *
+ * Lifecycle of an entry, Dispute: "A challenge is itself an entry, in the
+ * correction category, and it requires a citation ... The original stays in the
+ * log, marked overturned, linked to its correction." The array is the record of
+ * every challenge against this entry, upheld, failed or still open, in the order
+ * they were filed.
+ *
+ * `citation` and `snapshot_hash` come off the `dispute_filed` event, which
+ * copied them from the correction's core: the fold reads this entry's events and
+ * nothing else, so a reader holding only the target's sub-sequence of the log
+ * can rebuild the array exactly.
+ *
+ * A `dispute_upheld` with no `dispute_filed` before it produces no row. The
+ * event still overturns the entry (`overturnedBy` below reads it on its own),
+ * because it always has; but a disputes[] item needs a challenger, a citation
+ * and a snapshot hash, and inventing them would be a lie.
+ */
+function disputesFor(
+  events: readonly Event[],
+  entryId: string,
+): readonly Record<string, unknown>[] {
+  const outcomes = new Map<
+    string,
+    { outcome: "upheld" | "failed"; reason: string | null; at: string }
+  >();
+  for (const event of inSeqOrder(events)) {
+    if (event.entry_id !== entryId) continue;
+    if (isType(event, "dispute_upheld")) {
+      const id = event.payload.correction_entry_id;
+      if (!outcomes.has(id)) {
+        outcomes.set(id, { outcome: "upheld", reason: null, at: event.at });
+      }
+    } else if (isType(event, "dispute_failed")) {
+      const id = event.payload.correction_entry_id;
+      if (!outcomes.has(id)) {
+        outcomes.set(id, {
+          outcome: "failed",
+          reason: event.payload.reason,
+          at: event.at,
+        });
+      }
+    }
+  }
+
+  const disputes: Record<string, unknown>[] = [];
+  for (const event of inSeqOrder(events)) {
+    if (!isType(event, "dispute_filed")) continue;
+    if (event.entry_id !== entryId) continue;
+    const settled = outcomes.get(event.payload.correction_entry_id) ?? null;
+    disputes.push({
+      id: event.payload.correction_entry_id,
+      challenger: event.payload.challenger,
+      operator: event.payload.operator,
+      citation: event.payload.citation,
+      snapshot_hash: event.payload.snapshot_hash,
+      outcome: settled === null ? "open" : settled.outcome,
+      reason: settled === null ? null : settled.reason,
+      filed_at: event.at,
+      resolved_at: settled === null ? null : settled.at,
+    });
+  }
+  return disputes;
+}
+
+/**
+ * The schema's `failure_reports[]` array, folded from the target's own events.
+ *
+ * Whitepaper Section 8: "A reader that acts on a verified entry and fails ...
+ * files a signed failure report against the entry, with its transcript frozen
+ * and hashed like any artifact." Reports "never change the core or the status by
+ * themselves", so nothing here touches the status: the array is what the reports
+ * say, and the threshold that acts on them is src/dispute.ts's.
+ *
+ * `upgraded_to` is filled from the other direction: a `dispute_filed` naming
+ * this report's position in `from_report_seq` is what upgraded it, so the link
+ * is the log's and never a second field somebody had to remember to set.
+ */
+function failureReportsFor(
+  events: readonly Event[],
+  entryId: string,
+): readonly Record<string, unknown>[] {
+  const upgrades = new Map<number, string>();
+  for (const event of inSeqOrder(events)) {
+    if (!isType(event, "dispute_filed")) continue;
+    if (event.entry_id !== entryId) continue;
+    const from = event.payload.from_report_seq;
+    if (from === null || upgrades.has(from)) continue;
+    upgrades.set(from, event.payload.correction_entry_id);
+  }
+
+  const reports: Record<string, unknown>[] = [];
+  for (const event of inSeqOrder(events)) {
+    if (!isType(event, "failure_report")) continue;
+    if (event.entry_id !== entryId) continue;
+    reports.push({
+      reporter: event.payload.reporter,
+      operator: event.payload.operator,
+      observed: event.payload.observed,
+      artifact_hash: event.payload.artifact_hash,
+      citation: event.payload.citation,
+      upgraded_to: upgrades.get(event.seq) ?? null,
+      filed_at: event.at,
+    });
+  }
+  return reports;
+}
+
+/**
+ * The sidecar's `revalidations`, folded from the target's own events.
+ *
+ * One view per `revalidation_requested`, in the order they were made, each
+ * carrying the draw currently in force and the outcome if the check has landed.
+ * A `revalidation_missed` clears the draw rather than the request: Section 6's
+ * check is still owed, and the next draw answers it, exactly as a missed
+ * validation assignment leaves the entry still needing one.
+ */
+function revalidationsFor(
+  events: readonly Event[],
+  entryId: string,
+): readonly RevalidationView[] {
+  const views = new Map<number, RevalidationView>();
+  for (const event of inSeqOrder(events)) {
+    if (event.entry_id !== entryId) continue;
+
+    if (isType(event, "revalidation_requested")) {
+      views.set(event.seq, {
+        request_seq: event.seq,
+        requester: event.payload.requester,
+        operator: event.payload.operator,
+        source: event.payload.source,
+        requested_at: event.at,
+        assigned: null,
+        outcome: "open",
+        resolved_at: null,
+        checker: null,
+        correction_entry_id: null,
+      });
+      continue;
+    }
+
+    if (isType(event, "revalidation_assigned")) {
+      const view = views.get(event.payload.request_seq);
+      if (view === undefined) continue;
+      views.set(view.request_seq, {
+        ...view,
+        assigned: {
+          agent: event.payload.agent,
+          operator: event.payload.operator,
+          deadline: event.payload.deadline,
+        },
+      });
+      continue;
+    }
+
+    if (isType(event, "revalidation_missed")) {
+      const view = views.get(event.payload.request_seq);
+      if (view === undefined) continue;
+      views.set(view.request_seq, { ...view, assigned: null });
+      continue;
+    }
+
+    if (isType(event, "revalidation_resolved")) {
+      const view = views.get(event.payload.request_seq);
+      if (view === undefined) continue;
+      // The first resolution is the one that counts, as the first verdict on an
+      // entry is: a check answered twice is still one check.
+      if (view.outcome !== "open") continue;
+      views.set(view.request_seq, {
+        ...view,
+        assigned: null,
+        outcome: event.payload.outcome,
+        resolved_at: event.at,
+        checker: event.payload.checker,
+        correction_entry_id: event.payload.correction_entry_id,
+      });
+    }
+  }
+  return [...views.values()].sort(
+    (left, right) => left.request_seq - right.request_seq,
+  );
+}
+
+/**
  * Lifecycle of an entry, Dispute: "An upheld challenge ... overturns the entry
  * ... The original stays in the log, marked overturned, linked to its
  * correction."
@@ -735,6 +960,7 @@ export function deriveEntry(
     test_verdict: consensus.testVerdict,
     trusted_count_at_decision: consensus.trustedCountAtDecision,
     read_share_slots: readShareSlotsFor(events, entryId, consensus),
+    revalidations: revalidationsFor(events, entryId),
   };
 
   const entry: Record<string, unknown> = {};
@@ -742,8 +968,8 @@ export function deriveEntry(
   entry["signature"] = submission.signature;
   entry["approvers"] = consensus.approvers;
   entry["reconfirmations"] = freshness.reconfirmations;
-  entry["disputes"] = [];
-  entry["failure_reports"] = [];
+  entry["disputes"] = disputesFor(events, entryId);
+  entry["failure_reports"] = failureReportsFor(events, entryId);
   entry["seal"] = entrySeals.get(entryId) ?? null;
   entry["staleness_window_days"] = derived.staleness_window_days;
   entry["verified_at"] = derived.verified_at;

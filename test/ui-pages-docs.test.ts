@@ -27,6 +27,7 @@ import {
   TXT_RECORD_PREFIX,
 } from "../src/registry.js";
 import { renderApi } from "../src/ui/pages/api.js";
+import { VALIDATION_REFUSALS } from "../src/validate.js";
 import { renderGenesis } from "../src/ui/pages/genesis.js";
 import { shortHash } from "../src/ui/html.js";
 import { LANDING_CSS, renderLanding } from "../src/ui/pages/landing.js";
@@ -88,6 +89,34 @@ describe("renderPolicy", () => {
   it("marks the numbers the paper names and nothing publishes yet", () => {
     expect(page).toContain("not yet published (M21)");
     expect(page).toContain("not yet published (M24)");
+  });
+
+  it("groups the dispute and report numbers, and reads each from POLICY", () => {
+    expect(page).toContain("Disputes and reports");
+    for (const [name, value] of [
+      ["FAILURE_REPORT_THRESHOLD", String(POLICY.FAILURE_REPORT_THRESHOLD)],
+      ["DISPUTE_STAKE_STANDING", `${POLICY.DISPUTE_STAKE_STANDING} standing`],
+      ["DISPUTE_FILING_FEE_CENTS", `${POLICY.DISPUTE_FILING_FEE_CENTS} cents`],
+      [
+        "REVALIDATION_REQUEST_STAKE_STANDING",
+        `${POLICY.REVALIDATION_REQUEST_STAKE_STANDING} standing`,
+      ],
+      [
+        "REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW",
+        String(POLICY.REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW),
+      ],
+    ] as const) {
+      expect(page, `${name} has no row`).toContain(
+        `<td class="mono">${name}</td>`,
+      );
+      expect(page, `${name} does not print its value`).toContain(
+        `<td class="mono">${value}</td>`,
+      );
+    }
+    // The stakes are placeholders and the page says so rather than implying
+    // that a number nobody priced is a price.
+    expect(page).toContain("a stake is a");
+    expect(page).toContain("no money");
   });
 
   it("points at the JSON the kernel serves from the same module", () => {
@@ -165,9 +194,141 @@ describe("renderApi", () => {
   });
 
   it("names what is not built yet with its milestone", () => {
-    expect(page).toContain("M20");
+    expect(page).toContain("M21");
     expect(page).toContain("M23");
     expect(page).toContain("M24");
+  });
+
+  it("lists POST validate's refusals in VALIDATION_REFUSALS order", () => {
+    // The validation door applies src/validate.ts's list in its own order, and
+    // M20 put `original_signer` into it between submitter_operator and
+    // maintainer_operator: no operator that signed the original may judge the
+    // correction filed against it. The page has to say so where a caller meets
+    // it, not at the end of the row.
+    let at = page.indexOf("/entries/{id}/validate");
+    expect(at).toBeGreaterThan(-1);
+    for (const reason of VALIDATION_REFUSALS) {
+      const next = page.indexOf(reason, at);
+      expect(next, `${reason} is out of order`).toBeGreaterThan(at);
+      at = next;
+    }
+  });
+
+  it("documents the dispute, revalidation and failure-report doors", () => {
+    for (const path of [
+      "/entries/{id}/dispute",
+      "/entries/{id}/revalidate",
+      "/entries/{id}/revalidate/resolve",
+      "/entries/{id}/failure-reports",
+    ]) {
+      expect(page, `${path} is not documented`).toContain(path);
+    }
+    // They exist now, so they are gone from the list of what does not.
+    expect(page).not.toContain(
+      "Disputes, revalidation requests, failure reports",
+    );
+  });
+
+  it("lists each new route's refusals in the order the route checks them", () => {
+    const inOrder = (label: string, reasons: readonly string[]): void => {
+      let at = page.indexOf(label);
+      expect(at, `${label} is not on the page`).toBeGreaterThan(-1);
+      for (const reason of reasons) {
+        const next = page.indexOf(reason, at);
+        expect(next, `${label}: ${reason} is out of order`).toBeGreaterThan(at);
+        at = next;
+      }
+    };
+
+    inOrder("/entries/{id}/dispute", [
+      "bad_id",
+      "bad_body",
+      "the request verdicts",
+      "not_found",
+      "author_mismatch",
+      "POST /entries refusal",
+      "entry_not_verified",
+      "not_correction",
+      "missing_citation",
+      "subject_mismatch",
+      "self_dispute",
+      "dispute_open",
+      "bad_report_link",
+      "bad_revalidation_link",
+      // The target's rederivation is schema-checked last, after every filing
+      // rule has passed, so schema_invalid closes the row.
+      "schema_invalid",
+    ]);
+
+    inOrder("/entries/{id}/revalidate<", [
+      "bad_id",
+      "bad_body",
+      "the request verdicts",
+      "not_found",
+      "entry_not_verified",
+      "entry_stale",
+      "bare_key",
+      "cap_exceeded",
+      "request_open",
+      "schema_invalid",
+    ]);
+
+    inOrder("/entries/{id}/revalidate/resolve", [
+      "bad_id",
+      "bad_body",
+      "the request verdicts",
+      "not_found",
+      "no_open_request",
+      "not_assigned",
+      "agent_mismatch",
+      "bad_signed_at",
+      "bad_record_signature",
+      "schema_invalid",
+    ]);
+
+    inOrder("/entries/{id}/failure-reports", [
+      "bad_id",
+      "bad_body",
+      "the request verdicts",
+      "not_found",
+      // The door reads the artifact's kind off its key set before it can pick a
+      // shape check at all, so unknown_artifact comes first and never last.
+      "unknown_artifact",
+      "transcript_shape",
+      "receipt_shape",
+      "unknown_method",
+      "billing_shape",
+      "redacted_load_bearing",
+      "entry_not_verified",
+      "empty_observed",
+      "bad_artifact_hash",
+      "duplicate_reporter",
+      // The archive names the 1F916 identity that put the artifact there, so
+      // this door needs the fetcher configured exactly as POST /entries does.
+      "fetcher_not_configured",
+      "schema_invalid",
+    ]);
+  });
+
+  it("says in words what each mechanism is, and that stakes are placeholders", () => {
+    expect(page).toContain("A dispute is a challenge to a verified entry");
+    expect(page).toContain("A revalidation request is an operator asking");
+    expect(page).toContain("A failure report is a signed report");
+    expect(page).toContain("distinct registered\n          operators");
+    expect(page).toContain("drawn from the trusted pool by the public randomness");
+    expect(page).toContain("ledger records and nothing else");
+    expect(page).toContain("No\n          money moves on any of them today.");
+  });
+
+  it("gives the three 409 conflicts and never a status of its own", () => {
+    for (const conflict of [
+      "409 duplicate_entry",
+      "409 dispute_open",
+      "409 request_open",
+      "409 duplicate_reporter",
+    ]) {
+      expect(page, `${conflict} is not named`).toContain(conflict);
+    }
   });
 
   it("takes every paging bound from the policy module, never its own number", () => {

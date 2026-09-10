@@ -35,14 +35,21 @@ import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: 
 
 import { openAssignment as openAssignmentOf } from "../assign.js";
 import type { Core } from "../core.js";
-import { agentOperatorsAt, registeredOperatorsAt } from "../derive.js";
-import type { ApproverRecord, Event } from "../events.js";
+import {
+  agentOperatorsAt,
+  registeredOperatorsAt,
+  type DerivedEntry,
+} from "../derive.js";
+import { disputeExclusions, openDispute } from "../dispute.js";
+import type { ApproverRecord, Event, EventInput } from "../events.js";
 import { checkRecordEvidence } from "../evidence.js";
 import { LIST_PAGE_LIMIT, REQUEST_CLOCK_SKEW_SECONDS } from "../policy.js";
 import { verifyRecordSignature } from "../records.js";
 import { validateEntry, type ValidationError } from "../schema.js";
+import { disputeOutcomeStakes } from "../stake.js";
 import type { D1Like } from "../storage/d1.js";
 import {
+  disputeOf,
   getEntry,
   headSeq,
   listOperators,
@@ -284,6 +291,71 @@ class SchemaInvalid extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// The entry a challenge is filed against
+// ---------------------------------------------------------------------------
+
+/** The challenged entry, its world, and the filing that is still open on it. */
+interface DisputedTarget {
+  readonly id: string;
+  readonly world: EntryWorld;
+  readonly derived: DerivedEntry;
+  readonly filed: Event<"dispute_filed">;
+}
+
+/**
+ * The entry this one was filed as a challenge against, or null.
+ *
+ * Null three ways, and all three mean "an ordinary decision": the entry is not a
+ * dispute at all, the target is not in the log, or the challenge has already
+ * been settled. A settled challenge bars nobody — its verdict is in — and its
+ * correction entry is no longer draft anyway, so this door would have refused
+ * the decision before asking.
+ *
+ * Gathered before the write, because the batch's callbacks are synchronous, and
+ * derived over the target's whole world so a superseded target is seen as
+ * superseded rather than as still standing.
+ */
+async function disputedTarget(
+  db: D1Like,
+  correctionId: string,
+  deps: ValidateDeps,
+): Promise<DisputedTarget | null> {
+  const targetId = await disputeOf(db, correctionId);
+  if (targetId === null) return null;
+
+  const world = await entryWorld(db, targetId);
+  const filed = openDispute(world.entryEvents);
+  if (filed === null) return null;
+  if (filed.payload.correction_entry_id !== correctionId) return null;
+
+  return {
+    id: targetId,
+    world,
+    derived: rederive(world, targetId, deps.now),
+    filed,
+  };
+}
+
+/**
+ * The reason the first rejection gave, or null when none did.
+ *
+ * Section 6: "A failed challenge forfeits the stake and costs the challenger
+ * standing." The `dispute_failed` event carries the reason so the target's own
+ * events say why the challenge failed, without a reader having to open the
+ * correction and read its approvers.
+ */
+function firstRejectionReason(entry: Record<string, unknown>): string | null {
+  const approvers = entry["approvers"];
+  if (!Array.isArray(approvers)) return null;
+  for (const approver of approvers as readonly ApproverRecord[]) {
+    if (approver.decision !== "reject") continue;
+    const reason = approver.reason;
+    return typeof reason === "string" && reason.length > 0 ? reason : null;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // POST /entries/{id}/validate
 // ---------------------------------------------------------------------------
 
@@ -366,6 +438,24 @@ async function validate(
   }
   const open = openAssignmentOf(entryEvents, id);
 
+  // Section 6, "Dispute": a challenge "passes through the same validation
+  // process with one extra exclusion: no operator that signed the original,
+  // submitter or validator, may validate the challenge against it." The
+  // `dispute_of` column says whether this entry is such a challenge, and the
+  // challenged entry, derived over its own world, says who signed it. An
+  // ordinary entry answers null here and the list is empty, which is why every
+  // other decision behaves exactly as it always has.
+  const challenged = await disputedTarget(env.DB, id, deps);
+  const excludedOperators =
+    challenged === null
+      ? []
+      : disputeExclusions(
+          challenged.derived.entry as unknown as {
+            author_operator: string | null;
+            approvers: readonly ApproverRecord[];
+          },
+        );
+
   const verdict = checkValidation(record, {
     submitter: {
       agent: core["author"] as string,
@@ -375,6 +465,7 @@ async function validate(
     operators,
     priorRecords: priorRecordsOf(entryEvents, id),
     openAssignment: open === null ? null : { operator: open.operator },
+    excludedOperators,
   });
   if (!verdict.ok) return refuse(422, verdict.reason);
 
@@ -402,6 +493,20 @@ async function validate(
   const at = deps.now.toISOString();
   let derivedEntry: Record<string, unknown> | null = null;
   let verifiedByThisDecision = false;
+
+  /**
+   * This entry as this decision leaves it, derived once and reused.
+   *
+   * `alsoEvents` runs before `stored` — the extra events have to be sealed onto
+   * the same run — so the verdict is needed before the stored row is built, and
+   * deriving twice would be asking the same log the same question twice.
+   */
+  let decided: DerivedEntry | null = null;
+  const decide = (event: Event<"validation">): DerivedEntry => {
+    if (decided === null) decided = rederive(world, id, deps.now, [event]);
+    return decided;
+  };
+
   try {
     await recordValidation(env.DB, {
       event: {
@@ -410,11 +515,49 @@ async function validate(
         entry_id: id,
         payload: { record, signature: body.signature },
       },
+      // Section 6, "Dispute": "An upheld challenge returns the stake, pays the
+      // challenger, overturns the entry", and a failed one "forfeits the stake".
+      // Both land on the CHALLENGED entry, and both land in this batch: the
+      // decision that decides the correction is the moment the target is
+      // overturned or the challenge is done, and a reader between two writes
+      // must never see a correction verified and its target still standing.
+      alsoEvents: (event): readonly EventInput[] => {
+        if (challenged === null) return [];
+        const status = decide(event).derived.status;
+        const correctionId = challenged.filed.payload.correction_entry_id;
+        if (status === "verified") {
+          return [
+            {
+              at,
+              type: "dispute_upheld",
+              entry_id: challenged.id,
+              payload: { correction_entry_id: correctionId },
+            },
+          ];
+        }
+        if (status === "rejected") {
+          return [
+            {
+              at,
+              type: "dispute_failed",
+              entry_id: challenged.id,
+              payload: {
+                correction_entry_id: correctionId,
+                reason: firstRejectionReason(
+                  decide(event).entry as Record<string, unknown>,
+                ),
+              },
+            },
+          ];
+        }
+        // Still draft: the challenge has neither stood nor failed yet.
+        return [];
+      },
       // Called with the event already sealed onto the head and before anything
       // is written, so the entry stored is derived from a log that holds this
       // decision, and a schema refusal here leaves the log exactly as it was.
       stored: (event) => {
-        const derived = rederive(world, id, deps.now, [event]);
+        const derived = decide(event);
         const result = validateEntry(derived.entry);
         if (!result.ok) throw new SchemaInvalid(result.errors);
         derivedEntry = derived.entry as Record<string, unknown>;
@@ -425,33 +568,68 @@ async function validate(
           derivedThroughSeq: event.seq,
         };
       },
-      // The target of a supersession, rewritten in the same batch. Nothing is
-      // decided here either: the target is rederived over its own world with
-      // this entry's events and this decision folded in, and derivation is what
-      // says whether the pointer is there. A decision that does not verify this
-      // entry leaves the target's row untouched, which is why this is asked
-      // after `stored` has run rather than before.
-      also: (event): readonly StoredEntryInput[] => {
-        if (supersession === null) return [];
-        if (verifiedByThisDecision !== true) return [];
-        const merged: EntryWorld = {
-          registry: supersession.world.registry,
-          entryEvents: supersession.world.entryEvents,
-          superseders: [...supersession.world.superseders, ...entryEvents],
-          // The target's own seal, carried through: rewriting its row must not
-          // erase a seal it really has.
-          seal: supersession.world.seal,
-        };
-        const target = rederive(merged, supersession.id, deps.now, [event]);
-        const result = validateEntry(target.entry);
-        if (!result.ok) throw new SchemaInvalid(result.errors);
-        return [
-          {
+      // The other entries this decision changed, rewritten in the same batch.
+      // Nothing is decided here: each is rederived over its own world with this
+      // decision and whatever it sealed folded in, and derivation is what says
+      // what changed.
+      also: (event, extra): readonly StoredEntryInput[] => {
+        const rows: StoredEntryInput[] = [];
+
+        // Freshness and decay: the superseding entry "names the superseded entry
+        // inside the new entry's frozen, signed core ... and the old entry's
+        // superseded-by pointer is derived from it". The approvals are the
+        // check, so the pointer appears at exactly the decision that verifies
+        // this entry and never earlier. A decision that does not verify it
+        // leaves the target's row untouched, which is why this is asked after
+        // `stored` has run rather than before.
+        if (supersession !== null && verifiedByThisDecision) {
+          const merged: EntryWorld = {
+            registry: supersession.world.registry,
+            entryEvents: supersession.world.entryEvents,
+            superseders: [...supersession.world.superseders, ...entryEvents],
+            // The target's own seal, carried through: rewriting its row must not
+            // erase a seal it really has.
+            seal: supersession.world.seal,
+          };
+          const target = rederive(merged, supersession.id, deps.now, [event]);
+          const result = validateEntry(target.entry);
+          if (!result.ok) throw new SchemaInvalid(result.errors);
+          rows.push({
             entry: target.entry,
             sidecar: target.sidecar,
             derivedThroughSeq: event.seq,
-          },
-        ];
+          });
+        }
+
+        // The challenged entry, rewritten from the same log position: this is
+        // where `overturned_by` and the disputes[] outcome appear.
+        if (challenged !== null && extra.length > 0) {
+          const target = rederive(
+            challenged.world,
+            challenged.id,
+            deps.now,
+            extra,
+          );
+          const result = validateEntry(target.entry);
+          if (!result.ok) throw new SchemaInvalid(result.errors);
+          rows.push({
+            entry: target.entry,
+            sidecar: target.sidecar,
+            derivedThroughSeq: extra[extra.length - 1]!.seq,
+          });
+        }
+
+        return rows;
+      },
+      // Section 6: the outcome returns, pays or forfeits what the challenger put
+      // up. The rows are src/stake.ts's, read out of the filing and the outcome
+      // event, and they land in the batch that sealed the outcome.
+      ledger: (_event, extra) => {
+        if (challenged === null || extra.length === 0) return [];
+        const outcome = extra[0] as
+          | Event<"dispute_upheld">
+          | Event<"dispute_failed">;
+        return disputeOutcomeStakes(challenged.filed, outcome);
       },
       answeredAssignmentSeq,
     });

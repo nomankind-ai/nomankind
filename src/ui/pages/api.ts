@@ -239,7 +239,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation.",
     refusals:
-      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, maintainer_operator, provider_operator, missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, schema_invalid.",
+      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, schema_invalid.",
   },
   {
     method: "POST",
@@ -251,14 +251,49 @@ const WRITE_PATH: readonly Endpoint[] = [
     refusals:
       "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature, entry_not_verified, unregistered_agent, operator_mismatch, submitter_agent, submitter_operator, untrusted_operator, missing_snapshot_hash, unexpected_reproduction, unexpected_observation, missing_reproduction, bad_reproduction, failed_reproduction, missing_observation, bad_observation, failed_observation; 409 entry_not_stale; 422 schema_invalid.",
   },
+  {
+    method: "POST",
+    path: "/entries/{id}/dispute",
+    parameters:
+      "entry, receipt?, from_report_seq?, from_revalidation_seq?; entry is a full signed correction entry, exactly as POST /entries takes one",
+    answers:
+      "201 with { correction, target }: the correction entry as submitted, and the disputed entry as derivation left it. The correction enters the log as its own draft entry and is validated like any other, so nothing about the target moves until the challenge is upheld.",
+    refusals:
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 author_mismatch; then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch, self_dispute; 409 dispute_open; 422 bad_report_link, bad_revalidation_link, schema_invalid.",
+  },
+  {
+    method: "POST",
+    path: "/entries/{id}/revalidate",
+    parameters: "{} — an empty body; the stake is read from policy, never sent",
+    answers:
+      "201 with the derived entry, its sidecar carrying the new request. The checker is not chosen here: the next sweep draws one from the beacon and records the deadline.",
+    refusals:
+      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 422 entry_not_verified, entry_stale, bare_key, cap_exceeded; 409 request_open; 422 schema_invalid.",
+  },
+  {
+    method: "POST",
+    path: "/entries/{id}/revalidate/resolve",
+    parameters:
+      "record (exactly the schema's reconfirmations item), signature (nomankind-record-v1, kind reconfirmation), and held; signed by the assigned checker",
+    answers:
+      "200 with the derived entry. held says whether the fact still holds: a hold closes the request and reconfirms, and a change closes it for a correction to follow.",
+    refusals:
+      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 422 no_open_request, not_assigned; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature, schema_invalid.",
+  },
+  {
+    method: "POST",
+    path: "/entries/{id}/failure-reports",
+    parameters:
+      "observed, artifact, citation?; any key may file, and the artifact is the norm rule's transcript or receipt shape, archived at its hash",
+    answers:
+      "201 with the derived entry and opened_revalidation, which names the request the report crossed the threshold to open, or null. A report changes neither the core nor the status by itself.",
+    refusals:
+      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 422 unknown_artifact, transcript_shape, receipt_shape, unknown_method, billing_shape, redacted_load_bearing; 422 entry_not_verified, empty_observed, bad_artifact_hash; 409 duplicate_reporter; 503 fetcher_not_configured; 422 schema_invalid.",
+  },
 ];
 
 const NOT_YET_BUILT: readonly { readonly what: string; readonly when: string }[] =
   [
-    {
-      what: "Disputes, revalidation requests, failure reports",
-      when: "M20",
-    },
     { what: "Standing and the ledger endpoints", when: "M21" },
     { what: "Drift attestation and confidence inputs", when: "M22" },
     { what: "The log mirror", when: "M23" },
@@ -352,6 +387,40 @@ POST
         passes, and status is never sent in: it is recomputed from the log.`,
         WRITE_PATH,
       )}
+
+      <section class="panel">
+        <h2 class="panel-title">
+          Disputes, revalidation requests and failure reports
+        </h2>
+        <p class="note">
+          A dispute is a challenge to a verified entry, filed as a correction
+          entry that carries its own citation: the challenge is itself an entry
+          and is validated like any other, and an upheld one overturns the
+          original, which stays in the log marked overturned and linked to its
+          correction.
+        </p>
+        <p class="note">
+          A revalidation request is an operator asking, inside an entry's
+          freshness window, for the entry to be checked again; the assigned
+          checker is drawn from the trusted pool by the public randomness beacon,
+          exactly as a validator is, so anyone can recompute the draw.
+        </p>
+        <p class="note">
+          A failure report is a signed report from a reader that acted on an
+          entry and observed something different. One report is a signal; the
+          published threshold on the policy page counts distinct registered
+          operators, once each, and a report from that many auto-opens a
+          revalidation at nomankind's expense.
+        </p>
+        <p class="note">
+          Filing takes a stake, so burner keys cannot dispute for free: a
+          registered operator stakes standing and a bare key a refundable filing
+          fee, both published on the policy page. A stake, a refund, a forfeit
+          and a reward are ledger records and nothing else, and the amounts on
+          them are placeholders until the milestone that prices them is built. No
+          money moves on any of them today.
+        </p>
+      </section>
 
       <section class="panel">
         <h2 class="panel-title">The error format</h2>

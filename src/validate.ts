@@ -39,6 +39,18 @@ export interface ValidationContext {
   readonly priorRecords: readonly ApproverRecord[];
   /** The open assignment for this entry, or null. */
   readonly openAssignment: { readonly operator: string } | null;
+  /**
+   * Operators barred from validating this particular entry beyond the standing
+   * rules above. Empty by default, so the offline verifier and every caller
+   * that had no extra exclusion is unchanged.
+   *
+   * Whitepaper Section 6, "Dispute": a challenge "passes through the same
+   * validation process with one extra exclusion: no operator that signed the
+   * original, submitter or validator, may validate the challenge against it."
+   * The list is src/dispute.ts's `disputeExclusions`, computed from the
+   * challenged entry; this module only applies it.
+   */
+  readonly excludedOperators?: readonly string[];
 }
 
 /** Every reason a record can be refused. One string per rule, in check order. */
@@ -48,6 +60,7 @@ export type ValidationRefusal =
   | "unregistered_operator"
   | "submitter_agent"
   | "submitter_operator"
+  | "original_signer"
   | "maintainer_operator"
   | "provider_operator"
   | "missing_snapshot_hash"
@@ -63,6 +76,7 @@ export const VALIDATION_REFUSALS: readonly ValidationRefusal[] = Object.freeze([
   "unregistered_operator",
   "submitter_agent",
   "submitter_operator",
+  "original_signer",
   "maintainer_operator",
   "provider_operator",
   "missing_snapshot_hash",
@@ -127,12 +141,25 @@ export function checkValidation(
     return refuse("submitter_operator");
   }
 
-  // 6-7. Section 5: verification comes from outside the maintainer, and no
+  // 6. Section 6, "Dispute": a challenge passes through the same validation
+  // process "with one extra exclusion: no operator that signed the original,
+  // submitter or validator, may validate the challenge against it." The list is
+  // the caller's, computed from the challenged entry (src/dispute.ts), and is
+  // empty for an ordinary entry — which is why every other caller is unchanged.
+  // It sits here, after the submitter rules and before the maintainer ones,
+  // because it is the same kind of rule: who is too close to judge.
+  if (context.excludedOperators !== undefined) {
+    for (const excluded of context.excludedOperators) {
+      if (record.operator === excluded) return refuse("original_signer");
+    }
+  }
+
+  // 7-8. Section 5: verification comes from outside the maintainer, and no
   // model provider may register as an operator at all.
   if (operator.maintainer) return refuse("maintainer_operator");
   if (operator.provider) return refuse("provider_operator");
 
-  // 8-9. Section 6: an approval carries the validator's own snapshot hash, so
+  // 9-10. Section 6: an approval carries the validator's own snapshot hash, so
   // the capture at submission is never the only witness to what the page said;
   // a rejection carries the reason it is rejected. A rejection may carry a
   // snapshot hash too, but nothing forces it to.
@@ -150,14 +177,14 @@ export function checkValidation(
     return refuse("missing_reason");
   }
 
-  // 10. Section 5: every agent under an operator counts as one. One signature
+  // 11. Section 5: every agent under an operator counts as one. One signature
   // per operator per entry, so an entity cannot fill an entry's approvals with
   // its own agents.
   for (const prior of context.priorRecords) {
     if (prior.operator === record.operator) return refuse("duplicate_operator");
   }
 
-  // 11. Section 6: exactly one validator is drawn at random, and the flag has
+  // 12. Section 6: exactly one validator is drawn at random, and the flag has
   // to match the log. Claiming the draw without holding it, or holding it and
   // signing as a volunteer, both misreport who the entry's judges were.
   const assigned =

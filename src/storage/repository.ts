@@ -30,6 +30,7 @@ import {
   type ReadCountRow,
 } from "../events.js";
 import type { ReadReceipt, SyncReceipt } from "../receipt.js";
+import type { StakeRecord } from "../stake.js";
 import type { Entry } from "../schema.js";
 import type { RegistrySeal, Seal, WitnessSignature } from "../seal.js";
 import {
@@ -327,10 +328,27 @@ export interface StoredEntry {
   readonly derivedThroughSeq: number;
 }
 
+/**
+ * The sidecar as the row holds it, with the keys a later milestone added
+ * defaulted rather than left undefined.
+ *
+ * `revalidations` arrived in M20 and 0009 backfills every stored row with it,
+ * but the window between that migration and the deploy belongs to the previous
+ * Worker, which writes rows without the key. A reader that trusted the JSON
+ * would hand a page `undefined.length`. Defaulting here is not a second
+ * derivation: for a row written before the key existed there is no revalidation
+ * to fold, so the empty list is the same answer rederiving would give.
+ */
+function toSidecar(row: Row): Sidecar {
+  const sidecar = readJson<Sidecar>(row, "sidecar_json");
+  if (Array.isArray(sidecar.revalidations)) return sidecar;
+  return { ...sidecar, revalidations: [] };
+}
+
 function toStoredEntry(row: Row): StoredEntry {
   return {
     entry: readJson<Entry>(row, "entry_json"),
-    sidecar: readJson<Sidecar>(row, "sidecar_json"),
+    sidecar: toSidecar(row),
     submittedSeq: readInteger(row, "submitted_seq"),
     derivedThroughSeq: readInteger(row, "derived_through_seq"),
   };
@@ -622,8 +640,18 @@ export async function staleDue(
  */
 export interface CaptureRecord {
   readonly entryId: string;
-  /** "snapshot" for the entry's snapshot_hash, "receipt" for its receipt_hash. */
-  readonly role: "snapshot" | "receipt";
+  /**
+   * "snapshot" for the entry's snapshot_hash, "receipt" for its receipt_hash,
+   * and `report:<seq>` for the frozen artifact a failure report carries
+   * (Section 8: "with its transcript frozen and hashed like any artifact").
+   *
+   * The table's key is (entry_id, role), and an entry has at most one snapshot
+   * and one receipt — but any number of readers may report it, so a report's
+   * role carries the position of its own `failure_report` event. That makes each
+   * report's artifact its own row and keeps it from overwriting the entry's own
+   * captures, which is what a plain "receipt" role would have done.
+   */
+  readonly role: "snapshot" | "receipt" | `report:${number}`;
   readonly contentHash: string;
   readonly archiveHash: string;
   readonly normVersion: string;
@@ -998,6 +1026,20 @@ export async function trustOperator(
 // ---------------------------------------------------------------------------
 
 /**
+ * What an assignment answers. 0009 added the column with 'validation' as its
+ * default, so every row written before it keeps the meaning it already had.
+ *
+ * Not a policy number and not a knob: two literal values that name the two
+ * kinds of draw the log makes. Section 6 draws a validator for a submission and
+ * a checker for a revalidation request, and the two must never answer each
+ * other's assignment.
+ */
+export type AssignmentPurpose = "validation" | "revalidation";
+
+const VALIDATION: AssignmentPurpose = "validation";
+const REVALIDATION: AssignmentPurpose = "revalidation";
+
+/**
  * The upsert that stores one assignment row. `missed_seq` and `answered_seq`
  * start null: an assignment is open when it is made, and only an
  * `assignment_missed` or a `validation` closes it. Taken as a statement rather
@@ -1008,16 +1050,20 @@ function assignmentStatement(
   db: D1Like,
   entryId: string,
   assignment: OpenAssignment,
+  purpose: AssignmentPurpose = VALIDATION,
+  requestSeq: number | null = null,
 ): D1LikeStatement {
   return db
     .prepare(
-      `INSERT INTO assignments (entry_id, seq, operator_id, deadline, missed_seq, assignment_json)
-       VALUES (?, ?, ?, ?, NULL, ?)
+      `INSERT INTO assignments (entry_id, seq, operator_id, deadline, missed_seq, assignment_json, purpose, request_seq)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
        ON CONFLICT (seq) DO UPDATE SET
          entry_id = excluded.entry_id,
          operator_id = excluded.operator_id,
          deadline = excluded.deadline,
-         assignment_json = excluded.assignment_json`,
+         assignment_json = excluded.assignment_json,
+         purpose = excluded.purpose,
+         request_seq = excluded.request_seq`,
     )
     .bind(
       entryId,
@@ -1025,6 +1071,8 @@ function assignmentStatement(
       assignment.operator,
       assignment.deadline,
       writeJson(assignment),
+      purpose,
+      requestSeq,
     );
 }
 
@@ -1056,10 +1104,10 @@ export async function openAssignment(
   const row = await db
     .prepare(
       `SELECT assignment_json FROM assignments
-       WHERE entry_id = ? AND missed_seq IS NULL AND answered_seq IS NULL
+       WHERE entry_id = ? AND purpose = ? AND missed_seq IS NULL AND answered_seq IS NULL
        ORDER BY seq DESC ${ONE_ROW}`,
     )
-    .bind(entryId)
+    .bind(entryId, VALIDATION)
     .first<Row>();
   return row === null ? null : readJson<OpenAssignment>(row, "assignment_json");
 }
@@ -1127,14 +1175,69 @@ export async function dueAssignments(
   const rows = await db
     .prepare(
       `SELECT entry_id, assignment_json FROM assignments
-       WHERE deadline < ? AND missed_seq IS NULL AND answered_seq IS NULL
+       WHERE purpose = ? AND deadline < ? AND missed_seq IS NULL AND answered_seq IS NULL
        ORDER BY deadline LIMIT ?`,
     )
-    .bind(before, limit)
+    .bind(VALIDATION, before, limit)
     .all<Row>();
   return rows.results.map((row) => ({
     entryId: readText(row, "entry_id"),
     assignment: readJson<OpenAssignment>(row, "assignment_json"),
+  }));
+}
+
+/**
+ * The entry's open revalidation check: the newest revalidation draw that is
+ * neither missed nor answered, or null.
+ *
+ * The mirror of `openAssignment` for the other purpose. Whitepaper Section 6,
+ * "Revalidate": a request "is assigned at random to a trusted operator", with the
+ * same window and the same miss as a validation assignment — but it is a
+ * different question, so it is a different lookup. A validation must never close
+ * a revalidation check and a revalidation draw must never satisfy an entry's
+ * validation assignment, which is exactly what the purpose column keeps apart.
+ */
+export async function openRevalidationAssignment(
+  db: D1Like,
+  entryId: string,
+): Promise<OpenAssignment | null> {
+  const row = await db
+    .prepare(
+      `SELECT assignment_json FROM assignments
+       WHERE entry_id = ? AND purpose = ? AND missed_seq IS NULL AND answered_seq IS NULL
+       ORDER BY seq DESC ${ONE_ROW}`,
+    )
+    .bind(entryId, REVALIDATION)
+    .first<Row>();
+  return row === null ? null : readJson<OpenAssignment>(row, "assignment_json");
+}
+
+/**
+ * The revalidation checks whose window has run out: still open, and past
+ * `before`.
+ *
+ * The mirror of `dueAssignments`, and the sweep's second deadline-first read.
+ * Strictly before, oldest deadline first, and the limit is the caller's own:
+ * this module holds no page size. Served by the partial `assignments_purpose_due`
+ * index (migrations/0009_disputes.sql).
+ */
+export async function dueRevalidationAssignments(
+  db: D1Like,
+  before: string,
+  limit: number,
+): Promise<Array<{ entryId: string; assignment: OpenAssignment; requestSeq: number }>> {
+  const rows = await db
+    .prepare(
+      `SELECT entry_id, assignment_json, request_seq FROM assignments
+       WHERE purpose = ? AND deadline < ? AND missed_seq IS NULL AND answered_seq IS NULL
+       ORDER BY deadline LIMIT ?`,
+    )
+    .bind(REVALIDATION, before, limit)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    entryId: readText(row, "entry_id"),
+    assignment: readJson<OpenAssignment>(row, "assignment_json"),
+    requestSeq: readInteger(row, "request_seq"),
   }));
 }
 
@@ -1156,11 +1259,41 @@ async function sealOntoHead(
   db: D1Like,
   input: EventInput,
 ): Promise<{ event: Event; statements: D1LikeStatement[] }> {
+  const run = await sealRunOntoHead(db, [input]);
+  return { event: run.events[0]!, statements: run.statements };
+}
+
+/**
+ * A run of events sealed onto the stored head, in order, and the statements
+ * that write them.
+ *
+ * The same rule as `sealOntoHead`, for the writes that seal more than one event
+ * at once: a dispute filing is an `entry_submitted` for the correction and a
+ * `dispute_filed` on the target, and both have to land or neither does. Each
+ * event is chained onto the one before it, and `eventStatements` then checks the
+ * whole run against the head exactly as a plain append is checked.
+ *
+ * `next` lets a later event in the run be built from an earlier sealed one — a
+ * `dispute_upheld` naming a validation's seq, say — without the caller having to
+ * guess a position that does not exist yet.
+ */
+async function sealRunOntoHead(
+  db: D1Like,
+  inputs: readonly EventInput[],
+  next?: (sealed: readonly Event[]) => readonly EventInput[],
+): Promise<{ events: Event[]; statements: D1LikeStatement[] }> {
   const previous = await headEvent(db);
-  const sealed = await appendEvent(previous === null ? [] : [previous], input);
-  const event = sealed[sealed.length - 1]!;
+  let chain: Event[] = previous === null ? [] : [previous];
+  const base = chain.length;
+  for (const input of inputs) chain = await appendEvent(chain, input);
+  if (next !== undefined) {
+    for (const input of next(chain.slice(base))) {
+      chain = await appendEvent(chain, input);
+    }
+  }
+  const events = chain.slice(base);
   const at = previous === null ? null : { seq: previous.seq, hash: previous.hash };
-  return { event, statements: eventStatements(db, [event], at) };
+  return { events, statements: eventStatements(db, events, at) };
 }
 
 /**
@@ -1279,6 +1412,24 @@ export interface StoredEntryInput {
  * still standing. The caller rederives each of them and hands them in; nothing
  * here derives a field, and each row keeps its own submitted_seq because
  * submitted_seq is the position of that entry's own submission.
+ *
+ * `alsoEvents` is for the events this validation's verdict seals on ANOTHER
+ * entry. The case is a dispute: Section 6, "An upheld challenge ... overturns
+ * the entry", so the decision that verifies a correction entry is the same
+ * moment `dispute_upheld` lands on the entry it corrects, and the decision that
+ * rejects one is the moment `dispute_failed` does. Both have to be in this
+ * batch: a reader between two writes would see a correction verified and its
+ * target still standing, which is precisely the state the log must never show.
+ * The callback is handed the sealed validation, so it can name its position, and
+ * the events it returns are chained onto it in order.
+ *
+ * `ledger` is the stake rows the outcome produces (src/stake.ts), sealed in the
+ * same batch for the same reason `recordReconfirmation` writes a bounty in its
+ * own: a ledger row without its event would be a stake nobody can verify
+ * offline. It is handed both the validation and the events `alsoEvents` sealed.
+ *
+ * `also` and `ledger` take the sealed extra events as a second argument, so a
+ * caller that has none simply ignores it and is unchanged.
  */
 export async function recordValidation(
   db: D1Like,
@@ -1286,11 +1437,24 @@ export async function recordValidation(
     readonly event: EventInput<"validation">;
     readonly stored: (event: Event<"validation">) => StoredEntryInput;
     readonly answeredAssignmentSeq: number | null;
-    readonly also?: (event: Event<"validation">) => readonly StoredEntryInput[];
+    readonly alsoEvents?: (event: Event<"validation">) => readonly EventInput[];
+    readonly also?: (
+      event: Event<"validation">,
+      alsoEvents: readonly Event[],
+    ) => readonly StoredEntryInput[];
+    readonly ledger?: (
+      event: Event<"validation">,
+      alsoEvents: readonly Event[],
+    ) => readonly StakeRecord[];
   },
 ): Promise<Event<"validation">> {
-  const { event, statements } = await sealOntoHead(db, input.event);
-  const validation = event as Event<"validation">;
+  const { events, statements } = await sealRunOntoHead(
+    db,
+    [input.event],
+    (sealed) => input.alsoEvents?.(sealed[0] as Event<"validation">) ?? [],
+  );
+  const validation = events[0] as Event<"validation">;
+  const extra = events.slice(1);
   const entryId = scopedEntryId(validation);
   const submittedSeq = await submittedSeqOf(db, entryId);
 
@@ -1305,7 +1469,7 @@ export async function recordValidation(
     ),
   );
   if (input.also !== undefined) {
-    for (const other of input.also(validation)) {
+    for (const other of input.also(validation, extra)) {
       statements.push(
         entryStatement(
           db,
@@ -1326,14 +1490,76 @@ export async function recordValidation(
         .bind(validation.seq, entryId, input.answeredAssignmentSeq),
     );
   }
+  for (const stake of input.ledger?.(validation, extra) ?? []) {
+    statements.push(stakeStatement(db, stake));
+  }
   await db.batch(statements);
   return validation;
 }
 
 const LEDGER_COLUMNS = `id, kind, operator_id, seq, created_at, payload_json`;
 
+/** The same row, plus the entry column 0009 added for the stakes. */
+const STAKE_LEDGER_COLUMNS = `id, kind, operator_id, entry_id, seq, created_at, payload_json`;
+
 /** The `kind` a bounty accrual is stored under: the record's own. */
 const BOUNTY_ACCRUAL: BountyAccrual["kind"] = "bounty_accrual";
+
+/**
+ * Every kind of stake row, so `ledgerRowsForEntry` can say what it returns
+ * rather than handing back whatever else the ledger may hold one day. The list
+ * is src/stake.ts's `StakeKind`, spelled out because a type is not a value.
+ */
+const STAKE_KINDS: readonly StakeRecord["kind"][] = Object.freeze([
+  "dispute_stake",
+  "dispute_refund",
+  "dispute_forfeit",
+  "dispute_reward",
+  "revalidation_stake",
+  "revalidation_refund",
+  "revalidation_forfeit",
+  "revalidation_reward",
+] as const);
+
+const STAKE_KINDS_IN = `kind IN (${STAKE_KINDS.map(() => "?").join(", ")})`;
+
+/**
+ * The insert that writes one stake row.
+ *
+ * The row's id is its kind and the position of the event that produced it. One
+ * event produces at most one row of each kind — an upheld dispute produces a
+ * refund and a reward, never two refunds — so the pair is unique, and a write
+ * replayed after a partial failure lands on the same id rather than a second
+ * row. `operator_id` is null for a bare-key challenger, which is exactly what
+ * Section 6 means by "a bare-key challenger's reward accrues to the key": the
+ * row is real, and the operator it would pay out through does not exist yet.
+ *
+ * The whole record goes in `payload_json` as it came from src/stake.ts, so the
+ * columns beside it are never a second source of truth: they are what the
+ * lookups seek on.
+ */
+function stakeStatement(db: D1Like, stake: StakeRecord): D1LikeStatement {
+  return db
+    .prepare(
+      `INSERT INTO ledger (${STAKE_LEDGER_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET
+         kind = excluded.kind,
+         operator_id = excluded.operator_id,
+         entry_id = excluded.entry_id,
+         seq = excluded.seq,
+         created_at = excluded.created_at,
+         payload_json = excluded.payload_json`,
+    )
+    .bind(
+      `${stake.kind}:${stake.seq}`,
+      stake.kind,
+      stake.operator,
+      stake.entry_id,
+      stake.seq,
+      stake.at,
+      writeJson(stake),
+    );
+}
 
 /**
  * Record a reconfirmation: append the event, store the entry derived including
@@ -1428,6 +1654,501 @@ export async function bountiesForEntry(
     .bind(BOUNTY_ACCRUAL, entryId, limit)
     .all<Row>();
   return rows.results.map((row) => readJson<BountyAccrual>(row, "payload_json"));
+}
+
+// ---------------------------------------------------------------------------
+// Disputes, revalidations and failure reports
+// ---------------------------------------------------------------------------
+
+/** How a caller stores the correction entry a dispute is filed as. */
+export interface DisputeCorrectionInput {
+  /** The correction's own submission, exactly as `submitEntry` takes it. */
+  readonly event: EventInput<"entry_submitted">;
+  /** The derived correction entry, built from a log that already holds its events. */
+  readonly stored: (
+    submitted: Event<"entry_submitted">,
+    filed: Event<"dispute_filed">,
+  ) => StoredEntryInput;
+  /** The captures the correction rests on: its cited page, and its receipt if it has one. */
+  readonly captures: readonly CaptureRecord[];
+}
+
+/**
+ * File a dispute: submit the correction entry, seal the challenge against its
+ * target, write both entry rows and the challenger's stake, atomically.
+ *
+ * Whitepaper Section 6, "Dispute": "A challenge is itself an entry, in the
+ * correction category, and it requires a citation ... Filing takes a stake, so
+ * burner keys cannot dispute for free." So one act produces two events on two
+ * entries and a ledger row, and every one of them has to land or none may. A
+ * correction submitted without its `dispute_filed` would be an ordinary
+ * correction nobody linked to anything; a `dispute_filed` without its correction
+ * would name an entry that does not exist; and a stake row without either would
+ * be a charge against a challenger who never filed.
+ *
+ * The two events are sealed in that order — the correction's submission first,
+ * then the challenge — because the challenge names the correction, and an event
+ * may not name an entry the log has not seen yet.
+ *
+ * `filed` is built from the sealed submission, so the caller can name the
+ * correction's id without having invented a position. Nothing here derives a
+ * field: both entry rows come back from the caller's own derivation over a log
+ * that already holds both events, and `stake` is src/stake.ts's record over the
+ * sealed `dispute_filed`.
+ */
+export async function recordDisputeFiling(
+  db: D1Like,
+  input: {
+    readonly correction: DisputeCorrectionInput;
+    readonly filed: (
+      submitted: Event<"entry_submitted">,
+    ) => EventInput<"dispute_filed">;
+    /**
+     * The events this filing seals on the target after the challenge itself, in
+     * order, and empty by default.
+     *
+     * Section 6, "Revalidate": "A request that turns up a citation can be
+     * upgraded into a dispute." An upgrade closes the request in the same breath
+     * as it files the challenge — a `revalidation_resolved` with outcome
+     * `upgraded` — and the two have to be in this batch, or a reader between the
+     * writes sees a dispute filed against an entry whose check is still open and
+     * whose stake is still up.
+     */
+    readonly also?: (
+      submitted: Event<"entry_submitted">,
+    ) => readonly EventInput[];
+    /** The disputed entry, rederived: its `disputes[]` array gains this challenge. */
+    readonly target: (
+      submitted: Event<"entry_submitted">,
+      filed: Event<"dispute_filed">,
+      also: readonly Event[],
+    ) => StoredEntryInput;
+    readonly stake: (filed: Event<"dispute_filed">) => StakeRecord | null;
+    /** The rows the events in `also` produce (src/stake.ts), if any. */
+    readonly ledger?: (
+      filed: Event<"dispute_filed">,
+      also: readonly Event[],
+    ) => readonly StakeRecord[];
+    /**
+     * The `revalidation_assigned` an upgrade closes, or null when the request
+     * had no draw standing. A check whose request has been upgraded is not owed
+     * an answer any more, so its row is closed here rather than left for the
+     * sweep to seal a miss against a checker who was never late.
+     */
+    readonly answeredAssignmentSeq?: number | null;
+  },
+): Promise<{
+  submitted: Event<"entry_submitted">;
+  filed: Event<"dispute_filed">;
+  also: Event[];
+}> {
+  const { events, statements } = await sealRunOntoHead(
+    db,
+    [input.correction.event],
+    (sealed) => {
+      const submission = sealed[0] as Event<"entry_submitted">;
+      return [input.filed(submission), ...(input.also?.(submission) ?? [])];
+    },
+  );
+  const submitted = events[0] as Event<"entry_submitted">;
+  const filed = events[1] as Event<"dispute_filed">;
+  const also = events.slice(2);
+  const correctionId = scopedEntryId(submitted);
+  const targetId = scopedEntryId(filed);
+
+  const correction = input.correction.stored(submitted, filed);
+  statements.push(
+    entryStatement(
+      db,
+      correction.entry,
+      correction.sidecar,
+      submitted.seq,
+      correction.derivedThroughSeq,
+    ),
+  );
+  // 0009's `dispute_of`: the correction says which entry it was filed against.
+  // A separate statement rather than a column on `entryStatement`, so every
+  // later rederivation of this entry rewrites the derived columns and leaves
+  // this one exactly where the filing put it.
+  statements.push(
+    db
+      .prepare(`UPDATE entries SET dispute_of = ? WHERE id = ?`)
+      .bind(targetId, correctionId),
+  );
+  for (const capture of input.correction.captures) {
+    statements.push(captureStatement(db, capture));
+  }
+
+  const target = input.target(submitted, filed, also);
+  statements.push(
+    entryStatement(
+      db,
+      target.entry,
+      target.sidecar,
+      await submittedSeqOf(db, targetId),
+      target.derivedThroughSeq,
+    ),
+  );
+
+  const answered = input.answeredAssignmentSeq ?? null;
+  if (answered !== null) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE assignments SET answered_seq = ? WHERE entry_id = ? AND seq = ?`,
+        )
+        .bind(events[events.length - 1]!.seq, targetId, answered),
+    );
+  }
+
+  const stake = input.stake(filed);
+  if (stake !== null) statements.push(stakeStatement(db, stake));
+  for (const row of input.ledger?.(filed, also) ?? []) {
+    statements.push(stakeStatement(db, row));
+  }
+
+  await db.batch(statements);
+  return { submitted, filed, also };
+}
+
+/**
+ * What every revalidation write takes: the event, the entry row rederived
+ * including it, and the ledger rows it produces.
+ *
+ * `stored` and `ledger` are both optional because not every one of these events
+ * changes either. A miss changes the sidecar's view of the request and nothing
+ * in the ledger; a request opened at nomankind's expense stakes nothing
+ * (src/stake.ts). Callbacks rather than values, for the reason
+ * `recordValidation` gives: the event does not exist until it is sealed onto the
+ * head, and the derived row has to be computed from a log that already holds it.
+ */
+export interface RevalidationWrite<T extends EventType> {
+  readonly event: EventInput<T>;
+  readonly stored?: (event: Event<T>) => StoredEntryInput;
+  readonly ledger?: (event: Event<T>) => readonly StakeRecord[];
+}
+
+/** Seal one revalidation event, store what it changed, write what it charged. */
+async function recordRevalidationEvent<T extends EventType>(
+  db: D1Like,
+  input: RevalidationWrite<T>,
+  extra: (event: Event<T>) => readonly D1LikeStatement[] = () => [],
+): Promise<Event<T>> {
+  const { event, statements } = await sealOntoHead(db, input.event);
+  const sealed = event as Event<T>;
+  const entryId = scopedEntryId(sealed);
+
+  const stored = input.stored?.(sealed);
+  if (stored !== undefined) {
+    statements.push(
+      entryStatement(
+        db,
+        stored.entry,
+        stored.sidecar,
+        await submittedSeqOf(db, entryId),
+        stored.derivedThroughSeq,
+      ),
+    );
+  }
+  statements.push(...extra(sealed));
+  for (const stake of input.ledger?.(sealed) ?? []) {
+    statements.push(stakeStatement(db, stake));
+  }
+  await db.batch(statements);
+  return sealed;
+}
+
+/**
+ * Record a revalidation request: the event, the entry row, and the standing the
+ * requester staked.
+ *
+ * Section 6, "Revalidate": "Any operator can also request revalidation of an
+ * entry inside its window by staking a small amount of standing." A request
+ * auto-opened by failure reports stakes nothing (Section 8: "at nomankind's
+ * expense"), and `ledger` returns nothing for it.
+ */
+export async function recordRevalidationRequest(
+  db: D1Like,
+  input: RevalidationWrite<"revalidation_requested">,
+): Promise<Event<"revalidation_requested">> {
+  return recordRevalidationEvent(db, input);
+}
+
+/**
+ * Record a revalidation draw: the event, and the assignment row the sweep reads.
+ *
+ * The mirror of `recordAssignment`, with 0009's purpose column set to
+ * 'revalidation' and the request's position carried beside it, so a revalidation
+ * check can never be mistaken for an entry's validation assignment in either
+ * direction.
+ */
+export async function recordRevalidationAssignment(
+  db: D1Like,
+  input: RevalidationWrite<"revalidation_assigned">,
+): Promise<Event<"revalidation_assigned">> {
+  return recordRevalidationEvent(db, input, (assigned) => [
+    assignmentStatement(
+      db,
+      scopedEntryId(assigned),
+      {
+        seq: assigned.seq,
+        agent: assigned.payload.agent,
+        operator: assigned.payload.operator,
+        beacon_round: assigned.payload.beacon_round,
+        deadline: assigned.payload.deadline,
+        // A revalidation draw is never a replacement: Section 6's replacement
+        // rule is about the 2-1 split in validation, which a check has no
+        // equivalent of.
+        replacement: false,
+      },
+      REVALIDATION,
+      assigned.payload.request_seq,
+    ),
+  ]);
+}
+
+/**
+ * Record a missed check: the event, and the assignment row it closes.
+ * `assignmentSeq` is the position of the `revalidation_assigned` event being
+ * closed, exactly as `recordAssignmentMissed` takes it.
+ */
+export async function recordRevalidationMissed(
+  db: D1Like,
+  input: RevalidationWrite<"revalidation_missed">,
+  assignmentSeq: number,
+): Promise<Event<"revalidation_missed">> {
+  return recordRevalidationEvent(db, input, (missed) => [
+    db
+      .prepare(
+        `UPDATE assignments SET missed_seq = ? WHERE entry_id = ? AND seq = ?`,
+      )
+      .bind(missed.seq, scopedEntryId(missed), assignmentSeq),
+  ]);
+}
+
+/**
+ * Record how a check ended: the event, the entry row, the stake it settled, and
+ * the assignment it answered.
+ *
+ * Section 6: "If the check finds the fact changed, the requester gets the stake
+ * back plus a challenger-style reward. If the entry holds, the requester loses
+ * the stake." Which of those it is belongs to src/stake.ts; this writes the rows
+ * it returns, in the batch that seals the event they came from.
+ *
+ * `answeredAssignmentSeq` names the `revalidation_assigned` event this resolves,
+ * or null when the request was resolved without a draw having landed — an
+ * upgrade to a dispute, which the requester may make before any checker answers.
+ */
+export async function recordRevalidationResolution(
+  db: D1Like,
+  input: RevalidationWrite<"revalidation_resolved"> & {
+    readonly answeredAssignmentSeq?: number | null;
+  },
+): Promise<Event<"revalidation_resolved">> {
+  const answered = input.answeredAssignmentSeq ?? null;
+  return recordRevalidationEvent(db, input, (resolved) =>
+    answered === null
+      ? []
+      : [
+          db
+            .prepare(
+              `UPDATE assignments SET answered_seq = ? WHERE entry_id = ? AND seq = ?`,
+            )
+            .bind(resolved.seq, scopedEntryId(resolved), answered),
+        ],
+  );
+}
+
+/**
+ * Record a failure report: the event, the frozen artifact it rests on, the entry
+ * row, and the revalidation it auto-opened if it was the one that reached the
+ * threshold.
+ *
+ * Whitepaper Section 8: "A reader that acts on a verified entry and fails ...
+ * files a signed failure report against the entry, with its transcript frozen
+ * and hashed like any artifact. A single report is a signal. A published
+ * threshold of reports from distinct operators auto-opens a revalidation at
+ * nomankind's expense."
+ *
+ * `opens` is handed the sealed report and returns the `revalidation_requested`
+ * to seal after it, or null. Whether the threshold was reached is
+ * src/dispute.ts's question (`failureReportThresholdReached`), asked by the
+ * caller over the reports it read; this only writes the answer, in the same
+ * batch, so the report that opened a check and the check itself can never come
+ * apart.
+ *
+ * The capture is the artifact's row, under a `report:<seq>` role so each report's
+ * artifact is its own row and none of them overwrites the entry's own captures.
+ * Its role therefore cannot be known before the event is sealed, so it too comes
+ * from a callback.
+ */
+export async function recordFailureReport(
+  db: D1Like,
+  input: {
+    readonly event: EventInput<"failure_report">;
+    readonly capture: (report: Event<"failure_report">) => CaptureRecord;
+    readonly opens?: (
+      report: Event<"failure_report">,
+    ) => EventInput<"revalidation_requested"> | null;
+    readonly stored?: (
+      report: Event<"failure_report">,
+      opened: Event<"revalidation_requested"> | null,
+    ) => StoredEntryInput;
+  },
+): Promise<{
+  report: Event<"failure_report">;
+  opened: Event<"revalidation_requested"> | null;
+}> {
+  const { events, statements } = await sealRunOntoHead(
+    db,
+    [input.event],
+    (sealed) => {
+      const opens = input.opens?.(sealed[0] as Event<"failure_report">) ?? null;
+      return opens === null ? [] : [opens];
+    },
+  );
+  const report = events[0] as Event<"failure_report">;
+  const opened =
+    events.length > 1 ? (events[1] as Event<"revalidation_requested">) : null;
+
+  statements.push(captureStatement(db, input.capture(report)));
+
+  const stored = input.stored?.(report, opened);
+  if (stored !== undefined) {
+    statements.push(
+      entryStatement(
+        db,
+        stored.entry,
+        stored.sidecar,
+        await submittedSeqOf(db, scopedEntryId(report)),
+        stored.derivedThroughSeq,
+      ),
+    );
+  }
+  await db.batch(statements);
+  return { report, opened };
+}
+
+/**
+ * The entry a correction was filed as a dispute against, or null.
+ *
+ * Null both when the id names no entry at all and when it names a correction
+ * that was submitted on its own: neither disputes anything, and the caller's
+ * question — "which entry does this challenge?" — has the same answer for both.
+ */
+export async function disputeOf(
+  db: D1Like,
+  correctionEntryId: string,
+): Promise<string | null> {
+  const row = await db
+    .prepare(`SELECT dispute_of FROM entries WHERE id = ? ${ONE_ROW}`)
+    .bind(correctionEntryId)
+    .first<Row>();
+  return row === null ? null : readNullableText(row, "dispute_of");
+}
+
+/**
+ * The corrections filed as disputes against one entry, in filing order.
+ *
+ * Section 6: "The original stays in the log, marked overturned, linked to its
+ * correction." This is that link followed the other way, for a reader looking at
+ * the target and asking what was filed against it. Served by the partial
+ * `entries_dispute_of` index; the limit is the caller's own.
+ */
+export async function correctionEntriesFor(
+  db: D1Like,
+  targetId: string,
+  limit: number,
+): Promise<StoredEntry[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${ENTRY_COLUMNS} FROM entries
+       WHERE dispute_of = ? ORDER BY submitted_seq LIMIT ?`,
+    )
+    .bind(targetId, limit)
+    .all<Row>();
+  return rows.results.map(toStoredEntry);
+}
+
+/**
+ * The stake rows one entry's disputes and revalidations produced, oldest first.
+ *
+ * Read through 0009's `entry_id` column rather than `json_extract`, unlike
+ * `bountiesForEntry`: a stake is looked up per entry on every entry page that
+ * has ever been disputed, which is a seek and not a scan. Filtered to the stake
+ * kinds so the return type is honest when M21 fills the rest of this table.
+ */
+export async function ledgerRowsForEntry(
+  db: D1Like,
+  entryId: string,
+  limit: number,
+): Promise<StakeRecord[]> {
+  const rows = await db
+    .prepare(
+      `SELECT payload_json FROM ledger
+       WHERE entry_id = ? AND ${STAKE_KINDS_IN} ORDER BY seq LIMIT ?`,
+    )
+    .bind(entryId, ...STAKE_KINDS, limit)
+    .all<Row>();
+  return rows.results.map((row) => readJson<StakeRecord>(row, "payload_json"));
+}
+
+/**
+ * How many overturned entries each operator signed, as submitter or as
+ * approver, most first.
+ *
+ * Section 6: "An upheld challenge ... overturns the entry ... and claws back
+ * what the approvers earned on it", so an operator's overturned count is what
+ * the standing side of that sentence is measured on. An operator counts once per
+ * entry however many of its agents signed it — Identity and operators: the
+ * operator is the unit.
+ *
+ * The signers of an entry live inside `entry_json` (the core's `author_operator`
+ * and every `approvers[]` item), and there is no column for them: adding one
+ * would be a second source of truth for something derivation already computes.
+ * So this is a grouped read over the overturned rows, parsed in the caller's
+ * process rather than in SQL. That is acceptable at this volume and only at this
+ * volume — an overturned entry is rare by construction, the caller's `limit`
+ * bounds how many rows are read, and if overturned entries ever became common
+ * enough for this to matter, the answer is a column written from derivation, not
+ * a bigger scan.
+ */
+export async function overturnedCountsByOperator(
+  db: D1Like,
+  limit: number,
+): Promise<Array<{ operator: string; count: number }>> {
+  const rows = await db
+    .prepare(
+      `SELECT entry_json FROM entries
+       WHERE status = 'overturned' ORDER BY submitted_seq LIMIT ?`,
+    )
+    .bind(limit)
+    .all<Row>();
+
+  const counts = new Map<string, number>();
+  for (const row of rows.results) {
+    const entry = readJson<Record<string, unknown>>(row, "entry_json");
+    const signers = new Set<string>();
+    const author = entry["author_operator"];
+    if (typeof author === "string") signers.add(author);
+    const approvers = entry["approvers"];
+    if (Array.isArray(approvers)) {
+      for (const approver of approvers) {
+        const operator = (approver as Record<string, unknown>)["operator"];
+        if (typeof operator === "string") signers.add(operator);
+      }
+    }
+    for (const operator of signers) {
+      counts.set(operator, (counts.get(operator) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .map(([operator, count]) => ({ operator, count }))
+    .sort((left, right) =>
+      right.count === left.count
+        ? left.operator.localeCompare(right.operator)
+        : right.count - left.count,
+    );
 }
 
 // ---------------------------------------------------------------------------

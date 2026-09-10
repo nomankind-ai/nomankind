@@ -91,8 +91,126 @@ export type EventPayloads = {
    */
   validation: { record: ApproverRecord; signature: string };
   reconfirmation: { record: ReconfirmationRecord; signature: string };
-  /** Recorded on the overturned entry; M20 refines the dispute rules. */
+  /** Recorded on the overturned entry: the correction that overturned it. */
   dispute_upheld: { correction_entry_id: string };
+  /**
+   * A challenge filed against a verified entry.
+   *
+   * Whitepaper Section 6, "Dispute": "A challenge is itself an entry, in the
+   * correction category, and it requires a citation." So there are two entries
+   * in play, and this event is scoped to the DISPUTED one — the target — never
+   * to the correction. `correction_entry_id` names the correction, and every
+   * later dispute event on the target names it too, so the target's own
+   * sub-sequence of the log tells the whole story of what was challenged and
+   * how it ended.
+   *
+   * `citation` and `snapshot_hash` are copied from the correction entry's core
+   * rather than looked up. A reader folding the target's events alone must be
+   * able to fill the schema's disputes[] item, which requires both, and a
+   * derivation that had to fetch another entry's core to do it would not be a
+   * fold at all.
+   *
+   * `operator` is null for a bare-key challenger, which is what decides the
+   * stake: Section 6, "A verified operator stakes standing, a bare key stakes a
+   * refundable filing fee, and the amounts are published policy" (src/stake.ts,
+   * src/policy.ts).
+   *
+   * `from_report_seq` names the `failure_report` event this dispute was
+   * upgraded from, and `from_revalidation_seq` the `revalidation_requested`
+   * event it was upgraded from; both null for a dispute filed on its own.
+   * Section 8: "a report that carries a citation or a reproducible observation
+   * is upgraded into a dispute", and Section 6: "A request that turns up a
+   * citation can be upgraded into a dispute."
+   */
+  dispute_filed: {
+    correction_entry_id: string;
+    challenger: string;
+    operator: string | null;
+    citation: string;
+    snapshot_hash: string;
+    from_report_seq: number | null;
+    from_revalidation_seq: number | null;
+  };
+  /**
+   * The challenge did not stand: the correction entry was rejected by its own
+   * validators. Section 6: "A failed challenge forfeits the stake and costs the
+   * challenger standing, so disputes are for evidence."
+   *
+   * `reason` is the first rejection's reason, carried so the target's world
+   * says why the challenge failed without reading the correction's approvers.
+   * Null when no rejection carried one.
+   */
+  dispute_failed: { correction_entry_id: string; reason: string | null };
+  /**
+   * Section 6, "Revalidate": "Any operator can also request revalidation of an
+   * entry inside its window by staking a small amount of standing. No citation
+   * is needed; the request only asks for a check."
+   *
+   * `requester` and `operator` are both null when the request was opened by
+   * nomankind itself, which Section 8 says happens when failure reports from a
+   * published threshold of distinct verified operators arrive: the check is "at
+   * nomankind's expense", so nobody staked and nobody is refunded.
+   */
+  revalidation_requested: {
+    requester: string | null;
+    operator: string | null;
+    source: "operator" | "failure_reports";
+  };
+  /**
+   * Section 6: the request "is assigned at random to a trusted operator". The
+   * draw is src/assign.ts's, unchanged; `request_seq` is the position of the
+   * `revalidation_requested` event being answered, which is what ties the
+   * assignment to its request.
+   */
+  revalidation_assigned: {
+    request_seq: number;
+    agent: string;
+    operator: string;
+    beacon_round: number;
+    deadline: string;
+  };
+  /** The assigned checker let the window run out, exactly as `assignment_missed`. */
+  revalidation_missed: { request_seq: number; agent: string; operator: string };
+  /**
+   * How the check ended. Section 6: "If the check finds the fact changed, the
+   * requester gets the stake back plus a challenger-style reward. If the entry
+   * holds, the requester loses the stake." And: "A request that turns up a
+   * citation can be upgraded into a dispute", which is `upgraded` — the stake
+   * comes back and the dispute's own stake takes over from there.
+   *
+   * `checker`, `operator` and `snapshot_hash` are null for an upgrade that the
+   * requester made without a check having landed; `correction_entry_id` names
+   * the dispute's correction entry and is null unless the outcome is upgraded.
+   */
+  revalidation_resolved: {
+    request_seq: number;
+    outcome: "held" | "changed" | "upgraded";
+    checker: string | null;
+    operator: string | null;
+    snapshot_hash: string | null;
+    correction_entry_id: string | null;
+  };
+  /**
+   * Section 8, "Failure reports": "A reader that acts on a verified entry and
+   * fails ... files a signed failure report against the entry, with its
+   * transcript frozen and hashed like any artifact."
+   *
+   * `artifact_hash` is that frozen transcript or receipt, in the schema's own
+   * field name. `operator` is null for a bare-key reporter, and Section 12
+   * ("Failure reports can be flooded") is why the field matters: "The threshold
+   * that auto-opens revalidation counts distinct verified operators only", so a
+   * flood of bare-key reports opens nothing (src/dispute.ts).
+   *
+   * `citation` is optional evidence; the schema says "its presence makes the
+   * report eligible for upgrade to a dispute".
+   */
+  failure_report: {
+    reporter: string;
+    operator: string | null;
+    observed: string;
+    artifact_hash: string;
+    citation: string | null;
+  };
   /**
    * One UTC day's read counts, published to the log.
    *
@@ -142,6 +260,13 @@ export const EVENT_TYPES: readonly EventType[] = [
   "validation",
   "reconfirmation",
   "dispute_upheld",
+  "dispute_filed",
+  "dispute_failed",
+  "revalidation_requested",
+  "revalidation_assigned",
+  "revalidation_missed",
+  "revalidation_resolved",
+  "failure_report",
   "read_count",
 ] as const;
 
@@ -158,6 +283,13 @@ export const ENTRY_SCOPED_TYPES: readonly EventType[] = [
   "validation",
   "reconfirmation",
   "dispute_upheld",
+  "dispute_filed",
+  "dispute_failed",
+  "revalidation_requested",
+  "revalidation_assigned",
+  "revalidation_missed",
+  "revalidation_resolved",
+  "failure_report",
 ] as const;
 
 export type Event<T extends EventType = EventType> = {

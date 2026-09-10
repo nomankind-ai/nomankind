@@ -93,7 +93,7 @@ function clone(log: readonly Event[]): Event[] {
 }
 
 describe("event types", () => {
-  it("names exactly the twelve event types", () => {
+  it("names exactly the nineteen event types", () => {
     expect(EVENT_TYPES).toEqual([
       "operator_registered",
       "operator_trusted",
@@ -106,12 +106,19 @@ describe("event types", () => {
       "validation",
       "reconfirmation",
       "dispute_upheld",
+      "dispute_filed",
+      "dispute_failed",
+      "revalidation_requested",
+      "revalidation_assigned",
+      "revalidation_missed",
+      "revalidation_resolved",
+      "failure_report",
       "read_count",
     ]);
-    expect(new Set(EVENT_TYPES).size).toBe(12);
+    expect(new Set(EVENT_TYPES).size).toBe(19);
   });
 
-  it("scopes six of them to an entry", () => {
+  it("scopes thirteen of them to an entry", () => {
     expect(ENTRY_SCOPED_TYPES).toEqual([
       "entry_submitted",
       "assignment",
@@ -119,6 +126,13 @@ describe("event types", () => {
       "validation",
       "reconfirmation",
       "dispute_upheld",
+      "dispute_filed",
+      "dispute_failed",
+      "revalidation_requested",
+      "revalidation_assigned",
+      "revalidation_missed",
+      "revalidation_resolved",
+      "failure_report",
     ]);
     for (const type of ENTRY_SCOPED_TYPES) {
       expect(EVENT_TYPES).toContain(type);

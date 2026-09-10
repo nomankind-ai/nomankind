@@ -69,8 +69,10 @@ import {
   type AnchorExternal,
 } from "../anchor.js";
 import {
+  assignmentDeadline,
   buildAssignment,
   buildAssignmentMissed,
+  drawChecker,
   drawDue,
   drawValidator,
   exclusionsFor,
@@ -85,6 +87,7 @@ import {
   registeredOperatorsAt,
   type EntryStatus,
 } from "../derive.js";
+import { openRevalidation, revalidationDrawExclusions } from "../dispute.js";
 import {
   appendEvent,
   type Event,
@@ -112,16 +115,19 @@ import {
   agentsForOperator,
   appendEvents,
   dueAssignments,
+  dueRevalidationAssignments,
   earliestReadReceiptDay,
   eventsAfter,
   eventsForEntry,
   eventsInRange,
+  eventsOfType,
   getAnchor,
   getEntry,
   headSeq,
   latestEventOfType,
   latestSeal,
   listEntries,
+  openRevalidationAssignment,
   putAnchor,
   putEntry,
   readCounterRangeOn,
@@ -129,6 +135,8 @@ import {
   recordAssignment,
   recordAssignmentMissed,
   recordPoolSnapshot,
+  recordRevalidationAssignment,
+  recordRevalidationMissed,
   recordSeal,
   sealsSealedOn,
   setAnchorExternal,
@@ -205,6 +213,33 @@ export interface SweepDraw {
 }
 
 /**
+ * One revalidation check this run drew.
+ *
+ * Whitepaper Section 6, "Revalidate": a request "is assigned at random to a
+ * trusted operator". `request_seq` is the position of the
+ * `revalidation_requested` this answers, which is what ties the two together.
+ */
+export interface SweepRevalidationDraw {
+  readonly entry_id: string;
+  readonly request_seq: number;
+  readonly operator: string;
+  readonly agent: string;
+  readonly beacon_round: number;
+  /** Position of the `revalidation_assigned` event this run appended. */
+  readonly seq: number;
+}
+
+/** One revalidation check whose window ran out. */
+export interface SweepRevalidationMiss {
+  readonly entry_id: string;
+  readonly request_seq: number;
+  readonly operator: string;
+  readonly agent: string;
+  /** Position of the `revalidation_missed` event this run appended. */
+  readonly seq: number;
+}
+
+/**
  * What one run did.
  *
  * The skip counts are the interesting half: a run that draws nothing has a
@@ -222,6 +257,16 @@ export interface SweepReport {
   } | null;
   readonly missed: readonly SweepMiss[];
   readonly drawn: readonly SweepDraw[];
+  /**
+   * The revalidation checks this run drew, and the ones whose window ran out.
+   *
+   * Their own fields rather than the two above: a validation assignment and a
+   * revalidation check are different questions with different exclusions and
+   * different miss consequences, and a caller reading one report must be able to
+   * tell which of the two a row is about without looking anything up.
+   */
+  readonly revalidation_drawn: readonly SweepRevalidationDraw[];
+  readonly revalidation_missed: readonly SweepRevalidationMiss[];
   /**
    * The entries this run rewrote because their freshness window had run out.
    * Ids only: no event is appended, so there is no position to report.
@@ -846,6 +891,59 @@ export async function runSweep(
     });
   }
 
+  // (b2) The same expiry, for the other purpose. Section 6, "Revalidate": the
+  // check carries the same seventy-two hours as a validation assignment, and a
+  // checker who lets them run out is missed exactly as a validator is. A miss
+  // closes the assignment and never the request — the check is still owed — so
+  // the draw step below finds the request open again and redraws it.
+  const revalidationMissed: SweepRevalidationMiss[] = [];
+  for (const due of await dueRevalidationAssignments(db, at, LIST_PAGE_LIMIT)) {
+    const open = await openRevalidationAssignment(db, due.entryId);
+    if (open === null || open.seq !== due.assignment.seq) {
+      skip("revalidation_not_open");
+      continue;
+    }
+    if (!isAssignmentMissed(open, { now: at })) {
+      skip("revalidation_not_missed");
+      continue;
+    }
+    const world = await entryWorld(db, due.entryId);
+    const event = await recordRevalidationMissed(
+      db,
+      {
+        event: {
+          at,
+          type: "revalidation_missed",
+          entry_id: due.entryId,
+          payload: {
+            request_seq: due.requestSeq,
+            agent: open.agent,
+            operator: open.operator,
+          },
+        },
+        // The row is rewritten so the sidecar's view of the check goes back to
+        // having no draw standing, which is what a reader is owed the moment
+        // the window ran out.
+        stored: (missedEvent): StoredEntryInput => {
+          const derived = rederive(world, due.entryId, deps.now, [missedEvent]);
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: missedEvent.seq,
+          };
+        },
+      },
+      open.seq,
+    );
+    revalidationMissed.push({
+      entry_id: due.entryId,
+      request_seq: due.requestSeq,
+      operator: open.operator,
+      agent: open.agent,
+      seq: event.seq,
+    });
+  }
+
   // (c) The draws. One beacon read for the whole run, so every entry drawn in
   // this run is drawn against the same public round.
   const result = await deps.beacon.latest();
@@ -952,6 +1050,133 @@ export async function runSweep(
     afterSubmittedSeq = page[page.length - 1]!.submittedSeq;
   }
 
+  // (c2) The revalidation draws. Section 6, "Revalidate": the request "is
+  // assigned at random to a TRUSTED OPERATOR", by the same public randomness as
+  // a validation draw and against the same committed snapshot, so anyone
+  // holding the log and the beacon can recompute who should have been drawn.
+  //
+  // The requests are found through the (type, seq) index rather than by scanning
+  // the log: every `revalidation_requested` ever made, paged, and each one asked
+  // of the kernel whether it is still open. That is bounded by how many checks
+  // have ever been asked for, which is what the cap and the stake exist to keep
+  // small.
+  const revalidationDrawn: SweepRevalidationDraw[] = [];
+  let afterRequestSeq = -1;
+  for (;;) {
+    const requests = await eventsOfType(
+      db,
+      "revalidation_requested",
+      afterRequestSeq,
+      LIST_PAGE_LIMIT,
+    );
+    if (requests.length === 0) break;
+
+    for (const request of requests) {
+      const entryId = request.entry_id;
+      // Unreachable: `appendEvent` refuses an entry-scoped event without one.
+      if (entryId === null) continue;
+
+      const world = await entryWorld(db, entryId);
+      const open = openRevalidation(world.entryEvents);
+      if (open === null || open.seq !== request.seq) {
+        skip("revalidation_resolved");
+        continue;
+      }
+      if ((await openRevalidationAssignment(db, entryId)) !== null) {
+        skip("revalidation_assigned");
+        continue;
+      }
+
+      if (beacon === null) {
+        skip(beaconRefusal ?? "beacon_unavailable");
+        continue;
+      }
+
+      const all = [...registry, ...world.entryEvents];
+      const pool = latestPoolSnapshot(all, headPosition(all));
+      if (pool === null) {
+        skip("no_pool_snapshot");
+        continue;
+      }
+
+      // The submitter's operator and the requester's, and nobody else's: a
+      // revalidation is a recheck rather than a challenge, so it does not carry
+      // the dispute's extra exclusion (src/dispute.ts).
+      const submission = world.entryEvents.find(
+        (event) => event.type === "entry_submitted",
+      ) as Event<"entry_submitted"> | undefined;
+      const authorOperator =
+        (submission?.payload.core["author_operator"] as string | null) ?? null;
+      const exclude = revalidationDrawExclusions(
+        authorOperator,
+        (open as Event<"revalidation_requested">).payload.operator,
+      );
+
+      // The M4 draw first, so above the switch a checker and a validator are
+      // drawn by exactly the same function. Below it, `drawChecker` answers the
+      // same question without the rule that belongs to validation alone.
+      const attempted = await drawValidator({
+        entryId,
+        snapshot: pool,
+        beacon,
+        exclude,
+      });
+      const draw =
+        !attempted.ok && attempted.reason === "pool_below_switch"
+          ? await drawChecker({ entryId, snapshot: pool, beacon, exclude })
+          : attempted;
+      if (!draw.ok) {
+        skip(draw.reason);
+        continue;
+      }
+
+      // Identity and operators: the operator is the unit, and the agent named
+      // beside it is the first one bound under it.
+      const agents = await agentsForOperator(db, draw.operator, LIST_PAGE_LIMIT);
+      const agent = agents[0];
+      if (agent === undefined) {
+        skip("no_agent_for_operator");
+        continue;
+      }
+
+      const event = await recordRevalidationAssignment(db, {
+        event: {
+          at,
+          type: "revalidation_assigned",
+          entry_id: entryId,
+          payload: {
+            request_seq: request.seq,
+            agent: agent.agentId,
+            operator: draw.operator,
+            beacon_round: beacon.round,
+            // The same seventy-two hours a validation assignment carries.
+            deadline: assignmentDeadline(at),
+          },
+        },
+        stored: (assigned): StoredEntryInput => {
+          const derived = rederive(world, entryId, deps.now, [assigned]);
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: assigned.seq,
+          };
+        },
+      });
+
+      revalidationDrawn.push({
+        entry_id: entryId,
+        request_seq: request.seq,
+        operator: draw.operator,
+        agent: agent.agentId,
+        beacon_round: beacon.round,
+        seq: event.seq,
+      });
+    }
+
+    afterRequestSeq = requests[requests.length - 1]!.seq;
+    if (requests.length < LIST_PAGE_LIMIT) break;
+  }
+
   // (d) Staleness. Whitepaper Section 7, "Freshness and decay": past its window
   // an entry stays verified but shows as stale. Nobody appends an event for
   // that — the window closing is a fact about the calendar and about the log,
@@ -1050,6 +1275,8 @@ export async function runSweep(
     snapshot,
     missed,
     drawn,
+    revalidation_drawn: revalidationDrawn,
+    revalidation_missed: revalidationMissed,
     staled,
     published,
     sealed,

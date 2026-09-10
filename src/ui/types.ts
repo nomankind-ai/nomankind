@@ -17,6 +17,7 @@
 import type { Sidecar } from "../derive.js";
 import type { Event } from "../events.js";
 import type { Seal } from "../seal.js";
+import type { StakeRecord } from "../stake.js";
 
 /**
  * The three things every page knows about the request it is answering, and
@@ -131,6 +132,17 @@ export interface EntryData {
   superseders: string[];
   /** The window from policy for this entry's category, null for an event category. */
   stalenessWindowDays: number | null;
+  /**
+   * The stake rows this entry's disputes and revalidations produced, oldest
+   * first, exactly as `ledgerRowsForEntry` read them. Every row is derivable
+   * from the log, and an amount is null while M21 has not priced it.
+   */
+  ledger: StakeRecord[];
+  /**
+   * The entry this one was filed as a correction of (Section 6, Dispute), null
+   * when it is not a correction. The other direction of `overturned_by`.
+   */
+  disputeOf: string | null;
 }
 
 export interface OperatorRow {
@@ -143,6 +155,12 @@ export interface OperatorRow {
   registeredSeq: number;
   agents: number;
   validations: number;
+  /**
+   * Entries this operator signed, as submitter or as approver, that an upheld
+   * dispute overturned (Section 6). Counted once per entry however many of its
+   * agents signed it, and zero is a reading and not a missing number.
+   */
+  overturned: number;
 }
 
 export interface OperatorsData {

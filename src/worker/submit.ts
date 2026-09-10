@@ -42,7 +42,7 @@ import {
   transcriptArtifactHash,
 } from "../artifact.js";
 import { CORE_KEYS, extractCore, type Core } from "../core.js";
-import { deriveEntry } from "../derive.js";
+import { deriveEntry, type DerivedEntry } from "../derive.js";
 import { appendEvent, type Event } from "../events.js";
 import { isTranscriptCategory } from "../evidence.js";
 import { canonicalize } from "../hash.js";
@@ -144,7 +144,7 @@ const UNKNOWN_MEDIA_TYPE = "application/octet-stream";
  * same reason StorageUnreachable is: a TypeError from our own reading of what
  * R2 returned stays a bug of ours and still reaches the platform as a 500.
  */
-class ArchiveUnreachable extends Error {
+export class ArchiveUnreachable extends Error {
   constructor(reason: unknown) {
     super(reason instanceof Error ? reason.message : String(reason));
     this.name = "ArchiveUnreachable";
@@ -213,7 +213,7 @@ function parseSubmitBody(body: unknown): SubmitBody | null {
 // ---------------------------------------------------------------------------
 
 /** One capture, ready for the archive and for its row. */
-interface PreparedCapture {
+export interface PreparedCapture {
   readonly role: CaptureRecord["role"];
   readonly contentHash: string;
   readonly archiveHash: string;
@@ -404,21 +404,64 @@ async function tail(db: D1Like): Promise<Event[]> {
   return event === null ? [] : [event];
 }
 
-async function submit(
-  request: Request,
+/**
+ * One submission that has passed every check, ready to be archived and written.
+ *
+ * `event` is the `entry_submitted` sealed onto the head this request read, not
+ * yet written; `derived` is what src/derive.ts made of a log holding it, already
+ * past the published schema. The writer is the caller's: POST /entries stores it
+ * with `submitEntry`, and the dispute door stores it with `recordDisputeFiling`
+ * beside the challenge it is filed as.
+ */
+export interface PreparedSubmission {
+  readonly core: Core;
+  readonly id: string;
+  readonly event: Event;
+  readonly derived: DerivedEntry;
+  readonly captures: readonly PreparedCapture[];
+  /** The capture rows exactly as `submitEntry` takes them. */
+  readonly captureRows: readonly CaptureRecord[];
+  /** The instant every one of the above was built at. */
+  readonly at: string;
+}
+
+/** A prepared submission, or the refusal that stopped it, ready to return. */
+export type SubmissionAttempt =
+  | { ok: true; prepared: PreparedSubmission }
+  | { ok: false; response: Response };
+
+/**
+ * The whole POST /entries pipeline, from the parsed body to a submission ready
+ * to write.
+ *
+ * Whitepaper Section 6, "Dispute": "A challenge is itself an entry, in the
+ * correction category ... It passes through the same validation process". The
+ * word is *same*, so the dispute door does not get a second, thinner pipeline of
+ * its own: it hands its correction entry to this function and gets back exactly
+ * what POST /entries would have got, refusals included, in the same order.
+ *
+ * The author's signature, the kernel's submission and supersession checks, the
+ * duplicate lookup, the capture of the cited page under the norm rule, and the
+ * schema over the derived entry. Nothing is written and nothing is archived: a
+ * refusal here leaves the log and the archive exactly where they were.
+ */
+export async function prepareSubmission(
   env: Env,
   deps: SubmitDeps,
-  path: string,
-): Promise<Response> {
-  const auth = await authenticate(request, env, deps, path);
-  if (!auth.ok) return auth.response;
+  requestAgent: string,
+  raw: unknown,
+): Promise<SubmissionAttempt> {
+  const refused = (response: Response): SubmissionAttempt => ({
+    ok: false,
+    response,
+  });
 
-  const body = parseSubmitBody(auth.body);
-  if (body === null) return refuse(400, "bad_body");
+  const body = parseSubmitBody(raw);
+  if (body === null) return refused(refuse(400, "bad_body"));
 
   // The author's signature over the core, before anything else is believed.
   if (!(await verifyEntrySignature(body.entry))) {
-    return refuse(401, "bad_signature");
+    return refused(refuse(401, "bad_signature"));
   }
 
   const core = extractCore(body.entry);
@@ -430,7 +473,7 @@ async function submit(
 
   const submission = checkSubmission(core, {
     now: at,
-    requestAgent: auth.agent,
+    requestAgent,
     authorOperator,
     expectedId: await entryIdFor(core),
   });
@@ -439,7 +482,7 @@ async function submit(
     // still no; every other refusal is a well-formed request whose contents do
     // not hold up.
     const status = submission.reason === "author_mismatch" ? 403 : 422;
-    return refuse(status, submission.reason);
+    return refused(refuse(status, submission.reason));
   }
 
   const id = core["id"] as string;
@@ -453,10 +496,10 @@ async function submit(
   const link = checkSupersedes(core, (entryId) =>
     entryId === supersedes ? target : null,
   );
-  if (!link.ok) return refuse(422, link.reason);
+  if (!link.ok) return refused(refuse(422, link.reason));
 
   if ((await getEntry(env.DB, id)) !== null) {
-    return refuse(409, "duplicate_entry");
+    return refused(refuse(409, "duplicate_entry"));
   }
 
   // The sidecar names the 1F916 identity that fetched, and ours is the
@@ -464,23 +507,23 @@ async function submit(
   // provenance of a capture, so it does not take one: production says so and
   // refuses rather than archiving evidence nobody stands behind.
   const fetcher = env.MAINTAINER_AGENT_ID;
-  if (fetcher === "") return refuse(503, "fetcher_not_configured");
+  if (fetcher === "") return refused(refuse(503, "fetcher_not_configured"));
 
   const snapshot = isTranscriptCategory(core["category"])
     ? await transcriptCapture(core, at, fetcher)
     : await fetchedCapture(core, deps, at, fetcher);
-  if (!snapshot.ok) return refuse(422, snapshot.reason);
+  if (!snapshot.ok) return refused(refuse(422, snapshot.reason));
   const captures: PreparedCapture[] = [snapshot.capture];
 
   if (core["observation"] !== null) {
     const receipt = await receiptCapture(core, body.receipt, at, fetcher);
-    if (!receipt.ok) return refuse(422, receipt.reason);
+    if (!receipt.ok) return refused(refuse(422, receipt.reason));
     captures.push(receipt.capture);
   } else if (body.receipt !== undefined) {
     // A receipt with nothing to receipt: the core says this entry rests on a
     // document, and an unreferenced artifact would enter the archive attached
     // to nothing.
-    return refuse(400, "bad_body");
+    return refused(refuse(400, "bad_body"));
   }
 
   // The would-be event, built on the current head but not yet written, so the
@@ -500,30 +543,18 @@ async function submit(
   // not validate is not stored and its capture is not archived.
   const validation = validateEntry(derived.entry);
   if (!validation.ok) {
-    return json({ error: "schema_invalid", errors: validation.errors }, 422);
+    return refused(json({ error: "schema_invalid", errors: validation.errors }, 422));
   }
 
-  // Every check has passed. The evidence goes to the archive first: the objects
-  // are content addressed and immutable, so a batch that then fails leaves a
-  // capture nothing points at rather than a row pointing at nothing.
-  for (const capture of captures) {
-    await throughArchive(() =>
-      archiveCapture(env.CAPTURES, {
-        archiveHash: capture.archiveHash,
-        bytes: capture.bytes,
-        mediaType: capture.mediaType,
-        sidecar: capture.sidecar,
-      }),
-    );
-  }
-
-  try {
-    await submitEntry(env.DB, {
-      events: [event],
-      entry: derived.entry,
-      sidecar: derived.sidecar,
-      derivedThroughSeq: event.seq,
-      captures: captures.map((capture) => ({
+  return {
+    ok: true,
+    prepared: {
+      core,
+      id,
+      event,
+      derived,
+      captures,
+      captureRows: captures.map((capture) => ({
         entryId: id,
         role: capture.role,
         contentHash: capture.contentHash,
@@ -534,6 +565,59 @@ async function submit(
         size: capture.bytes.byteLength,
         fetchedAt: at,
       })),
+      at,
+    },
+  };
+}
+
+/**
+ * Put a prepared submission's evidence in the archive.
+ *
+ * Always before the batch that stores it: the objects are content addressed and
+ * immutable, so a batch that then fails leaves a capture nothing points at
+ * rather than a row pointing at nothing. A bucket that does not answer throws
+ * `ArchiveUnreachable`, which both doors turn into a 503.
+ */
+export async function archivePrepared(
+  env: Env,
+  prepared: PreparedSubmission,
+): Promise<void> {
+  for (const capture of prepared.captures) {
+    await throughArchive(() =>
+      archiveCapture(env.CAPTURES, {
+        archiveHash: capture.archiveHash,
+        bytes: capture.bytes,
+        mediaType: capture.mediaType,
+        sidecar: capture.sidecar,
+      }),
+    );
+  }
+}
+
+async function submit(
+  request: Request,
+  env: Env,
+  deps: SubmitDeps,
+  path: string,
+): Promise<Response> {
+  const auth = await authenticate(request, env, deps, path);
+  if (!auth.ok) return auth.response;
+
+  const attempt = await prepareSubmission(env, deps, auth.agent, auth.body);
+  if (!attempt.ok) return attempt.response;
+  const { prepared } = attempt;
+
+  // Every check has passed. The evidence goes to the archive first, then the
+  // event, the entry row and the capture rows in one atomic batch.
+  await archivePrepared(env, prepared);
+
+  try {
+    await submitEntry(env.DB, {
+      events: [prepared.event],
+      entry: prepared.derived.entry,
+      sidecar: prepared.derived.sidecar,
+      derivedThroughSeq: prepared.event.seq,
+      captures: prepared.captureRows,
     });
   } catch (error) {
     if (error instanceof EventAppendError) {
@@ -544,7 +628,9 @@ async function submit(
     throw error;
   }
 
-  return json(derived.entry, 201, { location: `/entries/${id}` });
+  return json(prepared.derived.entry, 201, {
+    location: `/entries/${prepared.id}`,
+  });
 }
 
 // ---------------------------------------------------------------------------

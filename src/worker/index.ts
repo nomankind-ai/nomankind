@@ -11,7 +11,11 @@
  * (src/worker/validate.ts) and the log's own page (src/worker/events.ts), and
  * adds the scheduled sweep (src/worker/sweep.ts) beside the request handler.
  * M15 mounts the reconfirmation door (src/worker/reconfirm.ts) beside the
- * validate one and gives the sweep its staleness step. M16 mounts the seal's own
+ * validate one and gives the sweep its staleness step. M20 mounts Section 6's
+ * dispute and revalidation doors and Section 8's failure-report door beside
+ * them (src/worker/dispute.ts, src/worker/revalidate.ts,
+ * src/worker/failure-reports.ts), and gives the sweep the draw and the miss that
+ * answer a revalidation request. M16 mounts the seal's own
  * pages (src/worker/seals.ts) — the seal chain, one seal, an event's inclusion
  * proof, and the daily anchors — and gives the sweep the three steps that make
  * them: seal, witness, anchor. M17 mounts Section 8's read door
@@ -50,11 +54,14 @@ import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import { htmlResponse } from "../ui/html.js";
 import { renderNotFound } from "../ui/pages/errors.js";
 import type { Env } from "./env.js";
+import { handleDispute } from "./dispute.js";
 import { handleEvents } from "./events.js";
+import { handleFailureReports } from "./failure-reports.js";
 import { forMethod, handlePages, wantsHtml } from "./pages.js";
 import { handleRead } from "./read.js";
 import { handleReconfirm } from "./reconfirm.js";
 import { handleRegistry, json } from "./registry.js";
+import { handleRevalidate } from "./revalidate.js";
 import { handleSeals } from "./seals.js";
 import { handleSubmit } from "./submit.js";
 import { runSweep } from "./sweep.js";
@@ -160,6 +167,21 @@ export async function handleRequest(
 
   const reconfirmed = await handleReconfirm(request, env, { now });
   if (reconfirmed !== null) return reconfirmed;
+
+  // M20's three doors, Section 6's "Dispute" and "Revalidate" and Section 8's
+  // failure reports. The dispute door runs the submit route's own pipeline on
+  // the correction entry, so it takes the same fetcher.
+  const disputed = await handleDispute(request, env, {
+    now,
+    fetcher: deps?.fetcher ?? new WebFetcher(),
+  });
+  if (disputed !== null) return disputed;
+
+  const revalidated = await handleRevalidate(request, env, { now });
+  if (revalidated !== null) return revalidated;
+
+  const reported = await handleFailureReports(request, env, { now });
+  if (reported !== null) return reported;
 
   const readable = await handleRead(request, env, { now });
   if (readable !== null) return readable;
