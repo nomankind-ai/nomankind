@@ -91,8 +91,76 @@ describe("renderPolicy", () => {
   });
 
   it("marks the numbers the paper names and nothing publishes yet", () => {
-    expect(page).toContain("not yet published (M21)");
+    // M21 published the standing formula, the price, the payout minimum and the
+    // cycle, so the only placeholders left are M24's paid tiers.
+    expect(page).not.toContain("not yet published (M21)");
     expect(page).toContain("not yet published (M24)");
+  });
+
+  it("publishes the standing formula, every term of it, read from POLICY", () => {
+    expect(page).toContain(">Standing</h2>");
+    for (const [name, value] of [
+      [
+        "STANDING_VALIDATION_VOLUNTEERED",
+        `${POLICY.STANDING_VALIDATION_VOLUNTEERED} standing`,
+      ],
+      [
+        "STANDING_VALIDATION_ASSIGNED",
+        `${POLICY.STANDING_VALIDATION_ASSIGNED} standing`,
+      ],
+      [
+        "STANDING_SUBMISSION_VERIFIED",
+        `${POLICY.STANDING_SUBMISSION_VERIFIED} standing`,
+      ],
+      ["STANDING_DISPUTE_UPHELD", `${POLICY.STANDING_DISPUTE_UPHELD} standing`],
+      [
+        "STANDING_OVERTURNED_SIGNER",
+        `${POLICY.STANDING_OVERTURNED_SIGNER} standing`,
+      ],
+      [
+        "STANDING_ASSIGNMENT_MISSED",
+        `${POLICY.STANDING_ASSIGNMENT_MISSED} standing`,
+      ],
+      ["STANDING_TRUSTED_ENTRY", `${POLICY.STANDING_TRUSTED_ENTRY} standing`],
+      ["STANDING_TRUSTED_STAY", `${POLICY.STANDING_TRUSTED_STAY} standing`],
+    ] as const) {
+      expect(page, `${name} has no row`).toContain(
+        `<td class="mono">${name}</td>`,
+      );
+      expect(page, `${name} does not print its value`).toContain(
+        `<td class="mono">${value}</td>`,
+      );
+    }
+    // The pause is a word, not a rate: the paper publishes that decay is paused
+    // and publishes no number, and a rate of zero would be a number nobody set.
+    expect(page).toContain(`<td class="mono">STANDING_DECAY_PAUSED</td>`);
+    expect(page).toContain(
+      `<td class="mono">${POLICY.STANDING_DECAY_PAUSED ? "paused" : "active"}</td>`,
+    );
+    expect(page).toContain("there is no decay term at all");
+  });
+
+  it("publishes the price, the payout minimum and the cycle, all from POLICY", () => {
+    for (const [name, value] of [
+      [
+        "READ_PRICE_MICROS_PER_READ",
+        `${POLICY.READ_PRICE_MICROS_PER_READ} micro-USD per read`,
+      ],
+      ["PAYOUT_MINIMUM_MICROS", `${POLICY.PAYOUT_MINIMUM_MICROS} micro-USD`],
+      ["PAYOUT_CYCLE", POLICY.PAYOUT_CYCLE],
+    ] as const) {
+      expect(page, `${name} has no row`).toContain(
+        `<td class="mono">${name}</td>`,
+      );
+      expect(page, `${name} does not print its value`).toContain(
+        `<td class="mono">${value}</td>`,
+      );
+    }
+    // The per-thousand figure is derived from the price rather than restated, so
+    // a price that moves by decision moves this with it. It is the paper's own
+    // worked example at today's number: fifty cents per thousand reads.
+    expect(page).toContain("$0.50 per thousand reads");
+    expect(page).toContain("$5.00");
   });
 
   it("groups the dispute and report numbers, and reads each from POLICY", () => {
@@ -128,8 +196,9 @@ describe("renderPolicy", () => {
     expect(page).toContain("Accept: application/json");
   });
 
-  it("carries no script", () => {
+  it("carries no script and no inline style", () => {
     expect(page).not.toContain("<script");
+    expect(page).not.toContain(' style="');
   });
 });
 
@@ -149,10 +218,43 @@ describe("renderApi", () => {
       "/read",
       "/sync",
       "/policy",
+      "/standing",
+      "/operators/{id}/standing",
+      "/operators/{id}/ledger",
+      "/ledger",
     ];
     for (const path of paths) {
       expect(page, `${path} is not documented`).toContain(path);
     }
+  });
+
+  it("documents the standing and ledger routes with their shapes and refusals", () => {
+    // Standing is recomputed over the log rather than read from a column, and
+    // the page has to say so: that is the whole difference between a number a
+    // reader can check and a score nomankind hands out.
+    expect(page).toContain("recomputed over the sealed log");
+    expect(page).toContain("formula");
+    expect(page).toContain("stored");
+    expect(page).toContain(
+      "accrued, held, released, clawed_back, paid, carried_forward",
+    );
+    expect(page).toContain("reconciliations");
+    expect(page).toContain("READ_PRICE_MICROS_PER_READ");
+    expect(page).toContain("PAYOUT_MINIMUM_MICROS");
+    expect(page).toContain("PAYOUT_CYCLE");
+    expect(page).toContain("HOLDBACK_DAYS");
+    expect(page).toContain("404 not_found.");
+  });
+
+  it("gives standing a command beside the other offline checks", () => {
+    expect(page).toContain(`npm run standing -- ${ctx.origin} &lt;operator&gt;`);
+  });
+
+  it("names the three units and what each one is", () => {
+    expect(page).toContain(">Units</h2>");
+    expect(page).toContain("a millionth of a dollar: 1,000,000 to the dollar");
+    expect(page).toContain("Standing units, which are not money");
+    expect(page).toContain(`${POLICY.DISPUTE_FILING_FEE_CENTS} cents`);
   });
 
   it("names the four headers a signed write carries", () => {
@@ -198,9 +300,13 @@ describe("renderApi", () => {
   });
 
   it("names what is not built yet with its milestone", () => {
-    expect(page).toContain("M21");
+    expect(page).toContain("M22");
     expect(page).toContain("M23");
     expect(page).toContain("M24");
+    // M21 built standing and the ledger, so the row is gone: a path that exists
+    // listed as unbuilt is the same lie as a documented path that answers 404.
+    expect(page).not.toContain("Standing and the ledger endpoints");
+    expect(page).not.toContain(`<td class="mono">M21</td>`);
   });
 
   it("lists POST validate's refusals in VALIDATION_REFUSALS order", () => {
@@ -350,8 +456,9 @@ describe("renderApi", () => {
     expect([...new Set(bounds)]).toEqual([LIST_PAGE_LIMIT]);
   });
 
-  it("carries no script", () => {
+  it("carries no script and no inline style", () => {
     expect(page).not.toContain("<script");
+    expect(page).not.toContain(' style="');
   });
 });
 

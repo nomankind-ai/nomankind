@@ -293,6 +293,11 @@ describe("joining", () => {
       trusted: false,
       trusted_seq: null,
       payout_status: "verified",
+      // The connected account id the body carried, and nothing else about the
+      // account (D-053). Without it a payout cycle has no reference to transfer
+      // against and skips the operator, so an operator that onboarded is stored
+      // with the answer to "where does this one's money leave through".
+      payout_reference: VERIFIED_REFERENCE,
     });
 
     const bound = await eventBySeq(store.db, (await head()) as number);
@@ -304,6 +309,11 @@ describe("joining", () => {
     expect((bound?.payload as { agent: string }).agent).toBe(alice.agentId);
     expect(body.registeredSeq).toBe(registered?.seq);
     expect(registered?.at).toBe(AT);
+
+    // The log is unchanged by it: the reference is the Worker's own index into
+    // a payment provider, and never a public event anyone replays.
+    expect(bound?.payload).not.toHaveProperty("payout_reference");
+    expect(registered?.payload).not.toHaveProperty("payout_reference");
   });
 
   it("answers GET /agents/{id} with the operator behind the key", async () => {

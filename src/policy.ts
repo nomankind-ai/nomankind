@@ -423,6 +423,92 @@ export const HOME_LATEST_ENTRIES = 10;
 /** How many seals the landing page's live seal-chain band shows. A page size, so it lives here beside HOME_LATEST_ENTRIES. */
 export const LANDING_BAND_SEALS = 12;
 
+/**
+ * Incentives / Standing: "Standing is the non-monetary record of being right. It
+ * is earned by approved submissions, completed validations (assigned work
+ * weighted highest), rejections that hold, and upheld challenges ... Amounts and
+ * rates are published policy."
+ *
+ * The paper names every move and states no amount, so all six below are the
+ * maintainer's own placeholders, in standing units. Assigned work weighs highest
+ * because the paper says so — "that is what makes an assignment on an entry
+ * nobody will read worth doing" — and a rejection that holds counts the same as
+ * an approval, which is why one number covers both decisions.
+ *
+ * Not whitepaper numbers. The maintainer's published policy (M21); they move
+ * only by a later decision, and never by an edit anywhere but this file.
+ */
+export const STANDING_VALIDATION_VOLUNTEERED = 1;
+export const STANDING_VALIDATION_ASSIGNED = 3;
+export const STANDING_SUBMISSION_VERIFIED = 2;
+export const STANDING_DISPUTE_UPHELD = 5;
+export const STANDING_OVERTURNED_SIGNER = 5;
+export const STANDING_ASSIGNMENT_MISSED = 2;
+
+/**
+ * Incentives / Standing: standing "gates everything discretionary, from entry to
+ * and stay in the trusted pool". Two numbers rather than one, because a single
+ * threshold would flap: an operator sitting exactly at the bar would be trusted
+ * and untrusted by turns as one burn landed and one validation followed.
+ *
+ * `STANDING_TRUSTED_ENTRY` is what a registered, non-maintainer, non-provider
+ * operator must reach to be trusted; `STANDING_TRUSTED_STAY` is what a trusted
+ * operator must stay at or above to keep it. Not whitepaper numbers: the
+ * maintainer's published policy, moving only by a later decision.
+ */
+export const STANDING_TRUSTED_ENTRY = 10;
+export const STANDING_TRUSTED_STAY = 0;
+
+/**
+ * Incentives / Standing: standing "decays when the work it came from stops being
+ * read or was never used ... Decay is paused until the paid loop starts (below),
+ * since before then there is nothing for it to decay against."
+ *
+ * So there is no rate here, and there must not be: the paper publishes the pause
+ * and not a number, and inventing a rate now would be publishing a policy nobody
+ * decided. The flag is what src/standing.ts reads, and the day the paid loop
+ * starts it moves by a decision, together with the rate that replaces it.
+ */
+export const STANDING_DECAY_PAUSED = true;
+
+/**
+ * Incentives / Money: "At $0.50 per thousand paid reads, an entry read ten
+ * thousand times in a month earns its submitter 75 cents and each validator 25."
+ *
+ * That is the paper's own worked example, so the price is the paper's: fifty
+ * cents per thousand reads is five hundred micro-USD per read. Micro-USD (a
+ * millionth of a dollar) is the unit every read-revenue amount in the ledger is
+ * counted in, because a single read's share is 75 micros — a fraction of a cent,
+ * and a ledger that rounded it to cents would pay nobody anything.
+ *
+ * A price, not a rule, and the paper says the unit economics depend on API
+ * pricing that does not exist yet: the maintainer's published policy, moving
+ * only by a later decision.
+ */
+export const READ_PRICE_MICROS_PER_READ = 500;
+
+/**
+ * Incentives / Money, as amended by decision D-053: payouts are batched per
+ * operator on a monthly cycle, and an operator whose released accruals sit below
+ * the published minimum is not paid that cycle — the amount carries forward to
+ * the next one.
+ *
+ * Five dollars, in the micro-USD the ledger counts in. Neither number is in the
+ * paper: the paper says payouts happen and leaves the cadence and the floor to
+ * published policy, so both are the maintainer's own (D-053) and move only by a
+ * later decision. The minimum exists because a transfer costs more than a
+ * long-tail entry earns in a month, and a payout that cost more than it paid
+ * would take the difference out of the contributor pool.
+ */
+export const PAYOUT_MINIMUM_MICROS = 5_000_000;
+
+/**
+ * The payout cycle (D-053): one UTC calendar month. A name and not a number,
+ * held here with every other published amount because it is the same kind of
+ * thing — a published choice the ledger reads and nobody else may restate.
+ */
+export const PAYOUT_CYCLE = "monthly";
+
 /** Every policy number, collected and frozen. */
 export const POLICY = Object.freeze({
   TRUSTED_POOL_SWITCH,
@@ -451,6 +537,18 @@ export const POLICY = Object.freeze({
   DISPUTE_FILING_FEE_CENTS,
   REVALIDATION_REQUEST_STAKE_STANDING,
   REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW,
+  STANDING_VALIDATION_VOLUNTEERED,
+  STANDING_VALIDATION_ASSIGNED,
+  STANDING_SUBMISSION_VERIFIED,
+  STANDING_DISPUTE_UPHELD,
+  STANDING_OVERTURNED_SIGNER,
+  STANDING_ASSIGNMENT_MISSED,
+  STANDING_TRUSTED_ENTRY,
+  STANDING_TRUSTED_STAY,
+  STANDING_DECAY_PAUSED,
+  READ_PRICE_MICROS_PER_READ,
+  PAYOUT_MINIMUM_MICROS,
+  PAYOUT_CYCLE,
   NORM_VERSION,
   FETCH_MAX_REDIRECTS,
   FETCH_TIMEOUT_MS,

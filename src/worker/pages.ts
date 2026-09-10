@@ -27,6 +27,7 @@
  */
 
 import type { Event } from "../events.js";
+import { ledgerBalance } from "../ledger.js";
 import {
   ATTESTATION_TEXT,
   ATTESTATION_VERSION,
@@ -52,15 +53,20 @@ import {
   getOperator,
   latestSeal,
   ledgerRowsForEntry,
+  ledgerRowsForOperator,
   listEntriesPage,
   listOperators,
+  operatorStanding,
   overturnedCountsByOperator,
+  payoutRows,
   sealCovering,
   sealsAfter,
+  standingForOperators,
   supersedersOf,
   validationCountsByOperator,
   validationsByOperator,
   type OperatorRecord,
+  type OperatorStanding,
   type StoredEntry,
 } from "../storage/repository.js";
 import { htmlResponse, cssResponse } from "../ui/html.js";
@@ -157,12 +163,20 @@ function toRow(stored: StoredEntry): EntryRow {
   };
 }
 
-/** An operator's stored row as the directory shows it. */
+/**
+ * An operator's stored row as the directory shows it.
+ *
+ * `standing` is the cached number and the position it was computed at, carried
+ * verbatim and undefined-to-null: an operator missing from the cache has not had
+ * the formula run for it, which is a different fact from a standing of zero and
+ * is shown differently.
+ */
 function toOperatorRow(
   record: OperatorRecord,
   agents: number,
   validations: number,
   overturned: number,
+  standing: OperatorStanding | undefined,
 ): OperatorRow {
   const trustedSeq = record.details["trusted_seq"];
   return {
@@ -175,6 +189,7 @@ function toOperatorRow(
     agents,
     validations,
     overturned,
+    standing: standing === undefined ? null : { ...standing },
   };
 }
 
@@ -434,6 +449,15 @@ async function operatorRows(db: D1Like): Promise<OperatorRow[]> {
   const overturnedByOperator = new Map(
     overturned.map((each) => [each.operator, each.count]),
   );
+  // One grouped read for the whole directory, like the counts above, over
+  // exactly the ids on this page: a leaderboard read would be ordered by
+  // standing while the page is ordered by id, so past its limit the join would
+  // blank out standings that are stored. An operator absent from it has no
+  // cached standing, which is not a zero.
+  const standings = await standingForOperators(
+    db,
+    records.map((record) => record.id),
+  );
 
   return records.map((record) =>
     toOperatorRow(
@@ -441,6 +465,7 @@ async function operatorRows(db: D1Like): Promise<OperatorRow[]> {
       agentsByOperator.get(record.id) ?? 0,
       byOperator.get(record.id)?.count ?? 0,
       overturnedByOperator.get(record.id) ?? 0,
+      standings.get(record.id),
     ),
   );
 }
@@ -453,6 +478,7 @@ async function operator(
   db: D1Like,
   ctx: PageContext,
   id: string,
+  now: Date,
 ): Promise<Response> {
   const record = await getOperator(db, id);
   if (record === null) return htmlResponse(renderNotFound(ctx), 404);
@@ -462,6 +488,16 @@ async function operator(
   // The same grouped read the directory does, narrowed to this one operator: an
   // operator absent from it signed nothing that was overturned, which is a zero.
   const overturned = await overturnedCountsByOperator(db, LIST_PAGE_LIMIT);
+  // This operator's own row rather than the top of the leaderboard, so an
+  // operator ranked past a page of standings still shows the one it has.
+  const standing = await operatorStanding(db, id);
+  // One keyset page of the operator's own rows, newest first, and its payouts.
+  // The balance is `ledgerBalance` over exactly those rows at the router's
+  // instant, because held and released are questions about a clock and the page
+  // has none; the page adds nothing up.
+  const ledger = await ledgerRowsForOperator(db, id, LIST_PAGE_LIMIT);
+  const payouts = await payoutRows(db, LIST_PAGE_LIMIT, id);
+  const balance = ledgerBalance(ledger, now.toISOString());
   const attestation = record.details["attestation"];
   const namedBy = record.details["named_by"];
   const payoutStatus = record.details["payout_status"];
@@ -473,7 +509,11 @@ async function operator(
         agents.length,
         validations.length,
         overturned.find((each) => each.operator === id)?.count ?? 0,
+        standing ?? undefined,
       ),
+      ledger,
+      payouts,
+      balance,
       agents: agents.map((each) => each.agentId),
       attestation:
         attestation !== null && typeof attestation === "object"
@@ -533,6 +573,7 @@ async function route(
   env: Env,
   db: D1Like,
   url: URL,
+  now: Date,
 ): Promise<Response | null> {
   const path = url.pathname;
   const ctx: PageContext = {
@@ -569,7 +610,7 @@ async function route(
 
   const operatorId = segmentAfter(path, "/operators/");
   if (operatorId !== null) {
-    return wants ? operator(db, ctx, operatorId) : null;
+    return wants ? operator(db, ctx, operatorId, now) : null;
   }
 
   // The public policy endpoint: the page for a browser, the frozen object for
@@ -602,8 +643,6 @@ export async function handlePages(
   env: Env,
   deps: { now: Date },
 ): Promise<Response | null> {
-  void deps;
-
   const url = new URL(request.url);
 
   // The www host is a fourth custom domain of the production Worker and serves
@@ -639,7 +678,7 @@ export async function handlePages(
 
   const db = guardDatabase(env.DB);
   try {
-    const answer = await route(request, env, db, url);
+    const answer = await route(request, env, db, url, deps.now);
     return answer === null ? null : forMethod(request, answer);
   } catch (error) {
     if (error instanceof StorageUnreachable) {

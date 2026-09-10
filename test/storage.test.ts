@@ -20,7 +20,13 @@ import {
   revalidationOutcomeStakes,
   revalidationStake,
   DISPUTE_STAKE_STANDING,
+  LIST_PAGE_LIMIT,
   buildReadCountPayload,
+  clawbackRows,
+  payoutPlan,
+  payoutRow,
+  readShareRows,
+  reconciliationRow,
   buildAnchor,
   buildSeal,
   buildSubmittedCore,
@@ -45,6 +51,7 @@ import {
   type Event,
   type EntrySeal,
   type Entry,
+  type LedgerRow,
   type OpenAssignment,
   type EntryStatus,
   type ReadReceipt,
@@ -81,6 +88,25 @@ import {
   disputeOf,
   dueRevalidationAssignments,
   ledgerRowsForEntry,
+  bountyPoolRows,
+  entryLedgerRows,
+  heldReadShareRows,
+  ledgerCursor,
+  ledgerRowsForOperator,
+  ledgerRowsOn,
+  markLedgerPaid,
+  payoutRows,
+  putLedgerRows,
+  reconciliationRows,
+  recordPayout,
+  recordTrustChange,
+  releasedUnpaidRows,
+  setLedgerCursor,
+  setOperatorStanding,
+  standingByOperator,
+  operatorStanding,
+  standingForOperators,
+  priceBountyRow,
   openRevalidationAssignment,
   overturnedCountsByOperator,
   recordDisputeFiling,
@@ -710,6 +736,7 @@ describe("migrations", () => {
       "0007_receipts.sql",
       "0008_sync.sql",
       "0009_disputes.sql",
+      "0010_ledger.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -806,6 +833,38 @@ describe("migrations", () => {
     }
   });
 
+  it("applies 0010 after 0009, adding to the ledger and operators tables", async () => {
+    // Forward-only (D-022): six nullable columns on `ledger`, two indexes, two
+    // backfills of what is already stored, one new table, and two nullable
+    // columns on `operators`. Nothing is dropped and no table is reshaped, so a
+    // live database takes it without rewriting one.
+    const statements = splitStatements(
+      loadMigrations().find((one) => one.name === "0010_ledger.sql")!.sql,
+    );
+    expect(statements).toHaveLength(13);
+    expect(statements[0]).toContain("ALTER TABLE ledger ADD COLUMN amount");
+    expect(statements[1]).toContain("ALTER TABLE ledger ADD COLUMN unit");
+    expect(statements[5]).toContain("ALTER TABLE ledger ADD COLUMN paid_by");
+    expect(statements[6]).toContain("CREATE INDEX ledger_operator_unpaid");
+    expect(statements[7]).toContain("CREATE INDEX ledger_kind_date");
+    expect(statements[10]).toContain("CREATE TABLE ledger_state");
+    expect(statements[11]).toContain("ALTER TABLE operators ADD COLUMN standing");
+    for (const statement of statements) {
+      expect(statement).not.toMatch(/\bDROP\b/);
+    }
+    // The one new table is the only CREATE TABLE in the file.
+    expect(statements.filter((one) => /\bCREATE TABLE\b/.test(one))).toHaveLength(1);
+
+    // The columns are on the live table and start null, so a row written before
+    // this milestone is unpaid and outside every holdback rather than missing.
+    const row = await test.db
+      .prepare(
+        `SELECT amount, unit, role, "date", available_at, paid_by FROM ledger ${"LIMIT 1"}`,
+      )
+      .first<Record<string, unknown>>();
+    expect(row === null || row["paid_by"] === null).toBe(true);
+  });
+
   it("records the migration under the name wrangler would use", async () => {
     const applied = await test.db
       .prepare(`SELECT name FROM "d1_migrations" ORDER BY id`)
@@ -820,6 +879,7 @@ describe("migrations", () => {
       "0007_receipts.sql",
       "0008_sync.sql",
       "0009_disputes.sql",
+      "0010_ledger.sql",
     ]);
   });
 });
@@ -3413,5 +3473,514 @@ describe("dispute and revalidation writes", () => {
     expect(
       (await capturesForEntry(store.db, checkedId)).map((one) => one.role),
     ).toEqual([`report:${filed.report.seq}`]);
+  });
+});
+
+/**
+ * The ledger and the standing cache (M21).
+ *
+ * Its own database, because these writes append to the log and cache rows on
+ * operators, and a shared world's head must not move under the tests that
+ * already read it.
+ *
+ * The rows under test are built by src/ledger.ts from real sealed events, never
+ * by hand: what is being checked is that a row derived from the log survives D1
+ * and comes back the same, and that the queries the payout cycle depends on
+ * answer the question they claim to.
+ */
+describe("the ledger", () => {
+  let store: TestDatabase;
+
+  const LEDGER_ENTRY = "nmk_01M21LEDGERSTORE";
+  const LEDGER_OPERATOR = "ledger.example";
+  const SLOT_OPERATOR = "slot.example";
+  const READ_DAY = "2026-09-08";
+  const READ_AT = `${READ_DAY}T23:59:00.000Z`;
+  /** Inside the holdback for the day above, and outside it. */
+  const INSIDE = "2026-09-20T00:00:00.000Z";
+  const OUTSIDE = "2026-11-01T00:00:00.000Z";
+
+  /**
+   * The log every priced day is sealed onto. One log rather than one per day,
+   * because a row's id carries the position of the event that produced it and
+   * two days sealed at seq 0 would be the same day twice.
+   */
+  let log: Event[] = [];
+
+  /** A day's read counts, sealed as a real event, priced by src/ledger.ts. */
+  async function pricedDay(
+    count: number,
+    stale: boolean,
+    date = READ_DAY,
+    at = READ_AT,
+  ): Promise<LedgerRow[]> {
+    log = await appendEvent(log, {
+      at,
+      type: "read_count",
+      entry_id: null,
+      payload: buildReadCountPayload(
+        date,
+        [{ entry_id: LEDGER_ENTRY, count }],
+        1,
+        1,
+      ),
+    });
+    return readShareRows(log[log.length - 1] as Event<"read_count">, () => ({
+      author_operator: LEDGER_OPERATOR,
+      read_share_slots: [{ operator: SLOT_OPERATOR, seq: 1 }],
+      stale,
+      verified: true,
+    }));
+  }
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  it("round-trips a row through D1 and writes it once, by id", async () => {
+    const rows = await pricedDay(10_000, false);
+    await putLedgerRows(store.db, rows);
+    // A step replayed after a partial failure writes the same ids and changes
+    // nothing: the idempotence is the id, not a flag anyone has to remember.
+    await putLedgerRows(store.db, rows);
+
+    const stored = await entryLedgerRows(store.db, LEDGER_ENTRY, LIST_PAGE_LIMIT);
+    expect(stored).toEqual(rows);
+    expect(await ledgerRowsOn(store.db, "read_share", READ_DAY)).toEqual(rows);
+    expect(
+      await ledgerRowsForOperator(store.db, LEDGER_OPERATOR, LIST_PAGE_LIMIT),
+    ).toEqual([rows.find((row) => row.operator === LEDGER_OPERATOR)]);
+  });
+
+  it("reads back what is still inside the holdback, and what is not", async () => {
+    // A second day, early enough that its rows are released by OUTSIDE, and
+    // large enough that the operator clears the published payout minimum:
+    // 200,000 reads is fifteen dollars to the submitter, three times the floor.
+    const early = await pricedDay(200_000, false, "2026-08-01", "2026-08-01T12:00:00.000Z");
+    await putLedgerRows(store.db, early);
+
+    const held = await heldReadShareRows(store.db, LEDGER_ENTRY, INSIDE);
+    expect(held.map((row) => row.date)).toEqual([READ_DAY, READ_DAY]);
+    expect(await heldReadShareRows(store.db, LEDGER_ENTRY, OUTSIDE)).toEqual([]);
+
+    const released = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE);
+    expect(released.map((row) => row.date).sort()).toEqual(["2026-08-01", READ_DAY]);
+    // Nothing has been released as of INSIDE for the later day.
+    expect(
+      (await releasedUnpaidRows(store.db, LEDGER_OPERATOR, "2026-09-01T00:00:00.000Z"))
+        .map((row) => row.date),
+    ).toEqual(["2026-08-01"]);
+  });
+
+  it("keeps a clawback payable at once and counts it against the payout", async () => {
+    const upheld = await appendEvent([], {
+      at: INSIDE,
+      type: "dispute_upheld",
+      entry_id: LEDGER_ENTRY,
+      payload: { correction_entry_id: "nmk_01M21CORRECTIONSTORE" },
+    });
+    const held = await heldReadShareRows(store.db, LEDGER_ENTRY, INSIDE);
+    const clawbacks = clawbackRows(upheld[0] as Event<"dispute_upheld">, held);
+    expect(clawbacks).toHaveLength(held.length);
+    await putLedgerRows(store.db, clawbacks);
+
+    // A clawback carries no available_at and is released the instant it is
+    // written, so it can never wait behind a holdback.
+    const released = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, INSIDE);
+    expect(released.some((row) => row.kind === "clawback")).toBe(true);
+  });
+
+  it("pays a cycle: the payout row, and the rows it claims", async () => {
+    const released = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE);
+    const plan = payoutPlan(LEDGER_OPERATOR, released, OUTSIDE);
+    expect(plan.rows.length).toBeGreaterThan(0);
+
+    const paid = payoutRow(plan, 1, OUTSIDE, "mock-verified-ledger");
+    await recordPayout(store.db, paid, plan.rows);
+
+    expect(await payoutRows(store.db, LIST_PAGE_LIMIT, LEDGER_OPERATOR)).toEqual([
+      paid,
+    ]);
+    // Claimed rows are out of the next cycle, and the payout row itself is not
+    // an accrual waiting to be paid again.
+    expect(await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE)).toEqual([]);
+  });
+
+  it("leaves a row an earlier payout already claimed where it is", async () => {
+    const rows = await pricedDay(4_000, false, "2026-07-01", "2026-07-01T12:00:00.000Z");
+    await putLedgerRows(store.db, rows);
+    const first = rows[0]!;
+    await markLedgerPaid(store.db, [first.id], "payout:first");
+    await markLedgerPaid(store.db, [first.id], "payout:second");
+
+    const stored = await store.db
+      .prepare(`SELECT paid_by FROM ledger WHERE id = ?`)
+      .bind(first.id)
+      .first<Record<string, unknown>>();
+    // Two cycles racing must not both pay one accrual.
+    expect(stored?.["paid_by"]).toBe("payout:first");
+  });
+
+  it("reads a stale day's withheld halves back over their window", async () => {
+    const stale = await pricedDay(2_000, true, "2026-06-10", "2026-06-10T12:00:00.000Z");
+    await putLedgerRows(store.db, stale);
+    const pool = stale.find((row) => row.kind === "bounty_pool")!;
+
+    expect(
+      await bountyPoolRows(store.db, LEDGER_ENTRY, "2026-06-01", "2026-06-30"),
+    ).toEqual([pool]);
+    // Outside the window, nothing: an earlier spell's pool was collected by
+    // whoever ended it.
+    expect(
+      await bountyPoolRows(store.db, LEDGER_ENTRY, "2026-07-01", "2026-07-31"),
+    ).toEqual([]);
+  });
+
+  it("stores the day's reconciliation where the same public can read it", async () => {
+    log = await appendEvent(log, {
+      at: READ_AT,
+      type: "read_count",
+      entry_id: null,
+      payload: buildReadCountPayload(
+        READ_DAY,
+        [{ entry_id: LEDGER_ENTRY, count: 10_000 }],
+        1,
+        1,
+      ),
+    });
+    const row = reconciliationRow(
+      log[log.length - 1] as Event<"read_count">,
+      new Map([[LEDGER_ENTRY, 10_000]]),
+    );
+    await putLedgerRows(store.db, [row]);
+    const stored = await reconciliationRows(store.db, LIST_PAGE_LIMIT);
+    expect(stored).toEqual([row]);
+    expect(stored[0]!.ref).toMatchObject({ ok: true });
+  });
+
+  it("remembers how far a step has read, and forgets nothing else", async () => {
+    expect(await ledgerCursor(store.db, "read_share")).toBeNull();
+    await setLedgerCursor(store.db, "read_share", 12);
+    expect(await ledgerCursor(store.db, "read_share")).toBe(12);
+    await setLedgerCursor(store.db, "read_share", 40);
+    expect(await ledgerCursor(store.db, "read_share")).toBe(40);
+    // One row per stepper, named by the stepper.
+    expect(await ledgerCursor(store.db, "standing")).toBeNull();
+  });
+});
+
+/**
+ * The standing cache and the trust changes it drives (M21).
+ *
+ * Section 9: standing "is derived from the sealed public events by a published
+ * formula", so these columns are a cache and `standing_seq` is what makes them
+ * checkable. What is under test here is the write, never the formula
+ * (test/standing.test.ts owns that).
+ */
+describe("standing writes", () => {
+  let store: TestDatabase;
+
+  const CANDIDATE = "candidate.example";
+  const INCUMBENT = "incumbent.example";
+
+  function operator(id: string, trusted: boolean): OperatorRecord {
+    return {
+      id,
+      maintainer: false,
+      provider: false,
+      registeredSeq: 0,
+      details: {
+        registered_by: `1F916:agent-${id}`,
+        trusted,
+        trusted_seq: trusted ? 0 : null,
+        payout_status: "verified",
+      },
+    };
+  }
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+    await putOperator(store.db, operator(CANDIDATE, false));
+    await putOperator(store.db, operator(INCUMBENT, true));
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  it("round-trips a cached standing, at the position it was computed at", async () => {
+    expect(await standingByOperator(store.db, LIST_PAGE_LIMIT)).toEqual(new Map());
+
+    await setOperatorStanding(store.db, CANDIDATE, 12, 40);
+    await setOperatorStanding(store.db, INCUMBENT, -3, 40);
+    const standings = await standingByOperator(store.db, LIST_PAGE_LIMIT);
+
+    expect(standings.get(CANDIDATE)).toEqual({ standing: 12, seq: 40 });
+    expect(standings.get(INCUMBENT)).toEqual({ standing: -3, seq: 40 });
+    // Highest first: the pool's own ordering.
+    expect([...standings.keys()]).toEqual([CANDIDATE, INCUMBENT]);
+    // Recomputing at a later position replaces both numbers together.
+    await setOperatorStanding(store.db, CANDIDATE, 15, 55);
+    expect(
+      (await standingByOperator(store.db, LIST_PAGE_LIMIT)).get(CANDIDATE),
+    ).toEqual({ standing: 15, seq: 55 });
+  });
+
+  it("trusts an operator: the event, the row and the cache, in one batch", async () => {
+    const event = await recordTrustChange(
+      store.db,
+      "operator_trusted",
+      CANDIDATE,
+      "2026-09-20T00:00:00.000Z",
+      "standing",
+      12,
+      40,
+    );
+
+    expect(event.seq).toBe(0);
+    expect(event.type).toBe("operator_trusted");
+    expect(event.payload).toEqual({ operator: CANDIDATE });
+    expect(await eventBySeq(store.db, 0)).toEqual(event);
+
+    const record = await getOperator(store.db, CANDIDATE);
+    expect(record?.details).toMatchObject({
+      trusted: true,
+      trusted_seq: event.seq,
+      // No key did this: the published formula did.
+      named_by: "standing",
+    });
+    // The registration details it already carried are still there.
+    expect(record?.details["payout_status"]).toBe("verified");
+    expect(
+      (await standingByOperator(store.db, LIST_PAGE_LIMIT)).get(CANDIDATE),
+    ).toEqual({ standing: 12, seq: 40 });
+  });
+
+  it("untrusts an operator, chaining onto the event before it", async () => {
+    const event = await recordTrustChange(
+      store.db,
+      "operator_untrusted",
+      INCUMBENT,
+      "2026-09-20T00:01:00.000Z",
+      "standing",
+      -3,
+      41,
+    );
+
+    expect(event.seq).toBe(1);
+    expect(event.type).toBe("operator_untrusted");
+    const stored = await eventsInRange(store.db, 0, 1);
+    // The chain rule is the same one a plain append is held to.
+    expect(await verifyChain(stored)).toEqual({ ok: true, length: 2 });
+    expect(stored[1]!.prev_hash).toBe(stored[0]!.hash);
+
+    const record = await getOperator(store.db, INCUMBENT);
+    expect(record?.details).toMatchObject({
+      trusted: false,
+      trusted_seq: null,
+      named_by: "standing",
+    });
+  });
+
+  it("refuses to trust an operator the registry has never heard of", async () => {
+    await expect(
+      recordTrustChange(
+        store.db,
+        "operator_trusted",
+        "stranger.example",
+        "2026-09-20T00:02:00.000Z",
+        "standing",
+        99,
+        42,
+      ),
+    ).rejects.toThrow(/unknown operator/);
+    // Refused before anything was written: the head has not moved.
+    expect(await headSeq(store.db)).toBe(1);
+  });
+});
+
+/**
+ * Reading a stored standing that is not near the top of the pool (M21).
+ *
+ * `standingByOperator` is a leaderboard, so it is the wrong read for a question
+ * about one named operator or about the operators on a page ordered by id: past
+ * its limit it drops standings that are stored, and a page that joins against it
+ * shows a dash where a number exists. These two reads are what the operator
+ * route and the two pages ask instead, and the pool here is deliberately larger
+ * than one page so the difference is visible.
+ */
+describe("standing reads past the leaderboard's limit", () => {
+  let store: TestDatabase;
+
+  /** One more operator than a page of the leaderboard holds. */
+  const POOL = LIST_PAGE_LIMIT + 1;
+  const id = (index: number) => `op-${String(index).padStart(3, "0")}.example`;
+  /** The lowest standing in the pool, so its row is off the leaderboard. */
+  const LAST = id(POOL - 1);
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+    for (let index = 0; index < POOL; index += 1) {
+      await putOperator(store.db, {
+        id: id(index),
+        maintainer: false,
+        provider: false,
+        registeredSeq: index,
+        details: { registered_by: `1F916:agent-${index}`, trusted: false },
+      });
+      // Descending standing, so the operator with the largest index ranks last.
+      await setOperatorStanding(store.db, id(index), POOL - index, 77);
+    }
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  it("reads one operator's own standing whatever it ranks", async () => {
+    // The leaderboard has run out before this operator: reading a standing off
+    // it would answer "never computed", which is a different thing.
+    expect(
+      (await standingByOperator(store.db, LIST_PAGE_LIMIT)).get(LAST),
+    ).toBeUndefined();
+
+    expect(await operatorStanding(store.db, LAST)).toEqual({
+      standing: 1,
+      seq: 77,
+    });
+    expect(await operatorStanding(store.db, id(0))).toEqual({
+      standing: POOL,
+      seq: 77,
+    });
+  });
+
+  it("answers null for an operator whose standing was never computed", async () => {
+    await putOperator(store.db, {
+      id: "uncomputed.example",
+      maintainer: false,
+      provider: false,
+      registeredSeq: POOL,
+      details: { registered_by: "1F916:agent-uncomputed", trusted: false },
+    });
+
+    // Null is "not computed yet" and never zero.
+    expect(await operatorStanding(store.db, "uncomputed.example")).toBeNull();
+    expect(await operatorStanding(store.db, "stranger.example")).toBeNull();
+  });
+
+  it("reads a page of ids, including ones the leaderboard cannot reach", async () => {
+    const page = [id(0), LAST, "uncomputed.example"];
+    const standings = await standingForOperators(store.db, page);
+
+    expect(standings.get(id(0))).toEqual({ standing: POOL, seq: 77 });
+    expect(standings.get(LAST)).toEqual({ standing: 1, seq: 77 });
+    // Absent rather than zero, exactly like the single read above.
+    expect(standings.has("uncomputed.example")).toBe(false);
+    expect(standings.size).toBe(2);
+  });
+
+  it("asks nothing of the database for an empty page", async () => {
+    expect(await standingForOperators(store.db, [])).toEqual(new Map());
+  });
+});
+
+/**
+ * Pricing M15's bounty accrual: one batch, not two statements (M21).
+ *
+ * The delete is the only record that the bounty was ever owed, so it must not
+ * be able to land without the priced row that replaces it.
+ */
+describe("bounty pricing", () => {
+  let store: TestDatabase;
+
+  const BOUNTY_ENTRY = "01J0BOUNTYENTRY00000000000";
+  const BOUNTY_OPERATOR = "bounty.example";
+  const AT = "2026-07-01T00:00:00.000Z";
+  const UNPRICED_ID = "bounty_accrual:9";
+
+  /** The row the M21 ledger step builds, under the accrual's own id. */
+  const priced: LedgerRow = {
+    id: UNPRICED_ID,
+    kind: "bounty_accrual",
+    entry_id: BOUNTY_ENTRY,
+    operator: BOUNTY_OPERATOR,
+    role: "reconfirmer",
+    date: null,
+    reads: null,
+    unit: "micros",
+    amount: 2_500,
+    available_at: "2026-07-31T00:00:00.000Z",
+    seq: 9,
+    at: AT,
+    ref: {},
+  };
+
+  /** M15's door row: the accrual payload, and no amount at all. */
+  async function writeUnpriced(): Promise<void> {
+    await store.db
+      .prepare(
+        `INSERT OR REPLACE INTO ledger
+           (id, kind, operator_id, entry_id, seq, created_at, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        UNPRICED_ID,
+        "bounty_accrual",
+        BOUNTY_OPERATOR,
+        BOUNTY_ENTRY,
+        9,
+        AT,
+        JSON.stringify({
+          kind: "bounty_accrual",
+          entry_id: BOUNTY_ENTRY,
+          operator: BOUNTY_OPERATOR,
+          stale_from: "2026-06-01",
+          stale_until: AT,
+          seq: 9,
+          amount_micros: null,
+        }),
+      )
+      .run();
+  }
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+    await writeUnpriced();
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  it("replaces the unpriced accrual with the priced row", async () => {
+    const before = await bountiesForEntry(store.db, BOUNTY_ENTRY, LIST_PAGE_LIMIT);
+    expect(before).toHaveLength(1);
+    expect(before[0]!.stale_from).toBe("2026-06-01");
+    expect(before[0]!.amount_micros).toBeNull();
+
+    await priceBountyRow(store.db, UNPRICED_ID, priced);
+
+    // One row still, under the same id, and now the ledger's own shape.
+    const after = await bountiesForEntry(store.db, BOUNTY_ENTRY, LIST_PAGE_LIMIT);
+    expect(after).toEqual([priced]);
+    expect(after[0]!.stale_from).toBeUndefined();
+    // The columns the money reads go with it.
+    expect(
+      await ledgerRowsForOperator(store.db, BOUNTY_OPERATOR, LIST_PAGE_LIMIT),
+    ).toEqual([priced]);
+  });
+
+  it("reprices nothing and deletes nothing on a replayed cursor", async () => {
+    // A row that has already been priced is not `amount IS NULL`, so the delete
+    // passes over it, and the insert is ignored by id.
+    await priceBountyRow(store.db, UNPRICED_ID, { ...priced, amount: 999 });
+
+    expect(await bountiesForEntry(store.db, BOUNTY_ENTRY, LIST_PAGE_LIMIT)).toEqual(
+      [priced],
+    );
   });
 });

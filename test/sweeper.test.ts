@@ -17,6 +17,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
+import {
+  MockPayoutAdapter,
+  UnavailablePayoutAdapter,
+} from "../src/adapters/payout.js";
 import { SWEEP_INTERVAL_MINUTES } from "../src/policy.js";
 import type { D1Like, D1LikeStatement } from "../src/storage/d1.js";
 import { eventBySeq, headSeq } from "../src/storage/repository.js";
@@ -26,6 +30,7 @@ import {
   SWEEPER_INSTANCE,
   Sweeper,
   ensureSweeper,
+  sweepDepsFor,
   type SweeperDeps,
   type SweeperNamespace,
   type SweeperState,
@@ -328,5 +333,52 @@ describe("arming the timer from a request", () => {
 
     expect(ctx.promises).toHaveLength(1);
     await expect(ctx.promises[0]).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The payout adapter the timer's own deps carry (M21, decision D-053).
+ *
+ * `sweepDepsFor` is the one place a run's adapters are built, and the alarm is a
+ * sweep like any other: a cycle that pays through the cron door and skips
+ * `payout_unconfigured` through the alarm would be two different sweeps of the
+ * same log, and which one an operator was paid by would depend on which timer
+ * happened to fire.
+ */
+describe("the payout adapter the timer runs with", () => {
+  it("is the one this environment runs, and never a fixture", async () => {
+    const store = await database();
+
+    // The same rule the beacon and the witness follow: demo and local mock it,
+    // production holds the stub that refuses.
+    expect((await sweepDepsFor(envFor(store), () => NOW)).payout).toBeInstanceOf(
+      MockPayoutAdapter,
+    );
+    expect(
+      (
+        await sweepDepsFor(
+          { ...envFor(store), ENVIRONMENT: "production" },
+          () => NOW,
+        )
+      ).payout,
+    ).toBeInstanceOf(UnavailablePayoutAdapter);
+  });
+
+  it("reaches the alarm's own run, which configures the payout step", async () => {
+    const store = await database();
+    // The deps a caller hands the object carry no payout adapter, exactly as
+    // the deployed object's do not: the environment's own is what fills it in.
+    const deps = await sweeperDeps(await makeWitness("sweeper-witness.example"));
+    expect(deps).not.toHaveProperty("payout");
+    const sweeper = new Sweeper(fakeState(), envFor(store), deps);
+
+    const response = await sweeper.fetch(new Request("https://sweeper/run"));
+
+    expect(response.status).toBe(200);
+    const report = (await response.json()) as SweepReport;
+    // The run sealed, so the payout step was reached, and it was configured.
+    expect(report.sealed).not.toBeNull();
+    expect(report.skipped["payout_unconfigured"]).toBeUndefined();
+    expect(report.payouts).toEqual([]);
   });
 });

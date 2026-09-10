@@ -11,7 +11,7 @@
  * wrong can fix it; a caller handed the last one has to guess what came before.
  */
 
-import { LIST_PAGE_LIMIT } from "../../policy.js";
+import { DISPUTE_FILING_FEE_CENTS, LIST_PAGE_LIMIT } from "../../policy.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
 import type { PageContext } from "../types.js";
@@ -178,6 +178,38 @@ const READ_PATH: readonly Endpoint[] = [
       "The published policy object, served from the same module the kernel reads. Every number on the policy page, as JSON.",
     refusals: "405 with Allow: GET.",
   },
+  {
+    method: "GET",
+    path: "/standing",
+    parameters: "—",
+    answers:
+      "Every operator's standing, recomputed over the sealed log rather than read from a column: position, formula (the policy names the fold applies, in the order it applies them), operators (each with operator, earned, burned, locked, standing, available, counts, position).",
+    refusals: "405 with Allow: GET.",
+  },
+  {
+    method: "GET",
+    path: "/operators/{id}/standing",
+    parameters: "—",
+    answers:
+      "One operator's standing, recomputed the same way: operator, position, earned, burned, locked, standing, available, counts, formula, and stored — the cached { standing, seq } off the operator row, or null when the formula has never been run for it. stored is the number to check the recomputation against; the log is what decides if the two disagree.",
+    refusals: "404 not_found.",
+  },
+  {
+    method: "GET",
+    path: "/operators/{id}/ledger",
+    parameters: "—",
+    answers:
+      `One operator's money: operator, balance (accrued, held, released, clawed_back, paid, carried_forward, all in micro-USD), and rows — the newest ${LIST_PAGE_LIMIT} ledger rows, newest first, each with id, kind, entry_id, operator, role, date, reads, unit, amount, available_at, seq, at, ref.`,
+    refusals: "404 not_found.",
+  },
+  {
+    method: "GET",
+    path: "/ledger",
+    parameters: "—",
+    answers:
+      "The money side of the log as a whole: reconciliations (each day's published read count against what the ledger accrued for it), payouts (what has left, under the provider's own reference), and policy — READ_PRICE_MICROS_PER_READ, PAYOUT_MINIMUM_MICROS, PAYOUT_CYCLE, HOLDBACK_DAYS, read from the same module the policy page reads.",
+    refusals: "405 with Allow: GET.",
+  },
 ];
 
 const WRITE_PATH: readonly Endpoint[] = [
@@ -294,7 +326,6 @@ const WRITE_PATH: readonly Endpoint[] = [
 
 const NOT_YET_BUILT: readonly { readonly what: string; readonly when: string }[] =
   [
-    { what: "Standing and the ledger endpoints", when: "M21" },
     { what: "Drift attestation and confidence inputs", when: "M22" },
     { what: "The log mirror", when: "M23" },
     { what: "API keys, paid tiers, webhooks, rate limits", when: "M24" },
@@ -423,6 +454,36 @@ POST
       </section>
 
       <section class="panel">
+        <h2 class="panel-title">Units</h2>
+        <p class="note">
+          Three units appear on the ledger, and every amount says which one it is
+          in on the row itself, so nothing has to be inferred from its size.
+        </p>
+        <dl class="dl">
+          <dt class="mono">micros</dt>
+          <dd>
+            Micro-USD, a millionth of a dollar: 1,000,000 to the dollar. Every
+            read share, bounty, clawback and payout is an integer count of them,
+            because one read's submitter share is a fraction of a cent and a
+            ledger that rounded to cents would pay the long tail nothing. The
+            price per read is on the policy page and nowhere else.
+          </dd>
+          <dt class="mono">standing</dt>
+          <dd>
+            Standing units, which are not money and never convert to it. Earned
+            and burned by the published formula, and staked by a registered
+            operator to file a dispute or ask for a revalidation.
+          </dd>
+          <dt class="mono">cents</dt>
+          <dd>
+            Whole US cents, on one row only: the refundable filing fee a bare key
+            puts up instead of standing, ${DISPUTE_FILING_FEE_CENTS} cents, so a
+            burner key cannot dispute for free.
+          </dd>
+        </dl>
+      </section>
+
+      <section class="panel">
         <h2 class="panel-title">The error format</h2>
         <p class="note">
           A refusal is one object with one field, and the reason is the same word
@@ -472,6 +533,13 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
         </p>
         <pre class="block mono">npm run read -- ${origin} &lt;entry-id&gt;
 npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT}</pre>
+        <p class="note">
+          Standing has a command of the same shape: it folds the sealed events by
+          the published formula itself and compares its own answer with the
+          endpoint's, so a standing nobody can recompute is a standing that fails
+          here rather than one a reader has to take on trust.
+        </p>
+        <pre class="block mono">npm run standing -- ${origin} &lt;operator&gt;</pre>
         <p class="note">
           The daily CC0 log mirror is M23 and is not yet published. The data is
           CC0 today and the whole record is already forkable from this API: the
