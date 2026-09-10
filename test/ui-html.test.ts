@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  APP_CSS_HREF,
   CONTENT_SECURITY_POLICY,
   badge,
   cssResponse,
@@ -184,7 +185,8 @@ describe("layout", () => {
   });
 
   it("links its own stylesheet and the font stylesheet", () => {
-    expect(document).toContain(`<link rel="stylesheet" href="/static/app.css" />`);
+    expect(document).toContain(`<link rel="stylesheet" href="${APP_CSS_HREF}" />`);
+    expect(APP_CSS_HREF).toMatch(/^\/static\/app\.css\?v=[0-9a-f]{8}$/);
     expect(document).toContain("https://fonts.googleapis.com/css2?family=Space+Grotesk");
     expect(document).toContain("family=JetBrains+Mono");
   });
