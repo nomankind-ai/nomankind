@@ -19,6 +19,7 @@
  * page can be rendered and asserted on without a Worker.
  */
 
+import { APP_CSS } from "./styles.js";
 import type { PageContext } from "./types.js";
 
 /** An em dash, for a field that has no value. */
@@ -188,6 +189,41 @@ export function link(href: string, label: string, external = false): Safe {
     : html`<a href="${safe}">${label}</a>`;
 }
 
+/**
+ * A stylesheet's version, derived from the stylesheet itself.
+ *
+ * The two sheets are served with an hour of public cache (see `cssResponse`),
+ * which is right for bytes that are the same for every reader and say nothing
+ * about the log — but it also means a returning browser can hold a stale sheet
+ * for an hour after a deploy, and a page whose rules are an hour behind its
+ * markup is a page that is drawn wrong. So the link carries the sheet's own
+ * content in its href: change one rule and the URL changes, and the browser
+ * fetches rather than reuses. Nothing here is a secret and nothing here is
+ * checked, so this is FNV-1a, 32 bits — deterministic, and synchronous, which
+ * WebCrypto is not and a module-load constant cannot wait for.
+ */
+export function assetVersion(content: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < content.length; index += 1) {
+    hash ^= content.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * The href a page links a stylesheet by: the path, then the version as a query.
+ * The query form rather than a versioned filename on purpose — the route matches
+ * on the pathname, so the plain path and every versioned form are the same
+ * route and there is nothing to keep in step.
+ */
+export function versionedHref(path: string, content: string): string {
+  return `${path}?v=${assetVersion(content)}`;
+}
+
+/** The app stylesheet's link, computed once when this module loads. */
+export const APP_CSS_HREF = versionedHref("/static/app.css", APP_CSS);
+
 /** The repository and the paper, linked from the header and the footer. */
 const REPOSITORY_URL = "https://github.com/nomankind-ai/nomankind";
 const PAPER_URL =
@@ -232,8 +268,10 @@ function navItems(path: string): Safe[] {
  * There is no `<script>` here and there is no inline `style` attribute either —
  * the CSP forbids both, so the prototype's look is expressed entirely as classes
  * in src/ui/styles.ts. The stylesheet is served from this Worker at
- * /static/app.css; only the font stylesheet is fetched from elsewhere, and the
- * CSP names exactly the two Google hosts it needs.
+ * /static/app.css, linked with the version suffix `assetVersion` derives from
+ * the sheet itself so an hour of cache cannot outlive a rule change; only the
+ * font stylesheet is fetched from elsewhere, and the CSP names exactly the two
+ * Google hosts it needs.
  */
 export function layout(
   ctx: PageContext,
@@ -254,7 +292,7 @@ export function layout(
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap"
     />
-    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="${APP_CSS_HREF}" />
   </head>
   <body>
     <header class="header">
@@ -318,7 +356,9 @@ export function htmlResponse(
 
 /**
  * Serve the stylesheet. Cacheable for an hour, unlike a page: the CSS is the
- * same for every reader and says nothing about the log.
+ * same for every reader and says nothing about the log. The hour is safe to
+ * hold because the link carries the sheet's own version (`versionedHref`), so a
+ * changed rule is a changed URL and a returning browser fetches it at once.
  */
 export function cssResponse(css: string): Response {
   return new Response(css, {

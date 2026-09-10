@@ -458,5 +458,26 @@ pre.block.plain { color: var(--muted); }
   .header, .main, .footer { padding-left: 16px; padding-right: 16px; }
   dl.kv, dl.dl { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
   dl.kv dt, dl.dl dt { margin-top: 8px; }
+  /* On a phone the floor costs more than it buys. A documentation table is a
+     term and a sentence about it, and 640px of table inside a 375px viewport
+     pushed the sentence into a column three words wide and put the rest of it
+     behind a sideways scroll. Below the breakpoint these lay out at the width
+     they are given. */
+  table.table { min-width: 0; }
+  /* And the long values wrap. Above the breakpoint an id and a hash are each one
+     token that never breaks, because a token broken per character can be neither
+     read nor compared and the row scrolls instead; on a phone there is not
+     enough width for that to be true of both the value and the prose beside it,
+     so the value breaks where it must. overflow-wrap rather than break-all, so a
+     value with a real break opportunity in it takes that one first, and only the
+     cells that hold a long value: a column header still never breaks mid-word. */
+  table.dense td.break,
+  table.table td.break,
+  table.dense td.mono,
+  table.table td.mono {
+    white-space: normal;
+    word-break: normal;
+    overflow-wrap: anywhere;
+  }
 }
 `;

@@ -41,7 +41,12 @@ import {
   latestSeal,
 } from "../src/storage/repository.js";
 import type { SubmissionProposal } from "../src/submit.js";
-import { CONTENT_SECURITY_POLICY, escapeHtml } from "../src/ui/html.js";
+import {
+  APP_CSS_HREF,
+  CONTENT_SECURITY_POLICY,
+  escapeHtml,
+} from "../src/ui/html.js";
+import { LANDING_CSS_HREF } from "../src/ui/pages/landing.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
 import { runSweep } from "../src/worker/sweep.js";
@@ -716,6 +721,23 @@ describe("the documentation pages and the front door", () => {
     );
     expect(landing.status).toBe(200);
     expect(landing.headers.get("content-type")).toContain("text/css");
+
+    // The form the pages actually link (D-064): the version the sheet's own
+    // bytes gave it, so an hour of public cache cannot outlive a rule change.
+    // Same route, same bytes, same hour — the query is a cache key and nothing
+    // reads it, so an old version served from a stale page is answered too.
+    for (const path of [
+      APP_CSS_HREF,
+      LANDING_CSS_HREF,
+      "/static/app.css?v=00000000",
+    ]) {
+      const versioned = await send(new Request(`${TEST_ORIGIN}${path}`));
+      expect(versioned.status, path).toBe(200);
+      expect(versioned.headers.get("content-type")).toContain("text/css");
+      expect(versioned.headers.get("cache-control")).toBe(
+        "public, max-age=3600",
+      );
+    }
   }, 60_000);
 });
 

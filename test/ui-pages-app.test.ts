@@ -28,7 +28,14 @@ import { renderEntry } from "../src/ui/pages/entry.js";
 import { renderHome } from "../src/ui/pages/home.js";
 import { renderOperator } from "../src/ui/pages/operator.js";
 import { renderOperators } from "../src/ui/pages/operators.js";
-import { shortHash } from "../src/ui/html.js";
+import {
+  APP_CSS_HREF,
+  assetVersion,
+  html,
+  layout,
+  shortHash,
+} from "../src/ui/html.js";
+import { APP_CSS } from "../src/ui/styles.js";
 import type {
   EntryData,
   EntryRow,
@@ -911,5 +918,59 @@ describe("the operator pages", () => {
     expect(quiet).toContain("This operator has signed no decisions.");
     expect(quiet).toContain("No agent is bound.");
     expect(quiet).toContain("No attestation is stored on this row.");
+  });
+});
+
+/**
+ * The stylesheet's version, and the rules that only apply on a phone (D-064,
+ * M19 GAPS). Both are properties of the sheet rather than of a page, and both
+ * are things a test can hold: that the link carries a version at all, that the
+ * version is a function of the CSS and moves when the CSS moves, and that the
+ * narrow-screen rules exist inside the media query rather than everywhere.
+ */
+describe("the stylesheet's version suffix", () => {
+  it("links the app stylesheet with a version derived from its bytes", () => {
+    expect(APP_CSS_HREF).toBe(`/static/app.css?v=${assetVersion(APP_CSS)}`);
+    expect(APP_CSS_HREF).toMatch(/^\/static\/app\.css\?v=[0-9a-f]{8}$/);
+    expect(
+      layout(ctx, { title: "Entries", body: html`<p>body</p>` }),
+    ).toContain(`href="${APP_CSS_HREF}"`);
+  });
+
+  it("gives a changed stylesheet a different version", () => {
+    // The whole point of the suffix: an hour of public cache is safe only if a
+    // changed rule is a changed URL.
+    expect(assetVersion("body { color: red }")).not.toBe(
+      assetVersion("body { color: blue }"),
+    );
+    expect(assetVersion(APP_CSS)).toBe(assetVersion(APP_CSS));
+    expect(assetVersion("")).toMatch(/^[0-9a-f]{8}$/);
+  });
+});
+
+describe("APP_CSS below the breakpoint", () => {
+  /** The 900px block, on its own: these rules must not apply above it. */
+  const narrow = APP_CSS.slice(APP_CSS.indexOf("@media (max-width: 900px)"));
+
+  it("wraps a long value in a table cell rather than scrolling the row", () => {
+    expect(narrow).toContain("table.dense td.break,");
+    expect(narrow).toContain("table.table td.break,");
+    // The documentation pages write the long value as a plain mono cell, so the
+    // rule has to name that too or a 64-character hash still holds a policy
+    // table open at a phone's width.
+    expect(narrow).toContain("table.dense td.mono,");
+    expect(narrow).toContain("table.table td.mono {");
+    expect(narrow).toContain("overflow-wrap: anywhere;");
+    expect(narrow).toContain("white-space: normal;");
+  });
+
+  it("lets the documentation tables lay out at the width they are given", () => {
+    expect(narrow).toContain("table.table { min-width: 0; }");
+  });
+
+  it("keeps the token unbroken and the floor in place at a full width", () => {
+    const wide = APP_CSS.slice(0, APP_CSS.indexOf("@media (max-width: 900px)"));
+    expect(wide).toContain("min-width: 640px;");
+    expect(wide).toContain("white-space: nowrap;");
   });
 });

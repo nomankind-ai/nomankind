@@ -30,7 +30,11 @@ import { renderApi } from "../src/ui/pages/api.js";
 import { VALIDATION_REFUSALS } from "../src/validate.js";
 import { renderGenesis } from "../src/ui/pages/genesis.js";
 import { shortHash } from "../src/ui/html.js";
-import { LANDING_CSS, renderLanding } from "../src/ui/pages/landing.js";
+import {
+  LANDING_CSS,
+  LANDING_CSS_HREF,
+  renderLanding,
+} from "../src/ui/pages/landing.js";
 import { renderPolicy } from "../src/ui/pages/policy.js";
 import type {
   GenesisData,
@@ -494,7 +498,8 @@ describe("renderLanding", () => {
     expect(page.startsWith("<!doctype html>")).toBe(true);
     expect(page).toContain(`<html lang="en">`);
     expect(page).toContain("<title>nomankind</title>");
-    expect(page).toContain(`href="/static/landing.css"`);
+    expect(page).toContain(`href="${LANDING_CSS_HREF}"`);
+    expect(LANDING_CSS_HREF.startsWith("/static/landing.css?v=")).toBe(true);
     expect(page).toContain("fonts.googleapis.com");
   });
 
@@ -535,9 +540,11 @@ describe("renderLanding", () => {
     expect(page).toContain("Forkable.");
   });
 
+  // Both doors are still on the page; where each one leads depends on the
+  // environment, which the test below this describe's data holds to.
   it("offers both doors", () => {
-    expect(page).toContain(`href="https://app.nomankind.ai"`);
-    expect(page).toContain(`href="https://demo.nomankind.ai"`);
+    expect(page).toContain(`class="btn-primary"`);
+    expect(page).toContain(`class="btn-ghost"`);
     expect(page).toContain("Open the app");
     expect(page).toContain("Try the demo");
   });
@@ -611,6 +618,37 @@ describe("renderLanding", () => {
   it("escapes a seal hash that is markup", () => {
     expect(page).not.toContain("<b>");
     expect(page).toContain("&lt;b&gt;");
+  });
+
+  /**
+   * D-064. The two buttons used to name app.nomankind.ai and demo.nomankind.ai
+   * in every environment, so the front door of a local Worker or of demo sent a
+   * reader to production. The app button now points at whatever deployment is
+   * serving the page unless that deployment is production, where the landing is
+   * the apex and the app really is another host; the demo button points at demo
+   * from everywhere except demo, which is already there.
+   */
+  it("points its buttons at the environment the page is being read on", () => {
+    const on = (environment: string): string =>
+      renderLanding({ ...ctx, environment, path: "/" }, data);
+
+    const demo = on("demo");
+    expect(demo).toContain(`<a class="btn-primary" href="/">`);
+    expect(demo).toContain(`<a class="btn-ghost" href="/entries">`);
+
+    const local = on("local");
+    expect(local).toContain(`<a class="btn-primary" href="/">`);
+    expect(local).toContain(
+      `<a class="btn-ghost" href="https://demo.nomankind.ai/">`,
+    );
+
+    const production = on("production");
+    expect(production).toContain(
+      `<a class="btn-primary" href="https://app.nomankind.ai/">`,
+    );
+    expect(production).toContain(
+      `<a class="btn-ghost" href="https://demo.nomankind.ai/">`,
+    );
   });
 });
 

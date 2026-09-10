@@ -625,6 +625,11 @@ export async function handlePages(
 
   if (request.method !== "GET" && request.method !== "HEAD") return null;
 
+  // Matched on the pathname, so both the plain path and the versioned form the
+  // pages link (/static/app.css?v=<8 hex>, src/ui/html.ts) are this one route
+  // and answer the same bytes with the same hour of cache. The version is only
+  // ever a cache key: nothing here reads it, and a stale or absent one serves
+  // the sheet the Worker has rather than refusing.
   if (url.pathname === "/static/app.css") {
     return forMethod(request, cssResponse(APP_CSS));
   }

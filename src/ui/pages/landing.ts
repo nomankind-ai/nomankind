@@ -25,7 +25,13 @@
  * separately at /static/landing.css rather than appended to app.css.
  */
 
-import { fmtInstant, html, shortHash, type Safe } from "../html.js";
+import {
+  fmtInstant,
+  html,
+  shortHash,
+  versionedHref,
+  type Safe,
+} from "../html.js";
 import type { LandingData, PageContext } from "../types.js";
 
 /** Where the top bar points. External every one of them: the record lives in git. */
@@ -34,8 +40,28 @@ const PAPER_URL =
 const CODE_URL = "https://github.com/nomankind-ai/nomankind";
 const LOG_URL = "https://github.com/nomankind-ai/log";
 const REGISTRY_URL = "https://1f916.org";
-const APP_URL = "https://app.nomankind.ai";
-const DEMO_URL = "https://demo.nomankind.ai";
+const APP_URL = "https://app.nomankind.ai/";
+const DEMO_URL = "https://demo.nomankind.ai/";
+
+/**
+ * Where the two buttons point, which depends on where the page is being read.
+ *
+ * On production the landing is the apex host and the app is a host of its own,
+ * so "open the app" crosses to app.nomankind.ai. On demo and locally there is no
+ * second host: the same Worker serves the landing at / and the instrument panel
+ * everywhere else, so the button that crossed hosts would have carried a reader
+ * off the deployment they were looking at. It points at this deployment's own
+ * home instead. The demo button is the mirror of it: it goes to the demo host,
+ * except on demo itself, where the demo is already what is on screen and the
+ * useful thing to offer is the log.
+ */
+function appHref(ctx: PageContext): string {
+  return ctx.environment === "production" ? APP_URL : "/";
+}
+
+function demoHref(ctx: PageContext): string {
+  return ctx.environment === "demo" ? "/entries" : DEMO_URL;
+}
 
 /**
  * The proof pipeline, drawn. Source, snapshot, three operators, the teal seal
@@ -199,7 +225,6 @@ function bandCells(seals: LandingData["seals"]): Safe[] {
 }
 
 export function renderLanding(ctx: PageContext, data: LandingData): string {
-  void ctx;
   const empty = data.seals.length === 0;
   // Written twice, so translateX(-50%) lands the strip exactly where it started
   // and the loop has no seam. With nothing sealed there is nothing to loop, so
@@ -223,7 +248,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap"
     />
-    <link rel="stylesheet" href="/static/landing.css" />
+    <link rel="stylesheet" href="${LANDING_CSS_HREF}" />
   </head>
   <body class="landing">
     <div class="sheet">
@@ -236,8 +261,8 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
           <a href="${REGISTRY_URL}" rel="noopener">Built on 1F916</a>
         </nav>
         <div class="topcta">
-          <a class="btn-primary" href="${APP_URL}">Open the app</a>
-          <a class="btn-ghost" href="${DEMO_URL}">Try the demo</a>
+          <a class="btn-primary" href="${appHref(ctx)}">Open the app</a>
+          <a class="btn-ghost" href="${demoHref(ctx)}">Try the demo</a>
         </div>
       </header>
 
@@ -1157,3 +1182,14 @@ export const LANDING_CSS = `
   }
 }
 `;
+
+/**
+ * The landing stylesheet's link, computed once when this module loads, and
+ * declared after LANDING_CSS because it reads it. The version is the sheet's own
+ * content (src/ui/html.ts), so the hour of public cache on /static/landing.css
+ * can never outlive a rule the page depends on.
+ */
+export const LANDING_CSS_HREF = versionedHref(
+  "/static/landing.css",
+  LANDING_CSS,
+);
