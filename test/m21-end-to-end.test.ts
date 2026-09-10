@@ -558,9 +558,9 @@ beforeAll(async () => {
   await register(n1);
   await register(maintainerParty);
 
-  staleEntry = await verified("kestrel/kestrel-1", k1, [k2, k3]);
-  heldEntry = await verified("kestrel/kestrel-2", k1, [k4, k5]);
-  releasedEntry = await verified("kestrel/kestrel-3", k1, [k2, k3]);
+  staleEntry = await verified("example/kestrel-1", k1, [k2, k3]);
+  heldEntry = await verified("example/kestrel-2", k1, [k4, k5]);
+  releasedEntry = await verified("example/kestrel-3", k1, [k2, k3]);
 
   // Two reads on day 0, of the entry whose money is released long before it is
   // overturned.
@@ -1016,10 +1016,10 @@ describe("a validation the log has not sealed yet", () => {
       {
         author: k1.agent.agentId,
         author_operator: k1.operator,
-        subject: "kestrel/kestrel-4",
+        subject: "example/kestrel-4",
         category: CATEGORY,
         domain: DEFAULT_DOMAIN,
-        claim: "kestrel/kestrel-4 seat pricing is $40 per seat per month",
+        claim: "example/kestrel-4 seat pricing is $40 per seat per month",
         before: "$35 per seat per month",
         after: "$40 per seat per month",
         effective_at: "2026-09-01",

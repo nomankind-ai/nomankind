@@ -147,6 +147,11 @@ function sidecarOf(fixture: Fixture): Sidecar {
     needs_replacement: false,
     effective_tier: fixture.effectiveTier as Sidecar["effective_tier"],
     test_verdict: null,
+    // The class the source policy derives from the citation (decision D-080).
+    // Fixed here rather than computed: these rows go in through the repository's
+    // own writer, and what the browsing reads are being held to is what was
+    // stored, not what a classifier would say about it now.
+    source: { class: "other", matched_host: null, provider: null },
     trusted_count_at_decision: null,
     read_share_slots: null,
     revalidations: [],

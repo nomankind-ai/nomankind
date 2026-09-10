@@ -12,9 +12,11 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_DOMAIN } from "../src/policy.js";
+import { SOURCE_CLASSES } from "../src/sources.js";
 import {
   ENTRIES_QUERY_PARAMETERS,
   ENTRIES_QUERY_REFUSALS,
+  ENTRY_SOURCES,
   ENTRY_CATEGORIES,
   ENTRY_STATUSES,
   ENTRY_TIERS,
@@ -46,15 +48,25 @@ describe("the accepted values come from the schema", () => {
     expect([...ENTRY_TIERS]).toEqual(schema.properties.evidence_tier.enum);
   });
 
-  it("accepts exactly six parameters", () => {
+  it("accepts exactly seven parameters", () => {
     expect([...ENTRIES_QUERY_PARAMETERS]).toEqual([
       "category",
       "status",
       "domain",
       "tier",
+      "source",
       "fresh",
       "before",
     ]);
+  });
+
+  it("takes the source classes from src/sources.ts and nowhere else", () => {
+    // Not a schema enum: the class is derived from the citation against the
+    // domain's published tables, so there is one list of it and this is not a
+    // second. `other` is a chip value where it is not a `min_source` value,
+    // because a chip is an exact class and not a minimum.
+    expect([...ENTRY_SOURCES]).toEqual([...SOURCE_CLASSES]);
+    expect(ENTRY_SOURCES).toContain("other");
   });
 
   it("names its refusals in the order it checks them", () => {
@@ -65,6 +77,7 @@ describe("the accepted values come from the schema", () => {
       "bad_status",
       "unknown_domain",
       "bad_tier",
+      "bad_source",
       "bad_fresh",
       "bad_before",
     ]);
@@ -80,6 +93,7 @@ describe("what parses", () => {
         status: null,
         domain: null,
         tier: null,
+        source: null,
         fresh: null,
       },
       before: null,
@@ -89,7 +103,7 @@ describe("what parses", () => {
   it("parses a full query", () => {
     expect(
       parse(
-        `category=pricing&status=verified&domain=${DEFAULT_DOMAIN}&tier=observed&fresh=stale&before=48213`,
+        `category=pricing&status=verified&domain=${DEFAULT_DOMAIN}&tier=observed&source=official&fresh=stale&before=48213`,
       ),
     ).toEqual({
       ok: true,
@@ -98,6 +112,7 @@ describe("what parses", () => {
         status: "verified",
         domain: DEFAULT_DOMAIN,
         tier: "observed",
+        source: "official",
         fresh: "stale",
       },
       before: 48213,
@@ -121,6 +136,9 @@ describe("what parses", () => {
     for (const tier of ENTRY_TIERS) {
       expect(parse(`tier=${tier}`).ok).toBe(true);
     }
+    for (const source of ENTRY_SOURCES) {
+      expect(parse(`source=${source}`).ok).toBe(true);
+    }
     for (const fresh of ["fresh", "stale"]) {
       expect(parse(`fresh=${fresh}`).ok).toBe(true);
     }
@@ -142,6 +160,8 @@ describe("what is refused, and by which parameter", () => {
     ["status=", "bad_status"],
     ["tier=inferred", "bad_tier"],
     ["tier=", "bad_tier"],
+    ["source=trusted", "bad_source"],
+    ["source=", "bad_source"],
     ["fresh=all", "bad_fresh"],
     ["fresh=", "bad_fresh"],
     ["before=-1", "bad_before"],

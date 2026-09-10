@@ -9,10 +9,16 @@
  * at all — a stale or weakly-evidenced answer dressed up as an answer is worse
  * than no answer, because the reader cannot tell the difference.
  *
+ * Section 4, the source policy (decision D-080), adds a fourth demand of the
+ * same kind: `min_source` asks for an answer whose citation reached at least a
+ * class — official, or recognized. It is not the tier restated. The tier says
+ * how the claim was checked; the class says who said it, and a reader may care
+ * about either without caring about the other.
+ *
  * Pure: no I/O, no storage, and no wall clock. The candidate list comes from
  * the store, `now` is injected, and nothing here derives a field — status,
- * `last_confirmed` and the sidecar's `effective_tier` are read exactly as
- * src/derive.ts computed them.
+ * `last_confirmed` and the sidecar's `effective_tier` and `source` are read
+ * exactly as src/derive.ts computed them.
  *
  * The category and tier enums are read from the entry schema itself, never
  * copied into TypeScript: the schema is the single source of truth for both,
@@ -27,6 +33,11 @@ import type { EntryStatus, Sidecar } from "./derive.js";
 import type { EvidenceTier } from "./evidence.js";
 import type { Category } from "./policy.js";
 import type { Entry } from "./schema.js";
+import {
+  MIN_SOURCE_VALUES,
+  sourceClassSatisfies,
+  type SourceClass,
+} from "./sources.js";
 
 /** The schema's category enum. */
 const CATEGORIES: readonly string[] = entrySchema.properties.category.enum;
@@ -45,6 +56,7 @@ export const READ_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "category",
   "domain",
   "min_tier",
+  "min_source",
   "max_age",
 ]);
 
@@ -69,6 +81,13 @@ export type ReadQuery =
        */
       readonly domain?: string;
       readonly min_tier?: EvidenceTier;
+      /**
+       * The weakest source class the reader will accept (decision D-080):
+       * `official` or `recognized`. Absent means the reader made no demand about
+       * where the claim came from, which is a different question from the tier —
+       * the tier asks how the claim was checked, this asks who said it.
+       */
+      readonly min_source?: SourceClass;
       /** Whole calendar days. Absent means the reader set no age demand. */
       readonly max_age?: number;
     };
@@ -83,6 +102,7 @@ export const READ_QUERY_REFUSALS = [
   "bad_category",
   "unknown_domain",
   "bad_min_tier",
+  "bad_min_source",
   "bad_max_age",
 ] as const;
 
@@ -152,6 +172,14 @@ export function parseReadQuery(params: URLSearchParams): ReadQueryResult {
     return { ok: false, reason: "bad_min_tier" };
   }
 
+  const minSource = params.get("min_source");
+  if (
+    minSource !== null &&
+    !(MIN_SOURCE_VALUES as readonly string[]).includes(minSource)
+  ) {
+    return { ok: false, reason: "bad_min_source" };
+  }
+
   const maxAge = params.get("max_age");
   if (maxAge !== null && !MAX_AGE_PATTERN.test(maxAge)) {
     return { ok: false, reason: "bad_max_age" };
@@ -169,6 +197,7 @@ export function parseReadQuery(params: URLSearchParams): ReadQueryResult {
       category: category as Category,
       ...(domain === null ? {} : { domain }),
       ...(minTier === null ? {} : { min_tier: minTier as EvidenceTier }),
+      ...(minSource === null ? {} : { min_source: minSource as SourceClass }),
       ...(maxAgeDays === undefined ? {} : { max_age: maxAgeDays }),
     },
   };
@@ -273,12 +302,18 @@ export function chooseReadable(
   now: Date,
 ): ReadCandidate | null {
   const minTier = query.by === "subject" ? query.min_tier : undefined;
+  const minSource = query.by === "subject" ? query.min_source : undefined;
   const maxAge = query.by === "subject" ? query.max_age : undefined;
 
   for (const candidate of candidates) {
     const record = candidate.entry as unknown as Record<string, unknown>;
     if (!isReadable(record["status"] as string)) continue;
     if (!tierSatisfies(candidate.sidecar.effective_tier, minTier)) continue;
+    if (
+      !sourceClassSatisfies(candidate.sidecar.source?.class ?? null, minSource)
+    ) {
+      continue;
+    }
     if (!withinMaxAge(record["last_confirmed"] as string, now, maxAge)) {
       continue;
     }

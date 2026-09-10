@@ -40,6 +40,7 @@ import {
   NORM_VERSION,
   REQUEST_CLOCK_SKEW_SECONDS,
 } from "./policy.js";
+import { checkSource, type SourceRefusal } from "./sources.js";
 
 /**
  * Domain-separation tag for the entry id. A format constant, not a policy
@@ -180,6 +181,7 @@ export type SubmissionRefusal =
   | "missing_domain"
   | "unregistered_domain"
   | "category_not_in_domain"
+  | SourceRefusal
   | "bad_submitted_at"
   | "author_mismatch"
   | "author_operator_mismatch"
@@ -192,6 +194,8 @@ export const SUBMISSION_REFUSALS: readonly SubmissionRefusal[] = Object.freeze([
   "missing_domain",
   "unregistered_domain",
   "category_not_in_domain",
+  "unknown_provider",
+  "source_not_official",
   "bad_submitted_at",
   "author_mismatch",
   "author_operator_mismatch",
@@ -256,6 +260,22 @@ function instant(value: unknown): number {
  * domain does not admit. The schema cannot express a per-domain enum, so this is
  * where that rule is actually enforced.
  *
+ * unknown_provider and source_not_official: the source policy (decision D-080,
+ * src/sources.ts). A category with an authoritative source by nature -- pricing,
+ * limit, deprecation, release, outage -- must cite the subject's own official
+ * source. The subject's provider must have a published row, and the citation
+ * must be one of its hosts over https. A correction entry is a submission like
+ * any other and passes here too -- under its own category, which no domain
+ * requires an official source for, so nothing here gates it. What makes a
+ * correction of a pricing claim cite the official source a pricing claim does is
+ * the dispute door's own second call, against the challenged entry's category
+ * (src/worker/dispute.ts).
+ *
+ * Both are checked here rather than at derivation because they are the one part
+ * of the policy that is a gate: an entry that fails them never enters the log,
+ * which is what stops a site made yesterday from carrying a pricing claim to
+ * verified. Everything else the policy says is a label the sidecar publishes.
+ *
  * bad_submitted_at: not a date-time at all, or further from the verifier's clock
  * than the skew window allows, in either direction. The paper has the source
  * snapshotted at the moment of submission, so a submission time far from now
@@ -294,6 +314,16 @@ export function checkSubmission(
   }
   if (!isDomainCategory(core.domain, core.category)) {
     return { ok: false, reason: "category_not_in_domain" };
+  }
+
+  const source = checkSource(
+    core.domain,
+    core.category,
+    core.subject,
+    core.citation,
+  );
+  if (!source.ok) {
+    return { ok: false, reason: source.reason };
   }
 
   const submittedAt = instant(core.submitted_at);

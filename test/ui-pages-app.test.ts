@@ -37,6 +37,7 @@ import { renderBadQuery } from "../src/ui/pages/errors.js";
 import { renderHome } from "../src/ui/pages/home.js";
 import { renderOperator } from "../src/ui/pages/operator.js";
 import { renderOperators } from "../src/ui/pages/operators.js";
+import { SOURCE_CLASSES } from "../src/sources.js";
 import { ENTRIES_QUERY_PARAMETERS, ENTRY_DOMAINS } from "../src/ui/query.js";
 import {
   APP_CSS_HREF,
@@ -120,6 +121,14 @@ const sidecar: Sidecar = {
   needs_replacement: false,
   effective_tier: "stated",
   test_verdict: "rejected",
+  // The class this entry's own citation earned (decision D-080). Official, with
+  // the host that matched and the provider the subject names, so the entry page
+  // has all three to show; the `other` wording is exercised on its own below.
+  source: {
+    class: "official",
+    matched_host: "docs.kestrel.example",
+    provider: "kestrel",
+  },
   trusted_count_at_decision: 3,
   read_share_slots: [
     { operator: "k1.example", seq: 8 },
@@ -611,6 +620,7 @@ function everyPage(): Record<string, string> {
         category: null,
         status: "verified",
         domain: DEFAULT_DOMAIN,
+        source: null,
         tier: null,
         fresh: null,
       },
@@ -779,6 +789,7 @@ describe("the entries listing", () => {
       category: "behavior",
       status: "verified",
       domain: null,
+      source: null,
       tier: null,
       fresh: "stale",
     },
@@ -851,6 +862,7 @@ describe("the entries listing", () => {
         category: "behavior",
         status: "verified",
         domain: DEFAULT_DOMAIN,
+        source: null,
         tier: null,
         fresh: "stale",
       },
@@ -873,12 +885,61 @@ describe("the entries listing", () => {
     );
   });
 
+  it("gives source a chip group of its own, from the kernel's own classes", () => {
+    // Decision D-080. The chips are the three classes src/sources.ts declares —
+    // `other` included, because the listing asks for an exact class rather than
+    // a minimum — and never a list typed into a page.
+    expect(document).toContain('<span class="filter-name">source</span>');
+    for (const value of SOURCE_CLASSES) {
+      expect(document, `${value} has no chip`).toContain(
+        `<input type="radio" name="source" value="${value}" />`,
+      );
+    }
+  });
+
+  it("checks the source chip that is on, and carries it in every link", () => {
+    const narrowed = renderEntries(ctx, {
+      filter: {
+        category: "behavior",
+        status: "verified",
+        domain: null,
+        source: "official",
+        tier: null,
+        fresh: "stale",
+      },
+      rows: [row],
+      total: 9,
+      nextBefore: 12,
+    });
+    expect(narrowed).toContain(
+      '<input type="radio" name="source" value="official" checked />',
+    );
+    // The pager keeps it, in the order the parser writes the query string in.
+    expect(narrowed).toContain(
+      'href="/entries?category=behavior&amp;status=verified&amp;source=official&amp;fresh=stale&amp;before=12"',
+    );
+    // And source's own "all" chip drops only source.
+    expect(narrowed).toContain(
+      'href="/entries?category=behavior&amp;status=verified&amp;fresh=stale"',
+    );
+  });
+
+  it("says the source filter narrows the page and not the total", () => {
+    // The total is by status and domain, both indexed columns; source is read
+    // off the sidecar over the page. The line says which, because a filtered
+    // two of nine that silently meant something else would be a wrong number.
+    expect(document).toContain(
+      "the category, source, tier and freshness filters narrow the page, not the total",
+    );
+  });
+
   it("refuses to pretend an empty page is a page", () => {
     const empty = renderEntries(ctx, {
       filter: {
         category: null,
         status: null,
         domain: null,
+        source: null,
         tier: null,
         fresh: null,
       },
@@ -952,6 +1013,53 @@ describe("the entry page", () => {
     expect(document).toContain("<dt>domain</dt>");
     const at = document.indexOf("<dt>domain</dt>");
     expect(document.slice(at, at + 200)).toContain(DEFAULT_DOMAIN);
+  });
+
+  it("shows the source class, its matched host and its provider, as derived", () => {
+    // Decision D-080. The class is a reading of the citation the core already
+    // carried, so it sits among the derived fields and not among the signed
+    // ones, and all three of its parts are shown: a class with no host beside
+    // it would be an assertion a reader cannot check.
+    expect(document).toContain("<dt>source</dt>");
+    const at = document.indexOf("<dt>source</dt>");
+    const cell = document.slice(at, at + 300);
+    expect(cell).toContain("official");
+    expect(cell).toContain("docs.kestrel.example");
+    expect(cell).toContain("kestrel");
+  });
+
+  it("says in words what an `other` source class means", () => {
+    // `other` is not an accusation and the page must not read as one: it says
+    // this log publishes no authority for this subject, which is a different
+    // statement from "the source is bad".
+    const unofficial = renderEntry(ctx, {
+      ...entryData,
+      sidecar: {
+        ...sidecar,
+        source: { class: "other", matched_host: null, provider: "kestrel" },
+      },
+    });
+    expect(unofficial).toContain(
+      "other: no published authority for this subject",
+    );
+    // And the derived cell itself names no host, because none matched. (The
+    // confidence inputs below still carry the official one: they were computed
+    // by the route from the sidecar this test replaced, which is exactly the
+    // separation the page keeps — it prints what it was handed and folds
+    // nothing.)
+    const at = unofficial.indexOf("<dt>source</dt>");
+    expect(unofficial.slice(at, at + 300)).not.toContain("docs.kestrel.example");
+  });
+
+  it("says when the subject named no provider at all", () => {
+    const nameless = renderEntry(ctx, {
+      ...entryData,
+      sidecar: {
+        ...sidecar,
+        source: { class: "other", matched_host: null, provider: null },
+      },
+    });
+    expect(nameless).toContain("no provider in the subject");
   });
 
   it("says a legacy core's domain is absent, and what the log reads it as", () => {

@@ -75,7 +75,7 @@ const HOUR_MS = 3_600_000;
 const VERIFIED_REFERENCE = "mock-verified-m22b-clients";
 const UNREGISTERED = "biotech";
 
-const SUBJECT = "kestrel/kestrel-1";
+const SUBJECT = "example/kestrel-1";
 const CATEGORY = "pricing";
 
 const PAGE: FixturePage = {
@@ -212,7 +212,7 @@ function fieldsFor(overrides: Record<string, unknown> = {}): Record<
     subject: SUBJECT,
     category: CATEGORY,
     domain: DEFAULT_DOMAIN,
-    claim: "kestrel/kestrel-1 seat pricing is $40 per seat per month",
+    claim: "example/kestrel-1 seat pricing is $40 per seat per month",
     before: "$35 per seat per month",
     after: "$40 per seat per month",
     effective_at: "2026-09-01",

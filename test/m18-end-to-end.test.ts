@@ -105,8 +105,8 @@ function date(days: number): string {
 const VERIFIED_REFERENCE = "mock-verified-m18";
 
 /** The chain's subject, and the subject of the entry beside it. */
-const CHAIN_SUBJECT = "kestrel/kestrel-1";
-const OTHER_SUBJECT = "kestrel/kestrel-2";
+const CHAIN_SUBJECT = "example/kestrel-1";
+const OTHER_SUBJECT = "example/kestrel-2";
 const CATEGORY = "pricing";
 
 // ---------------------------------------------------------------------------

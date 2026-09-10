@@ -40,6 +40,7 @@ function query(overrides: Partial<SyncQuery> = {}): SyncQuery {
     limit: LIST_PAGE_LIMIT,
     flatten: false,
     min_tier: null,
+    min_source: null,
     domain: null,
     ...overrides,
   };
@@ -63,8 +64,9 @@ function state(
   status: SyncEntryState["status"],
   tier: SyncEntryState["effective_tier"] = "observed",
   domain: string = DEFAULT_DOMAIN,
+  sourceClass: SyncEntryState["source_class"] = "official",
 ): SyncEntryState {
-  return { status, effective_tier: tier, domain };
+  return { status, effective_tier: tier, domain, source_class: sourceClass };
 }
 
 function parsed(search: string): SyncQuery {
@@ -86,6 +88,7 @@ describe("parseSyncQuery", () => {
       "limit",
       "flatten",
       "min_tier",
+      "min_source",
       "domain",
     ]);
     expect(SYNC_QUERY_REFUSALS).toEqual([
@@ -94,6 +97,7 @@ describe("parseSyncQuery", () => {
       "bad_limit",
       "bad_flatten",
       "bad_min_tier",
+      "bad_min_source",
       "unknown_domain",
     ]);
   });
@@ -104,6 +108,7 @@ describe("parseSyncQuery", () => {
       limit: LIST_PAGE_LIMIT,
       flatten: false,
       min_tier: null,
+      min_source: null,
       domain: null,
     });
   });
@@ -111,13 +116,14 @@ describe("parseSyncQuery", () => {
   it("reads every parameter a trainer wrote", () => {
     expect(
       parsed(
-        `from=41&limit=5&flatten=true&min_tier=observed&domain=${DEFAULT_DOMAIN}`,
+        `from=41&limit=5&flatten=true&min_tier=observed&min_source=official&domain=${DEFAULT_DOMAIN}`,
       ),
     ).toEqual({
       from: 41,
       limit: 5,
       flatten: true,
       min_tier: "observed",
+      min_source: "official",
       domain: DEFAULT_DOMAIN,
     });
     expect(parsed("flatten=false&min_tier=stated").flatten).toBe(false);
@@ -159,6 +165,23 @@ describe("parseSyncQuery", () => {
       expect(refusal(`min_tier=${bad}`)).toBe("bad_min_tier");
     }
     expect(parsed("min_tier=stated").min_tier).toBe("stated");
+  });
+
+  it("refuses a min_source outside the two minima (D-080)", () => {
+    for (const value of ["official", "recognized"]) {
+      expect(parsed(`min_source=${value}`).min_source).toBe(value);
+    }
+    // "at least other" is a demand nothing fails, so it is not one a trainer
+    // may write: it would look like a filter and be the unfiltered stream.
+    for (const bad of ["", "other", "Official", "any"]) {
+      expect(refusal(`min_source=${bad}`)).toBe("bad_min_source");
+    }
+    expect(refusal("min_source=official&min_source=recognized")).toBe(
+      "bad_min_source",
+    );
+    // After bad_min_tier, before unknown_domain: the first fault wins.
+    expect(refusal("min_tier=gold&min_source=nope")).toBe("bad_min_tier");
+    expect(refusal("min_source=nope&domain=biotech")).toBe("bad_min_source");
   });
 
   it("refuses a parameter given twice: two values are two questions", () => {
@@ -276,8 +299,72 @@ describe("keepSyncItem", () => {
     expect(keepSyncItem("entry", state("draft"), query())).toBe(true);
   });
 
+  it("drops anything the demanded source class does not cover (D-080)", () => {
+    const official = query({ min_source: "official" });
+    const recognized = query({ min_source: "recognized" });
+
+    expect(
+      keepSyncItem(
+        "entry",
+        state("verified", "observed", DEFAULT_DOMAIN, "official"),
+        official,
+      ),
+    ).toBe(true);
+    expect(
+      keepSyncItem(
+        "entry",
+        state("verified", "observed", DEFAULT_DOMAIN, "recognized"),
+        official,
+      ),
+    ).toBe(false);
+    expect(
+      keepSyncItem(
+        "entry",
+        state("verified", "observed", DEFAULT_DOMAIN, "recognized"),
+        recognized,
+      ),
+    ).toBe(true);
+    expect(
+      keepSyncItem(
+        "entry",
+        state("verified", "observed", DEFAULT_DOMAIN, "other"),
+        recognized,
+      ),
+    ).toBe(false);
+    // A class the caller could not supply promises nothing, exactly as a null
+    // effective tier does.
+    expect(
+      keepSyncItem(
+        "entry",
+        state("verified", "observed", DEFAULT_DOMAIN, null),
+        recognized,
+      ),
+    ).toBe(false);
+    // The demand is about facts to learn, so it carries the tier demand's own
+    // verified check: an unverified entry is not one of those.
+    expect(
+      keepSyncItem(
+        "entry",
+        state("draft", "observed", DEFAULT_DOMAIN, "official"),
+        official,
+      ),
+    ).toBe(false);
+    // With no demand at all the class is a label and filters nothing.
+    expect(
+      keepSyncItem(
+        "entry",
+        state("verified", "observed", DEFAULT_DOMAIN, "other"),
+        query(),
+      ),
+    ).toBe(true);
+  });
+
   it("never withholds an unlearn or an event, whatever was asked for", () => {
-    const strict = query({ flatten: true, min_tier: "observed" });
+    const strict = query({
+      flatten: true,
+      min_tier: "observed",
+      min_source: "official",
+    });
     for (const kind of ["unlearn", "event"] as const) {
       expect(keepSyncItem(kind, null, strict)).toBe(true);
       expect(keepSyncItem(kind, state("overturned", null), strict)).toBe(true);

@@ -30,6 +30,7 @@
 import type { EvidenceTier, TestVerdict } from "./evidence.js";
 import type { Sidecar } from "./derive.js";
 import type { Entry } from "./schema.js";
+import { isSourceClass, type SourceClass } from "./sources.js";
 
 /** A unit constant, not a policy number. */
 const MILLISECONDS_PER_DAY = 86_400_000;
@@ -101,6 +102,22 @@ export interface ConfidenceInputs {
   readonly formula: null;
   readonly evidence_tier: EvidenceTier | null;
   readonly effective_tier: EvidenceTier | null;
+  /**
+   * Where the claim came from (decision D-080): the class the entry's citation
+   * earned, and the listed host that matched it.
+   *
+   * An input and never a weight, like every other field here. The paper names
+   * tier, reproduction counts, age and dispute history as the inputs conf-v1
+   * would read; the source class is the same kind of receipt — a fact about the
+   * entry that a learner may weight for itself — and publishing it raw is what
+   * lets a learner prefer provider-stated pricing over a blog without waiting
+   * for a formula nobody has calibrated.
+   *
+   * Null for an entry whose sidecar carries no class at all, which is a row
+   * written before the key existed and read by a caller that did not default it.
+   */
+  readonly source_class: SourceClass | null;
+  readonly source_matched_host: string | null;
   readonly test_verdict: TestVerdict | null;
   readonly test_acceptance: TestAcceptance;
   readonly counts: EvidenceCounts;
@@ -170,10 +187,11 @@ function daysBetween(from: string, now: string): number {
  * The raw inputs to the confidence field for one stored entry.
  *
  * `entry` is what `deriveEntry` produced and the store holds verbatim, read by
- * the schema's own field names; `sidecar` carries the two the schema cannot
- * (`effective_tier` and `test_verdict`), which the paper's first sentence names
- * first: tier is what feeds the field, and the tier that matters is the one the
- * entry actually verified at, not the one its core claims.
+ * the schema's own field names; `sidecar` carries the three the schema cannot
+ * (`effective_tier`, `test_verdict` and `source`), two of which the paper's
+ * first sentence names first: tier is what feeds the field, and the tier that
+ * matters is the one the entry actually verified at, not the one its core
+ * claims. The source class is D-080's addition to the same list of receipts.
  *
  * `age_ratio` is null unless the entry is verified and carries a window. An
  * event-category entry has no window to age against — "once they happened they
@@ -256,6 +274,13 @@ export function confidenceInputs(input: {
         ? (entry["evidence_tier"] as EvidenceTier)
         : null,
     effective_tier: input.sidecar.effective_tier,
+    source_class: isSourceClass(input.sidecar.source?.class)
+      ? input.sidecar.source.class
+      : null,
+    source_matched_host:
+      typeof input.sidecar.source?.matched_host === "string"
+        ? input.sidecar.source.matched_host
+        : null,
     test_verdict: input.sidecar.test_verdict,
     test_acceptance: { accepted, rejected },
     counts: {

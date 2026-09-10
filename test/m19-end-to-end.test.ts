@@ -80,7 +80,7 @@ const AT = NOW.toISOString();
 const HTML = { accept: "text/html,application/xhtml+xml" };
 const JSON_ACCEPT = { accept: "application/json" };
 
-const SUBJECT = "kestrel/kestrel-1";
+const SUBJECT = "example/kestrel-1";
 const CATEGORY = "pricing";
 const VERIFIED_REFERENCE = "mock-verified-m19";
 

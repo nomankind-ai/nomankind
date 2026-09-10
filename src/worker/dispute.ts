@@ -20,7 +20,8 @@
  *
  * Order matters and is deliberate: the id, the shape, the envelope signature,
  * the target, the identity, the whole submission pipeline on the correction,
- * the filing rules (src/dispute.ts), the two links a filing may claim to be an
+ * the filing rules (src/dispute.ts), the source policy read against the entry
+ * being challenged (src/sources.ts), the two links a filing may claim to be an
  * upgrade of, and last the standing its stake needs (Section 9: standing "gates
  * ... dispute stakes"). Nothing is written until every one of them has passed,
  * and the archive is written only after that: a refused filing leaves the log
@@ -39,6 +40,7 @@
 
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
+import { domainOf } from "../core.js";
 import type { EntryStatus } from "../derive.js";
 import {
   checkDisputeFiling,
@@ -50,6 +52,7 @@ import {
 import type { Event, EventInput } from "../events.js";
 import { DISPUTE_STAKE_STANDING, LIST_PAGE_LIMIT } from "../policy.js";
 import { validateEntry, type ValidationError } from "../schema.js";
+import { checkSource } from "../sources.js";
 import { disputeStake, revalidationOutcomeStakes } from "../stake.js";
 import {
   getEntry,
@@ -311,6 +314,31 @@ async function file(
     const status = filing.reason === "dispute_open" ? 409 : 422;
     return refuse(status, filing.reason);
   }
+
+  // Section 4 and decision D-080: a category with an authoritative source by
+  // nature must cite the subject's own official source. The pipeline above ran
+  // that gate already, but on the correction's own core — and a correction's
+  // category is `correction`, which no domain requires an official source for,
+  // so nothing there gated it. The claim a challenge actually makes is a claim
+  // about the *target's* fact, so the gate that binds it is the target's: its
+  // domain and its category, against the correction's own subject and citation.
+  // Without this, a stranger's blog could overturn a pricing entry that the same
+  // blog could never have made in the first place.
+  //
+  // The domain comes off the target's stored entry through `domainOf`, which
+  // reads a legacy v0.6 core as the default domain exactly as every other
+  // domain-keyed rule does. The subject and citation come off the correction —
+  // `subject_mismatch` above has already made the two subjects the same string,
+  // and the citation is the challenge's own evidence, which is the thing being
+  // gated. Checked before `archivePrepared` and before the batch, so a refusal
+  // leaves the log, the archive and the ledger exactly where they were.
+  const source = checkSource(
+    domainOf(target),
+    target["category"],
+    prepared.core["subject"],
+    prepared.core["citation"],
+  );
+  if (!source.ok) return refuse(422, source.reason);
 
   if (
     body.fromReportSeq !== null &&

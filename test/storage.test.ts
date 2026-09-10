@@ -64,6 +64,7 @@ import {
   type WitnessSignature,
 } from "../src/index.js";
 import { DEFAULT_DOMAIN } from "../src/policy.js";
+import { sourceClassOf } from "../src/sources.js";
 import { applyMigrations, splitStatements } from "../src/storage/migrate.js";
 import {
   EventAppendError,
@@ -1017,6 +1018,94 @@ describe("a sidecar stored before revalidations existed", () => {
     expect(stored!.sidecar.revalidations).toEqual([]);
     // Nothing else about the sidecar is invented by the default.
     expect(stored!.sidecar.effective_tier).toBeDefined();
+  });
+});
+
+/**
+ * A sidecar written before the source class existed (decision D-080).
+ *
+ * The M20 pattern again, and with a stronger guarantee than the empty list had:
+ * the class is a pure function of the stored core's domain, subject and
+ * citation, so the reader computing it from the row's own entry gives the
+ * identical answer `deriveEntry` would. There is no migration and there does not
+ * need to be one -- a row written by the previous Worker reads with its class
+ * the first time anybody asks for it.
+ */
+describe("a sidecar stored before the source class existed", () => {
+  /** One entries row whose sidecar_json is shaped as the previous Worker wrote it. */
+  async function putPreM23b(id: string): Promise<Record<string, unknown>> {
+    const entrySeals = await sealsForEntries(
+      world.bundle.events,
+      world.bundle.seals,
+    );
+    const derived = deriveEntry(
+      world.bundle.events,
+      VERIFIED_ENTRY_ID,
+      clock(),
+      entrySeals,
+    );
+    const entry = { ...derived.entry, id } as Record<string, unknown>;
+    // The key removed rather than nulled: undefined is what the page would meet.
+    const { source: _gone, ...older } = derived.sidecar;
+    expect(Object.keys(older)).not.toContain("source");
+
+    await test.db
+      .prepare(
+        `INSERT INTO entries
+           (id, subject, category, status, submitted_at, submitted_seq,
+            author, entry_json, sidecar_json, derived_through_seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id,
+        entry["subject"] as string,
+        entry["category"] as string,
+        entry["status"] as string,
+        entry["submitted_at"] as string,
+        0,
+        entry["author"] as string,
+        JSON.stringify(entry),
+        JSON.stringify(older),
+        0,
+      )
+      .run();
+
+    const raw = await test.db
+      .prepare(`SELECT sidecar_json FROM entries WHERE id = ?`)
+      .bind(id)
+      .first<{ sidecar_json: string }>();
+    expect(JSON.parse(raw!.sidecar_json)).not.toHaveProperty("source");
+    return entry;
+  }
+
+  it("reads back with the class computed from its own stored core", async () => {
+    const id = `nmk_${"0".repeat(31)}3`;
+    const entry = await putPreM23b(id);
+
+    const stored = await getEntry(test.db, id);
+    expect(stored).not.toBeNull();
+    // The same answer derivation gives, because it is the same function over
+    // the same bytes -- not a second reading of the citation.
+    expect(stored!.sidecar.source).toEqual(
+      sourceClassOf(
+        entry["domain"] as string,
+        entry["subject"],
+        entry["citation"],
+      ),
+    );
+    expect(stored!.sidecar.source.class).toBe("official");
+    // Nothing else about the sidecar is invented by the default.
+    expect(stored!.sidecar.effective_tier).toBeDefined();
+    expect(stored!.sidecar.revalidations).toEqual([]);
+  });
+
+  it("leaves a row that already carries the key alone", async () => {
+    const stored = await getEntry(test.db, VERIFIED_ENTRY_ID);
+    expect(stored).not.toBeNull();
+    expect(stored!.sidecar.source).toEqual(
+      deriveEntry(world.bundle.events, VERIFIED_ENTRY_ID, clock()).sidecar
+        .source,
+    );
   });
 });
 

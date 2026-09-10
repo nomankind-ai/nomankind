@@ -89,12 +89,104 @@ signed verbatim:
 **Subject naming convention.** `<provider>/<model or product>`, lowercase, as
 the schema's `subject` description gives it: for example `openai/gpt-5`.
 
+**Sources.** Who may be cited for what (decision D-080, 2026-09-10). A stated
+entry is verified when independent operators confirm the source said what the
+entry says (whitepaper Section 4; Section 12, "stated entries are about the
+source, not the world"). Nothing in that sentence asks whether the source is one
+that should be believed about that subject, so a site made yesterday could carry
+a pricing claim to verified. This table is the answer. Every entry carries a
+source class derived from its own citation; some categories are gated on it, and
+everywhere else it is a label published beside the entry.
+
+*The three classes.*
+
+| class | what it means |
+| --- | --- |
+| official | the host is one the subject's own provider published, from the provider table below |
+| recognized | the host is on the recognized list below: an editorial process, a standards body, a court or regulator, a journal or a preprint server |
+| other | neither. Not an accusation: it says this log publishes no authority for this subject |
+
+*The host rule.* The citation must be `https`; `http` is `other` and never
+official or recognized, because a plaintext fetch is a source anybody on the path
+can rewrite. The citation's host, lowercased, matches a listed host exactly or as
+a subdomain of it — `docs.anthropic.com` matches `anthropic.com`, and
+`anthropic.com.evil.tld` does not. A port or userinfo in the citation makes it
+`other`. Where several listed hosts match, the longest is the one published.
+
+*Official-required categories.* `pricing`, `limit`, `deprecation`, `release`,
+`outage`. These have an authoritative source by nature — what a product costs,
+what its limits are, what was released, deprecated, or down is the provider's own
+to state — so an entry in one of them must cite the subject's official source or
+it is refused at submit, with `unknown_provider` when the subject's provider has
+no row and `source_not_official` when it has one and the citation is not among
+its hosts. A correction entry is a submission like any other, and is checked
+under its own category — `correction`, which is not official-required — so the
+rule that binds a challenge is the one its target carries: the dispute door runs
+the same check against the challenged entry's domain and category, and
+overturning an official-required claim takes an official source too.
+
+*The provider table.* The subject convention is `<provider>/<model or product>`,
+so the provider slug — the first path segment, lowercase — keys this table. Every
+excluded party of this domain appears here: a party too close to judge the record
+is exactly the party whose own pages are authoritative about its own products. A
+provider absent from the table has no official source published here, so its
+official-required claims are refused until a decision adds the row.
+
+| provider | official hosts |
+| --- | --- |
+| openai | openai.com, platform.openai.com, status.openai.com, help.openai.com |
+| anthropic | anthropic.com, docs.anthropic.com, status.anthropic.com, claude.com, docs.claude.com |
+| google | google.com, ai.google.dev, cloud.google.com, status.cloud.google.com, deepmind.google, blog.google |
+| meta | meta.com, ai.meta.com, llama.com |
+| microsoft | microsoft.com, azure.microsoft.com, learn.microsoft.com |
+| xai | x.ai, docs.x.ai, status.x.ai |
+| mistral | mistral.ai, docs.mistral.ai, status.mistral.ai |
+| cohere | cohere.com, docs.cohere.com, status.cohere.com |
+| amazon | amazon.com, aws.amazon.com, docs.aws.amazon.com, health.aws.amazon.com |
+| deepseek | deepseek.com, api-docs.deepseek.com, status.deepseek.com |
+| alibaba | alibaba.com, alibabacloud.com, help.aliyun.com |
+| moonshot | moonshot.cn, platform.moonshot.cn |
+| 01-ai | 01.ai |
+| ai21 | ai21.com, docs.ai21.com |
+| nvidia | nvidia.com, docs.nvidia.com, build.nvidia.com |
+| ibm | ibm.com, cloud.ibm.com |
+| baidu | baidu.com, cloud.baidu.com |
+| tencent | tencent.com, cloud.tencent.com |
+| bytedance | bytedance.com, volcengine.com |
+| zhipuai | zhipuai.cn, open.bigmodel.cn |
+| example | example.com, example — a fixture, never a real subject |
+
+`example` is the reserved-name row (RFC 2606): `example.com`, which the demo's
+own checkpoint cites, and the `example` top-level domain itself, which every
+`*.example` fixture host is a subdomain of. Both are reserved by IANA and can
+never be registered, so nothing in this row can become a real provider's
+official host. It is marked a fixture in `DOMAINS`, and the test that pins this
+table against the excluded-party list skips it for that reason.
+
+*The recognized list.* A label and never a gate; it grows by decision:
+
+arxiv.org, doi.org, openreview.net, acm.org, ieee.org, nature.com, science.org,
+nist.gov, iso.org, ietf.org, w3.org, sec.gov, federalregister.gov,
+courtlistener.com, gov.uk, europa.eu, eur-lex.europa.eu, reuters.com,
+apnews.com, bloomberg.com, nytimes.com, wsj.com, ft.com, theverge.com,
+techcrunch.com, wired.com, arstechnica.com
+
+*What the policy does not automate.* A validator's approval asserts that the
+cited page supports the claim. This table says only which pages may be cited at
+all; whether the page says what the entry says it says is the judgment the
+validators make, and no host list can make it for them.
+
+Both lists are the maintainer's published policy, not whitepaper lists, and both
+move only by a later decision.
+
 ## Adding a domain
 
 A new domain is a decision, not a pull request: the block above is filled in
 first — categories, windows, transcript categories, excluded parties and their
-list, attestation version and sentence, subject convention — the slug is added
-to the schema's `domain` enum, and `DOMAINS` in `src/policy.ts` is extended to
-match. A test pins that `DOMAINS`' key set is exactly the schema's enum, so the
-two can never drift. Existing entries are untouched: their domain is in their
-signed core, and no migration can move them.
+list, attestation version and sentence, subject convention, and the sources
+section (the official-required categories, the provider table with a row for
+every excluded party, and the recognized list) — the slug is added to the
+schema's `domain` enum, and `DOMAINS` in `src/policy.ts` is extended to match. A
+test pins that `DOMAINS`' key set is exactly the schema's enum, so the two can
+never drift. Existing entries are untouched: their domain is in their signed
+core, and no migration can move them.

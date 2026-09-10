@@ -370,7 +370,7 @@ async function file(
 function artifact(observer: string, note: string): Record<string, unknown> {
   return {
     method: "endpoint_error",
-    subject: "kestrel/kestrel-1",
+    subject: "example/kestrel-1",
     test: `contains:${note}`,
     request: {
       method: "GET",
@@ -499,23 +499,23 @@ beforeAll(async () => {
 
   overturnedEntry = await verified(
     "Kestrel-1 seat pricing is $40 per seat per month",
-    "kestrel/kestrel-1",
+    "example/kestrel-1",
   );
   standingEntry = await verified(
     "Kestrel-2 seat pricing is $40 per seat per month",
-    "kestrel/kestrel-2",
+    "example/kestrel-2",
   );
   checkedEntry = await verified(
     "Kestrel-3 seat pricing is $40 per seat per month",
-    "kestrel/kestrel-3",
+    "example/kestrel-3",
   );
   reportedEntry = await verified(
     "Kestrel-4 seat pricing is $40 per seat per month",
-    "kestrel/kestrel-4",
+    "example/kestrel-4",
   );
   upgradedEntry = await verified(
     "Kestrel-5 seat pricing is $40 per seat per month",
-    "kestrel/kestrel-5",
+    "example/kestrel-5",
   );
 }, 240_000);
 

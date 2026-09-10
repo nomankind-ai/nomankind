@@ -75,6 +75,56 @@ export interface DomainPolicy {
   };
   readonly attestation: { readonly version: string; readonly text: string };
   readonly subject_convention: string;
+  readonly sources: DomainSourcePolicy;
+}
+
+/** One provider's published hosts, and whether the row is a fixture. */
+export interface ProviderSources {
+  readonly hosts: readonly string[];
+  /**
+   * True for the reserved row the demo's own checkpoint cites. A fixture
+   * provider is never a real subject, and the test that pins the provider table
+   * against the excluded-party list skips it for exactly that reason.
+   */
+  readonly fixture?: boolean;
+}
+
+/**
+ * Who may be cited for what, in one domain (decision D-080).
+ *
+ * Whitepaper Section 4, and Section 12's "stated entries are about the source,
+ * not the world": a stated entry verifies when independent operators confirm the
+ * source said what the entry says. Nothing in that sentence asks whether the
+ * source is one that should be believed about that subject, so a site made
+ * yesterday could carry a pricing claim to verified. This table is the answer,
+ * and it is deliberately two different kinds of thing:
+ *
+ * `official_required` is a gate. Those categories have an authoritative source
+ * by nature -- what a product costs, what its limits are, what was released,
+ * deprecated, or down is the provider's own to state -- so an entry in one of
+ * them must cite the subject's official source or it is refused at submit.
+ *
+ * `providers` says what "the subject's official source" means. The subject
+ * convention is `<provider>/<model or product>`, so the first path segment keys
+ * this table. Every excluded party of the domain appears here: a party too close
+ * to judge the record is exactly the party whose own pages are authoritative
+ * about its own products. A provider with no row has no official source
+ * published here, so its official-required claims are refused until a decision
+ * adds the row -- refused, and never quietly accepted from anywhere.
+ *
+ * `recognized_hosts` is a label and never a gate: sources with an editorial
+ * process, a standards body, a court or regulator, a journal or a preprint
+ * server. It says where a claim came from and leaves the judgment where it
+ * belongs. A validator's approval is still what asserts that the cited page
+ * supports the claim; this table only says which pages may be cited at all.
+ *
+ * Not a whitepaper list. The maintainer's published policy (D-080); it grows
+ * only by a later decision, and never by an edit anywhere but this file.
+ */
+export interface DomainSourcePolicy {
+  readonly official_required: readonly Category[];
+  readonly providers: Readonly<Record<string, ProviderSources>>;
+  readonly recognized_hosts: readonly string[];
 }
 
 /**
@@ -148,6 +198,168 @@ export const DOMAINS: Readonly<Record<string, DomainPolicy>> = Object.freeze({
       text: "No model provider holds control of, or a beneficial stake in, this operator.",
     }),
     subject_convention: "<provider>/<model or product>",
+    sources: Object.freeze({
+      official_required: Object.freeze([
+        "pricing",
+        "limit",
+        "deprecation",
+        "release",
+        "outage",
+      ] as const),
+      providers: Object.freeze({
+        openai: Object.freeze({
+          hosts: Object.freeze([
+            "openai.com",
+            "platform.openai.com",
+            "status.openai.com",
+            "help.openai.com",
+          ]),
+        }),
+        anthropic: Object.freeze({
+          hosts: Object.freeze([
+            "anthropic.com",
+            "docs.anthropic.com",
+            "status.anthropic.com",
+            "claude.com",
+            "docs.claude.com",
+          ]),
+        }),
+        google: Object.freeze({
+          hosts: Object.freeze([
+            "google.com",
+            "ai.google.dev",
+            "cloud.google.com",
+            "status.cloud.google.com",
+            "deepmind.google",
+            "blog.google",
+          ]),
+        }),
+        meta: Object.freeze({
+          hosts: Object.freeze(["meta.com", "ai.meta.com", "llama.com"]),
+        }),
+        microsoft: Object.freeze({
+          hosts: Object.freeze([
+            "microsoft.com",
+            "azure.microsoft.com",
+            "learn.microsoft.com",
+          ]),
+        }),
+        xai: Object.freeze({
+          hosts: Object.freeze(["x.ai", "docs.x.ai", "status.x.ai"]),
+        }),
+        mistral: Object.freeze({
+          hosts: Object.freeze([
+            "mistral.ai",
+            "docs.mistral.ai",
+            "status.mistral.ai",
+          ]),
+        }),
+        cohere: Object.freeze({
+          hosts: Object.freeze([
+            "cohere.com",
+            "docs.cohere.com",
+            "status.cohere.com",
+          ]),
+        }),
+        amazon: Object.freeze({
+          hosts: Object.freeze([
+            "amazon.com",
+            "aws.amazon.com",
+            "docs.aws.amazon.com",
+            "health.aws.amazon.com",
+          ]),
+        }),
+        deepseek: Object.freeze({
+          hosts: Object.freeze([
+            "deepseek.com",
+            "api-docs.deepseek.com",
+            "status.deepseek.com",
+          ]),
+        }),
+        alibaba: Object.freeze({
+          hosts: Object.freeze([
+            "alibaba.com",
+            "alibabacloud.com",
+            "help.aliyun.com",
+          ]),
+        }),
+        moonshot: Object.freeze({
+          hosts: Object.freeze(["moonshot.cn", "platform.moonshot.cn"]),
+        }),
+        // 01.ai publishes the Yi models under the org name `01-ai`, which is
+        // what a subject names; the registrable domain is the excluded party.
+        "01-ai": Object.freeze({ hosts: Object.freeze(["01.ai"]) }),
+        ai21: Object.freeze({
+          hosts: Object.freeze(["ai21.com", "docs.ai21.com"]),
+        }),
+        nvidia: Object.freeze({
+          hosts: Object.freeze([
+            "nvidia.com",
+            "docs.nvidia.com",
+            "build.nvidia.com",
+          ]),
+        }),
+        ibm: Object.freeze({
+          hosts: Object.freeze(["ibm.com", "cloud.ibm.com"]),
+        }),
+        baidu: Object.freeze({
+          hosts: Object.freeze(["baidu.com", "cloud.baidu.com"]),
+        }),
+        tencent: Object.freeze({
+          hosts: Object.freeze(["tencent.com", "cloud.tencent.com"]),
+        }),
+        bytedance: Object.freeze({
+          hosts: Object.freeze(["bytedance.com", "volcengine.com"]),
+        }),
+        zhipuai: Object.freeze({
+          hosts: Object.freeze(["zhipuai.cn", "open.bigmodel.cn"]),
+        }),
+        /**
+         * The reserved names (RFC 2606): `example.com`, which the demo's own
+         * checkpoint and the M14 fixtures cite, and the `example` top-level
+         * domain itself, which every `*.example` fixture host is a subdomain of.
+         *
+         * A fixture row and never a real subject, which is what `fixture` says
+         * and what the test pinning this table against the excluded-party list
+         * skips it for. Both entries are reserved by IANA and can never be
+         * registered by anybody, so nothing published here can become a real
+         * provider's official host by someone buying a domain.
+         */
+        example: Object.freeze({
+          hosts: Object.freeze(["example.com", "example"]),
+          fixture: true,
+        }),
+      }),
+      recognized_hosts: Object.freeze([
+        "arxiv.org",
+        "doi.org",
+        "openreview.net",
+        "acm.org",
+        "ieee.org",
+        "nature.com",
+        "science.org",
+        "nist.gov",
+        "iso.org",
+        "ietf.org",
+        "w3.org",
+        "sec.gov",
+        "federalregister.gov",
+        "courtlistener.com",
+        "gov.uk",
+        "europa.eu",
+        "eur-lex.europa.eu",
+        "reuters.com",
+        "apnews.com",
+        "bloomberg.com",
+        "nytimes.com",
+        "wsj.com",
+        "ft.com",
+        "theverge.com",
+        "techcrunch.com",
+        "wired.com",
+        "arstechnica.com",
+      ]),
+    }),
   }),
 });
 
@@ -239,6 +451,64 @@ export function isDomainCategory(domain: string, category: unknown): boolean {
 export function excludedPartyDomains(domain: string): readonly string[] {
   return domainPolicy(domain).excluded_parties.domains;
 }
+
+/**
+ * One domain's source policy: the official-required categories, the provider
+ * table, and the recognized hosts (decision D-080).
+ *
+ * Throws for a domain nobody registered, exactly as `domainPolicy` does and for
+ * the same reason: there is no honest empty answer to "who may be cited in a
+ * domain that does not exist", and handing back a blank table would let an
+ * official-required claim through under a name nobody published.
+ */
+export function sourcePolicy(domain: string): DomainSourcePolicy {
+  return domainPolicy(domain).sources;
+}
+
+/**
+ * Whether this category of this domain must cite the subject's official source.
+ *
+ * Answers rather than throws, like the three accessors above: a category a
+ * domain does not admit, or a domain nobody registered, requires nothing here —
+ * the submission is refused earlier, by `isRegisteredDomain` and
+ * `isDomainCategory`, and this question is not the one that should be raising.
+ */
+export function isOfficialRequiredCategory(
+  domain: string,
+  category: unknown,
+): boolean {
+  if (!isRegisteredDomain(domain) || typeof category !== "string") return false;
+  return (
+    sourcePolicy(domain).official_required as readonly string[]
+  ).includes(category);
+}
+
+/**
+ * One provider's published hosts in one domain, or null when the table has no
+ * row for it.
+ *
+ * Null is the load-bearing answer: a provider with no row has no official source
+ * published here, which is what refuses its official-required claims rather than
+ * accepting them from anywhere.
+ */
+export function providerSources(
+  domain: string,
+  provider: unknown,
+): ProviderSources | null {
+  if (!isRegisteredDomain(domain) || typeof provider !== "string") return null;
+  const table = sourcePolicy(domain).providers;
+  if (!Object.prototype.hasOwnProperty.call(table, provider)) return null;
+  return table[provider] ?? null;
+}
+
+/** The hosts a domain labels recognized: an editorial, standards, court or journal source. */
+export function recognizedHosts(domain: string): readonly string[] {
+  if (!isRegisteredDomain(domain)) return EMPTY_HOSTS;
+  return sourcePolicy(domain).recognized_hosts;
+}
+
+/** The empty answer for a domain nobody registered: nothing is recognized there. */
+const EMPTY_HOSTS: readonly string[] = Object.freeze([]);
 
 /** The independence attestation of one domain: the version, and the sentence. */
 export function attestationFor(

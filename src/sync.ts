@@ -40,6 +40,11 @@ import type { Event } from "./events.js";
 import type { EvidenceTier } from "./evidence.js";
 import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "./policy.js";
 import { tierSatisfies } from "./read.js";
+import {
+  MIN_SOURCE_VALUES,
+  sourceClassSatisfies,
+  type SourceClass,
+} from "./sources.js";
 
 /** The schema's evidence_tier enum. */
 const EVIDENCE_TIERS: readonly string[] =
@@ -54,6 +59,7 @@ export const SYNC_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "limit",
   "flatten",
   "min_tier",
+  "min_source",
   "domain",
 ]);
 
@@ -64,6 +70,7 @@ export const SYNC_QUERY_REFUSALS = [
   "bad_limit",
   "bad_flatten",
   "bad_min_tier",
+  "bad_min_source",
   "unknown_domain",
 ] as const;
 
@@ -83,6 +90,13 @@ export interface SyncQuery {
   readonly limit: number;
   readonly flatten: boolean;
   readonly min_tier: EvidenceTier | null;
+  /**
+   * The weakest source class the stream will carry (decision D-080): official,
+   * recognized, or null for no demand. A different question from the tier — the
+   * tier is how the claim was checked, the class is who said it — and a trainer
+   * building a corpus of provider-stated facts asks this one.
+   */
+  readonly min_source: SourceClass | null;
   /**
    * The registered domain to stream. Null means every domain, which is what a
    * trainer replaying the whole log asks for.
@@ -150,6 +164,15 @@ export function parseSyncQuery(params: URLSearchParams): SyncQueryResult {
     return { ok: false, refusal: "bad_min_tier" };
   }
 
+  const minSource = params.getAll("min_source");
+  if (minSource.length > 1) return { ok: false, refusal: "bad_min_source" };
+  if (
+    minSource.length === 1 &&
+    !(MIN_SOURCE_VALUES as readonly string[]).includes(minSource[0]!)
+  ) {
+    return { ok: false, refusal: "bad_min_source" };
+  }
+
   const domain = params.getAll("domain");
   if (domain.length > 1) return { ok: false, refusal: "unknown_domain" };
   if (domain.length === 1 && !DOMAINS.includes(domain[0]!)) {
@@ -163,6 +186,8 @@ export function parseSyncQuery(params: URLSearchParams): SyncQueryResult {
       limit: limitValue,
       flatten: flattenValue,
       min_tier: minTier.length === 0 ? null : (minTier[0] as EvidenceTier),
+      min_source:
+        minSource.length === 0 ? null : (minSource[0] as SourceClass),
       domain: domain.length === 0 ? null : (domain[0] as string),
     },
   };
@@ -200,12 +225,18 @@ export interface SyncEntryState {
    * default domain, exactly as a legacy v0.6 core does.
    */
   readonly domain?: string;
+  /**
+   * The class the entry's citation earned, off the sidecar derivation wrote
+   * (decision D-080). Absent or null is a class the caller did not supply, and
+   * it fails any demand — `sourceClassSatisfies` says why.
+   */
+  readonly source_class?: SourceClass | null;
 }
 
 /**
  * Whether one delivered item survives the query's filters.
  *
- * The two filters only ever narrow entries. An unlearn is never filtered out —
+ * The entry filters only ever narrow entries. An unlearn is never filtered out —
  * a trainer that filtered its stream to observed evidence still ingested the
  * entry when it qualified, and must still be told it was overturned — and a
  * registry or read-count event is not about an entry at all, so no entry filter
@@ -217,7 +248,8 @@ export interface SyncEntryState {
  * delivered instead and its signed core's `supersedes` keeps the chain
  * reachable. `min_tier` drops anything not verified, and anything whose
  * *effective* tier — what it actually verified at, never what its core claimed
- * — does not meet the demand, by the reader's own `tierSatisfies`.
+ * — does not meet the demand, by the reader's own `tierSatisfies`. `min_source`
+ * does the same for the class the entry's citation earned (decision D-080).
  *
  * A null state for an "entry" item is a programming error, not a refusal: the
  * caller read the event out of the log and failed to derive the entry it names.
@@ -251,6 +283,16 @@ export function keepSyncItem(
   if (query.min_tier !== null) {
     if (state.status !== "verified") return false;
     if (!tierSatisfies(state.effective_tier, query.min_tier)) return false;
+  }
+  // The source demand is the tier demand's twin and is applied beside it,
+  // verified check and all: a trainer that asked where a fact came from is
+  // asking for facts to learn, and an unverified entry is not one of those
+  // whatever its citation says.
+  if (query.min_source !== null) {
+    if (state.status !== "verified") return false;
+    if (!sourceClassSatisfies(state.source_class ?? null, query.min_source)) {
+      return false;
+    }
   }
   return true;
 }

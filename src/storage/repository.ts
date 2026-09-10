@@ -41,6 +41,11 @@ import type { StakeRecord } from "../stake.js";
 import type { Entry } from "../schema.js";
 import type { RegistrySeal, Seal, WitnessSignature } from "../seal.js";
 import {
+  isSourceClass,
+  sourceClassOf,
+  type SourceClassification,
+} from "../sources.js";
+import {
   readBoolean,
   readInteger,
   readJson,
@@ -345,17 +350,33 @@ export interface StoredEntry {
  * would hand a page `undefined.length`. Defaulting here is not a second
  * derivation: for a row written before the key existed there is no revalidation
  * to fold, so the empty list is the same answer rederiving would give.
+ *
+ * `source` arrived in M23b (decision D-080) and is defaulted the same way, for
+ * the same reason and with the same guarantee: the class is a pure function of
+ * the stored core's domain, subject and citation, so computing it here from the
+ * row's own entry gives the identical answer `deriveEntry` would. No migration,
+ * and a page never sees the key missing.
  */
-function toSidecar(row: Row): Sidecar {
-  const sidecar = readJson<Sidecar>(row, "sidecar_json");
-  if (Array.isArray(sidecar.revalidations)) return sidecar;
-  return { ...sidecar, revalidations: [] };
+function toSidecar(row: Row, entry: Entry): Sidecar {
+  const stored = readJson<Sidecar>(row, "sidecar_json");
+  const sidecar = Array.isArray(stored.revalidations)
+    ? stored
+    : { ...stored, revalidations: [] };
+  if (isSourceClass((sidecar.source as SourceClassification | undefined)?.class)) {
+    return sidecar;
+  }
+  const core = entry as unknown as Record<string, unknown>;
+  return {
+    ...sidecar,
+    source: sourceClassOf(domainOf(core), core["subject"], core["citation"]),
+  };
 }
 
 function toStoredEntry(row: Row): StoredEntry {
+  const entry = readJson<Entry>(row, "entry_json");
   return {
-    entry: readJson<Entry>(row, "entry_json"),
-    sidecar: toSidecar(row),
+    entry,
+    sidecar: toSidecar(row, entry),
     submittedSeq: readInteger(row, "submitted_seq"),
     derivedThroughSeq: readInteger(row, "derived_through_seq"),
   };

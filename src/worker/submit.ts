@@ -444,6 +444,20 @@ export type SubmissionAttempt =
  * duplicate lookup, the capture of the cited page under the norm rule, and the
  * schema over the derived entry. Nothing is written and nothing is archived: a
  * refusal here leaves the log and the archive exactly where they were.
+ *
+ * The source policy (decision D-080) needs nothing of its own here, which is the
+ * point of putting it in `checkSubmission`: `unknown_provider` and
+ * `source_not_official` are two more of that function's verdicts, refused in its
+ * own order — after `category_not_in_domain`, before `bad_submitted_at` — and
+ * mapped to 422 by the same rule every other verdict but `author_mismatch` is.
+ * So a pricing claim citing a host nobody published is refused before the
+ * citation is fetched, before the capture is taken, and before anything is
+ * written. A dispute's correction entry comes through this same function and is
+ * checked here the same way — but under its own category, `correction`, which no
+ * domain requires an official source for, so this call passes it. The rule that
+ * a challenge to an official-required claim cites an official source is the
+ * dispute door's, run against the challenged entry's own domain and category
+ * after the filing rules (src/worker/dispute.ts).
  */
 export async function prepareSubmission(
   env: Env,

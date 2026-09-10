@@ -31,6 +31,7 @@ export * from "./registry.js";
 export * from "./request.js";
 export * from "./seal.js";
 export * from "./sign.js";
+export * from "./sources.js";
 export * from "./standing.js";
 export * from "./stake.js";
 export * from "./status.js";

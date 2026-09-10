@@ -108,7 +108,7 @@ function hour(hours: number): Date {
 const VERIFIED_REFERENCE = "mock-verified-m22";
 
 const CATEGORY = "pricing";
-const SUBJECT = "kestrel/kestrel-1";
+const SUBJECT = "example/kestrel-1";
 const CLAIM = `${SUBJECT} seat pricing is $40 per seat per month`;
 
 const PRICING: FixturePage = {
@@ -868,6 +868,10 @@ describe("the confidence field", () => {
         "formula",
         "overturned",
         "report_count",
+        // The source policy's two inputs (decision D-080): where the claim came
+        // from is an input a learner may weight, exposed raw like every other.
+        "source_class",
+        "source_matched_host",
         "stale",
         "status",
         "superseded",

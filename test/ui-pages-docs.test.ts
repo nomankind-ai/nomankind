@@ -125,6 +125,51 @@ describe("renderPolicy", () => {
     }
   });
 
+  it("publishes every domain's source policy, all three tables, from POLICY", () => {
+    // Decision D-080. The gate, the provider table and the recognized list are
+    // published under the path they live at, and every value is read off the
+    // frozen object: a host typed into the page would be a second place the
+    // policy lives, which is the one thing this page exists to prevent.
+    for (const [slug, domain] of Object.entries(POLICY.DOMAINS)) {
+      const path = `DOMAINS.${slug}.sources`;
+      expect(page, `${slug} has no sources panel`).toContain(
+        `Domains · ${slug} · sources`,
+      );
+      expect(page).toContain(`<td class="mono">${path}.official_required</td>`);
+      expect(page).toContain(
+        `<td class="mono">${domain.sources.official_required.join(", ")}</td>`,
+      );
+
+      for (const [provider, row] of Object.entries(domain.sources.providers)) {
+        const label = row.fixture === true ? `${provider} (fixture)` : provider;
+        expect(page, `${provider} has no row`).toContain(label);
+        expect(page, `${provider} does not publish its hosts`).toContain(
+          `<td class="mono">${row.hosts.join(", ")}</td>`,
+        );
+      }
+
+      domain.sources.recognized_hosts.forEach((host, index) => {
+        expect(page, `${host} is not published`).toContain(
+          `<td class="mono">${path}.recognized_hosts[${index}]</td>`,
+        );
+        expect(page).toContain(`<td class="mono">${host}</td>`);
+      });
+    }
+  });
+
+  it("says what the source policy does not automate", () => {
+    // The tables say whose page may be cited; three operators still say whether
+    // the page cited actually supports the claim. A page that published the
+    // tables without that sentence would read as if a hostname were the check.
+    expect(page).toContain(
+      "A validator's approval asserts that the cited page supports the claim.",
+    );
+    // And the host rule itself, exactly, including the subdomain trap.
+    expect(page).toContain("anthropic.com.evil.tld");
+    expect(page).toContain("source_not_official");
+    expect(page).toContain("unknown_provider");
+  });
+
   it("publishes the two status thresholds as their own group", () => {
     // The status page's whole judgement is these two numbers, so they are
     // published beside every other number the record runs on rather than left in
@@ -610,6 +655,10 @@ describe("renderApi", () => {
       "subject_mismatch",
       "self_dispute",
       "dispute_open",
+      // Decision D-080: the source gate is asked a second time here, about the
+      // entry being challenged, after the filing rules and before the links.
+      "unknown_provider",
+      "source_not_official",
       "bad_report_link",
       "bad_revalidation_link",
       // Section 9: standing gates the stake, checked after every M20 rule and
@@ -713,7 +762,7 @@ describe("renderApi", () => {
     // caller knows exists.
     for (const marker of [
       "subject=<s>, category=<c>, domain=<slug>",
-      "min_tier=stated|observed, domain=<slug>",
+      "min_source=official|recognized, domain=<slug>",
       "category=<c>, status=<s>, domain=<slug>",
     ]) {
       expect(page, `${marker} is not documented`).toContain(
@@ -739,6 +788,7 @@ describe("renderApi", () => {
       "bad_category",
       "bad_status",
       "unknown_domain",
+      "bad_source",
       "bad_tier",
       "bad_fresh",
       "bad_before",
@@ -769,26 +819,63 @@ describe("renderApi", () => {
     expect(page).toContain("attestation_domain_mismatch");
   });
 
-  it("names the submission's three domain refusals where the door checks them", () => {
-    // src/submit.ts puts them straight after bad_norm_version, so the page does
-    // too: a caller told the first thing that was wrong can fix it.
-    const three = SUBMISSION_REFUSALS.slice(
+  it("names the submission's domain and source refusals where the door checks them", () => {
+    // src/submit.ts puts the domain three straight after bad_norm_version and
+    // the source policy's two straight after them (decision D-080), so the page
+    // does too: a caller told the first thing that was wrong can fix it.
+    const run = SUBMISSION_REFUSALS.slice(
       SUBMISSION_REFUSALS.indexOf("bad_norm_version"),
       SUBMISSION_REFUSALS.indexOf("bad_submitted_at"),
     );
-    expect([...three]).toEqual([
+    expect([...run]).toEqual([
       "bad_norm_version",
       "missing_domain",
       "unregistered_domain",
       "category_not_in_domain",
+      "unknown_provider",
+      "source_not_official",
     ]);
     let at = page.indexOf('<td class="mono">/entries</td>', page.indexOf("Write path"));
     expect(at).toBeGreaterThan(-1);
-    for (const reason of three) {
+    for (const reason of run) {
       const next = page.indexOf(reason, at);
       expect(next, `${reason} is out of order`).toBeGreaterThan(at);
       at = next;
     }
+  });
+
+  it("documents the source policy: the classes, the gate and the host rule", () => {
+    // Decision D-080. The API page is where a caller learns why a citation that
+    // hashes correctly can still be refused, so it has to carry the three
+    // classes, the two refusals, the reader's own demand, and the sentence that
+    // the class is not the judgment.
+    expect(page).toContain("Which sources may be cited for what");
+    for (const word of [
+      "official",
+      "recognized",
+      "other",
+      "source_not_official",
+      "unknown_provider",
+      "min_source",
+    ]) {
+      expect(page, `${word} is not documented`).toContain(word);
+    }
+    // The correction goes through the same pipeline, so it obeys the same rule.
+    expect(page).toContain("a correction of a pricing claim must");
+    // And the judgment the policy does not automate.
+    expect(page).toContain("a validator's approval asserts that the");
+  });
+
+  it("carries min_source on both reader doors and source on the listing", () => {
+    const readRow = page.indexOf('<td class="mono">/read</td>');
+    expect(page.indexOf("min_source=official|recognized", readRow)).toBeGreaterThan(
+      readRow,
+    );
+    const syncRow = page.indexOf('<td class="mono">/sync</td>');
+    expect(page.indexOf("min_source=official|recognized", syncRow)).toBeGreaterThan(
+      syncRow,
+    );
+    expect(page).toContain("source=official|recognized|other");
   });
 
   it("counts the signed core keys rather than spelling the number out", () => {
