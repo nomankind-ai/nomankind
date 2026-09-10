@@ -1,143 +1,166 @@
 {
-  "as_of": "2026-09-08T12:00:00.000Z",
+  "as_of": "2026-09-10T13:06:24.055Z",
   "events": [
     {
       "seq": 0,
-      "at": "2026-09-08T12:00:00.000Z",
-      "type": "operator_registered",
-      "entry_id": null,
+      "at": "2026-09-08T18:37:55.344Z",
+      "type": "entry_submitted",
+      "entry_id": "nmk_8de6fec758a8016cec3f69974c25f2b1",
       "payload": {
-        "operator": "fixture-a.nomankind.ai",
-        "maintainer": false,
-        "domain": "ai-ecosystem"
+        "core": {
+          "id": "nmk_8de6fec758a8016cec3f69974c25f2b1",
+          "subject": "example/site",
+          "category": "release",
+          "claim": "The example.com landing page says the domain is for use in illustrative examples.",
+          "before": "no cited statement",
+          "after": "the page states the domain's purpose",
+          "effective_at": "2026-09-08",
+          "evidence_tier": "stated",
+          "evidence": null,
+          "observation": null,
+          "citation": "https://example.com/",
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "norm_version": "norm-v1.2",
+          "supersedes": null,
+          "author": "1F916:ZHwg397MgTpybbKnN2R8i-C092XlcX31t_YvwHUNKnU",
+          "author_operator": null,
+          "submitted_at": "2026-09-08T18:37:55.145Z"
+        },
+        "signature": "3ZGzV0zsJOdGkIUbDCsvzLZkmAnIV9OaPBqLf9z7UUwVKESr8kt4XoenV1YcnvSpgG2QecYH7nx3w8V0w4BGAQ=="
       },
       "prev_hash": null,
-      "hash": "sha256:44a23674b86ec16f832ac218a448437c774ed624156efc3ed7c294332664f777"
+      "hash": "sha256:fb1dcd7bdda872b6f2af6de1e223b540911371bee5767981f7f6b3ee18c80511"
     },
     {
       "seq": 1,
-      "at": "2026-09-08T12:00:00.000Z",
+      "at": "2026-09-08T21:02:01.044Z",
+      "type": "operator_registered",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-a.nomankind.ai",
+        "maintainer": false
+      },
+      "prev_hash": "sha256:fb1dcd7bdda872b6f2af6de1e223b540911371bee5767981f7f6b3ee18c80511",
+      "hash": "sha256:dc31cf3513abbdafc87c7e5f65e2fbc950d39a5754fe2f1e9bc8b4c22bfbf380"
+    },
+    {
+      "seq": 2,
+      "at": "2026-09-08T21:02:01.044Z",
       "type": "agent_bound",
       "entry_id": null,
       "payload": {
         "operator": "fixture-a.nomankind.ai",
-        "agent": "1F916:RYEy26g5ubpH_-mImEstjwa2BVMyCiQJQ40rPnBc6oc",
+        "agent": "1F916:ZJTlpf93Xr9RNGeixeFbkMbnxz8Mbdb4PGPO9AiCtBc",
         "attestation": {
           "version": "nomankind-independence-v1",
-          "domain": "ai-ecosystem",
-          "signed_at": "2026-09-08T12:00:00.000Z",
-          "signature": "5_nLAUsEQjLZ4yDrMkhSphxvngfSNwUj2itLbHlW9MvZesKdIKmJEvsx267LKnszecH17NKX2gji1GukAxHIBA"
+          "signed_at": "2026-09-08T21:02:00.831Z",
+          "signature": "Ne7ZtD8T1G8E2fk8q1Gbp8TOIlizim89qP4od0D38GzIj-YQy3CsQX8MeYQlpcTsIJxc_YX3t-6EyYrGJdQ2Bw"
         }
       },
-      "prev_hash": "sha256:44a23674b86ec16f832ac218a448437c774ed624156efc3ed7c294332664f777",
-      "hash": "sha256:2f16c416b1f65d9c2869c695eab3094bf6f9c0b0b98991cdcdc19d0f1938f337"
-    },
-    {
-      "seq": 2,
-      "at": "2026-09-08T12:00:00.000Z",
-      "type": "operator_registered",
-      "entry_id": null,
-      "payload": {
-        "operator": "fixture-b.nomankind.ai",
-        "maintainer": false,
-        "domain": "ai-ecosystem"
-      },
-      "prev_hash": "sha256:2f16c416b1f65d9c2869c695eab3094bf6f9c0b0b98991cdcdc19d0f1938f337",
-      "hash": "sha256:ba6ebeef19b7527541b80fe3c2015dad3f46ebd501c1b491f00a914527aeba19"
+      "prev_hash": "sha256:dc31cf3513abbdafc87c7e5f65e2fbc950d39a5754fe2f1e9bc8b4c22bfbf380",
+      "hash": "sha256:913eab0d7f3538c901d5cfd80f390815c39ef8ac79620cd0dc6c89e67864d90f"
     },
     {
       "seq": 3,
-      "at": "2026-09-08T12:00:00.000Z",
+      "at": "2026-09-08T21:02:01.658Z",
+      "type": "operator_registered",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-b.nomankind.ai",
+        "maintainer": false
+      },
+      "prev_hash": "sha256:913eab0d7f3538c901d5cfd80f390815c39ef8ac79620cd0dc6c89e67864d90f",
+      "hash": "sha256:40fe27bc6a9452f2a02a0865713f4ec9d32150396e3e49e7da02ae9cfdc5a324"
+    },
+    {
+      "seq": 4,
+      "at": "2026-09-08T21:02:01.658Z",
       "type": "agent_bound",
       "entry_id": null,
       "payload": {
         "operator": "fixture-b.nomankind.ai",
-        "agent": "1F916:h_MELnKFIESGxSvT_Z7U-Y26Iqk7_Znw0YsjxXq3Ypo",
+        "agent": "1F916:GwNvWtrOr42ZNLbje4GEyJDeVfCi07zOI8B4H9yxRK8",
         "attestation": {
           "version": "nomankind-independence-v1",
-          "domain": "ai-ecosystem",
-          "signed_at": "2026-09-08T12:00:00.000Z",
-          "signature": "I27f1xpmLvnVgwncXwV1pu55B3-5TWLUC6JopJ47GoZcguhE1kbA3O7_gbgImNru2JWc_5QptkZsQAe_PDOOBA"
+          "signed_at": "2026-09-08T21:02:00.831Z",
+          "signature": "hTa7D8XMuSdjJlsjVldIfGSAYgzOixsyMqjcVZmeAUkUuoPdh--T54cd7022yIIv5BxBi6G1kJ9DI5AACsPcAg"
         }
       },
-      "prev_hash": "sha256:ba6ebeef19b7527541b80fe3c2015dad3f46ebd501c1b491f00a914527aeba19",
-      "hash": "sha256:3c5d56688612cd0d7e929810be8c9c23965d205ecbcd02fc8f2f43a671f435e4"
+      "prev_hash": "sha256:40fe27bc6a9452f2a02a0865713f4ec9d32150396e3e49e7da02ae9cfdc5a324",
+      "hash": "sha256:2e9b35db51cdf03e921e4940578ac7b6e16023367d4fa8089ed71437e65e85f7"
     },
     {
-      "seq": 4,
-      "at": "2026-09-08T12:00:00.000Z",
+      "seq": 5,
+      "at": "2026-09-08T21:02:02.226Z",
       "type": "operator_registered",
       "entry_id": null,
       "payload": {
         "operator": "fixture-c.nomankind.ai",
-        "maintainer": false,
-        "domain": "ai-ecosystem"
+        "maintainer": false
       },
-      "prev_hash": "sha256:3c5d56688612cd0d7e929810be8c9c23965d205ecbcd02fc8f2f43a671f435e4",
-      "hash": "sha256:70db607fadf0af31d39e4298043715c18f123f88d8c06f6184bfefc1df00995c"
+      "prev_hash": "sha256:2e9b35db51cdf03e921e4940578ac7b6e16023367d4fa8089ed71437e65e85f7",
+      "hash": "sha256:d69002a4125209a43ef63f61106e9eb9b87ae83c4dc7c592877007e8ae5c33ce"
     },
     {
-      "seq": 5,
-      "at": "2026-09-08T12:00:00.000Z",
+      "seq": 6,
+      "at": "2026-09-08T21:02:02.226Z",
       "type": "agent_bound",
       "entry_id": null,
       "payload": {
         "operator": "fixture-c.nomankind.ai",
-        "agent": "1F916:S_vNUomwVQ3YFQrzOxeefhFYfl6_XhIibKCdb-wSTQ0",
+        "agent": "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY",
         "attestation": {
           "version": "nomankind-independence-v1",
-          "domain": "ai-ecosystem",
-          "signed_at": "2026-09-08T12:00:00.000Z",
-          "signature": "_B5wSyqvOd55KCxOUu4XqknWDr6lb9XLxtuDQdxOOQfCa37wCFq82Dn6rnLEreJfgoWf2llWL4YHSRwv2hyFBg"
+          "signed_at": "2026-09-08T21:02:00.831Z",
+          "signature": "57R0PGQm1pMvZ9FlazFD57oDPIZ4OWZP48dzzXh0qTXfyMnpgRhtRFV6j_HTXR-KKEnsEWMv5OerkyenENHNBA"
         }
       },
-      "prev_hash": "sha256:70db607fadf0af31d39e4298043715c18f123f88d8c06f6184bfefc1df00995c",
-      "hash": "sha256:233e47c559d852c37bf715b23f9813aeb58ebea61c2f234544393a101819d121"
+      "prev_hash": "sha256:d69002a4125209a43ef63f61106e9eb9b87ae83c4dc7c592877007e8ae5c33ce",
+      "hash": "sha256:a41ccb944e9b7f51e0d1d68782ff81df69970df0c0c8d6209a128c8e2c982eda"
     },
     {
-      "seq": 6,
-      "at": "2026-09-08T12:00:00.000Z",
+      "seq": 7,
+      "at": "2026-09-08T21:02:02.875Z",
       "type": "operator_trusted",
       "entry_id": null,
       "payload": {
         "operator": "fixture-a.nomankind.ai"
       },
-      "prev_hash": "sha256:233e47c559d852c37bf715b23f9813aeb58ebea61c2f234544393a101819d121",
-      "hash": "sha256:7eb7bff06270f4bf6de16b9e2bf12822819e3d485f0220c3c21aaaaa2e24acde"
+      "prev_hash": "sha256:a41ccb944e9b7f51e0d1d68782ff81df69970df0c0c8d6209a128c8e2c982eda",
+      "hash": "sha256:3bdb7e0022b6f477d28e310c0c13acc916416c0f7c116c133647be477051e75e"
     },
     {
-      "seq": 7,
-      "at": "2026-09-08T12:00:00.000Z",
+      "seq": 8,
+      "at": "2026-09-08T21:02:03.387Z",
       "type": "operator_trusted",
       "entry_id": null,
       "payload": {
         "operator": "fixture-b.nomankind.ai"
       },
-      "prev_hash": "sha256:7eb7bff06270f4bf6de16b9e2bf12822819e3d485f0220c3c21aaaaa2e24acde",
-      "hash": "sha256:aa2aa5762e7ce356be37c6b96ce24b5ebe39c6cdd565b3f08a476451ffe9a9aa"
+      "prev_hash": "sha256:3bdb7e0022b6f477d28e310c0c13acc916416c0f7c116c133647be477051e75e",
+      "hash": "sha256:896142fd06313f55b3b5615ebea0cf3e7c501b37cc940c5e14834f0decf9efc3"
     },
     {
-      "seq": 8,
-      "at": "2026-09-08T12:00:00.000Z",
+      "seq": 9,
+      "at": "2026-09-08T21:02:03.888Z",
       "type": "operator_trusted",
       "entry_id": null,
       "payload": {
         "operator": "fixture-c.nomankind.ai"
       },
-      "prev_hash": "sha256:aa2aa5762e7ce356be37c6b96ce24b5ebe39c6cdd565b3f08a476451ffe9a9aa",
-      "hash": "sha256:b312491d691da2a6110bd2b97b65b4b7d5bba5e054165a89d375cde2f884e217"
+      "prev_hash": "sha256:896142fd06313f55b3b5615ebea0cf3e7c501b37cc940c5e14834f0decf9efc3",
+      "hash": "sha256:2e9197092ea2950653ad33afdd4e5b9298a1e356ac98c8014c2cf4c32e785d22"
     },
     {
-      "seq": 9,
-      "at": "2026-09-08T12:00:00.000Z",
+      "seq": 10,
+      "at": "2026-09-08T21:02:04.469Z",
       "type": "entry_submitted",
-      "entry_id": "nmk_0e859abba8813de70b598dc413de7401",
+      "entry_id": "nmk_cc64299e1653fd8cac4b819f870274bb",
       "payload": {
         "core": {
-          "id": "nmk_0e859abba8813de70b598dc413de7401",
+          "id": "nmk_cc64299e1653fd8cac4b819f870274bb",
           "subject": "example/demo-model",
           "category": "limit",
-          "domain": "ai-ecosystem",
           "claim": "demo checkpoint seed: example/demo-model request limit is documented at its cited page",
           "before": "demo checkpoint seed: no documented request limit",
           "after": "demo checkpoint seed: the cited page is the documented request limit",
@@ -146,67 +169,67 @@
           "evidence": null,
           "observation": null,
           "citation": "https://example.com/",
-          "snapshot_hash": "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888",
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
           "norm_version": "norm-v1.2",
           "supersedes": null,
-          "author": "1F916:wmU1v0hE5PwXklZRhiWp0IX--gJKo-7dcEG66tYZuN8",
+          "author": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
           "author_operator": null,
-          "submitted_at": "2026-09-08T12:00:00.000Z"
+          "submitted_at": "2026-09-08T21:02:00.831Z"
         },
-        "signature": "EVHpxtHtEAJWrgspIHxsk3o8hSYHIAMzNaLn6zb59H0AizD4ZfPhAKkQoMnPSti+n0M89hjlPgemahDfsvFFDQ=="
+        "signature": "lgo0yvYBmvxFz++KCEyuWa9vmK8CORr+ixtowO8B4HUbNaUL0x0mnF6PHYQtFJ552Vm+8aU/64Yf2YFvkMkkAg=="
       },
-      "prev_hash": "sha256:b312491d691da2a6110bd2b97b65b4b7d5bba5e054165a89d375cde2f884e217",
-      "hash": "sha256:e501b877673b4112a4fbdc9298dd6b0ce096525a3ecfd59a231f727c5d472e2e"
-    },
-    {
-      "seq": 10,
-      "at": "2026-09-08T12:00:00.000Z",
-      "type": "validation",
-      "entry_id": "nmk_0e859abba8813de70b598dc413de7401",
-      "payload": {
-        "record": {
-          "agent": "1F916:RYEy26g5ubpH_-mImEstjwa2BVMyCiQJQ40rPnBc6oc",
-          "operator": "fixture-a.nomankind.ai",
-          "decision": "approve",
-          "reason": null,
-          "snapshot_hash": "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888",
-          "assigned_random": false,
-          "test_accepted": null,
-          "reproduction": null,
-          "observation": null,
-          "signed_at": "2026-09-08T12:00:00.000Z"
-        },
-        "signature": "7Uv31pp2OVNPJgCcFERv_oCnKhfScqJAlDLIwJSRcjSPKKnr6GiPeUmh5j44kRl0JpfvDZ2GbzTyEEUCU5geCw"
-      },
-      "prev_hash": "sha256:e501b877673b4112a4fbdc9298dd6b0ce096525a3ecfd59a231f727c5d472e2e",
-      "hash": "sha256:6b3668d040fd3fcfca60cf5d7a81723d38dc8b893435e51a67b1f26300e2c21c"
+      "prev_hash": "sha256:2e9197092ea2950653ad33afdd4e5b9298a1e356ac98c8014c2cf4c32e785d22",
+      "hash": "sha256:e4b7558a0d7491b2bf7344afd65164df51f908423fd3e961662fdcc440e67335"
     },
     {
       "seq": 11,
-      "at": "2026-09-08T12:00:00.000Z",
+      "at": "2026-09-08T21:02:05.661Z",
       "type": "validation",
-      "entry_id": "nmk_0e859abba8813de70b598dc413de7401",
+      "entry_id": "nmk_cc64299e1653fd8cac4b819f870274bb",
       "payload": {
         "record": {
-          "agent": "1F916:h_MELnKFIESGxSvT_Z7U-Y26Iqk7_Znw0YsjxXq3Ypo",
-          "operator": "fixture-b.nomankind.ai",
+          "agent": "1F916:ZJTlpf93Xr9RNGeixeFbkMbnxz8Mbdb4PGPO9AiCtBc",
+          "operator": "fixture-a.nomankind.ai",
           "decision": "approve",
           "reason": null,
-          "snapshot_hash": "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888",
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
           "assigned_random": false,
           "test_accepted": null,
           "reproduction": null,
           "observation": null,
-          "signed_at": "2026-09-08T12:00:00.000Z"
+          "signed_at": "2026-09-08T21:02:00.831Z"
         },
-        "signature": "5uWMo7uclY3ROiAutdfwUyCI2anV0Q6cPWrTm4BcuIgUwXyWbzBSI1fBWFK2fneBOS4pc4_faS1Gw-PJtdS1DQ"
+        "signature": "7qAAFQU1UQBUYbs1ezNfJlg5qy1xcPnBmsIK-qA3X_INegdEC5v-Rm1YAr30ySYdrSM8VPtUb55A3fvjjfRrCw"
       },
-      "prev_hash": "sha256:6b3668d040fd3fcfca60cf5d7a81723d38dc8b893435e51a67b1f26300e2c21c",
-      "hash": "sha256:053cb69af89f3b6e2ed789d9ae01734f9d4f678cf18b06c806ab16991d240150"
+      "prev_hash": "sha256:e4b7558a0d7491b2bf7344afd65164df51f908423fd3e961662fdcc440e67335",
+      "hash": "sha256:b0ad13f7338ee2745e490c0276570c0c2cb2484a5d7c53ac895c51f215397452"
     },
     {
       "seq": 12,
-      "at": "2026-09-08T12:00:00.000Z",
+      "at": "2026-09-08T21:02:06.802Z",
+      "type": "validation",
+      "entry_id": "nmk_cc64299e1653fd8cac4b819f870274bb",
+      "payload": {
+        "record": {
+          "agent": "1F916:GwNvWtrOr42ZNLbje4GEyJDeVfCi07zOI8B4H9yxRK8",
+          "operator": "fixture-b.nomankind.ai",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "assigned_random": false,
+          "test_accepted": null,
+          "reproduction": null,
+          "observation": null,
+          "signed_at": "2026-09-08T21:02:00.831Z"
+        },
+        "signature": "81c5AeMpDS6OJaOmFxLc2HuqvdVVylVibgN0hCjy78cgH0IUlulGhqSQuhQj6tWIVFlzJ0wBL--fS22sIzJ7DA"
+      },
+      "prev_hash": "sha256:b0ad13f7338ee2745e490c0276570c0c2cb2484a5d7c53ac895c51f215397452",
+      "hash": "sha256:315552165f1756b423578742a47b217c9d3988b55ccdcf43585095553cba7774"
+    },
+    {
+      "seq": 13,
+      "at": "2026-09-08T22:20:13.000Z",
       "type": "pool_snapshot",
       "entry_id": null,
       "payload": {
@@ -216,15 +239,783 @@
           "fixture-c.nomankind.ai"
         ]
       },
-      "prev_hash": "sha256:053cb69af89f3b6e2ed789d9ae01734f9d4f678cf18b06c806ab16991d240150",
-      "hash": "sha256:9a6cc35f70d7166dc7e6da5a75b6044f9cf70e97003ddd7fc075172d25941240"
+      "prev_hash": "sha256:315552165f1756b423578742a47b217c9d3988b55ccdcf43585095553cba7774",
+      "hash": "sha256:5823f6183d87e28756fafb0f2ee6a18b697b98d161c6c37c9e2beda91f4201be"
+    },
+    {
+      "seq": 14,
+      "at": "2026-09-09T01:58:14.419Z",
+      "type": "entry_submitted",
+      "entry_id": "nmk_005580467422968b9bd17bf058305aef",
+      "payload": {
+        "core": {
+          "id": "nmk_005580467422968b9bd17bf058305aef",
+          "subject": "example/demo-model",
+          "category": "limit",
+          "claim": "demo checkpoint seed: example/demo-model request limit is documented at its cited page",
+          "before": "demo checkpoint seed: no documented request limit",
+          "after": "demo checkpoint seed: the cited page is the documented request limit",
+          "effective_at": "2026-09-08",
+          "evidence_tier": "stated",
+          "evidence": null,
+          "observation": null,
+          "citation": "https://example.com/",
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "norm_version": "norm-v1.2",
+          "supersedes": "nmk_cc64299e1653fd8cac4b819f870274bb",
+          "author": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+          "author_operator": null,
+          "submitted_at": "2026-09-09T01:58:14.095Z"
+        },
+        "signature": "Ws1KTFp1iRNPPQXTOyZvmkvz8QgcyHH2f2YaXpeV+Z3KRn+SALHysZvUTJMbsHnbDm0YeGEs+gGXC9XkfWvvBA=="
+      },
+      "prev_hash": "sha256:5823f6183d87e28756fafb0f2ee6a18b697b98d161c6c37c9e2beda91f4201be",
+      "hash": "sha256:b2401e0bd00e3e83c6ebebb1ff62d629a0dcc6720e32fd40e7253aa906bdf053"
+    },
+    {
+      "seq": 15,
+      "at": "2026-09-09T01:58:22.712Z",
+      "type": "validation",
+      "entry_id": "nmk_005580467422968b9bd17bf058305aef",
+      "payload": {
+        "record": {
+          "agent": "1F916:ZJTlpf93Xr9RNGeixeFbkMbnxz8Mbdb4PGPO9AiCtBc",
+          "operator": "fixture-a.nomankind.ai",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "assigned_random": false,
+          "test_accepted": null,
+          "reproduction": null,
+          "observation": null,
+          "signed_at": "2026-09-09T01:58:22.214Z"
+        },
+        "signature": "R4DnXk3xOxD-SbI6OhDUjHDJZwKA71mm7yJkgvmr9VItKhDHWGACKhGbWvnbm7BZz8LXiHLa6wFUZsyI-hsuAQ"
+      },
+      "prev_hash": "sha256:b2401e0bd00e3e83c6ebebb1ff62d629a0dcc6720e32fd40e7253aa906bdf053",
+      "hash": "sha256:5a1115e574700d3c864d51863a28c61c57c1ea3d7ea267268fa0922726b43d86"
+    },
+    {
+      "seq": 16,
+      "at": "2026-09-09T01:58:24.718Z",
+      "type": "validation",
+      "entry_id": "nmk_005580467422968b9bd17bf058305aef",
+      "payload": {
+        "record": {
+          "agent": "1F916:GwNvWtrOr42ZNLbje4GEyJDeVfCi07zOI8B4H9yxRK8",
+          "operator": "fixture-b.nomankind.ai",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "assigned_random": false,
+          "test_accepted": null,
+          "reproduction": null,
+          "observation": null,
+          "signed_at": "2026-09-09T01:58:24.310Z"
+        },
+        "signature": "djXUKzATNdAR23hKDC-cCNwrk4mNtwe7Wyw2sa7R527SLMMbqyfRN4IJ6tqNOxXhWbE8XyWIJufjJjaiVcn2Bg"
+      },
+      "prev_hash": "sha256:5a1115e574700d3c864d51863a28c61c57c1ea3d7ea267268fa0922726b43d86",
+      "hash": "sha256:ace49cc8e83bda8a7b918dbc63eea0671e37f4f25c6bf2d290f73699d6328845"
+    },
+    {
+      "seq": 17,
+      "at": "2026-09-10T00:00:05.010Z",
+      "type": "read_count",
+      "entry_id": null,
+      "payload": {
+        "date": "2026-09-09",
+        "reads": [
+          {
+            "entry_id": "nmk_005580467422968b9bd17bf058305aef",
+            "count": 17
+          }
+        ],
+        "total": 17,
+        "counter_first": 1,
+        "counter_last": 19
+      },
+      "prev_hash": "sha256:ace49cc8e83bda8a7b918dbc63eea0671e37f4f25c6bf2d290f73699d6328845",
+      "hash": "sha256:5f0e5c6d07d56d40949bccfa1fe28e19c770bcb358caf24385b517f7685ca009"
+    },
+    {
+      "seq": 18,
+      "at": "2026-09-10T00:39:49.898Z",
+      "type": "operator_registered",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-d.nomankind.ai",
+        "maintainer": false
+      },
+      "prev_hash": "sha256:5f0e5c6d07d56d40949bccfa1fe28e19c770bcb358caf24385b517f7685ca009",
+      "hash": "sha256:5613455096b39c95698b482218066fd420107ef7f5213b388f2fe3b156b99377"
+    },
+    {
+      "seq": 19,
+      "at": "2026-09-10T00:39:49.898Z",
+      "type": "agent_bound",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-d.nomankind.ai",
+        "agent": "1F916:gKZrUL-4SlNSwZqugtVA0LXbRGftTuyxpk3eXCuYRfc",
+        "attestation": {
+          "version": "nomankind-independence-v1",
+          "signed_at": "2026-09-10T00:39:49.634Z",
+          "signature": "grCxYlJB6zhCCsfyMcUgwi1RQVOzs_ekbK2q_-9hxvI9ndPf8wIZUCNtFchjd4UlVX9Pqv13aG8mtTTHf3U5AQ"
+        }
+      },
+      "prev_hash": "sha256:5613455096b39c95698b482218066fd420107ef7f5213b388f2fe3b156b99377",
+      "hash": "sha256:5bc7e03b25978d75ae24cbe693ef184c1351464ae0b4a8cc36b075f4e18ac195"
+    },
+    {
+      "seq": 20,
+      "at": "2026-09-10T00:39:50.942Z",
+      "type": "operator_trusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-d.nomankind.ai"
+      },
+      "prev_hash": "sha256:5bc7e03b25978d75ae24cbe693ef184c1351464ae0b4a8cc36b075f4e18ac195",
+      "hash": "sha256:6cd3bd3b9445a72a52809195bfa71489170daa1c0d1768da6437142d8f8b98b6"
+    },
+    {
+      "seq": 21,
+      "at": "2026-09-10T00:40:16.225Z",
+      "type": "pool_snapshot",
+      "entry_id": null,
+      "payload": {
+        "operators": [
+          "fixture-a.nomankind.ai",
+          "fixture-b.nomankind.ai",
+          "fixture-c.nomankind.ai",
+          "fixture-d.nomankind.ai"
+        ]
+      },
+      "prev_hash": "sha256:6cd3bd3b9445a72a52809195bfa71489170daa1c0d1768da6437142d8f8b98b6",
+      "hash": "sha256:46c3250fd2299596a3ca197f26a25167118b507603deb618513bc742dddcf9d5"
+    },
+    {
+      "seq": 22,
+      "at": "2026-09-10T00:48:12.813Z",
+      "type": "failure_report",
+      "entry_id": "nmk_005580467422968b9bd17bf058305aef",
+      "payload": {
+        "reporter": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+        "operator": null,
+        "observed": "called the documented limit and got a different error",
+        "artifact_hash": "sha256:8d5a87db2761a3be27d8b0c062af729e9801a0bfc0a9f3ac28f461988b0b1a39",
+        "citation": "https://example.com/"
+      },
+      "prev_hash": "sha256:46c3250fd2299596a3ca197f26a25167118b507603deb618513bc742dddcf9d5",
+      "hash": "sha256:71d90d22195db24d051291584370afe066cbe1e628c45a7b27916818d2ab7fe4"
+    },
+    {
+      "seq": 23,
+      "at": "2026-09-10T00:48:16.167Z",
+      "type": "entry_submitted",
+      "entry_id": "nmk_aa3ce28b365893fece13f1be17b515d9",
+      "payload": {
+        "core": {
+          "id": "nmk_aa3ce28b365893fece13f1be17b515d9",
+          "subject": "example/demo-model",
+          "category": "correction",
+          "claim": "correction: the cited page documents no request limit for example/demo-model",
+          "before": "demo checkpoint seed: the cited page is the documented request limit",
+          "after": "the cited page documents no request limit",
+          "effective_at": "2026-09-10",
+          "evidence_tier": "stated",
+          "evidence": null,
+          "observation": null,
+          "citation": "https://example.com/",
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "norm_version": "norm-v1.2",
+          "supersedes": null,
+          "author": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+          "author_operator": null,
+          "submitted_at": "2026-09-10T00:48:15.502Z"
+        },
+        "signature": "W0urZu14tj0rPn8CX1msUJ/BZFhvgcfhN8mOBNdb7uDG8a4xeEjToaprT2YLZNIKdhowLBt+GU6N9Sgfx5kWAA=="
+      },
+      "prev_hash": "sha256:71d90d22195db24d051291584370afe066cbe1e628c45a7b27916818d2ab7fe4",
+      "hash": "sha256:9466186e00811f1cb7bb944ffd78c3accbbef9899ade6803ec2d731b8efc6515"
+    },
+    {
+      "seq": 24,
+      "at": "2026-09-10T00:48:16.167Z",
+      "type": "dispute_filed",
+      "entry_id": "nmk_005580467422968b9bd17bf058305aef",
+      "payload": {
+        "correction_entry_id": "nmk_aa3ce28b365893fece13f1be17b515d9",
+        "challenger": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+        "operator": null,
+        "citation": "https://example.com/",
+        "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+        "from_report_seq": 22,
+        "from_revalidation_seq": null
+      },
+      "prev_hash": "sha256:9466186e00811f1cb7bb944ffd78c3accbbef9899ade6803ec2d731b8efc6515",
+      "hash": "sha256:26e5dc7e888037e306c0df5ab4ce73ac414af4232434bc7059900419df49d058"
+    },
+    {
+      "seq": 25,
+      "at": "2026-09-10T00:48:21.540Z",
+      "type": "validation",
+      "entry_id": "nmk_aa3ce28b365893fece13f1be17b515d9",
+      "payload": {
+        "record": {
+          "agent": "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY",
+          "operator": "fixture-c.nomankind.ai",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "assigned_random": false,
+          "test_accepted": null,
+          "reproduction": null,
+          "observation": null,
+          "signed_at": "2026-09-10T00:48:20.840Z"
+        },
+        "signature": "sCAoATeOXV4TAqwAuf4p5sk5Cl5LykOR8ZkGhJ3Qlvechh6Hoj66G4-qRBnHOZxbPw_wG1gKSGrkBvvydIbzDA"
+      },
+      "prev_hash": "sha256:26e5dc7e888037e306c0df5ab4ce73ac414af4232434bc7059900419df49d058",
+      "hash": "sha256:5983aff49cd53b57859f383d1e3351378477292734942f462aa7a5336e77d866"
+    },
+    {
+      "seq": 26,
+      "at": "2026-09-10T00:48:24.369Z",
+      "type": "validation",
+      "entry_id": "nmk_aa3ce28b365893fece13f1be17b515d9",
+      "payload": {
+        "record": {
+          "agent": "1F916:gKZrUL-4SlNSwZqugtVA0LXbRGftTuyxpk3eXCuYRfc",
+          "operator": "fixture-d.nomankind.ai",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "assigned_random": false,
+          "test_accepted": null,
+          "reproduction": null,
+          "observation": null,
+          "signed_at": "2026-09-10T00:48:23.600Z"
+        },
+        "signature": "6cNuvqnOE2atIU4---FE2nlC8nTupTWA9qAFLD3Yw13Bv3fmc1_kN6RfApj1RNWOUjxRm3O4QcG8Oh8osrRqCQ"
+      },
+      "prev_hash": "sha256:5983aff49cd53b57859f383d1e3351378477292734942f462aa7a5336e77d866",
+      "hash": "sha256:6727dac4a93d22fec5aead0064ca070b47d6d4b72572ce6df088f22448d07460"
+    },
+    {
+      "seq": 27,
+      "at": "2026-09-10T00:48:24.369Z",
+      "type": "dispute_upheld",
+      "entry_id": "nmk_005580467422968b9bd17bf058305aef",
+      "payload": {
+        "correction_entry_id": "nmk_aa3ce28b365893fece13f1be17b515d9"
+      },
+      "prev_hash": "sha256:6727dac4a93d22fec5aead0064ca070b47d6d4b72572ce6df088f22448d07460",
+      "hash": "sha256:dc5c382fef51d05e8faf4d735ca61b7e6497e098ed4f93c6a3ec2fd2c9cb333c"
+    },
+    {
+      "seq": 28,
+      "at": "2026-09-10T00:48:28.276Z",
+      "type": "revalidation_requested",
+      "entry_id": "nmk_aa3ce28b365893fece13f1be17b515d9",
+      "payload": {
+        "requester": "1F916:ZJTlpf93Xr9RNGeixeFbkMbnxz8Mbdb4PGPO9AiCtBc",
+        "operator": "fixture-a.nomankind.ai",
+        "source": "operator"
+      },
+      "prev_hash": "sha256:dc5c382fef51d05e8faf4d735ca61b7e6497e098ed4f93c6a3ec2fd2c9cb333c",
+      "hash": "sha256:8c4a6b312e635bfd30c6ae2cb6c67074774945c9ad340c88f2af0d46cf22a48b"
+    },
+    {
+      "seq": 29,
+      "at": "2026-09-10T00:50:19.241Z",
+      "type": "revalidation_assigned",
+      "entry_id": "nmk_aa3ce28b365893fece13f1be17b515d9",
+      "payload": {
+        "request_seq": 28,
+        "agent": "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY",
+        "operator": "fixture-c.nomankind.ai",
+        "beacon_round": 32066018,
+        "deadline": "2026-09-13T00:50:19.241Z"
+      },
+      "prev_hash": "sha256:8c4a6b312e635bfd30c6ae2cb6c67074774945c9ad340c88f2af0d46cf22a48b",
+      "hash": "sha256:7371a7daeb6a4325e5c1bb43d944de214aa5897b77a4de0491a5cd01fc793e3d"
+    },
+    {
+      "seq": 30,
+      "at": "2026-09-10T01:26:06.074Z",
+      "type": "revalidation_resolved",
+      "entry_id": "nmk_aa3ce28b365893fece13f1be17b515d9",
+      "payload": {
+        "request_seq": 28,
+        "outcome": "held",
+        "checker": "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY",
+        "operator": "fixture-c.nomankind.ai",
+        "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+        "correction_entry_id": null
+      },
+      "prev_hash": "sha256:7371a7daeb6a4325e5c1bb43d944de214aa5897b77a4de0491a5cd01fc793e3d",
+      "hash": "sha256:c3e3e746d3d714f8c4e6f61a1add73776757f04e36fcc447876b20a9d222ac34"
+    },
+    {
+      "seq": 31,
+      "at": "2026-09-10T03:25:48.000Z",
+      "type": "operator_untrusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-a.nomankind.ai"
+      },
+      "prev_hash": "sha256:c3e3e746d3d714f8c4e6f61a1add73776757f04e36fcc447876b20a9d222ac34",
+      "hash": "sha256:8e71399b38fb1b59270726c0ade96ea00b0c7d1dfdcd710042a98a88699dee1b"
+    },
+    {
+      "seq": 32,
+      "at": "2026-09-10T03:25:48.000Z",
+      "type": "operator_untrusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-b.nomankind.ai"
+      },
+      "prev_hash": "sha256:8e71399b38fb1b59270726c0ade96ea00b0c7d1dfdcd710042a98a88699dee1b",
+      "hash": "sha256:c5ef979772e1f9ab914b69d5edf34169a74f7fa2a1ea056a589d695cad35f8df"
+    },
+    {
+      "seq": 33,
+      "at": "2026-09-10T03:26:18.664Z",
+      "type": "pool_snapshot",
+      "entry_id": null,
+      "payload": {
+        "operators": [
+          "fixture-c.nomankind.ai",
+          "fixture-d.nomankind.ai"
+        ]
+      },
+      "prev_hash": "sha256:c5ef979772e1f9ab914b69d5edf34169a74f7fa2a1ea056a589d695cad35f8df",
+      "hash": "sha256:20af8fa40f33c478943a317f13eda7f745d41430b489ef6326865288dac8438a"
+    },
+    {
+      "seq": 34,
+      "at": "2026-09-10T04:53:47.335Z",
+      "type": "operator_trusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-a.nomankind.ai"
+      },
+      "prev_hash": "sha256:20af8fa40f33c478943a317f13eda7f745d41430b489ef6326865288dac8438a",
+      "hash": "sha256:684a080c6673133fa90b6c4b53f7d3b6195d36cd936fa7afcf011772a05ebee8"
+    },
+    {
+      "seq": 35,
+      "at": "2026-09-10T04:53:48.759Z",
+      "type": "operator_trusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-b.nomankind.ai"
+      },
+      "prev_hash": "sha256:684a080c6673133fa90b6c4b53f7d3b6195d36cd936fa7afcf011772a05ebee8",
+      "hash": "sha256:737b818257326c8a1437f003e722217f1affae9e0aa30406d667a51bded5e9bc"
+    },
+    {
+      "seq": 36,
+      "at": "2026-09-10T04:55:48.000Z",
+      "type": "pool_snapshot",
+      "entry_id": null,
+      "payload": {
+        "operators": [
+          "fixture-a.nomankind.ai",
+          "fixture-b.nomankind.ai",
+          "fixture-c.nomankind.ai",
+          "fixture-d.nomankind.ai"
+        ]
+      },
+      "prev_hash": "sha256:737b818257326c8a1437f003e722217f1affae9e0aa30406d667a51bded5e9bc",
+      "hash": "sha256:579a30810c13caa1e039f1d45609cb7c4fdc74e15717b05f1e9549f76cc3480b"
+    },
+    {
+      "seq": 37,
+      "at": "2026-09-10T04:55:48.000Z",
+      "type": "operator_untrusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-a.nomankind.ai"
+      },
+      "prev_hash": "sha256:579a30810c13caa1e039f1d45609cb7c4fdc74e15717b05f1e9549f76cc3480b",
+      "hash": "sha256:faae24681471a52604e605a1031f285efb5e51a7774e4e169c7e75c644847e8f"
+    },
+    {
+      "seq": 38,
+      "at": "2026-09-10T04:55:48.000Z",
+      "type": "operator_untrusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-b.nomankind.ai"
+      },
+      "prev_hash": "sha256:faae24681471a52604e605a1031f285efb5e51a7774e4e169c7e75c644847e8f",
+      "hash": "sha256:6f5a2b22dd1ce5608f21b36b5be9f129bcd5d78735b293ab76a4621c1cbbcbbc"
+    },
+    {
+      "seq": 39,
+      "at": "2026-09-10T04:56:59.443Z",
+      "type": "pool_snapshot",
+      "entry_id": null,
+      "payload": {
+        "operators": [
+          "fixture-c.nomankind.ai",
+          "fixture-d.nomankind.ai"
+        ]
+      },
+      "prev_hash": "sha256:6f5a2b22dd1ce5608f21b36b5be9f129bcd5d78735b293ab76a4621c1cbbcbbc",
+      "hash": "sha256:f2a27f21fc7bfc0d4540fac745f0d1cf473565f354bdc858be946198af85df58"
+    },
+    {
+      "seq": 40,
+      "at": "2026-09-10T07:29:32.445Z",
+      "type": "entry_submitted",
+      "entry_id": "nmk_852119884ec03629d5dd94cf824ffbeb",
+      "payload": {
+        "core": {
+          "id": "nmk_852119884ec03629d5dd94cf824ffbeb",
+          "subject": "example/example-domain",
+          "category": "limit",
+          "domain": "ai-ecosystem",
+          "claim": "The example.com landing page is served with the title Example Domain (first v0.7 entry on demo)",
+          "before": "no title recorded",
+          "after": "title Example Domain",
+          "effective_at": "2026-09-10",
+          "evidence_tier": "stated",
+          "evidence": null,
+          "observation": null,
+          "citation": "https://example.com/",
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "norm_version": "norm-v1.2",
+          "supersedes": null,
+          "author": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+          "author_operator": null,
+          "submitted_at": "2026-09-10T07:29:32.154Z"
+        },
+        "signature": "IrRw2mOvsnqZSCGYLHrTf9UF22OrgI1trKFBVW8083wNL1ds7ex8GyWd3zj9ccLFv62s0d+P39IoGdMEbioDDg=="
+      },
+      "prev_hash": "sha256:f2a27f21fc7bfc0d4540fac745f0d1cf473565f354bdc858be946198af85df58",
+      "hash": "sha256:74bd7730e0f1a56b73c128ad41339711beab804ff1dcca9a69857a29d507c9c9"
+    },
+    {
+      "seq": 41,
+      "at": "2026-09-10T07:29:34.039Z",
+      "type": "validation",
+      "entry_id": "nmk_852119884ec03629d5dd94cf824ffbeb",
+      "payload": {
+        "record": {
+          "agent": "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY",
+          "operator": "fixture-c.nomankind.ai",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "assigned_random": false,
+          "test_accepted": null,
+          "reproduction": null,
+          "observation": null,
+          "signed_at": "2026-09-10T07:29:33.625Z"
+        },
+        "signature": "x9Md_VVblJgS0-7gCCjIV5gZJQHWhLTQMYatzMMEyufcvIojhTSIMqZg86dwgs2-DJJpEFXWpRcqg5DYYOWNDw"
+      },
+      "prev_hash": "sha256:74bd7730e0f1a56b73c128ad41339711beab804ff1dcca9a69857a29d507c9c9",
+      "hash": "sha256:5de46cacae92760872ed9b5f658b3d2c796e04f386d0ac28670b6d5f2631ba85"
+    },
+    {
+      "seq": 42,
+      "at": "2026-09-10T07:29:35.938Z",
+      "type": "validation",
+      "entry_id": "nmk_852119884ec03629d5dd94cf824ffbeb",
+      "payload": {
+        "record": {
+          "agent": "1F916:gKZrUL-4SlNSwZqugtVA0LXbRGftTuyxpk3eXCuYRfc",
+          "operator": "fixture-d.nomankind.ai",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "assigned_random": false,
+          "test_accepted": null,
+          "reproduction": null,
+          "observation": null,
+          "signed_at": "2026-09-10T07:29:35.498Z"
+        },
+        "signature": "QDo2PlnR9bFQMvnYrM8AugO9xc9C0luBm2cCdatcziLOLAPvRiUQUxmKTF8xLc_t5cdu3NLpCccz6FZ6FCiHAA"
+      },
+      "prev_hash": "sha256:5de46cacae92760872ed9b5f658b3d2c796e04f386d0ac28670b6d5f2631ba85",
+      "hash": "sha256:9bfe5fc5f0b2bb418807fc643156c9b81d279db5e3815c8b96ddb8c66bc85b92"
+    },
+    {
+      "seq": 43,
+      "at": "2026-09-10T12:51:37.839Z",
+      "type": "operator_registered",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-e.nomankind.ai",
+        "maintainer": false,
+        "domain": "ai-ecosystem"
+      },
+      "prev_hash": "sha256:9bfe5fc5f0b2bb418807fc643156c9b81d279db5e3815c8b96ddb8c66bc85b92",
+      "hash": "sha256:36c45eb5646c6d826a434901da7d02e709dd27c075a0fde829a4170fc4a641a9"
+    },
+    {
+      "seq": 44,
+      "at": "2026-09-10T12:51:37.839Z",
+      "type": "agent_bound",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-e.nomankind.ai",
+        "agent": "1F916:1TKKI7sj8zxdhwYzyUaGIvbD5rP7WKG51Ld1YQqE_QM",
+        "attestation": {
+          "version": "nomankind-independence-v1",
+          "domain": "ai-ecosystem",
+          "signed_at": "2026-09-10T12:51:37.559Z",
+          "signature": "5VIm6MEPLXvI3wA6G4AoWHOyuJkaMaOw3woigPsaXeqfyD6eg1wezVi8P2hehMgJAec3_ipl50K9zbGIIM21DQ"
+        }
+      },
+      "prev_hash": "sha256:36c45eb5646c6d826a434901da7d02e709dd27c075a0fde829a4170fc4a641a9",
+      "hash": "sha256:1575ac870226023cbe16c8433c5dc08f8fdcbd368a5ef49a18cd6ce79d3e7971"
+    },
+    {
+      "seq": 45,
+      "at": "2026-09-10T12:51:38.510Z",
+      "type": "operator_trusted",
+      "entry_id": null,
+      "payload": {
+        "operator": "fixture-e.nomankind.ai"
+      },
+      "prev_hash": "sha256:1575ac870226023cbe16c8433c5dc08f8fdcbd368a5ef49a18cd6ce79d3e7971",
+      "hash": "sha256:e049c421cd145e10ce6c0af215af2af48d25f61b9882fec82809f5b4442265e2"
+    },
+    {
+      "seq": 46,
+      "at": "2026-09-10T12:51:39.947Z",
+      "type": "entry_submitted",
+      "entry_id": "nmk_4d7c5efb907732f6a54de4d958078663",
+      "payload": {
+        "core": {
+          "id": "nmk_4d7c5efb907732f6a54de4d958078663",
+          "subject": "example/example-domain",
+          "category": "limit",
+          "domain": "ai-ecosystem",
+          "claim": "The example.com landing page states the heading Example Domain (demo attestation probe)",
+          "before": "no heading recorded",
+          "after": "heading Example Domain",
+          "effective_at": "2026-09-10",
+          "evidence_tier": "observed",
+          "evidence": null,
+          "observation": {
+            "method": "completed_request",
+            "test": "contains:Example Domain",
+            "receipt_hash": "sha256:25f8d1848de06708eda3fac78aa78b365c0a9bb9bd7e5e687133865359ee3e16",
+            "observed_at": "2026-09-10",
+            "notes": null
+          },
+          "citation": "https://example.com/",
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "norm_version": "norm-v1.2",
+          "supersedes": null,
+          "author": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+          "author_operator": null,
+          "submitted_at": "2026-09-10T12:51:39.543Z"
+        },
+        "signature": "jgjaqd2AqTOAY3psvkECsQhGwvtNBYLWzdqdp0G4rl7ljIxAJGA5a9I6Y1FxVLT12ONI7xpjJXb0Jt8JrM7aCg=="
+      },
+      "prev_hash": "sha256:e049c421cd145e10ce6c0af215af2af48d25f61b9882fec82809f5b4442265e2",
+      "hash": "sha256:511052a03ef49edcb72e98632fc0eaecc6bbe28935fdd64b7b307c1943670d87"
+    },
+    {
+      "seq": 47,
+      "at": "2026-09-10T12:51:42.612Z",
+      "type": "validation",
+      "entry_id": "nmk_4d7c5efb907732f6a54de4d958078663",
+      "payload": {
+        "record": {
+          "agent": "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY",
+          "operator": "fixture-c.nomankind.ai",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "assigned_random": false,
+          "test_accepted": true,
+          "reproduction": null,
+          "observation": {
+            "method": "completed_request",
+            "receipt_hash": "sha256:b7bd76e60323a342dcec44a44f0254230cff705979427502fda229f623b3b3a3",
+            "observed_at": "2026-09-10",
+            "runs": 10,
+            "holds": 10
+          },
+          "signed_at": "2026-09-10T12:51:41.846Z"
+        },
+        "signature": "FKCBm-GcQFZhANyFAqrp0Nat9YAOlIyGve50822m9_gAk2B5WRN8Z8l5SkI_YQ1WLclip9nwzJFkqacyYAeJBg"
+      },
+      "prev_hash": "sha256:511052a03ef49edcb72e98632fc0eaecc6bbe28935fdd64b7b307c1943670d87",
+      "hash": "sha256:ebf6f86e57eee894cd0318cc649b51e1b985c80827ca32dd0efdc36d488a125a"
+    },
+    {
+      "seq": 48,
+      "at": "2026-09-10T12:51:44.801Z",
+      "type": "validation",
+      "entry_id": "nmk_4d7c5efb907732f6a54de4d958078663",
+      "payload": {
+        "record": {
+          "agent": "1F916:gKZrUL-4SlNSwZqugtVA0LXbRGftTuyxpk3eXCuYRfc",
+          "operator": "fixture-d.nomankind.ai",
+          "decision": "approve",
+          "reason": null,
+          "snapshot_hash": "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c",
+          "assigned_random": false,
+          "test_accepted": true,
+          "reproduction": null,
+          "observation": {
+            "method": "completed_request",
+            "receipt_hash": "sha256:8bfd222ce8e87f239ca8b09a429b6ee422b2006d649915052511b915ebe38b25",
+            "observed_at": "2026-09-10",
+            "runs": 10,
+            "holds": 10
+          },
+          "signed_at": "2026-09-10T12:51:44.067Z"
+        },
+        "signature": "NKCacRjm2z3yNYYoXchMwGLDd2sZfaU1fpIK232l8DxYTu-ERWCcWm7mkc0AW8pm0TqeBnqTCfK-TuPctPEPAQ"
+      },
+      "prev_hash": "sha256:ebf6f86e57eee894cd0318cc649b51e1b985c80827ca32dd0efdc36d488a125a",
+      "hash": "sha256:a74116b2ad2b0c1b54f1e303b9aada1fa55fc5ba88e9e61e4c893715fc577685"
+    },
+    {
+      "seq": 49,
+      "at": "2026-09-10T12:55:48.700Z",
+      "type": "pool_snapshot",
+      "entry_id": null,
+      "payload": {
+        "operators": [
+          "fixture-c.nomankind.ai",
+          "fixture-d.nomankind.ai",
+          "fixture-e.nomankind.ai"
+        ]
+      },
+      "prev_hash": "sha256:a74116b2ad2b0c1b54f1e303b9aada1fa55fc5ba88e9e61e4c893715fc577685",
+      "hash": "sha256:6db9523df3470afc36069a2e3efd9bfa641e3fbe55f963fd639f8e968a5d4568"
+    },
+    {
+      "seq": 50,
+      "at": "2026-09-10T12:55:55.209Z",
+      "type": "attestation_requested",
+      "entry_id": null,
+      "payload": {
+        "attestation": "att_ce8252943fd4611e759c43d57f04318b",
+        "domain": "ai-ecosystem",
+        "model": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+        "model_operator": null,
+        "probes": [
+          {
+            "entry_id": "nmk_4d7c5efb907732f6a54de4d958078663",
+            "entry_hash": "sha256:6be4b5a5557d61dd34ecda417c6d59637785ea8afe5624c4aa26b76722c3ab55"
+          }
+        ],
+        "probe_hash": "sha256:f126afc6e748e64f9e35a2bde663bac359e6f7b929f31286a75542faf66a7821",
+        "probe_count": 1,
+        "pool_snapshot_seq": 49,
+        "beacon_round": 32080530,
+        "beacon_randomness": "81a5b92bd23f4fffa4b172e2bcba408c585d8879a254be0ac609e38b5f286b59",
+        "scorers": [
+          {
+            "operator": "fixture-e.nomankind.ai",
+            "agent": "1F916:1TKKI7sj8zxdhwYzyUaGIvbD5rP7WKG51Ld1YQqE_QM"
+          },
+          {
+            "operator": "fixture-c.nomankind.ai",
+            "agent": "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY"
+          },
+          {
+            "operator": "fixture-d.nomankind.ai",
+            "agent": "1F916:gKZrUL-4SlNSwZqugtVA0LXbRGftTuyxpk3eXCuYRfc"
+          }
+        ],
+        "deadline": "2026-09-13T12:55:55.209Z"
+      },
+      "prev_hash": "sha256:6db9523df3470afc36069a2e3efd9bfa641e3fbe55f963fd639f8e968a5d4568",
+      "hash": "sha256:85e08b87a58d7a0852ede5011ce9c74789209b937498818797b4954f623bad0f"
+    },
+    {
+      "seq": 51,
+      "at": "2026-09-10T12:55:57.443Z",
+      "type": "attestation_answered",
+      "entry_id": null,
+      "payload": {
+        "attestation": "att_ce8252943fd4611e759c43d57f04318b",
+        "answers_hash": "sha256:4a05cc72c390750ddfe2ea0dbfd01d9dcf73bed3c5845f6542e89bf3e3e52077"
+      },
+      "prev_hash": "sha256:85e08b87a58d7a0852ede5011ce9c74789209b937498818797b4954f623bad0f",
+      "hash": "sha256:f87e8218f3adb0c4bcd9112edc6e3463eab9481dfbe4c0ae6a4f48c30a46e01c"
+    },
+    {
+      "seq": 52,
+      "at": "2026-09-10T12:56:10.063Z",
+      "type": "attestation_scored",
+      "entry_id": null,
+      "payload": {
+        "attestation": "att_ce8252943fd4611e759c43d57f04318b",
+        "record": {
+          "agent": "1F916:1TKKI7sj8zxdhwYzyUaGIvbD5rP7WKG51Ld1YQqE_QM",
+          "operator": "fixture-e.nomankind.ai",
+          "agreed": 1,
+          "probe_hash": "sha256:f126afc6e748e64f9e35a2bde663bac359e6f7b929f31286a75542faf66a7821",
+          "answers_hash": "sha256:4a05cc72c390750ddfe2ea0dbfd01d9dcf73bed3c5845f6542e89bf3e3e52077",
+          "signed_at": "2026-09-10T12:56:09.522Z"
+        },
+        "signature": "DxMrVPxifc98A5fthO1-gUv56MsKywowpB5VD7sc8BHTx4kolA4IWwYtbrA4FhUemFMQVBSwctO1JpdrUmmGDA"
+      },
+      "prev_hash": "sha256:f87e8218f3adb0c4bcd9112edc6e3463eab9481dfbe4c0ae6a4f48c30a46e01c",
+      "hash": "sha256:2abf13ccf13ec4c8dd7aed5395e647ac740be0b464275d4522aa5accf2b23fea"
+    },
+    {
+      "seq": 53,
+      "at": "2026-09-10T12:56:11.832Z",
+      "type": "attestation_scored",
+      "entry_id": null,
+      "payload": {
+        "attestation": "att_ce8252943fd4611e759c43d57f04318b",
+        "record": {
+          "agent": "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY",
+          "operator": "fixture-c.nomankind.ai",
+          "agreed": 1,
+          "probe_hash": "sha256:f126afc6e748e64f9e35a2bde663bac359e6f7b929f31286a75542faf66a7821",
+          "answers_hash": "sha256:4a05cc72c390750ddfe2ea0dbfd01d9dcf73bed3c5845f6542e89bf3e3e52077",
+          "signed_at": "2026-09-10T12:56:11.296Z"
+        },
+        "signature": "Tln8y1wiSgpxpGq7EBK4XF1YhXuRs31fE7N0fI6cjEsS8sxNSnP8R6PQOAzu5WWgpOMwFUvQauNyvBFfGn4QDw"
+      },
+      "prev_hash": "sha256:2abf13ccf13ec4c8dd7aed5395e647ac740be0b464275d4522aa5accf2b23fea",
+      "hash": "sha256:09a3ca2248e47588863398ec252d289d28a9e02e4f51fabbe0ac1edd6c7bdafd"
+    },
+    {
+      "seq": 54,
+      "at": "2026-09-10T12:56:13.656Z",
+      "type": "attestation_scored",
+      "entry_id": null,
+      "payload": {
+        "attestation": "att_ce8252943fd4611e759c43d57f04318b",
+        "record": {
+          "agent": "1F916:gKZrUL-4SlNSwZqugtVA0LXbRGftTuyxpk3eXCuYRfc",
+          "operator": "fixture-d.nomankind.ai",
+          "agreed": 1,
+          "probe_hash": "sha256:f126afc6e748e64f9e35a2bde663bac359e6f7b929f31286a75542faf66a7821",
+          "answers_hash": "sha256:4a05cc72c390750ddfe2ea0dbfd01d9dcf73bed3c5845f6542e89bf3e3e52077",
+          "signed_at": "2026-09-10T12:56:13.137Z"
+        },
+        "signature": "zIVzVOHnrLJ67RXM8rztSbZGiBRZMaMO0bEQPCOBy-3ViANRhvu5m1FoV9iUURqJtecwo3RW1nUKpqPvdqCaBw"
+      },
+      "prev_hash": "sha256:09a3ca2248e47588863398ec252d289d28a9e02e4f51fabbe0ac1edd6c7bdafd",
+      "hash": "sha256:18c3496e122443fd895f927ff7d925226d3e5d7d776d343f39f7cb557b6e4458"
     }
   ],
   "registry": {
     "agents": {
-      "1F916:RYEy26g5ubpH_-mImEstjwa2BVMyCiQJQ40rPnBc6oc": "fixture-a.nomankind.ai",
-      "1F916:h_MELnKFIESGxSvT_Z7U-Y26Iqk7_Znw0YsjxXq3Ypo": "fixture-b.nomankind.ai",
-      "1F916:S_vNUomwVQ3YFQrzOxeefhFYfl6_XhIibKCdb-wSTQ0": "fixture-c.nomankind.ai"
+      "1F916:ZJTlpf93Xr9RNGeixeFbkMbnxz8Mbdb4PGPO9AiCtBc": "fixture-a.nomankind.ai",
+      "1F916:GwNvWtrOr42ZNLbje4GEyJDeVfCi07zOI8B4H9yxRK8": "fixture-b.nomankind.ai",
+      "1F916:dnbOcpGR2ePk-6q0OfmQnOgzOax2x7ZeB28__ZAbXiY": "fixture-c.nomankind.ai",
+      "1F916:gKZrUL-4SlNSwZqugtVA0LXbRGftTuyxpk3eXCuYRfc": "fixture-d.nomankind.ai",
+      "1F916:1TKKI7sj8zxdhwYzyUaGIvbD5rP7WKG51Ld1YQqE_QM": "fixture-e.nomankind.ai"
     },
     "operators": {
       "fixture-a.nomankind.ai": {
@@ -247,6 +1038,20 @@
         "domains": [
           "ai-ecosystem"
         ]
+      },
+      "fixture-d.nomankind.ai": {
+        "maintainer": false,
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
+      },
+      "fixture-e.nomankind.ai": {
+        "maintainer": false,
+        "provider": false,
+        "domains": [
+          "ai-ecosystem"
+        ]
       }
     }
   },
@@ -254,25 +1059,260 @@
     {
       "seq": 0,
       "first_seq": 0,
-      "last_seq": 12,
-      "size": 13,
-      "root": "sha256:faca0bfc0e3e940e081b0aef3b10e64f2df492cfbcc3e6286e3a856590e96b15",
-      "sealed_at": "2026-09-08T12:00:00.000Z",
+      "last_seq": 16,
+      "size": 17,
+      "root": "sha256:92fe03dab291654f0a8ec6ec81726beedd84a6a179b1edf64c18a78a99cabb88",
+      "sealed_at": "2026-09-09T04:49:44.871Z",
       "prev_hash": null,
-      "hash": "sha256:ab61082ea6dc832aa140462ec9155786c1cf290b9734bb256429315c21f36900",
+      "hash": "sha256:195cd540adb0840477bc0984c853746b54976074c3d635983e327c2ba6d69ed5",
       "witnesses": [
         {
-          "agent": "1F916:1EXjZGeqKz11t9tRX6zSPeyT3u3vEYqEGqp4HzBeke8",
-          "signature": "MKsziBt0SVSBinZKadhOqA7iF6R0ZwrI1kD_6x5JOHB7-Ji_2KvbsJASmRUCNPF4qH4atDrm60h_dgM7jW1eCw"
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "ejFIWdR0ic9YcV7O0r3m176OTTOpPW0ODDQlmUEb1kndFuqQF3Vyd9XWWLiD2j_AlVAWYDwfPMCkF8heHqM3BQ"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "Fd7yYKmj1EF9UiuitAiqY0_rxZV0zzcfd_cHHGcqzWL7zuTOaXAPUPEWEfc6R1B5W9DFtxRKfIsw1b28FZdmCw"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 1,
+      "first_seq": 17,
+      "last_seq": 17,
+      "size": 1,
+      "root": "sha256:76689dcae1b3cde14b1bbbfbac07d63088b782f72be869d8b6627173d03792e5",
+      "sealed_at": "2026-09-10T00:00:05.010Z",
+      "prev_hash": "sha256:195cd540adb0840477bc0984c853746b54976074c3d635983e327c2ba6d69ed5",
+      "hash": "sha256:bba956b0a91d0b32f7aa32ce32ee6db1332666735a37833f0b4475bc82add556",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "dInbfGBbI0f10HpnCHfCdOZVaTt9TNorE4CSetxjh36uY9AMegfK9sAyLKZrPgUlIfSDERvK5QeD-wEfpgtoAA"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "gBy5J2BWjb914mtYQFq1A4b8RDW04JUBVc5r-VXS8V0uDnDsMySyHsgmjptNXj1G_No_DZZEOYIFOUQhS-h-Dg"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 2,
+      "first_seq": 18,
+      "last_seq": 21,
+      "size": 4,
+      "root": "sha256:03903ea2a1e6a2b066e622549fead1a3e11d0107d4232208f01d3efb4778b979",
+      "sealed_at": "2026-09-10T00:40:16.225Z",
+      "prev_hash": "sha256:bba956b0a91d0b32f7aa32ce32ee6db1332666735a37833f0b4475bc82add556",
+      "hash": "sha256:6e191439b5e912efa7d8be8128bcd0f0df51c70799299e06ef49bd78b439f976",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "dLkRXHj99d77DdJNW3tuzXQmQtp73aF-ioVRKB0-ixaavJTJxPXtDEsklUtz4YL8RDW79-jbSjEswh4qYitXDw"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "bw4OP2H2ZoN7DCfQk4dGWY9vden__J5kVjNkSKpx1vEdccZ3-ZbgPVNRonKR6KO5Pw8LnTf7MNeSSd2i1NR2DQ"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 3,
+      "first_seq": 22,
+      "last_seq": 29,
+      "size": 8,
+      "root": "sha256:de8d54f511f965717652bd10b32fa8af506cf54b1629849f298daa7433eba851",
+      "sealed_at": "2026-09-10T00:50:19.241Z",
+      "prev_hash": "sha256:6e191439b5e912efa7d8be8128bcd0f0df51c70799299e06ef49bd78b439f976",
+      "hash": "sha256:162b31f3de05fab254506058ac091f083c9db2c13dcb67676a935a6a5e1ab029",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "mfFE1kyZEj0v-4w_opgs3YZSpH3PwXBdjsj13PRMXY41Fq6jDSkLQo9Cz8yP6Jv5SV6OTFWrdlumPmpmwIMhAg"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "8-cy0e41j7Msp-YQ_BiHGeCh1CVtxuYBZD-PUK0FiLk3FUMm00BuocofDxcLPgCJrmF5YYMPevc6W2gDhN9BDg"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 4,
+      "first_seq": 30,
+      "last_seq": 30,
+      "size": 1,
+      "root": "sha256:6dfb786c57d7a7e06e711f960096a0a50de338a5995c668ad216aa42b50024f0",
+      "sealed_at": "2026-09-10T01:30:34.894Z",
+      "prev_hash": "sha256:162b31f3de05fab254506058ac091f083c9db2c13dcb67676a935a6a5e1ab029",
+      "hash": "sha256:31132dcfd7ce0f843ce0edbcca0ddedae6ea26232c1f56897a6480f5704a8bc9",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "sinbhfvwtOEi-ytF159MZF93DK6lv59Bb8nYgLHipGOVJBvrcp9c1Qj-Ib3TyQW7QuIfoX3h5hU1sxPighz9Aw"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "LR6xZbfZYkDw9L6Zi-3X_JJhwRdYmrqOIj3IIZbQ7zHxFNmoreMrxF0YAcSIdaMWY2lUB5M56v8nNbAtNzIQCQ"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 5,
+      "first_seq": 31,
+      "last_seq": 33,
+      "size": 3,
+      "root": "sha256:2baf5ec5bbeba77529fdfa7aaec2aa7ee27130d643a0a85ae3e451079ca8bac4",
+      "sealed_at": "2026-09-10T03:26:18.664Z",
+      "prev_hash": "sha256:31132dcfd7ce0f843ce0edbcca0ddedae6ea26232c1f56897a6480f5704a8bc9",
+      "hash": "sha256:04b918e211cab194d8a12d556e4114c48fb872d0c7e8a479f85dfce67667bfc8",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "c461aRt9EcH7CF0XVCEFI2gw1FJq6Dw-HrJbdcJsbf8mEvekBYvid8IIKC4jrEH1pZ0OABJc10FWlz90CroCCQ"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "nkLC2yf9A-QgcDQ5Y9rMMoApCFaYREnNifxW54LBF1j_w6kBV0Cv3zkhdRUETAQxyhlIRBysCdBjVMx0cl5nBw"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 6,
+      "first_seq": 34,
+      "last_seq": 36,
+      "size": 3,
+      "root": "sha256:c0139df356bf1e01b6cc4f940bedecd3e05327a97484068c3516b48b459bd875",
+      "sealed_at": "2026-09-10T04:55:48.000Z",
+      "prev_hash": "sha256:04b918e211cab194d8a12d556e4114c48fb872d0c7e8a479f85dfce67667bfc8",
+      "hash": "sha256:a6e71f249bf842812c81d0030094d4a3cb1101dcc92f478372e1d97b8b87f2c0",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "RBtv7ZdooYr1mqfXm6a12sL_esCT7YI1dgEm_1gmcn842krPv097wkFd8g2JIIeML4N-ew1Ovu9XcnMPgX5CCQ"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "ZC7YS0WjWahNZvPNMAvP-uoWCCvJRK4gA2sNdPpJO8R0oo1LpMXh6Z-KthzVNzGObFuklf4hqAtxF6aMGOTsAQ"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 7,
+      "first_seq": 37,
+      "last_seq": 39,
+      "size": 3,
+      "root": "sha256:03a935372d5569c4c4a2de63dbc7da848938c938318123fd36085de368bc3662",
+      "sealed_at": "2026-09-10T04:56:59.443Z",
+      "prev_hash": "sha256:a6e71f249bf842812c81d0030094d4a3cb1101dcc92f478372e1d97b8b87f2c0",
+      "hash": "sha256:9f3a0f7d7fd16eb59e7ec7a921e7131f0b0b96bae3948353262b16b06991e041",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "gVt-Ks87XmcqpCcPQXKKTXryOskmAD60WayMT-h6fLhmoc_8XB957MV_XCW38shP7gaa_pXdhrjN-ASBOaI6Cw"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "fW3DQCo6NpzjoYAacWRikeP4WsQnl3-vNukDKTXwC_jUyNLu6JTIf0rkAfa27bBVB3Bg7wjPz--Zn1RuRBXVCw"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 8,
+      "first_seq": 40,
+      "last_seq": 42,
+      "size": 3,
+      "root": "sha256:7b25a750da3e1a48f2f7a3d6c511b856b94569502edd9f3fe5e9783e88e735d1",
+      "sealed_at": "2026-09-10T07:30:03.000Z",
+      "prev_hash": "sha256:9f3a0f7d7fd16eb59e7ec7a921e7131f0b0b96bae3948353262b16b06991e041",
+      "hash": "sha256:bd3933b4c518148973d284f893bfac25902c318107d2c4b49940b08d4e017bcf",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "g9l8O9pS4H9i8UZty75yEZweNbv9zson2v4iVmh47pCfRMSiSDeS-2kZIZ4q4K95FveTH6XPY0AeBPwl-w2wCA"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "4hzqGwvjBku75prqS_9nATZOiX3R0pc0GF8j36O7uG4jGN9BQQfmOGrkws5pb9-9o_XtlER2QDsTldC-IylHCw"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 9,
+      "first_seq": 43,
+      "last_seq": 49,
+      "size": 7,
+      "root": "sha256:a56cb426607e90dedb78cf82a17c74739a4c90ac547faa0a43e91b1ebe14eb73",
+      "sealed_at": "2026-09-10T12:55:48.700Z",
+      "prev_hash": "sha256:bd3933b4c518148973d284f893bfac25902c318107d2c4b49940b08d4e017bcf",
+      "hash": "sha256:30e798078dfa65b698f05c85e0b2d6d138659c8e0b6350e477f709429dc0f053",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "Ul-mDnlyJp6EL12hCnwzICRKE-ivzQzvaxx3SayAj_LHvRRJ1_YMFwZAICMPpCLEa4e9YRu9kpdrX94U0_APBg"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "wHarVsEWtLV99LnZZXII7IxytK8KdpdSuHjBh2WhElg3M6KR7-Q6XfOvkVRNiH9DlfBt1QydjuSbtPF1tN4kDA"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 10,
+      "first_seq": 50,
+      "last_seq": 51,
+      "size": 2,
+      "root": "sha256:6f7e22d3ed6a1fcaad8f3a5d9563e6212bcacd6c6c8f23a705d18e4282551ac8",
+      "sealed_at": "2026-09-10T12:55:59.000Z",
+      "prev_hash": "sha256:30e798078dfa65b698f05c85e0b2d6d138659c8e0b6350e477f709429dc0f053",
+      "hash": "sha256:a72ffff69bec833016b0e743e53aa0f9a75a7a7473efdeb0397d3640c1fe9b9a",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "d9hrm-JclYSnAwjKhUG4pV77RoFXy5Hw0d0x_hUWTkOs-H0u8rqtG5XCIr057eeZ_W41Nh7KFOuE-tAYSDQHDA"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "t9I1OIUmHF2n81slSIJ8u8sDQkuXijwikk8-U5e8qrulH007RDSh-jr3asDFGzdHdnC4rehfEnEn5zgCenjWCQ"
+        }
+      ],
+      "registry": null
+    },
+    {
+      "seq": 11,
+      "first_seq": 52,
+      "last_seq": 54,
+      "size": 3,
+      "root": "sha256:a4d8ca3b5d8ae89d08698902ab2fdbffa0a08b897a9d829053ad367be51cd896",
+      "sealed_at": "2026-09-10T13:00:52.369Z",
+      "prev_hash": "sha256:a72ffff69bec833016b0e743e53aa0f9a75a7a7473efdeb0397d3640c1fe9b9a",
+      "hash": "sha256:b0f5bbad00009884a8097b152e2e97185e5199eecc618192d64d150ef1a2f6e8",
+      "witnesses": [
+        {
+          "agent": "1F916:CBtuT6Z72V_W528bwI0J4Iz90yaNovnwpLQH_gCl4DA",
+          "signature": "9pqKvSasTTy_q8FS63hMPdoH6Vt9_2BzZ738KtmrGdm6lSBXUZpNquli0SRp0ZduQlCckAUwzZOfJHx4N-1aCw"
+        },
+        {
+          "agent": "1F916:wbikOv3WpsHwdazCVTRKYeg8r5AHCxfBHvKHJroY9gs",
+          "signature": "unJHGOAhD3SMLO_0UN4HFB3iSnsZIh2A0RivkjlTewn9-2Xj9lVK6TPt4ZwUBtI3zN4207jTNRvh3qTW-ZWXBQ"
         }
       ],
       "registry": null
     }
   ],
   "captures": {
-    "sha256:b008ffa4343f272779f898b6b882f0391df6eaeb1567e21e0c331701ef0c4888": {
-      "content_type": "text/html; charset=utf-8",
-      "body_base64": "PCFkb2N0eXBlIGh0bWw+PGh0bWw+PGhlYWQ+PHRpdGxlPmV4YW1wbGUvZGVtby1tb2RlbDwvdGl0bGU+PC9oZWFkPjxib2R5PjxtYWluPjxoMT5leGFtcGxlL2RlbW8tbW9kZWw8L2gxPjxwPjkwIHJlcXVlc3RzIHBlciBtaW51dGU8L3A+PC9tYWluPjwvYm9keT48L2h0bWw+"
+    "sha256:13f5e50297bde87abbf51cd1cd43678109b1a72a52c1cefa3b56844464e4f25c": {
+      "content_type": "text/html",
+      "body_base64": "PCFkb2N0eXBlIGh0bWw+PGh0bWwgbGFuZz0iZW4iPjxoZWFkPjx0aXRsZT5FeGFtcGxlIERvbWFpbjwvdGl0bGU+PGxpbmsgcmVsPSJpY29uIiBocmVmPSJkYXRhOiwiPjxtZXRhIG5hbWU9InZpZXdwb3J0IiBjb250ZW50PSJ3aWR0aD1kZXZpY2Utd2lkdGgsIGluaXRpYWwtc2NhbGU9MSI+PHN0eWxlPmJvZHl7YmFja2dyb3VuZDojZWVlO3dpZHRoOjYwdnc7bWFyZ2luOjE1dmggYXV0bztmb250LWZhbWlseTpzeXN0ZW0tdWksc2Fucy1zZXJpZn1oMXtmb250LXNpemU6MS41ZW19ZGl2e29wYWNpdHk6MC44fWE6bGluayxhOnZpc2l0ZWR7Y29sb3I6IzM0OH08L3N0eWxlPjwvaGVhZD48Ym9keT48ZGl2PjxoMT5FeGFtcGxlIERvbWFpbjwvaDE+PHA+VGhpcyBkb21haW4gaXMgZm9yIHVzZSBpbiBkb2N1bWVudGF0aW9uIGV4YW1wbGVzIHdpdGhvdXQgbmVlZGluZyBwZXJtaXNzaW9uLiBBdm9pZCB1c2UgaW4gb3BlcmF0aW9ucy48L3A+PHA+PGEgaHJlZj0iaHR0cHM6Ly9pYW5hLm9yZy9kb21haW5zL2V4YW1wbGUiPkxlYXJuIG1vcmU8L2E+PC9wPjwvZGl2PjwvYm9keT48L2h0bWw+Cg=="
     }
   }
 }
