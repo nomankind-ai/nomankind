@@ -365,6 +365,9 @@ describe("renderApi", () => {
       "dispute_open",
       "bad_report_link",
       "bad_revalidation_link",
+      // Section 9: standing gates the stake, checked after every M20 rule and
+      // before anything is written.
+      "insufficient_standing",
       // The target's rederivation is schema-checked last, after every filing
       // rule has passed, so schema_invalid closes the row.
       "schema_invalid",
@@ -380,6 +383,7 @@ describe("renderApi", () => {
       "bare_key",
       "cap_exceeded",
       "request_open",
+      "insufficient_standing",
       "schema_invalid",
     ]);
 

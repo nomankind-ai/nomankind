@@ -42,6 +42,7 @@ import {
   FAILURE_REPORT_THRESHOLD,
   REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW,
 } from "./policy.js";
+import type { StakeRecord } from "./stake.js";
 
 // ---------------------------------------------------------------------------
 // Filing a dispute
@@ -151,6 +152,75 @@ export function checkDisputeFiling(
 
 function refuseDispute(reason: DisputeRefusal): DisputeVerdict {
   return { ok: false, reason };
+}
+
+// ---------------------------------------------------------------------------
+// Standing enough to stake
+// ---------------------------------------------------------------------------
+
+/**
+ * The one refusal a filing gets for having nothing to put up.
+ *
+ * Section 9, Standing: it "gates everything discretionary, from entry to and
+ * stay in the trusted pool to revalidation-request caps and dispute stakes". A
+ * stake that an operator cannot cover is not a stake: the filing would cost
+ * nothing to make and nothing to lose, which is exactly the free challenge
+ * Section 6 says the stake exists to prevent.
+ */
+export type StakeCoverRefusal = "insufficient_standing";
+
+/**
+ * What the check needs: the operator's standing, what its open stakes already
+ * hold, and what this filing would put up. All three in the same unit, standing,
+ * and all three the caller's to gather.
+ */
+export interface StakeCover {
+  /** The operator's standing at the position the caller read it at. */
+  readonly standing: number;
+  /** What its still-open stakes hold: no refund and no forfeit has settled them. */
+  readonly locked: number;
+  /** What this filing stakes, from src/policy.ts through the caller. */
+  readonly stake: number;
+}
+
+/** Accepted, or refused with the reason. */
+export type StakeCoverVerdict =
+  | { ok: true }
+  | { ok: false; reason: StakeCoverRefusal };
+
+/**
+ * Whether an operator can cover one more stake.
+ *
+ * Available standing is what it has less what its open stakes already hold: an
+ * operator with ten standing and a ten-standing dispute in flight has nothing
+ * available, because the standing in flight is already promised to the outcome
+ * of that dispute. Without the subtraction one balance could back any number of
+ * simultaneous filings, and a challenger could lose more than it ever had.
+ *
+ * Pure, like every other check here: no clock, no storage, and no policy number
+ * of its own — the amount reaches it as `stake`.
+ */
+export function checkStakeCover(cover: StakeCover): StakeCoverVerdict {
+  const available = cover.standing - cover.locked;
+  if (available < cover.stake) return { ok: false, reason: "insufficient_standing" };
+  return { ok: true };
+}
+
+/**
+ * What a set of open stake rows holds, in standing.
+ *
+ * Only the rows whose unit is standing: a bare key's dispute stake is a filing
+ * fee in cents (Section 6), it is nobody's standing, and adding it to this total
+ * would be adding two units together. A row with no amount is not a stake — a
+ * reward carries none — and counts as nothing.
+ */
+export function lockedStanding(rows: readonly StakeRecord[]): number {
+  let locked = 0;
+  for (const row of rows) {
+    if (row.unit !== "standing" || row.amount === null) continue;
+    locked += row.amount;
+  }
+  return locked;
 }
 
 // ---------------------------------------------------------------------------

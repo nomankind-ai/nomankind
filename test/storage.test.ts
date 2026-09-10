@@ -20,6 +20,7 @@ import {
   revalidationOutcomeStakes,
   revalidationStake,
   DISPUTE_STAKE_STANDING,
+  REVALIDATION_REQUEST_STAKE_STANDING,
   LIST_PAGE_LIMIT,
   buildReadCountPayload,
   clawbackRows,
@@ -51,7 +52,9 @@ import {
   type Event,
   type EntrySeal,
   type Entry,
+  lockedStanding,
   type LedgerRow,
+  type StakeRecord,
   type OpenAssignment,
   type EntryStatus,
   type ReadReceipt,
@@ -108,6 +111,7 @@ import {
   standingForOperators,
   priceBountyRow,
   openRevalidationAssignment,
+  openStakeRowsForOperator,
   overturnedCountsByOperator,
   recordDisputeFiling,
   recordFailureReport,
@@ -3474,6 +3478,148 @@ describe("dispute and revalidation writes", () => {
       (await capturesForEntry(store.db, checkedId)).map((one) => one.role),
     ).toEqual([`report:${filed.report.seq}`]);
   });
+
+  /**
+   * Section 9: standing "gates ... dispute stakes", and what an operator can
+   * stake is what it holds less what its open stakes already hold. This is the
+   * read that answers the second half of that.
+   */
+  it("reads back only the stakes that are still in flight", async () => {
+    // Everything this challenger put up has been settled: the dispute stake was
+    // refunded when the challenge was upheld, and the request's was forfeited
+    // when the check held.
+    expect(
+      await openStakeRowsForOperator(store.db, CHALLENGER_OPERATOR, 50),
+    ).toEqual([]);
+
+    const request = await recordRevalidationRequest(store.db, {
+      event: {
+        at: AT,
+        type: "revalidation_requested",
+        entry_id: checkedId,
+        payload: {
+          requester: CHALLENGER,
+          operator: CHALLENGER_OPERATOR,
+          source: "operator",
+        },
+      },
+      stored: (event) => stored(checkedId, [event], event.seq),
+      ledger: (event) => {
+        const stake = revalidationStake(event);
+        return stake === null ? [] : [stake];
+      },
+    });
+    seen(request);
+
+    const open = await openStakeRowsForOperator(store.db, CHALLENGER_OPERATOR, 50);
+    expect(open.map((row) => row.kind)).toEqual(["revalidation_stake"]);
+    expect([open[0]!.request_seq, open[0]!.amount, open[0]!.unit]).toEqual([
+      request.seq,
+      REVALIDATION_REQUEST_STAKE_STANDING,
+      "standing",
+    ]);
+    // Nobody else's, whatever else the table holds.
+    expect(await openStakeRowsForOperator(store.db, CHECKER, 50)).toEqual([]);
+  });
+
+  /**
+   * An operator's settled history grows for its lifetime; what it has in flight
+   * cannot. So the read has to be bounded by what is OPEN and not by the ledger
+   * in log order: a page of the rows themselves is the oldest settled history
+   * long before it is the recent filings, and an operator whose history has
+   * outgrown one page would look as if it had staked nothing — which would let
+   * it hold more stakes than its standing covers.
+   *
+   * The rows are written here rather than through the doors because a hundred
+   * settled disputes is a hundred entries and a hundred corrections, and what is
+   * under test is the query and not the writers. Each one is exactly what
+   * src/stake.ts builds and what `stakeStatement` stores.
+   */
+  it("finds the open stake behind a page of settled history", async () => {
+    const BUSY = "merlin.example";
+    const base = 900_000;
+    const settled: StakeRecord[] = [];
+    for (let i = 0; i < LIST_PAGE_LIMIT + 1; i += 1) {
+      const entry_id = `nmk_settled${i}`;
+      const seq = base + i * 2;
+      const dispute = i % 2 === 0;
+      const stake: StakeRecord = {
+        kind: dispute ? "dispute_stake" : "revalidation_stake",
+        entry_id,
+        correction_entry_id: dispute ? `nmk_corr${i}` : null,
+        request_seq: dispute ? null : seq,
+        agent: CHALLENGER,
+        operator: BUSY,
+        unit: "standing",
+        amount: dispute
+          ? DISPUTE_STAKE_STANDING
+          : REVALIDATION_REQUEST_STAKE_STANDING,
+        seq,
+        at: AT,
+      };
+      settled.push(stake, {
+        ...stake,
+        kind: dispute ? "dispute_refund" : "revalidation_forfeit",
+        seq: seq + 1,
+      });
+    }
+
+    // Two filings still in flight, one of each mechanism, after all of it.
+    const openSeq = base + settled.length * 2;
+    const openDispute: StakeRecord = {
+      kind: "dispute_stake",
+      entry_id: "nmk_open",
+      correction_entry_id: "nmk_opencorr",
+      request_seq: null,
+      agent: CHALLENGER,
+      operator: BUSY,
+      unit: "standing",
+      amount: DISPUTE_STAKE_STANDING,
+      seq: openSeq,
+      at: AT,
+    };
+    const openRequest: StakeRecord = {
+      ...openDispute,
+      kind: "revalidation_stake",
+      entry_id: "nmk_openreq",
+      correction_entry_id: null,
+      request_seq: openSeq + 1,
+      amount: REVALIDATION_REQUEST_STAKE_STANDING,
+      seq: openSeq + 1,
+    };
+
+    await store.db.batch(
+      [...settled, openDispute, openRequest].map((row) =>
+        store.db
+          .prepare(
+            `INSERT INTO ledger
+               (id, kind, operator_id, entry_id, seq, created_at, payload_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            `${row.kind}:${row.seq}`,
+            row.kind,
+            row.operator,
+            row.entry_id,
+            row.seq,
+            row.at,
+            JSON.stringify(row),
+          ),
+      ),
+    );
+
+    // More than a page of history in front of them, and the read still answers
+    // the question it was asked.
+    expect(settled).toHaveLength((LIST_PAGE_LIMIT + 1) * 2);
+    expect(
+      await openStakeRowsForOperator(store.db, BUSY, LIST_PAGE_LIMIT),
+    ).toEqual([openDispute, openRequest]);
+    expect(
+      lockedStanding(
+        await openStakeRowsForOperator(store.db, BUSY, LIST_PAGE_LIMIT),
+      ),
+    ).toBe(DISPUTE_STAKE_STANDING + REVALIDATION_REQUEST_STAKE_STANDING);
+  });
 });
 
 /**
@@ -3576,7 +3722,7 @@ describe("the ledger", () => {
     ).toEqual(["2026-08-01"]);
   });
 
-  it("keeps a clawback payable at once and counts it against the payout", async () => {
+  it("holds a clawback with the share it negates, and releases it with it", async () => {
     const upheld = await appendEvent([], {
       at: INSIDE,
       type: "dispute_upheld",
@@ -3588,10 +3734,21 @@ describe("the ledger", () => {
     expect(clawbacks).toHaveLength(held.length);
     await putLedgerRows(store.db, clawbacks);
 
-    // A clawback carries no available_at and is released the instant it is
-    // written, so it can never wait behind a holdback.
-    const released = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, INSIDE);
-    expect(released.some((row) => row.kind === "clawback")).toBe(true);
+    // A clawback carries the available_at of the row it negates, so at INSIDE
+    // neither is payable: a cycle can no more take the clawback early than it
+    // can pay the share early.
+    const inside = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, INSIDE);
+    expect(inside.some((row) => row.kind === "clawback")).toBe(false);
+    expect(inside.some((row) => row.date === READ_DAY)).toBe(false);
+
+    // Past the holdback they come out together, and they net to nothing.
+    const outside = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE);
+    const clawed = outside.filter((row) => row.kind === "clawback");
+    expect(clawed).toHaveLength(1);
+    const share = outside.find(
+      (row) => row.kind === "read_share" && row.date === READ_DAY,
+    );
+    expect(clawed[0]!.amount).toBe(-share!.amount);
   });
 
   it("pays a cycle: the payout row, and the rows it claims", async () => {

@@ -246,8 +246,9 @@ describe("clawbackRows", () => {
         operator: source.operator,
         unit: "micros",
         amount: -source.amount,
-        // A clawback is never itself held: it takes effect at once.
-        available_at: null,
+        // The negated row's own release instant: the two wait out one holdback
+        // and come to nothing together.
+        available_at: source.available_at,
         ref: { claws_back: source.id },
       });
     }
@@ -398,17 +399,33 @@ describe("payoutPlan and payoutRow", () => {
     expect(plan.amount).toBe(PAYOUT_MINIMUM_MICROS);
   });
 
-  it("always counts a clawback, however recently it was written", () => {
+  it("counts a released clawback against the cycle", () => {
     const clawback = row({
       id: "clawback:9:x",
       kind: "clawback",
       amount: -PAYOUT_MINIMUM_MICROS,
-      available_at: null,
     });
     const plan = payoutPlan(SUBMITTER, [row({}), clawback], NOW);
     expect(plan.amount).toBe(0);
     expect(plan.carried_forward).toBe(0);
     expect(plan.rows).toEqual([]);
+  });
+
+  it("never pays a share whose clawback is still held", () => {
+    // The clawback carries the share's own available_at, so the two are held
+    // together: a share cannot leave while the row that negates it waits.
+    const stillHeld = "2026-12-01T00:00:00.000Z";
+    const share = row({ id: "held", available_at: stillHeld });
+    const clawback = row({
+      id: "clawback:9:held",
+      kind: "clawback",
+      amount: -PAYOUT_MINIMUM_MICROS,
+      available_at: stillHeld,
+    });
+    const plan = payoutPlan(SUBMITTER, [share, clawback], NOW);
+    expect(plan.rows).toEqual([]);
+    expect(plan.amount).toBe(0);
+    expect(plan.carried_forward).toBe(0);
   });
 
   it("counts one operator's rows and nobody else's", () => {
@@ -523,7 +540,6 @@ describe("ledgerBalance", () => {
       id: `clawback:9:${shares[0]!.id}`,
       kind: "clawback",
       amount: -shares[0]!.amount,
-      available_at: null,
     };
     const paid = payoutRow(
       { operator: SUBMITTER, amount: 1000, rows: [], carried_forward: 0 },
@@ -538,10 +554,35 @@ describe("ledgerBalance", () => {
     expect(later).toMatchObject({
       accrued,
       held: 0,
-      released: accrued,
+      // Released nets the clawback against the share it negates: what is
+      // payable is what is left after the money that has to come back.
+      released: accrued - shares[0]!.amount,
       clawed_back: -shares[0]!.amount,
       paid: 1000,
       carried_forward: accrued - shares[0]!.amount - 1000,
+    });
+  });
+
+  it("nets a held share against its clawback, and holds both", async () => {
+    const day = await readCount([{ entry_id: ENTRY, count: READS }]);
+    const share = readShareRows(day, () => state())[0]!;
+    const clawback: LedgerRow = {
+      ...share,
+      id: `clawback:9:${share.id}`,
+      kind: "clawback",
+      amount: -share.amount,
+    };
+
+    // Inside the holdback, both rows wait: nothing is held, because nothing is
+    // owed, and nothing carries forward, because nothing is payable.
+    const balance = ledgerBalance([share, clawback], "2026-09-09T00:00:00.000Z");
+    expect(balance).toEqual({
+      accrued: share.amount,
+      held: 0,
+      released: 0,
+      clawed_back: -share.amount,
+      paid: 0,
+      carried_forward: 0,
     });
   });
 });

@@ -20,8 +20,9 @@
  *
  * Order matters and is deliberate: the id, the shape, the envelope signature,
  * the target, the identity, the whole submission pipeline on the correction,
- * the filing rules (src/dispute.ts), and last the two links a filing may claim
- * to be an upgrade of. Nothing is written until every one of them has passed,
+ * the filing rules (src/dispute.ts), the two links a filing may claim to be an
+ * upgrade of, and last the standing its stake needs (Section 9: standing "gates
+ * ... dispute stakes"). Nothing is written until every one of them has passed,
  * and the archive is written only after that: a refused filing leaves the log
  * exactly where it was.
  *
@@ -29,9 +30,11 @@
  * status are all src/derive.ts's, recomputed from a log that already holds these
  * events; the stake rows are src/stake.ts's, read out of the sealed event.
  *
- * No policy number lives here: the bare integers are HTTP status codes, and the
- * stake amounts reach the ledger through src/stake.ts from src/policy.ts. The id
- * pattern is read out of the entry schema rather than copied into TypeScript.
+ * No policy number lives here: the bare integers are HTTP status codes, and
+ * every amount is src/policy.ts's — the stake reaches the ledger through
+ * src/stake.ts, and the standing gate reads the same constant to say what a
+ * filer must be able to cover. The id pattern is read out of the entry schema
+ * rather than copied into TypeScript.
  */
 
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
@@ -39,15 +42,20 @@ import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: 
 import type { EntryStatus } from "../derive.js";
 import {
   checkDisputeFiling,
+  checkStakeCover,
+  lockedStanding,
   openDispute,
   openRevalidation,
 } from "../dispute.js";
 import type { Event, EventInput } from "../events.js";
+import { DISPUTE_STAKE_STANDING, LIST_PAGE_LIMIT } from "../policy.js";
 import { validateEntry, type ValidationError } from "../schema.js";
 import { disputeStake, revalidationOutcomeStakes } from "../stake.js";
 import {
   getEntry,
   openRevalidationAssignment,
+  openStakeRowsForOperator,
+  operatorStanding,
   recordDisputeFiling,
   type StoredEntryInput,
 } from "../storage/repository.js";
@@ -280,6 +288,9 @@ async function file(
   const targetEvents = targetWorld.entryEvents;
   const target = stored.entry as Record<string, unknown>;
 
+  const challengerOperator =
+    (prepared.core["author_operator"] as string | null) ?? null;
+
   const filing = checkDisputeFiling(
     prepared.core,
     {
@@ -289,8 +300,7 @@ async function file(
     },
     {
       challenger: auth.agent,
-      challengerOperator:
-        (prepared.core["author_operator"] as string | null) ?? null,
+      challengerOperator,
       openDisputes: openDispute(targetEvents) === null ? 0 : 1,
     },
   );
@@ -315,6 +325,26 @@ async function file(
       : revalidationLink(targetEvents, body.fromRevalidationSeq, auth.agent);
   if (body.fromRevalidationSeq !== null && upgraded === null) {
     return refuse(422, "bad_revalidation_link");
+  }
+
+  // Section 9: standing "gates everything discretionary, from entry to and stay
+  // in the trusted pool to revalidation-request caps and dispute stakes". So a
+  // registered operator has to be able to cover what it is about to stake, and
+  // available means its standing less what its still-open stakes already hold.
+  // The gate reads the standing the sweep stored, which is the published formula
+  // folded to the last sealed head and so at most one interval behind the log.
+  // A bare key is never gated: Section 6 has it stake a filing fee instead, and
+  // that fee is money rather than standing.
+  if (challengerOperator !== null) {
+    const stored = await operatorStanding(env.DB, challengerOperator);
+    const cover = checkStakeCover({
+      standing: stored?.standing ?? 0,
+      locked: lockedStanding(
+        await openStakeRowsForOperator(env.DB, challengerOperator, LIST_PAGE_LIMIT),
+      ),
+      stake: DISPUTE_STAKE_STANDING,
+    });
+    if (!cover.ok) return refuse(422, cover.reason);
   }
 
   // The draw the upgrade closes, if the request had one standing. Read before
@@ -362,8 +392,7 @@ async function file(
         payload: {
           correction_entry_id: submitted.payload.core["id"] as string,
           challenger: auth.agent,
-          operator:
-            (prepared.core["author_operator"] as string | null) ?? null,
+          operator: challengerOperator,
           citation: prepared.core["citation"] as string,
           snapshot_hash: prepared.core["snapshot_hash"] as string,
           from_report_seq: body.fromReportSeq,
