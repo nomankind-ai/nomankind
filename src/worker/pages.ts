@@ -46,12 +46,15 @@ import {
   countEntries,
   countSeals,
   countTrustedOperators,
+  disputeOf,
   eventsForEntry,
   getEntry,
   getOperator,
   latestSeal,
+  ledgerRowsForEntry,
   listEntriesPage,
   listOperators,
+  overturnedCountsByOperator,
   sealCovering,
   sealsAfter,
   supersedersOf,
@@ -159,6 +162,7 @@ function toOperatorRow(
   record: OperatorRecord,
   agents: number,
   validations: number,
+  overturned: number,
 ): OperatorRow {
   const trustedSeq = record.details["trusted_seq"];
   return {
@@ -170,6 +174,7 @@ function toOperatorRow(
     registeredSeq: record.registeredSeq,
     agents,
     validations,
+    overturned,
   };
 }
 
@@ -319,6 +324,10 @@ async function entry(
   const events = await eventsForEntry(db, id);
   const seal = await sealCovering(db, stored.submittedSeq);
   const superseders = await supersedersOf(db, id, LIST_PAGE_LIMIT);
+  const ledger = await ledgerRowsForEntry(db, id, LIST_PAGE_LIMIT);
+  // The other direction of overturned_by: what this entry was filed against,
+  // when it is itself a correction. Null for every entry that is not one.
+  const disputeTarget = await disputeOf(db, id);
   const trust = new TrustedOperators(db);
 
   const validations = events.filter(
@@ -398,6 +407,8 @@ async function entry(
       reconfirmations,
       superseders,
       stalenessWindowDays: typeof window === "number" ? window : null,
+      ledger,
+      disputeOf: disputeTarget,
     }),
   );
 }
@@ -419,12 +430,17 @@ async function operatorRows(db: D1Like): Promise<OperatorRow[]> {
   const agentsByOperator = new Map(
     agents.map((each) => [each.operator, each.count]),
   );
+  const overturned = await overturnedCountsByOperator(db, LIST_PAGE_LIMIT);
+  const overturnedByOperator = new Map(
+    overturned.map((each) => [each.operator, each.count]),
+  );
 
   return records.map((record) =>
     toOperatorRow(
       record,
       agentsByOperator.get(record.id) ?? 0,
       byOperator.get(record.id)?.count ?? 0,
+      overturnedByOperator.get(record.id) ?? 0,
     ),
   );
 }
@@ -443,13 +459,21 @@ async function operator(
 
   const agents = await agentsForOperator(db, id, LIST_PAGE_LIMIT);
   const validations = await validationsByOperator(db, id, LIST_PAGE_LIMIT);
+  // The same grouped read the directory does, narrowed to this one operator: an
+  // operator absent from it signed nothing that was overturned, which is a zero.
+  const overturned = await overturnedCountsByOperator(db, LIST_PAGE_LIMIT);
   const attestation = record.details["attestation"];
   const namedBy = record.details["named_by"];
   const payoutStatus = record.details["payout_status"];
 
   return htmlResponse(
     renderOperator(ctx, {
-      row: toOperatorRow(record, agents.length, validations.length),
+      row: toOperatorRow(
+        record,
+        agents.length,
+        validations.length,
+        overturned.find((each) => each.operator === id)?.count ?? 0,
+      ),
       agents: agents.map((each) => each.agentId),
       attestation:
         attestation !== null && typeof attestation === "object"

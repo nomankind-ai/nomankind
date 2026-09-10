@@ -15,6 +15,11 @@ import {
   agentIdFromPublicKey,
   appendEvent,
   bountyAccrual,
+  disputeOutcomeStakes,
+  disputeStake,
+  revalidationOutcomeStakes,
+  revalidationStake,
+  DISPUTE_STAKE_STANDING,
   buildReadCountPayload,
   buildAnchor,
   buildSeal,
@@ -72,6 +77,19 @@ import {
   listEntries,
   listOperators,
   bountiesForEntry,
+  correctionEntriesFor,
+  disputeOf,
+  dueRevalidationAssignments,
+  ledgerRowsForEntry,
+  openRevalidationAssignment,
+  overturnedCountsByOperator,
+  recordDisputeFiling,
+  recordFailureReport,
+  recordRevalidationAssignment,
+  recordRevalidationMissed,
+  recordRevalidationRequest,
+  recordRevalidationResolution,
+  type StoredEntryInput,
   markAssignmentAnswered,
   markAssignmentMissed,
   MissingSubmissionError,
@@ -691,6 +709,7 @@ describe("migrations", () => {
       "0006_sealing.sql",
       "0007_receipts.sql",
       "0008_sync.sql",
+      "0009_disputes.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -800,7 +819,119 @@ describe("migrations", () => {
       "0006_sealing.sql",
       "0007_receipts.sql",
       "0008_sync.sql",
+      "0009_disputes.sql",
     ]);
+  });
+});
+
+/**
+ * A sidecar written before M20 existed.
+ *
+ * `revalidations` is new in this milestone, so every row already in a live
+ * database has a sidecar_json without the key and the entry page reads
+ * `sidecar.revalidations.length` off it. Two things have to hold, and they are
+ * two different things: 0009 backfills what is already stored, and the reader
+ * defaults the key for a row the previous Worker writes in the window between
+ * that migration and the deploy that replaces it.
+ */
+describe("a sidecar stored before revalidations existed", () => {
+  /** 0009's backfill statement, taken from the migration file itself. */
+  function backfill(): string {
+    const migration = loadMigrations().find(
+      (one) => one.name === "0009_disputes.sql",
+    );
+    expect(migration).toBeDefined();
+    const found = splitStatements(migration!.sql).filter((statement) =>
+      statement.includes("json_set(sidecar_json"),
+    );
+    expect(found).toHaveLength(1);
+    return found[0]!;
+  }
+
+  /** One entries row whose sidecar_json is shaped as an older Worker wrote it. */
+  async function putPreM20(id: string): Promise<void> {
+    const entrySeals = await sealsForEntries(
+      world.bundle.events,
+      world.bundle.seals,
+    );
+    const derived = deriveEntry(
+      world.bundle.events,
+      VERIFIED_ENTRY_ID,
+      clock(),
+      entrySeals,
+    );
+    const entry = { ...derived.entry, id } as Record<string, unknown>;
+    // The key removed rather than emptied: undefined is what the page met.
+    const { revalidations: _gone, ...older } = derived.sidecar;
+    expect(Object.keys(older)).not.toContain("revalidations");
+
+    await test.db
+      .prepare(
+        `INSERT INTO entries
+           (id, subject, category, status, submitted_at, submitted_seq,
+            author, entry_json, sidecar_json, derived_through_seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id,
+        entry["subject"] as string,
+        entry["category"] as string,
+        entry["status"] as string,
+        entry["submitted_at"] as string,
+        0,
+        entry["author"] as string,
+        JSON.stringify(entry),
+        JSON.stringify(older),
+        0,
+      )
+      .run();
+
+    const raw = await test.db
+      .prepare(`SELECT sidecar_json FROM entries WHERE id = ?`)
+      .bind(id)
+      .first<{ sidecar_json: string }>();
+    expect(JSON.parse(raw!.sidecar_json)).not.toHaveProperty("revalidations");
+  }
+
+  it("is backfilled with an empty list by 0009", async () => {
+    const id = `nmk_${"0".repeat(31)}1`;
+    await putPreM20(id);
+
+    await test.db.prepare(backfill()).run();
+
+    // The column itself, so this is the migration answering and not the reader.
+    const raw = await test.db
+      .prepare(`SELECT sidecar_json FROM entries WHERE id = ?`)
+      .bind(id)
+      .first<{ sidecar_json: string }>();
+    expect(JSON.parse(raw!.sidecar_json)).toHaveProperty("revalidations", []);
+
+    const stored = await getEntry(test.db, id);
+    expect(stored!.sidecar.revalidations).toEqual([]);
+  });
+
+  it("leaves a row that already carries the key alone", async () => {
+    // The filter is the point: a derived list of real checks must survive the
+    // backfill, and running it twice must not flatten one.
+    const stored = await getEntry(test.db, VERIFIED_ENTRY_ID);
+    expect(stored).not.toBeNull();
+
+    await test.db.prepare(backfill()).run();
+    await test.db.prepare(backfill()).run();
+
+    const again = await getEntry(test.db, VERIFIED_ENTRY_ID);
+    expect(again!.sidecar).toEqual(stored!.sidecar);
+  });
+
+  it("reads back as an empty list even when the backfill has not run", async () => {
+    const id = `nmk_${"0".repeat(31)}2`;
+    await putPreM20(id);
+
+    const stored = await getEntry(test.db, id);
+    expect(stored).not.toBeNull();
+    expect(stored!.sidecar.revalidations).toEqual([]);
+    // Nothing else about the sidecar is invented by the default.
+    expect(stored!.sidecar.effective_tier).toBeDefined();
   });
 });
 
@@ -2815,5 +2946,472 @@ describe("sync receipts", () => {
 
   it("starts the publication from the sync receipt's earlier day", async () => {
     expect(await earliestReadReceiptDay(syncing.db)).toBe("2026-09-08");
+  });
+});
+
+/**
+ * Disputes, revalidations and failure reports, in their own database.
+ *
+ * Whitepaper Section 6, "Dispute": a challenge is itself an entry, so filing one
+ * writes two events on two entries and a ledger row, and all of it lands or none
+ * of it does; "an upheld challenge returns the stake, pays the challenger,
+ * overturns the entry", which happens in the batch of the decision that verified
+ * the correction. Section 6, "Revalidate": a request is drawn for and answered
+ * like a validation assignment, which is why it shares that table and why the
+ * purpose column has to keep the two apart. Section 8: a threshold of reports
+ * auto-opens a check, in the batch of the report that reached it.
+ *
+ * A round trip each: the chain read back still verifies, and the rows beside it
+ * say exactly what the events say. Every derived row is rederived by the test
+ * itself, because nothing in storage derives a field.
+ */
+describe("dispute and revalidation writes", () => {
+  const AUTHOR = "1F916:6PmY_Rl-vJoqcBTdMBoMbLZLc0nUqYHpXK0dK7hM8kQ";
+  const CHALLENGER = "1F916:2m1F1TL0ByLTHM_ZDvGGVMDLtvgFcT7l8jvpZ4bVMSU";
+  const REPORTER = "1F916:Ku8xLPHqQ0nMi3ZQrpFvJXfDl9fJ0oO0yYy0OaXWQ7A";
+  const AUTHOR_OPERATOR = "kestrel.example";
+  const CHALLENGER_OPERATOR = "harrier.example";
+  const CHECKER = "osprey.example";
+  const SUBJECT = "kestrel/kestrel-9";
+  const AT = "2026-09-08T12:00:00.000Z";
+  const CLOCK = { now: AT };
+  const SNAPSHOT = `sha256:${"7c".repeat(32)}`;
+  const ARTIFACT = `sha256:${"6d".repeat(32)}`;
+
+  let store: TestDatabase;
+  let log: Event[] = [];
+  let targetId: string;
+  let checkedId: string;
+  let correctionId: string;
+  let filedEvent: Event<"dispute_filed">;
+
+  /**
+   * Each entry's own events, mirrored here as the writes land. Kept rather than
+   * re-read because the writers' callbacks are synchronous: the caller has to
+   * already hold the log it derives from, which is exactly how the Worker's
+   * routes will do it too.
+   */
+  const events = new Map<string, Event[]>();
+
+  function seen(...sealed: readonly Event[]): void {
+    for (const event of sealed) {
+      const id = event.entry_id as string;
+      events.set(id, [...(events.get(id) ?? []), event]);
+    }
+  }
+
+  /** One entry rederived over its own events plus `extra`, as a writer takes it. */
+  function stored(
+    id: string,
+    extra: readonly Event[],
+    seq: number,
+  ): StoredEntryInput {
+    const derived = deriveEntry(
+      [...(events.get(id) ?? []), ...extra],
+      id,
+      CLOCK,
+    );
+    return {
+      entry: derived.entry,
+      sidecar: derived.sidecar,
+      derivedThroughSeq: seq,
+    };
+  }
+
+  async function submit(
+    claim: string,
+    at: string,
+    author = AUTHOR,
+  ): Promise<string> {
+    const core = await buildSubmittedCore(
+      {
+        subject: SUBJECT,
+        category: "pricing",
+        claim,
+        before: "$25 per seat per month",
+        after: "$30 per seat per month",
+        effective_at: "2026-09-01",
+        citation: "https://kestrel.example/pricing-9",
+        snapshot_hash: SNAPSHOT,
+        supersedes: null,
+        author,
+        author_operator: AUTHOR_OPERATOR,
+      },
+      { now: at },
+    );
+    const id = core["id"] as string;
+    log = await appendEvent(log, {
+      at,
+      type: "entry_submitted",
+      entry_id: id,
+      payload: { core, signature: "c2lnbmF0dXJl" },
+    });
+    const event = log[log.length - 1]!;
+    const derived = deriveEntry(log, id, { now: at });
+    await submitEntry(store.db, {
+      events: [event],
+      entry: derived.entry,
+      sidecar: derived.sidecar,
+      derivedThroughSeq: event.seq,
+      captures: [],
+    });
+    seen(event);
+    return id;
+  }
+
+  beforeAll(async () => {
+    store = await openTestDatabase();
+    targetId = await submit("Kestrel-9 seat pricing is $25 per seat per month", AT);
+    checkedId = await submit(
+      "Kestrel-9 storage pricing is $5 per terabyte",
+      "2026-09-08T12:05:00.000Z",
+    );
+  });
+
+  afterAll(async () => {
+    await store?.dispose();
+  });
+
+  it("files a dispute: the correction, the challenge, both rows and the stake", async () => {
+    const at = "2026-09-08T13:00:00.000Z";
+    const correctionCore = await buildSubmittedCore(
+      {
+        subject: SUBJECT,
+        category: "correction",
+        claim: "Kestrel-9 seat pricing never moved off $25",
+        before: "$30 per seat per month",
+        after: "$25 per seat per month",
+        effective_at: "2026-09-01",
+        citation: "https://kestrel.example/pricing-9-archive",
+        snapshot_hash: SNAPSHOT,
+        supersedes: null,
+        author: CHALLENGER,
+        author_operator: CHALLENGER_OPERATOR,
+      },
+      { now: at },
+    );
+    correctionId = correctionCore["id"] as string;
+
+    const capture: CaptureRecord = {
+      entryId: correctionId,
+      role: "snapshot",
+      contentHash: SNAPSHOT,
+      archiveHash: SNAPSHOT,
+      normVersion: "norm-v1.2",
+      kind: "html",
+      mediaType: "text/html",
+      size: 42,
+      fetchedAt: at,
+    };
+
+    const filing = await recordDisputeFiling(store.db, {
+      correction: {
+        event: {
+          at,
+          type: "entry_submitted",
+          entry_id: correctionId,
+          payload: { core: correctionCore, signature: "c2lnbmF0dXJl" },
+        },
+        stored: (submitted, filed) => {
+          const derived = deriveEntry([submitted], correctionId, CLOCK);
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: filed.seq,
+          };
+        },
+        captures: [capture],
+      },
+      filed: (submitted) => ({
+        at,
+        type: "dispute_filed",
+        entry_id: targetId,
+        payload: {
+          correction_entry_id: submitted.entry_id as string,
+          challenger: CHALLENGER,
+          operator: CHALLENGER_OPERATOR,
+          citation: correctionCore["citation"] as string,
+          snapshot_hash: correctionCore["snapshot_hash"] as string,
+          from_report_seq: null,
+          from_revalidation_seq: null,
+        },
+      }),
+      target: (_submitted, filed) => stored(targetId, [filed], filed.seq),
+      stake: (filed) => disputeStake(filed),
+    });
+    filedEvent = filing.filed;
+    seen(filing.submitted, filing.filed);
+
+    // The submission comes first: the challenge names an entry the log has seen.
+    expect(filing.submitted.seq + 1).toBe(filing.filed.seq);
+    expect(
+      await verifyChain(await eventsInRange(store.db, 0, filing.filed.seq)),
+    ).toEqual({ ok: true, length: filing.filed.seq + 1 });
+
+    // The correction is linked to what it disputes, read back both ways.
+    expect(await disputeOf(store.db, correctionId)).toBe(targetId);
+    expect(await disputeOf(store.db, targetId)).toBeNull();
+    expect(await disputeOf(store.db, "nmk_01NOTHERE")).toBeNull();
+    expect(
+      (await correctionEntriesFor(store.db, targetId, 10)).map(
+        (row) => row.entry["id"],
+      ),
+    ).toEqual([correctionId]);
+    expect(await correctionEntriesFor(store.db, checkedId, 10)).toEqual([]);
+
+    // The target's own row now carries the challenge in disputes[].
+    const target = (await getEntry(store.db, targetId))!;
+    expect(target.entry["disputes"]).toHaveLength(1);
+
+    // The capture the correction rests on landed in the same batch.
+    expect(await capturesForEntry(store.db, correctionId)).toEqual([capture]);
+
+    // And the stake the challenger put up, filed against the disputed entry.
+    const rows = await ledgerRowsForEntry(store.db, targetId, 10);
+    expect(rows.map((row) => row.kind)).toEqual(["dispute_stake"]);
+    expect(rows[0]!.amount).toBe(DISPUTE_STAKE_STANDING);
+    expect(rows[0]!.correction_entry_id).toBe(correctionId);
+  });
+
+  it("upholds it: dispute_upheld and the refund land with the validation", async () => {
+    const record: ApproverRecord = {
+      agent: `1F916:agent-${CHECKER}`,
+      operator: CHECKER,
+      decision: "approve",
+      reason: null,
+      snapshot_hash: SNAPSHOT,
+      assigned_random: false,
+      test_accepted: null,
+      reproduction: null,
+      observation: null,
+      signed_at: AT,
+    };
+
+    const validation = await recordValidation(store.db, {
+      event: {
+        at: AT,
+        type: "validation",
+        entry_id: correctionId,
+        payload: { record, signature: "c2lnbmF0dXJl" },
+      },
+      // Section 6: the decision that verifies the correction is the moment the
+      // entry it corrects is overturned. One batch, or neither.
+      alsoEvents: () => [
+        {
+          at: AT,
+          type: "dispute_upheld",
+          entry_id: targetId,
+          payload: { correction_entry_id: correctionId },
+        },
+      ],
+      stored: (event) => stored(correctionId, [event], event.seq),
+      also: (event, extra) => [
+        stored(targetId, extra, event.seq + extra.length),
+      ],
+      answeredAssignmentSeq: null,
+      ledger: (_event, extra) =>
+        disputeOutcomeStakes(filedEvent, extra[0] as Event<"dispute_upheld">),
+    });
+
+    const upheldSeq = validation.seq + 1;
+    const upheld = (await eventBySeq(store.db, upheldSeq))!;
+    expect(upheld.type).toBe("dispute_upheld");
+    expect(await verifyChain(await eventsInRange(store.db, 0, upheldSeq))).toEqual({
+      ok: true,
+      length: upheldSeq + 1,
+    });
+    seen(validation, upheld);
+
+    // The original stays in the log, marked overturned, linked to its correction.
+    const target = (await getEntry(store.db, targetId))!;
+    expect(target.entry["status"]).toBe("overturned");
+    expect(target.entry["overturned_by"]).toBe(correctionId);
+    const [dispute] = target.entry["disputes"] as Record<string, unknown>[];
+    expect(dispute!["outcome"]).toBe("upheld");
+
+    // The stake comes back and a reward is owed, both at the outcome's position.
+    const rows = await ledgerRowsForEntry(store.db, targetId, 10);
+    expect(rows.map((row) => row.kind)).toEqual([
+      "dispute_stake",
+      "dispute_refund",
+      "dispute_reward",
+    ]);
+    expect(rows[1]!.amount).toBe(DISPUTE_STAKE_STANDING);
+    expect(rows[2]!.amount).toBeNull();
+
+    // The operators that signed the overturned entry, counted for standing.
+    expect(await overturnedCountsByOperator(store.db, 10)).toEqual([
+      { operator: AUTHOR_OPERATOR, count: 1 },
+    ]);
+  });
+
+  it("runs a revalidation: request, draw, miss, and resolution", async () => {
+    const request = await recordRevalidationRequest(store.db, {
+      event: {
+        at: AT,
+        type: "revalidation_requested",
+        entry_id: checkedId,
+        payload: {
+          requester: CHALLENGER,
+          operator: CHALLENGER_OPERATOR,
+          source: "operator",
+        },
+      },
+      stored: (event) => stored(checkedId, [event], event.seq),
+      ledger: (event) => {
+        const stake = revalidationStake(event);
+        return stake === null ? [] : [stake];
+      },
+    });
+    seen(request);
+    expect(await ledgerRowsForEntry(store.db, checkedId, 10)).toHaveLength(1);
+
+    const assigned = await recordRevalidationAssignment(store.db, {
+      event: {
+        at: AT,
+        type: "revalidation_assigned",
+        entry_id: checkedId,
+        payload: {
+          request_seq: request.seq,
+          agent: `1F916:agent-${CHECKER}`,
+          operator: CHECKER,
+          beacon_round: 991,
+          deadline: "2026-09-11T12:00:00.000Z",
+        },
+      },
+      stored: (event) => stored(checkedId, [event], event.seq),
+    });
+    seen(assigned);
+
+    // The purpose column keeps the two kinds of draw apart in both directions.
+    expect((await openRevalidationAssignment(store.db, checkedId))!.seq).toBe(
+      assigned.seq,
+    );
+    expect(await openAssignment(store.db, checkedId)).toBeNull();
+    const due = await dueRevalidationAssignments(store.db, "2026-09-12T00:00:00Z", 10);
+    expect(due.map((row) => row.requestSeq)).toEqual([request.seq]);
+    expect(await dueAssignments(store.db, "2026-09-12T00:00:00Z", 10)).toEqual([]);
+
+    // A miss closes the draw and leaves the request owed.
+    const missed = await recordRevalidationMissed(
+      store.db,
+      {
+        event: {
+          at: AT,
+          type: "revalidation_missed",
+          entry_id: checkedId,
+          payload: {
+            request_seq: request.seq,
+            agent: `1F916:agent-${CHECKER}`,
+            operator: CHECKER,
+          },
+        },
+        stored: (event) => stored(checkedId, [event], event.seq),
+      },
+      assigned.seq,
+    );
+    seen(missed);
+    expect(await openRevalidationAssignment(store.db, checkedId)).toBeNull();
+    expect(
+      await dueRevalidationAssignments(store.db, "2026-09-12T00:00:00Z", 10),
+    ).toEqual([]);
+
+    // The entry held, so the requester loses the stake.
+    const resolution = await recordRevalidationResolution(store.db, {
+      event: {
+        at: AT,
+        type: "revalidation_resolved",
+        entry_id: checkedId,
+        payload: {
+          request_seq: request.seq,
+          outcome: "held",
+          checker: `1F916:agent-${CHECKER}`,
+          operator: CHECKER,
+          snapshot_hash: SNAPSHOT,
+          correction_entry_id: null,
+        },
+      },
+      stored: (event) => stored(checkedId, [event], event.seq),
+      ledger: (event) => revalidationOutcomeStakes(request, event),
+    });
+    seen(resolution);
+
+    expect(await eventBySeq(store.db, resolution.seq)).toEqual(resolution);
+    const row = (await getEntry(store.db, checkedId))!;
+    const [view] = row.sidecar.revalidations;
+    expect(view!.request_seq).toBe(request.seq);
+    expect(view!.outcome).toBe("held");
+    expect(view!.assigned).toBeNull();
+    expect(
+      (await ledgerRowsForEntry(store.db, checkedId, 10)).map((one) => one.kind),
+    ).toEqual(["revalidation_stake", "revalidation_forfeit"]);
+  });
+
+  it("auto-opens a check in the batch of the report that reached the threshold", async () => {
+    const filed = await recordFailureReport(store.db, {
+      event: {
+        at: AT,
+        type: "failure_report",
+        entry_id: checkedId,
+        payload: {
+          reporter: REPORTER,
+          operator: CHECKER,
+          observed: "The storage endpoint billed $7, not $5.",
+          artifact_hash: ARTIFACT,
+          citation: null,
+        },
+      },
+      capture: (report) => ({
+        entryId: checkedId,
+        // A role of its own, so one reader's artifact never overwrites another's
+        // or the entry's own captures.
+        role: `report:${report.seq}`,
+        contentHash: ARTIFACT,
+        archiveHash: ARTIFACT,
+        normVersion: "norm-v1.2",
+        kind: "transcript",
+        mediaType: "application/json",
+        size: 128,
+        fetchedAt: AT,
+      }),
+      // Section 8: the check nomankind opens itself, at its own expense.
+      opens: () => ({
+        at: AT,
+        type: "revalidation_requested",
+        entry_id: checkedId,
+        payload: { requester: null, operator: null, source: "failure_reports" },
+      }),
+      stored: (report, opened) =>
+        stored(
+          checkedId,
+          opened === null ? [report] : [report, opened],
+          (opened ?? report).seq,
+        ),
+    });
+    seen(filed.report, filed.opened!);
+
+    expect(filed.opened).not.toBeNull();
+    expect(filed.opened!.seq).toBe(filed.report.seq + 1);
+    expect(
+      await verifyChain(await eventsInRange(store.db, 0, filed.opened!.seq)),
+    ).toEqual({ ok: true, length: filed.opened!.seq + 1 });
+
+    const row = (await getEntry(store.db, checkedId))!;
+    const reports = row.entry["failure_reports"] as Record<string, unknown>[];
+    expect(reports).toHaveLength(1);
+    expect(reports[0]!["artifact_hash"]).toBe(ARTIFACT);
+    expect(reports[0]!["upgraded_to"]).toBeNull();
+    // Two requests now: the operator's, and the one the reports opened.
+    expect(row.sidecar.revalidations).toHaveLength(2);
+    expect(row.sidecar.revalidations[1]!.source).toBe("failure_reports");
+    // Nomankind staked nothing against itself, so the ledger did not move.
+    expect(
+      (await ledgerRowsForEntry(store.db, checkedId, 10)).map((one) => one.kind),
+    ).toEqual(["revalidation_stake", "revalidation_forfeit"]);
+
+    // The artifact is its own capture row, under its own role.
+    expect(
+      (await capturesForEntry(store.db, checkedId)).map((one) => one.role),
+    ).toEqual([`report:${filed.report.seq}`]);
   });
 });

@@ -22,6 +22,12 @@
  * test verdict, the reproduction counts — exposed raw beside it, never as a
  * number.
  *
+ * Section 6, dispute and revalidate, and Section 8, failure reports: what was
+ * filed against the entry is shown beside what was signed for it, with the
+ * outcome of each and the stakes the ledger recorded. The disputes and the
+ * reports are read off the entry's own arrays and the revalidations off the
+ * stored sidecar, so nothing on this page is folded a second time here.
+ *
  * Neutral tone throughout: the page prints what the record says and never
  * characterises it. Pure: no clock, no storage, no derivation.
  */
@@ -163,6 +169,10 @@ function derived(data: EntryData): Safe {
             html`<dt>${key}</dt>
               <dd>${derivedValue(data.entry, key)}</dd>`,
         )}
+        ${data.disputeOf === null
+          ? raw("")
+          : html`<dt>dispute of</dt>
+              <dd>${entryLink(data.disputeOf)}</dd>`}
       </dl>
       <p class="note">
         confidence is null for every entry until conf-v1 is published; its inputs
@@ -340,6 +350,314 @@ function reconfirmations(data: EntryData): Safe {
   </section>`;
 }
 
+/** The items of one of the entry's append-only arrays, by the schema's name. */
+function items(entry: Record_, key: string): Record_[] {
+  const value = entry[key];
+  return Array.isArray(value) ? (value as Record_[]) : [];
+}
+
+/**
+ * A citation, which is somebody else's URL. `safeHref` refuses anything that is
+ * not http or https and the text is shown instead, exactly as the core does it.
+ */
+function citationCell(value: unknown): Safe {
+  if (value === null || value === undefined || value === "") {
+    return html`${EM_DASH}`;
+  }
+  const href = safeHref(value);
+  return href === null
+    ? html`<span class="break">${value}</span>`
+    : html`<span class="break">${link(href, href, true)}</span>`;
+}
+
+/** An operator that filed something, or the words for a key that has none. */
+function filerOperator(value: unknown): Safe {
+  return typeof value === "string" && value !== ""
+    ? html`<a href="/operators/${value}">${value}</a>`
+    : html`<span class="dim">bare key</span>`;
+}
+
+/**
+ * The badge class for a dispute outcome. Section 6: an upheld challenge
+ * overturns the entry, a failed one forfeits the stake, and an open one has
+ * decided nothing yet — so the three read as three different things and never as
+ * one colour.
+ */
+function outcomeClass(outcome: string): string {
+  switch (outcome) {
+    case "open":
+      return "b-open";
+    case "upheld":
+      return "b-upheld";
+    default:
+      return "b-failed";
+  }
+}
+
+/**
+ * The disputes filed against this entry (Section 6, Dispute).
+ *
+ * Every challenge is itself an entry in the correction category, so the id is a
+ * link into the log rather than a bare string: a reader who is told an entry was
+ * challenged and cannot read the challenge has been told nothing.
+ */
+function disputes(data: EntryData): Safe {
+  const rows = items(data.entry, "disputes");
+  if (rows.length === 0) {
+    return html`<section class="panel">
+      <div class="panel-head"><h2>Disputes</h2></div>
+      <div class="panel-empty">No dispute has been filed.</div>
+    </section>`;
+  }
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Disputes</h2>
+      <span class="panel-label">a challenge is itself an entry</span>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>id</th>
+            <th>challenger</th>
+            <th>operator</th>
+            <th>citation</th>
+            <th>snapshot_hash</th>
+            <th>outcome</th>
+            <th>reason</th>
+            <th>filed_at</th>
+            <th>resolved_at</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((each) => {
+            const hash = text(each, "snapshot_hash");
+            const outcome = text(each, "outcome") ?? EM_DASH;
+            return html`<tr class="row">
+              <td class="break">${entryLink(text(each, "id") ?? EM_DASH)}</td>
+              <td class="break">${text(each, "challenger") ?? EM_DASH}</td>
+              <td>${filerOperator(each["operator"])}</td>
+              <td>${citationCell(each["citation"])}</td>
+              <td class="muted" title="${hash ?? ""}">
+                ${hash === null ? EM_DASH : shortHash(hash)}
+              </td>
+              <td>${badge(outcomeClass(outcome), outcome)}</td>
+              <td class="prose">${text(each, "reason") ?? EM_DASH}</td>
+              <td class="dim">${fmtInstant(text(each, "filed_at"))}</td>
+              <td class="dim">${fmtInstant(text(each, "resolved_at"))}</td>
+            </tr>`;
+          })}
+        </tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+/**
+ * The failure reports filed on this entry (Section 8).
+ *
+ * A report changes neither the core nor the status by itself: it is what a
+ * reader saw, the artifact they saw it in, and — when it was upgraded — the
+ * dispute it became.
+ */
+function failureReports(data: EntryData): Safe {
+  const rows = items(data.entry, "failure_reports");
+  if (rows.length === 0) {
+    return html`<section class="panel">
+      <div class="panel-head"><h2>Failure reports</h2></div>
+      <div class="panel-empty">No failure report has been filed.</div>
+    </section>`;
+  }
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Failure reports</h2>
+      <span class="panel-label">signals, never a status change</span>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>reporter</th>
+            <th>operator</th>
+            <th>observed</th>
+            <th>artifact_hash</th>
+            <th>citation</th>
+            <th>upgraded_to</th>
+            <th>filed_at</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((each) => {
+            const hash = text(each, "artifact_hash");
+            const upgraded = text(each, "upgraded_to");
+            return html`<tr class="row">
+              <td class="break">${text(each, "reporter") ?? EM_DASH}</td>
+              <td>${filerOperator(each["operator"])}</td>
+              <td class="prose">${text(each, "observed") ?? EM_DASH}</td>
+              <td class="muted" title="${hash ?? ""}">
+                ${hash === null
+                  ? raw(EM_DASH)
+                  : html`<a href="/captures/${hash}">${shortHash(hash)}</a>`}
+              </td>
+              <td>${citationCell(each["citation"])}</td>
+              <td class="break">
+                ${upgraded === null
+                  ? html`<span class="dim">not upgraded</span>`
+                  : entryLink(upgraded)}
+              </td>
+              <td class="dim">${fmtInstant(text(each, "filed_at"))}</td>
+            </tr>`;
+          })}
+        </tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+/**
+ * The revalidation requests on this entry, from the sidecar (Section 6,
+ * Revalidate).
+ *
+ * Read from the stored sidecar rather than folded here: the view was derived
+ * from the entry's own events when the entry was written, and a page that folded
+ * them again would be a second derivation nobody can compare against the first.
+ */
+function revalidations(data: EntryData): Safe {
+  const rows = data.sidecar.revalidations;
+  if (rows.length === 0) {
+    return html`<section class="panel">
+      <div class="panel-head"><h2>Revalidations</h2></div>
+      <div class="panel-empty">No revalidation has been requested.</div>
+    </section>`;
+  }
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Revalidations</h2>
+      <span class="panel-label">the checker is drawn by the beacon</span>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>request_seq</th>
+            <th>requester</th>
+            <th>operator</th>
+            <th>requested_at</th>
+            <th>assigned</th>
+            <th>outcome</th>
+            <th>checker</th>
+            <th>resolved_at</th>
+            <th>correction</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((each) => {
+            const assigned = each.assigned;
+            return html`<tr class="row">
+              <td class="dim">${each.request_seq}</td>
+              <td class="break">
+                ${each.source === "failure_reports"
+                  ? html`<span class="dim"
+                      >nomankind, from failure reports</span
+                    >`
+                  : html`${each.requester ?? EM_DASH}`}
+              </td>
+              <td>
+                ${each.operator === null
+                  ? raw(EM_DASH)
+                  : html`<a href="/operators/${each.operator}"
+                      >${each.operator}</a
+                    >`}
+              </td>
+              <td class="dim">${fmtInstant(each.requested_at)}</td>
+              <td class="break">
+                ${assigned === null
+                  ? html`<span class="dim">not yet drawn</span>`
+                  : html`<div>${assigned.agent}</div>
+                      <div>
+                        <a href="/operators/${assigned.operator}"
+                          >${assigned.operator}</a
+                        >
+                      </div>
+                      <div class="dim">${fmtInstant(assigned.deadline)}</div>`}
+              </td>
+              <td>${each.outcome}</td>
+              <td class="break">${each.checker ?? EM_DASH}</td>
+              <td class="dim">${fmtInstant(each.resolved_at)}</td>
+              <td class="break">
+                ${each.correction_entry_id === null
+                  ? raw(EM_DASH)
+                  : entryLink(each.correction_entry_id)}
+              </td>
+            </tr>`;
+          })}
+        </tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+/**
+ * The stakes this entry's disputes and revalidations put up.
+ *
+ * Every row is a ledger record derived from a sealed event, and an amount is
+ * shown only where the record carries one: a reward has none, because pricing is
+ * a later milestone's and a number invented here would be a policy nobody
+ * decided.
+ */
+function stakes(data: EntryData): Safe {
+  if (data.ledger.length === 0) {
+    return html`<section class="panel">
+      <div class="panel-head"><h2>Stakes</h2></div>
+      <div class="panel-empty">No stake has been recorded.</div>
+    </section>`;
+  }
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Stakes</h2>
+      <span class="panel-label">ledger rows, derived from the log</span>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>kind</th>
+            <th>who</th>
+            <th>amount</th>
+            <th>seq</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.ledger.map(
+            (stake) => html`<tr class="row">
+              <td>${stake.kind}</td>
+              <td class="break">
+                ${stake.operator === null
+                  ? html`${stake.agent ?? EM_DASH}`
+                  : html`<a href="/operators/${stake.operator}"
+                      >${stake.operator}</a
+                    >`}
+              </td>
+              <td>
+                ${stake.amount === null
+                  ? html`<span class="dim">unpriced</span>`
+                  : html`${stake.amount} ${stake.unit ?? EM_DASH}`}
+              </td>
+              <td class="dim">${stake.seq}</td>
+            </tr>`,
+          )}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      No money moves on any of these rows. The amounts are the placeholders the
+      policy page publishes, and they stand until the milestone that prices them
+      is built; a row with no amount is a fact the log records without a number
+      attached.
+    </p>
+  </section>`;
+}
+
 /** This entry's own events, each with the route that proves it is in a seal. */
 function events(data: EntryData): Safe {
   return html`<section class="panel">
@@ -491,7 +809,8 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
 
       <div class="cols">${core(data)} ${derived(data)}</div>
       <div class="cols">${sidecar(data)} ${seal(data)}</div>
-      ${approvers(data)} ${reconfirmations(data)}
+      ${approvers(data)} ${reconfirmations(data)} ${disputes(data)}
+      ${failureReports(data)} ${revalidations(data)} ${stakes(data)}
       ${data.superseders.length === 0
         ? raw("")
         : html`<section class="panel">

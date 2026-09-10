@@ -40,6 +40,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
+import type { Core } from "../core.js";
 import { signCore } from "../sign.js";
 import { buildSubmittedCore } from "../submit.js";
 import {
@@ -186,6 +187,87 @@ export async function operatorFor(
   return typeof id === "string" ? id : null;
 }
 
+/**
+ * A core built and ready to sign, or the reason the run stopped before one
+ * could be.
+ *
+ * `usage` is what tells a mistake about the fields file from a refusal: a file
+ * naming a field the author does not choose was never a submission at all, and
+ * the CLI exits 2 rather than 1 for it.
+ */
+export type CoreAttempt =
+  | { ok: true; core: Core }
+  | { ok: false; reason: string; detail: string | null; usage: boolean };
+
+/**
+ * Read an author's fields, capture the citation, and build the signed core.
+ *
+ * The whole front half of a submission, in one place, because the dispute
+ * command needs exactly it: Section 6's challenge "is itself an entry, in the
+ * correction category", so a challenger builds a core the same way an author
+ * does — the same checked fields, the same fetch under the norm rule, the same
+ * `buildSubmittedCore` naming and stamping it, the same `author_operator` read
+ * from the registry rather than guessed. Two commands doing that two ways would
+ * be two ways for the same core to come out different.
+ *
+ * Nothing is signed and nothing is sent here.
+ */
+export async function buildAuthoredCore(input: {
+  readonly key: ValidatorKey;
+  readonly baseUrl: string;
+  readonly fields: Record<string, unknown>;
+  readonly deps: {
+    readonly http: HttpClient;
+    readonly fetcher: SnapshotFetcher;
+    readonly now: Date;
+  };
+}): Promise<CoreAttempt> {
+  const { deps } = input;
+
+  const checked = checkFields(input.fields);
+  if (!checked.ok) {
+    return {
+      ok: false,
+      reason: checked.reason,
+      detail: checked.detail,
+      usage: true,
+    };
+  }
+  const fields = checked.fields;
+  const citation = fields["citation"] as string;
+
+  // Section 6: the source is snapshotted at the moment of submission. The
+  // Worker fetches it again for itself and refuses a hash that disagrees.
+  const captured = await fetchAndHash(deps.fetcher, citation);
+  if (!captured.ok) {
+    return { ok: false, reason: captured.reason, detail: null, usage: false };
+  }
+
+  const core = await buildSubmittedCore(
+    {
+      subject: fields["subject"] as string,
+      category: fields["category"] as string,
+      claim: fields["claim"] as string,
+      before: fields["before"] as string,
+      after: fields["after"] as string,
+      effective_at: fields["effective_at"] as string,
+      evidence: fields["evidence"],
+      observation: fields["observation"],
+      citation,
+      snapshot_hash: captured.snapshot.hash,
+      supersedes: (fields["supersedes"] as string | null | undefined) ?? null,
+      author: input.key.agentId,
+      author_operator: await operatorFor(
+        deps.http,
+        input.baseUrl,
+        input.key.agentId,
+      ),
+    },
+    { now: deps.now.toISOString() },
+  );
+  return { ok: true, core };
+}
+
 /** What one submission run did. `code` is the exit code the CLI reports. */
 export interface SubmitRun {
   /** The entry is on the log. */
@@ -225,48 +307,25 @@ export async function runSubmit(input: {
 }): Promise<SubmitRun> {
   const { deps } = input;
 
-  const checked = checkFields(input.fields);
-  if (!checked.ok) {
-    deps.io.stderr(`${checked.reason}: ${checked.detail}`);
+  const built = await buildAuthoredCore({
+    key: input.key,
+    baseUrl: input.baseUrl,
+    fields: input.fields,
+    deps,
+  });
+  if (!built.ok) {
+    if (!built.usage) return stopped(built.reason);
+    deps.io.stderr(`${built.reason}: ${built.detail ?? ""}`);
     return {
       ok: false,
       code: 2,
       status: null,
-      error: checked.reason,
+      error: built.reason,
       entryId: null,
       entryStatus: null,
     };
   }
-  const fields = checked.fields;
-  const citation = fields["citation"] as string;
-
-  // Section 6: the source is snapshotted at the moment of submission. The
-  // Worker fetches it again for itself and refuses a hash that disagrees.
-  const captured = await fetchAndHash(deps.fetcher, citation);
-  if (!captured.ok) return stopped(captured.reason);
-
-  const core = await buildSubmittedCore(
-    {
-      subject: fields["subject"] as string,
-      category: fields["category"] as string,
-      claim: fields["claim"] as string,
-      before: fields["before"] as string,
-      after: fields["after"] as string,
-      effective_at: fields["effective_at"] as string,
-      evidence: fields["evidence"],
-      observation: fields["observation"],
-      citation,
-      snapshot_hash: captured.snapshot.hash,
-      supersedes: (fields["supersedes"] as string | null | undefined) ?? null,
-      author: input.key.agentId,
-      author_operator: await operatorFor(
-        deps.http,
-        input.baseUrl,
-        input.key.agentId,
-      ),
-    },
-    { now: deps.now.toISOString() },
-  );
+  const { core } = built;
   const entryId = core["id"] as string;
 
   const signature = await signCore(core, input.key.privateKey);

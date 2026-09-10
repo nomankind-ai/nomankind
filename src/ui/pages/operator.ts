@@ -7,6 +7,10 @@
  * signature — because that is what an offline reader rechecks it from; the page
  * neither verifies it nor claims it verified.
  *
+ * The overturned count in the record block is the same reading the directory
+ * shows (Section 6): entries this operator signed that an upheld dispute
+ * overturned, counted once per entry.
+ *
  * Pure: the route gathered all of it.
  */
 
@@ -112,6 +116,10 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
               <dd class="break">${data.namedBy ?? EM_DASH}</dd>
               <dt>payout status</dt>
               <dd>${data.payoutStatus ?? EM_DASH}</dd>
+              <dt>overturned</dt>
+              <dd class="${row.overturned === 0 ? "" : "danger"}">
+                ${row.overturned}
+              </dd>
             </dl>
           </div>
         </section>

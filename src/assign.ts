@@ -136,6 +136,62 @@ export async function drawValidator(input: {
   };
 }
 
+/**
+ * Draw the operator that checks one revalidation request.
+ *
+ * Whitepaper Section 6, "Revalidate": the request "is assigned at random to a
+ * TRUSTED OPERATOR". That is the whole rule, and it is not the validation rule:
+ * `drawValidator` refuses below TRUSTED_POOL_SWITCH because Section 6's
+ * validation paragraph says outright that "before then two approvals verify and
+ * no draw is made", so a drawn validator under a small pool would be an approval
+ * nobody counts. A revalidation has no such sentence and no such counting — the
+ * check is a check whatever the pool's size — so refusing to answer a staked
+ * request until ten operators exist would be borrowing a rule from the wrong
+ * paragraph and leaving the requester's standing up with nothing being done.
+ *
+ * Identical to `drawValidator` in every other respect, deliberately: the same
+ * commitment ordering, the same canonical pool, the same digest over the entry
+ * id and the whole snapshot, so anyone holding the log and the beacon recomputes
+ * the same checker. The caller reaches for this only when `drawValidator`
+ * answered `pool_below_switch`, so above the switch the two are the same draw.
+ */
+export async function drawChecker(input: {
+  entryId: string;
+  snapshot: PoolSnapshot;
+  beacon: Beacon;
+  exclude: readonly string[];
+}): Promise<DrawResult> {
+  if (!(Date.parse(input.snapshot.at) < Date.parse(input.beacon.at))) {
+    return { ok: false, reason: "snapshot_after_beacon" };
+  }
+
+  const pool = canonicalPool(input.snapshot.operators);
+  if (pool.length === 0) return { ok: false, reason: "empty_pool" };
+
+  const excluded = new Set(input.exclude);
+  const eligible = pool.filter((operator) => !excluded.has(operator));
+  if (eligible.length === 0) {
+    return { ok: false, reason: "no_eligible_operator" };
+  }
+
+  const canonical = canonicalize({
+    entry_id: input.entryId,
+    pool,
+    beacon_round: input.beacon.round,
+    beacon_randomness: input.beacon.randomness,
+  });
+  const hex = await taggedSha256Hex(HASH_TAG_DRAW, canonical);
+  const index = Number(BigInt(`0x${hex}`) % BigInt(eligible.length));
+
+  return {
+    ok: true,
+    operator: eligible[index] as string,
+    index,
+    digest: `sha256:${hex}`,
+    eligible,
+  };
+}
+
 /** Events in seq order, without mutating the caller's array (as derive.ts). */
 function inSeqOrder(events: readonly Event[]): readonly Event[] {
   return [...events].sort((left, right) => left.seq - right.seq);

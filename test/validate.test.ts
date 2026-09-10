@@ -124,6 +124,14 @@ const REFUSAL_CASES: readonly {
     context: context(),
   },
   {
+    // Section 6: an operator that signed the original may not validate the
+    // challenge against it. The list is the caller's, and it is empty for every
+    // entry that is not a challenge.
+    reason: "original_signer",
+    record: approval(V1_AGENT, "op_v1"),
+    context: context({ excludedOperators: ["op_v1"] }),
+  },
+  {
     reason: "maintainer_operator",
     record: approval(MAINTAINER_AGENT, MAINTAINER_OPERATOR),
     context: context(),
@@ -180,6 +188,7 @@ describe("checkValidation refusals", () => {
       "unregistered_operator",
       "submitter_agent",
       "submitter_operator",
+      "original_signer",
       "maintainer_operator",
       "provider_operator",
       "missing_snapshot_hash",

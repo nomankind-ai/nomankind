@@ -148,6 +148,7 @@ function sidecarOf(fixture: Fixture): Sidecar {
     test_verdict: null,
     trusted_count_at_decision: null,
     read_share_slots: null,
+    revalidations: [],
   };
 }
 

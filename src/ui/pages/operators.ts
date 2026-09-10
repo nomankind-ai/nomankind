@@ -8,10 +8,12 @@
  * validate, and the page says so on its row rather than leaving a reader to work
  * it out from the flag.
  *
- * Two columns are honest blanks. Standing is derived by a published formula that
- * M21 has not published yet, and the overturned count needs the dispute door M20
- * builds. A number invented here would be a number nobody can recompute, which
- * is the one thing this log is against, so each says which milestone it waits on.
+ * One column is an honest blank. Standing is derived by a published formula that
+ * M21 has not published yet, and a number invented here would be a number nobody
+ * can recompute, which is the one thing this log is against, so the column says
+ * which milestone it waits on. The overturned count beside it is a reading: the
+ * entries an operator signed, as submitter or as approver, that an upheld
+ * dispute overturned, counted once per entry.
  *
  * Pure: the rows were gathered by the route.
  */
@@ -19,9 +21,8 @@
 import { html, layout, type Safe } from "../html.js";
 import type { OperatorRow, OperatorsData, PageContext } from "../types.js";
 
-/** The two columns nothing can compute yet, and the milestone that will. */
+/** The one column nothing can compute yet, and the milestone that will. */
 const NOT_PUBLISHED_STANDING = "not yet published (M21)";
-const NOT_PUBLISHED_OVERTURNED = "not yet published (M20)";
 
 const EM_DASH = "—";
 
@@ -40,7 +41,9 @@ function row(operator: OperatorRow): Safe {
     <td>${operator.agents}</td>
     <td>${operator.validations}</td>
     <td class="dim">${NOT_PUBLISHED_STANDING}</td>
-    <td class="dim">${NOT_PUBLISHED_OVERTURNED}</td>
+    <td class="${operator.overturned === 0 ? "dim" : "danger"}">
+      ${operator.overturned}
+    </td>
   </tr>`;
 }
 
@@ -87,9 +90,10 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
             </div>`}
       </section>
       <p class="note">
-        Standing and the overturned count are derived from the sealed events by
-        published formulas, and anyone can recompute them once those formulas are
-        published.
+        Standing is derived from the sealed events by a formula M21 publishes,
+        and anyone can recompute it once that formula exists. The overturned
+        count is already a reading of the log: entries this operator signed, as
+        submitter or as approver, that an upheld dispute overturned.
       </p>
     `,
   });

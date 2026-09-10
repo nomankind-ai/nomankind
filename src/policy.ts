@@ -126,6 +126,39 @@ export const SWEEP_INTERVAL_MINUTES = 5;
 export const FAILURE_REPORT_THRESHOLD = 3;
 
 /**
+ * Lifecycle of an entry, "Dispute": "Filing takes a stake, so burner keys cannot
+ * dispute for free. A verified operator stakes standing, a bare key stakes a
+ * refundable filing fee, and the amounts are published policy."
+ *
+ * The paper names the rule and states no amount, so both amounts below are the
+ * maintainer's own placeholders (decision D-064): stakes are ledger rows and
+ * nothing else until M21 builds the money side, so no money moves on either of
+ * them. The maintainer sets the real amounts, and they move only by a later
+ * decision.
+ *
+ * `DISPUTE_STAKE_STANDING` is an operator's stake in standing units;
+ * `DISPUTE_FILING_FEE_CENTS` is a bare key's refundable fee in cents.
+ */
+export const DISPUTE_STAKE_STANDING = 10;
+export const DISPUTE_FILING_FEE_CENTS = 1000;
+
+/**
+ * Lifecycle of an entry, "Revalidate": "Any operator can also request
+ * revalidation of an entry inside its window by staking a small amount of
+ * standing ... and requests are capped per operator per window."
+ *
+ * Neither the amount nor the cap is in the paper, so both are the maintainer's
+ * own placeholders (decision D-064), in standing units and in requests
+ * respectively. A stake is a ledger row and nothing else until M21; no money
+ * moves before then. The cap counts per operator, per entry, per freshness
+ * window: one operator may ask for one check of one entry per window, which is
+ * what keeps a request from becoming a way to keep an entry permanently under
+ * review. Both move only by a later decision.
+ */
+export const REVALIDATION_REQUEST_STAKE_STANDING = 1;
+export const REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW = 1;
+
+/**
  * Lifecycle of an entry (Seal), and "Limitations" ("The identity layer is
  * young"). How many distinct pinned operators must have countersigned the
  * registry head, verifiably, before a seal counts as witnessed.
@@ -414,6 +447,10 @@ export const POLICY = Object.freeze({
   WITNESS_PIN,
   ANCHOR_CALENDARS,
   FAILURE_REPORT_THRESHOLD,
+  DISPUTE_STAKE_STANDING,
+  DISPUTE_FILING_FEE_CENTS,
+  REVALIDATION_REQUEST_STAKE_STANDING,
+  REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW,
   NORM_VERSION,
   FETCH_MAX_REDIRECTS,
   FETCH_TIMEOUT_MS,

@@ -314,6 +314,8 @@ table.table td.break {
 .b-stale { color: var(--warn); border-color: var(--warn); }
 .b-fresh { color: var(--accent); border-color: var(--accent-edge); }
 .b-open { color: var(--warn); border-color: var(--warn); }
+.b-upheld { color: var(--danger); border-color: var(--danger); }
+.b-failed { color: var(--dim); border-color: var(--border); }
 
 /* --- filter chips (a real form: no script anywhere) ------------------- */
 .filters {

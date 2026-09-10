@@ -22,11 +22,13 @@ import type { Sidecar } from "../src/derive.js";
 import type { Event } from "../src/events.js";
 import { TRUSTED_POOL_SWITCH } from "../src/policy.js";
 import type { Seal } from "../src/seal.js";
+import type { StakeRecord } from "../src/stake.js";
 import { renderEntries } from "../src/ui/pages/entries.js";
 import { renderEntry } from "../src/ui/pages/entry.js";
 import { renderHome } from "../src/ui/pages/home.js";
 import { renderOperator } from "../src/ui/pages/operator.js";
 import { renderOperators } from "../src/ui/pages/operators.js";
+import { shortHash } from "../src/ui/html.js";
 import type {
   EntryData,
   EntryRow,
@@ -45,11 +47,16 @@ const ctx: PageContext = {
 
 const ENTRY_ID = "nmk_00112233445566778899aabbccddeeff";
 const OTHER_ID = "nmk_ffeeddccbbaa99887766554433221100";
+/** The correction filed against the entry, and the entry this one corrects. */
+const CORRECTION_ID = "nmk_0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
+const DISPUTED_ID = "nmk_a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
 
 const HASH =
   "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 const OTHER_HASH =
   "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+const ARTIFACT_HASH =
+  "sha256:3333333333333333333333333333333333333333333333333333333333333333";
 
 const row: EntryRow = {
   id: ENTRY_ID,
@@ -86,7 +93,65 @@ const sidecar: Sidecar = {
     { operator: "k1.example", seq: 8 },
     { operator: "k2.example", seq: 9 },
   ],
+  revalidations: [
+    {
+      request_seq: 31,
+      requester: "1F916:k4",
+      operator: "k4.example",
+      source: "operator",
+      requested_at: "2026-09-10T09:00:00.000Z",
+      assigned: {
+        agent: "1F916:k5",
+        operator: "k5.example",
+        deadline: "2026-09-11T09:00:00.000Z",
+      },
+      outcome: "held",
+      resolved_at: "2026-09-10T18:00:00.000Z",
+      checker: "1F916:k5",
+      correction_entry_id: CORRECTION_ID,
+    },
+    {
+      request_seq: 34,
+      requester: null,
+      operator: null,
+      source: "failure_reports",
+      requested_at: "2026-09-11T09:00:00.000Z",
+      assigned: null,
+      outcome: "open",
+      resolved_at: null,
+      checker: null,
+      correction_entry_id: null,
+    },
+  ],
 };
+
+/** The stake rows the dispute above put on the ledger. */
+const ledger: StakeRecord[] = [
+  {
+    kind: "dispute_stake",
+    entry_id: ENTRY_ID,
+    correction_entry_id: CORRECTION_ID,
+    request_seq: null,
+    agent: "1F916:k4",
+    operator: "k4.example",
+    unit: "standing",
+    amount: 10,
+    seq: 41,
+    at: "2026-09-10T09:00:00.000Z",
+  },
+  {
+    kind: "dispute_reward",
+    entry_id: ENTRY_ID,
+    correction_entry_id: CORRECTION_ID,
+    request_seq: null,
+    agent: "1F916:k4",
+    operator: null,
+    unit: null,
+    amount: null,
+    seq: 42,
+    at: "2026-09-10T18:00:00.000Z",
+  },
+];
 
 /** The whole entry record, with a derived half and a hostile claim. */
 const entryRecord: Record<string, unknown> = {
@@ -158,8 +223,30 @@ const entryRecord: Record<string, unknown> = {
       signed_at: "2026-09-09T12:00:00.000Z",
     },
   ],
-  disputes: [],
-  failure_reports: [],
+  disputes: [
+    {
+      id: CORRECTION_ID,
+      challenger: "1F916:k4",
+      operator: "k4.example",
+      citation: "https://kestrel.example/correction",
+      snapshot_hash: OTHER_HASH,
+      outcome: "upheld",
+      reason: `the transcript was cut ${HOSTILE}`,
+      filed_at: "2026-09-10T09:00:00.000Z",
+      resolved_at: "2026-09-10T18:00:00.000Z",
+    },
+  ],
+  failure_reports: [
+    {
+      reporter: "1F916:reader",
+      operator: null,
+      observed: `the model answered anyway ${HOSTILE}`,
+      artifact_hash: ARTIFACT_HASH,
+      citation: "https://kestrel.example/report",
+      upgraded_to: CORRECTION_ID,
+      filed_at: "2026-09-09T20:00:00.000Z",
+    },
+  ],
   seal: {
     log: "1F916",
     inclusion_proof: "inclusion-proof-string-0012",
@@ -271,6 +358,8 @@ const entryData: EntryData = {
   ],
   superseders: [OTHER_ID],
   stalenessWindowDays: 30,
+  ledger,
+  disputeOf: DISPUTED_ID,
 };
 
 const operatorRow: OperatorRow = {
@@ -282,6 +371,7 @@ const operatorRow: OperatorRow = {
   registeredSeq: 2,
   agents: 2,
   validations: 7,
+  overturned: 2,
 };
 
 /** Every page, so the escaping check runs over all of them at once. */
@@ -635,6 +725,116 @@ describe("the entry page", () => {
   });
 });
 
+/**
+ * What was filed against the entry, beside what was signed for it (M20).
+ *
+ * The three arrays and the ledger rows are read straight off the data the route
+ * gathered, so the assertions below are about the page and never about a
+ * derivation: the outcomes, the links a reader follows to check a challenge, and
+ * the escaping that has to survive a reporter who wrote a script tag into a
+ * plain-language field.
+ */
+describe("the entry page's disputes, reports, revalidations and stakes", () => {
+  const document = renderEntry(ctx, entryData);
+
+  it("shows every field of a dispute, and links the challenge itself", () => {
+    expect(document).toContain(">Disputes</h2>");
+    expect(document).toContain(`<a href="/entries/${CORRECTION_ID}">`);
+    expect(document).toContain("1F916:k4");
+    expect(document).toContain('<a href="/operators/k4.example">');
+    expect(document).toContain("https://kestrel.example/correction");
+    expect(document).toContain(shortHash(OTHER_HASH));
+    expect(document).toContain(`<span class="badge b-upheld">upheld</span>`);
+    expect(document).toContain("the transcript was cut");
+    expect(document).toContain("2026-09-10 09:00:00Z");
+    expect(document).toContain("2026-09-10 18:00:00Z");
+  });
+
+  it("shows every field of a failure report, escaped, with its artifact", () => {
+    expect(document).toContain(">Failure reports</h2>");
+    expect(document).toContain("1F916:reader");
+    // The reporter is a bare key: the page says so rather than showing nothing.
+    expect(document).toContain(`<span class="dim">bare key</span>`);
+    expect(document).toContain("the model answered anyway");
+    expect(document).toContain(`href="/captures/${ARTIFACT_HASH}"`);
+    expect(document).toContain("https://kestrel.example/report");
+    expect(document).toContain("2026-09-09 20:00:00Z");
+    // Somebody else's text in a plain-language field is text, never markup.
+    expect(document).not.toContain("<script");
+    expect(document).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("says which report was upgraded and which was not", () => {
+    expect(document).toContain(`<a href="/entries/${CORRECTION_ID}">`);
+    const notUpgraded = renderEntry(ctx, {
+      ...entryData,
+      entry: {
+        ...entryRecord,
+        failure_reports: [
+          {
+            reporter: "1F916:reader",
+            operator: "k6.example",
+            observed: "the model answered anyway",
+            artifact_hash: ARTIFACT_HASH,
+            citation: null,
+            upgraded_to: null,
+            filed_at: "2026-09-09T20:00:00.000Z",
+          },
+        ],
+      },
+    });
+    expect(notUpgraded).toContain(`<span class="dim">not upgraded</span>`);
+    expect(notUpgraded).toContain('<a href="/operators/k6.example">');
+  });
+
+  it("shows every field of a revalidation, from the sidecar", () => {
+    expect(document).toContain(">Revalidations</h2>");
+    expect(document).toContain("<td class=\"dim\">31</td>");
+    expect(document).toContain('href="/operators/k5.example"');
+    expect(document).toContain("1F916:k5");
+    expect(document).toContain("2026-09-11 09:00:00Z");
+    expect(document).toContain("held");
+    // The one nomankind opened itself, and the one nothing has been drawn for.
+    expect(document).toContain("nomankind, from failure reports");
+    expect(document).toContain(`<span class="dim">not yet drawn</span>`);
+  });
+
+  it("lists the stakes, and never prices what the log left unpriced", () => {
+    expect(document).toContain(">Stakes</h2>");
+    expect(document).toContain("dispute_stake");
+    expect(document).toContain("dispute_reward");
+    expect(document).toContain("10 standing");
+    expect(document).toContain(`<span class="dim">unpriced</span>`);
+    expect(document).toContain("<td class=\"dim\">41</td>");
+    expect(document).toContain("<td class=\"dim\">42</td>");
+    // The sentence about the placeholders spells no number of its own.
+    expect(document).toContain("No money moves on any of these rows.");
+  });
+
+  it("links the entry this one was filed against, both ways", () => {
+    expect(document).toContain("<dt>dispute of</dt>");
+    expect(document).toContain(`<a href="/entries/${DISPUTED_ID}">`);
+    // overturned_by is the other direction and is a link too.
+    expect(document).toContain("<dt>overturned_by</dt>");
+    expect(document).toContain(`<a href="/entries/${OTHER_ID}">`);
+  });
+
+  it("says nothing was filed rather than showing four empty tables", () => {
+    const quiet = renderEntry(ctx, {
+      ...entryData,
+      entry: { ...entryRecord, disputes: [], failure_reports: [] },
+      sidecar: { ...sidecar, revalidations: [] },
+      ledger: [],
+      disputeOf: null,
+    });
+    expect(quiet).toContain("No dispute has been filed.");
+    expect(quiet).toContain("No failure report has been filed.");
+    expect(quiet).toContain("No revalidation has been requested.");
+    expect(quiet).toContain("No stake has been recorded.");
+    expect(quiet).not.toContain("<dt>dispute of</dt>");
+  });
+});
+
 describe("the operator pages", () => {
   const directory = renderOperators(ctx, {
     rows: [
@@ -646,6 +846,7 @@ describe("the operator pages", () => {
         trusted: false,
         trustedSeq: null,
         validations: 0,
+        overturned: 0,
       },
     ],
   });
@@ -654,7 +855,18 @@ describe("the operator pages", () => {
     expect(directory).toContain("cannot validate");
     expect(directory).toContain('<a href="/operators/maintainer.example">');
     expect(directory).toContain("not yet published (M21)");
-    expect(directory).toContain("not yet published (M20)");
+  });
+
+  it("fills the overturned column with a count, and a zero with a zero", () => {
+    // The column is a reading of the log now that the dispute door exists, so
+    // the milestone placeholder is gone and an operator nothing was overturned
+    // for shows 0 rather than a sentence about a milestone.
+    expect(directory).not.toContain("not yet published (M20)");
+    expect(directory).toContain(`<td class="danger">\n      2\n    </td>`);
+    expect(directory).toContain(`<td class="dim">\n      0\n    </td>`);
+    expect(directory).toContain(
+      "entries this operator signed, as\n        submitter or as approver, that an upheld dispute overturned",
+    );
   });
 
   it("shows one operator's record, agents, attestation and validations", () => {
@@ -683,11 +895,13 @@ describe("the operator pages", () => {
     expect(one).toContain("onboarded");
     expect(one).toContain(`<a href="/entries/${ENTRY_ID}">`);
     expect(one).toContain("<dt>registered seq</dt>");
+    expect(one).toContain("<dt>overturned</dt>");
+    expect(one).toContain(`<dd class="danger">\n                2\n              </dd>`);
   });
 
   it("says an operator has signed nothing rather than showing an empty table", () => {
     const quiet = renderOperator(ctx, {
-      row: { ...operatorRow, validations: 0, agents: 0 },
+      row: { ...operatorRow, validations: 0, agents: 0, overturned: 0 },
       agents: [],
       attestation: null,
       namedBy: null,

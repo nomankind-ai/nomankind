@@ -219,12 +219,6 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         "The contributor pool's share of paid-read revenue at launch. It is a floor that only rises, on published milestones, and never falls.",
     },
     {
-      name: "FAILURE_REPORT_THRESHOLD",
-      value: String(policy.FAILURE_REPORT_THRESHOLD),
-      means:
-        "Reports from this many distinct verified operators auto-open a revalidation.",
-    },
-    {
       name: "the standing formula and its decay rate",
       value: "not yet published (M21)",
       means:
@@ -241,6 +235,39 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       value: "not yet published (M24)",
       means:
         "Reads are free at low volume today. The paid tiers, their rate limits and the price the contributor share is computed against arrive with M24.",
+    },
+  ];
+
+  const disputes: Row[] = [
+    {
+      name: "FAILURE_REPORT_THRESHOLD",
+      value: String(policy.FAILURE_REPORT_THRESHOLD),
+      means:
+        "Reports from this many distinct verified operators auto-open a revalidation, at nomankind's expense rather than anyone's stake.",
+    },
+    {
+      name: "DISPUTE_STAKE_STANDING",
+      value: `${policy.DISPUTE_STAKE_STANDING} standing`,
+      means:
+        "What a registered operator puts up to file a dispute. An upheld challenge returns it and pays the challenger; a failed one forfeits it, so disputes are for evidence.",
+    },
+    {
+      name: "DISPUTE_FILING_FEE_CENTS",
+      value: `${policy.DISPUTE_FILING_FEE_CENTS} cents`,
+      means:
+        "What a bare key puts up instead: a refundable filing fee, so a burner key cannot dispute for free.",
+    },
+    {
+      name: "REVALIDATION_REQUEST_STAKE_STANDING",
+      value: `${policy.REVALIDATION_REQUEST_STAKE_STANDING} standing`,
+      means:
+        "What an operator stakes to ask for a check of an entry inside its freshness window. Returned with a reward if the fact changed, lost if the entry holds.",
+    },
+    {
+      name: "REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW",
+      value: String(policy.REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW),
+      means:
+        "How many checks one operator may request on one entry per freshness window, which is what keeps a request from becoming a way to hold an entry permanently under review.",
     },
   ];
 
@@ -347,6 +374,14 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
 
       ${group("Validation", validation)} ${group("Evidence", evidence)}
       ${group("Freshness", staleness)} ${group("Money and standing", money)}
+      ${group("Disputes and reports", disputes)}
+
+      <p class="note">
+        Every stake above is a placeholder the maintainer set, and a stake is a
+        ledger record and nothing else until the money side is built: no money
+        moves on any of them, and the maintainer sets the real amounts by a later
+        recorded decision.
+      </p>
 
       <p class="note">
         There is no seed fee: contributors are paid only from read revenue
