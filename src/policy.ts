@@ -399,6 +399,52 @@ export const BEACON: Readonly<{
 });
 
 /**
+ * The training path, "Drift attestation": "A probe set is drawn from verified,
+ * observed, fresh entries by public randomness ... That set size is published
+ * policy, and the observed tier will be thin at genesis (Section 12)."
+ *
+ * `PROBE_SET_SIZE` is that published size: ten probes when the log holds at
+ * least ten entries to draw from. `PROBE_SET_MIN_CANDIDATES` is the floor below
+ * which no attestation is drawn at all, and it is one rather than ten precisely
+ * because the paper says the observed tier is thin at genesis: between the floor
+ * and the size every candidate is drawn, so an attestation over three probes is
+ * a small attestation and never a refused one. A score over one probe says
+ * little, which is what the probe count published beside every score is for.
+ *
+ * Not whitepaper numbers. The paper names the rule and says the size is
+ * published policy, so both are the maintainer's own placeholders (M22); they
+ * move only by a later decision, and never by an edit anywhere but this file.
+ */
+export const PROBE_SET_SIZE = 10;
+export const PROBE_SET_MIN_CANDIDATES = 1;
+
+/**
+ * The training path, "Drift attestation": "Three operators from the trusted
+ * pool, none under the model's operator, score its answers against the log and
+ * sign the result."
+ *
+ * Three is the paper's own number, so this one is not a placeholder: it is the
+ * sentence, held here rather than written into src/attest.ts, because a count of
+ * signers is the same kind of thing as APPROVALS_TO_VERIFY_LARGE_POOL and lives
+ * where every other one does.
+ */
+export const ATTESTATION_SCORERS = 3;
+
+/**
+ * How long an attestation stays open: from the request to the deadline for the
+ * model's answers and for the scorers' scores.
+ *
+ * Not a whitepaper number. The paper says an attestation happens and never how
+ * long it may hang open, so the window is the maintainer's own placeholder
+ * (M22), seventy-two hours because that is what ASSIGNMENT_WINDOW_HOURS already
+ * gives a drawn validator and a second, different window for the same kind of
+ * drawn work would be a rule nobody could remember. It is its own constant all
+ * the same: the two move independently, and an attestation window that borrowed
+ * the assignment's number would silently move with it.
+ */
+export const ATTESTATION_WINDOW_HOURS = 72;
+
+/**
  * The most records one list request returns. The first page-size number in the
  * system, so it lives here with every other published amount rather than
  * beside the query that uses it; src/storage/repository.ts holds no default
@@ -556,6 +602,10 @@ export const POLICY = Object.freeze({
   REQUEST_CLOCK_SKEW_SECONDS,
   NONCE_RETENTION_SECONDS,
   MODEL_PROVIDER_DOMAINS,
+  PROBE_SET_SIZE,
+  PROBE_SET_MIN_CANDIDATES,
+  ATTESTATION_SCORERS,
+  ATTESTATION_WINDOW_HOURS,
   LIST_PAGE_LIMIT,
   HOME_LATEST_ENTRIES,
   LANDING_BAND_SEALS,

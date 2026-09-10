@@ -324,9 +324,83 @@ const WRITE_PATH: readonly Endpoint[] = [
   },
 ];
 
+/**
+ * The training path's own doors (Section 8), in the order a caller meets them:
+ * the three signed writes that carry one attestation from request to score,
+ * then the reads that serve what they produced, then the confidence inputs.
+ *
+ * Their own table rather than rows split between the read and write paths,
+ * because an attestation is one sequence and a caller reading the score route
+ * without the answers route above it has been handed the end of a story.
+ */
+const ATTESTATION_PATH: readonly Endpoint[] = [
+  {
+    method: "POST",
+    path: "/attestations",
+    parameters: "{} — an empty body; signed by the model agent",
+    answers:
+      "201 with the derived attestation: the probe set drawn from verified, observed, fresh entries by the beacon and a published pool snapshot, the probe hash, the scorers drawn from the trusted pool, and the deadline. Neither the model's operator nor the maintainer picks the questions, and one model attests at most once per beacon round.",
+    refusals:
+      "400 bad_body; 401 the request verdicts; 409 attestation_open; 503 beacon_unavailable; 422 no_pool_snapshot, snapshot_after_beacon (the newest snapshot must precede the newest round, so the client retries), insufficient_candidates, empty_pool, insufficient_scorers, no_agent_for_operator when the draw names a trusted operator with no agent bound under it.",
+  },
+  {
+    method: "POST",
+    path: "/attestations/{id}/answers",
+    parameters:
+      "answers: [{ entry_id, answer }], one per probe; signed by the model agent",
+    answers:
+      "200 with the derived attestation. The answers are stored and hashed; what is sealed is the hash, so a scorer reads the answers and a reader checks that the ones scored are the ones answered.",
+    refusals:
+      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 403 not_model; 409 not_open; 422 deadline_passed, bad_answers.",
+  },
+  {
+    method: "POST",
+    path: "/attestations/{id}/score",
+    parameters:
+      "record { agent, operator, agreed, probe_hash, answers_hash, signed_at } and signature (nomankind-record-v1, kind attestation_score); signed by the scorer agent",
+    answers:
+      "201 with the derived attestation. The published score is the median of the scorers' agreed counts over the probe count, and it appears only once every drawn scorer has signed.",
+    refusals:
+      "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature; then 409 not_open, 422 deadline_passed, 403 not_a_scorer, 422 operator_mismatch, 403 model_operator, 409 duplicate_scorer, 422 probe_hash_mismatch, answers_hash_mismatch, bad_agreed.",
+  },
+  {
+    method: "GET",
+    path: "/attestations",
+    parameters: `model=<agent>, operator=<id>, before=<requested seq>, limit=<1..${LIST_PAGE_LIMIT}>`,
+    answers:
+      "The attestations, newest first, by requested position. Keyset paging, never offset.",
+    refusals:
+      "None. A before or limit that is not an integer is ignored and a limit outside the page bound is served at the page bound, so this listing narrows rather than refuses; a model or operator nobody holds is an empty list.",
+  },
+  {
+    method: "GET",
+    path: "/attestations/{id}",
+    parameters: "—",
+    answers:
+      "One attestation: the derived record — probes, probe_hash, scorers, deadline, scores, score, status, date — plus the answers the model gave, or null while it has not answered.",
+    refusals: "400 bad_id; 404 not_found.",
+  },
+  {
+    method: "GET",
+    path: "/operators/{id}/attestations",
+    parameters: "—",
+    answers:
+      "What one operator has to do with attestation, from both sides: as_model, the attestations its own model asked for, and as_scorer, the ones it was drawn to score. Two lists because they are two relationships, and the second is the one that makes the first worth anything.",
+    refusals:
+      "None. An operator this log has never heard of answers 200 with both lists empty, which is the same answer as an operator that has never attested and never been drawn: this route reports attestation, not registration.",
+  },
+  {
+    method: "GET",
+    path: "/entries/{id}/confidence-inputs",
+    parameters: "—",
+    answers:
+      "Every published input to the confidence field, at the request's own clock: confidence and formula both null, then evidence_tier, effective_tier, test_verdict, test_acceptance, counts (approvals, rejections, reproductions, observations, reconfirmations), age_ratio (days against window_days, null when there is no window), stale, dispute_count, report_count, superseded, overturned, status. The number is null for every entry on purpose; the inputs are raw so a learner can weight them itself.",
+    refusals: "404 not_found.",
+  },
+];
+
 const NOT_YET_BUILT: readonly { readonly what: string; readonly when: string }[] =
   [
-    { what: "Drift attestation and confidence inputs", when: "M22" },
     { what: "The log mirror", when: "M23" },
     { what: "API keys, paid tiers, webhooks, rate limits", when: "M24" },
     {
@@ -451,6 +525,43 @@ POST
           them are placeholders until the milestone that prices them is built. No
           money moves on any of them today.
         </p>
+      </section>
+
+      ${endpoints(
+        "Attestation and confidence",
+        html`One attestation is three signed writes — the request that draws the
+        probes, the model's answers, each scorer's signed score — and then a
+        record anyone can read. Every one of them answers
+        <span class="mono">cache-control: no-store</span>, a wrong method gets
+        405 with an <span class="mono">Allow</span> header, and a storage
+        failure is 503 <span class="mono">storage_unreachable</span>.`,
+        ATTESTATION_PATH,
+      )}
+
+      <section class="panel">
+        <h2 class="panel-title">Attesting from the command line</h2>
+        <p class="note">
+          The three writes have one command with three subcommands. The request
+          draws the probes; the answer command answers each probe with the
+          entry's own claim by default, takes a file instead when the caller has
+          real answers, and has a <span class="mono">--drift</span> switch that
+          answers every probe wrong on purpose, which is how a falling score is
+          tested rather than waited for; the score command counts a probe agreed
+          when the answer and the entry's claim match under the published
+          normalization rule, signs the record and posts it.
+        </p>
+        <pre class="block mono">npm run attest -- request &lt;model-key.json&gt; ${origin}
+npm run attest -- answer &lt;model-key.json&gt; ${origin} &lt;attestation-id&gt; [--answers &lt;file.json&gt;] [--drift]
+npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt;</pre>
+        <p class="note">
+          The submit command gained the other half of an observed entry:
+          <span class="mono">--receipt</span> takes the receipt artifact, checks
+          its shape, hashes it, fills the observation's
+          <span class="mono">receipt_hash</span> when the fields file left it
+          null, and sends the artifact as the body's
+          <span class="mono">receipt</span>.
+        </p>
+        <pre class="block mono">npm run submit -- &lt;key.json&gt; ${origin} &lt;fields.json&gt; --receipt &lt;receipt.json&gt;</pre>
       </section>
 
       <section class="panel">

@@ -316,6 +316,11 @@ table.table td.break {
 .b-open { color: var(--warn); border-color: var(--warn); }
 .b-upheld { color: var(--danger); border-color: var(--danger); }
 .b-failed { color: var(--dim); border-color: var(--border); }
+/* An attestation's four states, in three readings: running, finished, out of
+   time. An expired attestation is not a low score and must not read as one. */
+.b-answered { color: var(--muted); border-color: var(--border); }
+.b-scored { color: var(--accent); border-color: var(--accent-edge); }
+.b-expired { color: var(--dim); border-color: var(--border); }
 
 /* --- filter chips (a real form: no script anywhere) ------------------- */
 .filters {

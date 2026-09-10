@@ -28,8 +28,22 @@ import { publicKeyFromAgentId, signBytes, verifyBytes } from "./identity.js";
  */
 export const HASH_TAG_RECORD = "nomankind-record-v1";
 
-/** The two kinds of signed record, named exactly as their event types are. */
-export type RecordKind = "validation" | "reconfirmation";
+/**
+ * The kinds of signed record, named exactly as their event types are — with
+ * `attestation_score` named for its event `attestation_scored`, in the noun form
+ * the payload's own `record` field takes.
+ *
+ * An attestation is not about an entry, so an `attestation_score` puts the
+ * ATTESTATION ID in the `entryId` slot of the signing bytes. The slot is a
+ * domain separator either way: what it carries is whatever the record is about,
+ * and the ids cannot collide because an entry id is `nmk_` and an attestation id
+ * is `att_`. A score signed for one attestation therefore cannot be replayed
+ * onto another, and the kind keeps it from being replayed as a validation.
+ */
+export type RecordKind =
+  | "validation"
+  | "reconfirmation"
+  | "attestation_score";
 
 const encoder = new TextEncoder();
 

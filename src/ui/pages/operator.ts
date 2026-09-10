@@ -19,12 +19,25 @@
  * to and the rows themselves; every amount is the integer the ledger stores,
  * with a dollar rendering beside it, and no amount is rounded on the way.
  *
+ * Section 8's drift attestation is the last panel, from both sides: what this
+ * operator's own model was asked, and what this operator was drawn to score.
+ * The two are separate tables because they are separate relationships, and the
+ * whole construction turns on the scorers being outside the model's operator.
+ *
  * Pure: the route gathered all of it, the balance included.
  */
 
 import type { LedgerRow } from "../../ledger.js";
-import { fmtDate, fmtInstant, html, layout, type Safe } from "../html.js";
-import type { OperatorData, PageContext } from "../types.js";
+import {
+  badge,
+  fmtDate,
+  fmtInstant,
+  html,
+  layout,
+  shortHash,
+  type Safe,
+} from "../html.js";
+import type { AttestationRow, OperatorData, PageContext } from "../types.js";
 
 const EM_DASH = "—";
 
@@ -267,6 +280,118 @@ function ledgerPanel(data: OperatorData): Safe {
   </section>`;
 }
 
+/**
+ * The badge class for an attestation's status.
+ *
+ * Four states and three readings: one still running (open, answered), one
+ * finished (scored), one that ran out of time (expired). An expired attestation
+ * is not a bad score and is not shown as one — nobody scored it, which is a
+ * different fact from a low score and reads differently here.
+ */
+function attestationStatusClass(status: string): string {
+  switch (status) {
+    case "open":
+      return "b-open";
+    case "answered":
+      return "b-answered";
+    case "scored":
+      return "b-scored";
+    default:
+      return "b-expired";
+  }
+}
+
+/**
+ * One attestation row. The model is an agent id, shortened the way every hash
+ * on these pages is shortened, with the whole of it in the title: a key a
+ * reader cannot copy in full is a key they cannot check.
+ */
+function attestationRow(row: AttestationRow): Safe {
+  return html`<tr class="row">
+    <td class="break">${row.id}</td>
+    <td class="muted" title="${row.model}">${shortHash(row.model)}</td>
+    <td>${badge(attestationStatusClass(row.status), row.status)}</td>
+    <td>
+      ${row.score === null
+        ? html`<span class="dim">${EM_DASH}</span>`
+        : html`${row.score.agreed} / ${row.score.probe_count}`}
+    </td>
+    <td class="dim">${row.date === null ? EM_DASH : fmtDate(row.date)}</td>
+    <td class="muted" title="${row.probe_hash}">${shortHash(row.probe_hash)}</td>
+  </tr>`;
+}
+
+/** One of the two attestation tables, or the words for an empty one. */
+function attestationTable(
+  title: string,
+  empty: string,
+  rows: readonly AttestationRow[],
+): Safe {
+  if (rows.length === 0) {
+    return html`<div class="panel-body"><h3 class="mono">${title}</h3></div>
+      <div class="panel-empty">${empty}</div>`;
+  }
+  return html`<div class="panel-body"><h3 class="mono">${title}</h3></div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>id</th>
+            <th>model</th>
+            <th>status</th>
+            <th>score</th>
+            <th>date</th>
+            <th>probe_hash</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(attestationRow)}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+/**
+ * Drift attestation, from both sides (Section 8, Drift attestation).
+ *
+ * Two tables and not one, because they are two different relationships: the
+ * attestations this operator's own model asked for, and the ones this operator
+ * was drawn to score. The separation is the paper's — the scorers are "parties
+ * its lab does not control" — so running the two together on one page would
+ * hide exactly the thing the construction exists to show.
+ *
+ * A score is two numbers, agreed over probe_count, and never the fraction:
+ * three of three at genesis and thirty of thirty later are not the same claim,
+ * and the page leaves the weighting to the reader for the same reason the
+ * confidence field is null.
+ */
+function attestationsPanel(data: OperatorData): Safe {
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Attestations</h2>
+      <span class="panel-label">probes drawn by the beacon, scored by others</span>
+    </div>
+    ${attestationTable(
+      "As the model's operator",
+      "No attestation has been requested for a model under this operator.",
+      data.attestations.asModel,
+    )}
+    ${attestationTable(
+      "As a scorer",
+      "This operator has not been drawn to score an attestation.",
+      data.attestations.asScorer,
+    )}
+    <p class="note">
+      An attestation says one thing in public: as of its date, this model's
+      answers to a probe set drawn by public randomness agreed with the verified
+      record to this degree, judged by trusted operators the model's own
+      operator does not control. The score is agreed over the number of probes
+      asked, because a score over a thin probe set is a small claim and never a
+      confident one.
+    </p>
+  </section>`;
+}
+
 export function renderOperator(ctx: PageContext, data: OperatorData): string {
   const row = data.row;
   const flags: string[] = [];
@@ -338,6 +463,7 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
       </section>
 
       ${standingPanel(ctx, data)} ${ledgerPanel(data)}
+      ${attestationsPanel(data)}
 
       <section class="panel">
         <div class="panel-head"><h2>Validations</h2></div>

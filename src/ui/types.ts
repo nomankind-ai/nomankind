@@ -14,6 +14,8 @@
  * and the field names below are the schema's own — never an alias.
  */
 
+import type { DerivedAttestation } from "../attest.js";
+import type { ConfidenceInputs } from "../confidence.js";
 import type { Sidecar } from "../derive.js";
 import type { Event } from "../events.js";
 import type { LedgerBalance, LedgerRow } from "../ledger.js";
@@ -151,7 +153,34 @@ export interface EntryData {
    * when it is not a correction. The other direction of `overturned_by`.
    */
   disputeOf: string | null;
+  /**
+   * Every published input to the confidence field, exactly as
+   * `confidenceInputs` computed them at the route's injected clock — the same
+   * object `GET /entries/{id}/confidence-inputs` serves.
+   *
+   * Section 8, The confidence field: the field is null until conf-v1 is
+   * published "and every input to it is exposed raw, so a learner can build its
+   * own weighting from the receipts". So the inputs are carried whole rather
+   * than picked over here, and the page prints the object's own field names.
+   * The only clock-dependent one is `age_ratio`, which is why the route
+   * computes it and this page never does.
+   */
+  confidenceInputs: ConfidenceInputs;
 }
+
+/**
+ * One attestation as a table row (Section 8, Drift attestation).
+ *
+ * A `Pick` of the derived record rather than a shape of its own: every name
+ * comes from `DerivedAttestation`, so the columns cannot drift from the fold
+ * that produced them, and a `DerivedAttestation` is itself a row. What is left
+ * out — the probes, the scorers, the answers hash — is on the attestation's own
+ * JSON endpoint, because a directory row is a way in and not a substitute.
+ */
+export type AttestationRow = Pick<
+  DerivedAttestation,
+  "id" | "model" | "status" | "score" | "date" | "probe_hash" | "probe_count"
+>;
 
 /**
  * A standing the formula already returned, and the log position it returned it
@@ -226,6 +255,20 @@ export interface OperatorData {
    * row paid without the page working out what a payout was for.
    */
   payouts: LedgerRow[];
+  /**
+   * What this operator has to do with drift attestation, from both sides,
+   * exactly as `attestationsForOperator` read them at the route's own limit.
+   *
+   * Two lists and never one. Section 8's point is that the scorers are "parties
+   * its lab does not control", so the attestations an operator's own model
+   * asked for and the ones it was drawn to score are two different
+   * relationships, and a page that ran them together would hide the separation
+   * the paper depends on.
+   */
+  attestations: {
+    asModel: AttestationRow[];
+    asScorer: AttestationRow[];
+  };
 }
 
 /** One candidate or member of the founding trusted pool (Section 11, genesis). */

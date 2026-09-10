@@ -62,6 +62,46 @@ export type Attestation = {
   signature: string;
 };
 
+/**
+ * One probe in an attestation's set: the entry it was drawn from, and the hash
+ * of that entry as it stood when the set was drawn.
+ *
+ * The training path, "Drift attestation": "the score and the probe hash are
+ * sealed with a date". The entry hash travels beside the id because the probe
+ * is a question about a fact at a moment: an entry reconfirmed or superseded
+ * after the draw is a different fact, and a score recomputed years later has to
+ * know which one was asked about.
+ */
+export interface Probe {
+  readonly entry_id: string;
+  readonly entry_hash: string;
+}
+
+/** One drawn scorer: the operator the draw picked, and the agent it answers with. */
+export interface AttestationScorer {
+  readonly operator: string;
+  readonly agent: string;
+}
+
+/**
+ * A scorer's signed verdict.
+ *
+ * `agreed` is how many of the probes the model's answers matched the log on,
+ * out of the attestation's probe_count; `probe_hash` and `answers_hash` pin
+ * exactly which questions and which answers were scored, so a score can never be
+ * moved onto a different probe set or a different set of answers. The signature
+ * travels beside the record in the event payload, exactly as a validation's
+ * does (src/records.ts).
+ */
+export interface AttestationScoreRecord {
+  readonly agent: string;
+  readonly operator: string;
+  readonly agreed: number;
+  readonly probe_hash: string;
+  readonly answers_hash: string;
+  readonly signed_at: string;
+}
+
 /** The payload shape carried by each event type. */
 export type EventPayloads = {
   operator_registered: { operator: string; maintainer: boolean };
@@ -237,6 +277,80 @@ export type EventPayloads = {
     counter_first: number | null;
     counter_last: number | null;
   };
+  /**
+   * An attestation opened: the probes drawn, the scorers drawn, and everything
+   * either draw was computed from.
+   *
+   * The training path, "Drift attestation": "A probe set is drawn from verified,
+   * observed, fresh entries by public randomness, the same beacon-and-snapshot
+   * construction as validator assignment (Section 6), so neither the model's
+   * operator nor the maintainer picks the questions."
+   *
+   * Which is why the payload carries the snapshot's position, the beacon round
+   * and the round's randomness rather than only the outcome: both draws are
+   * deterministic functions of exactly those, so anyone holding the log and the
+   * beacon can recompute the probe set and the three scorers and check that
+   * nobody picked either (src/probe.ts, src/attest.ts).
+   *
+   * `model` is the model's own agent id, and `model_operator` the operator that
+   * answers for it, null for an agent bound to nobody. `probes` is sorted by
+   * entry_id, so the canonical form the probe hash is taken over does not depend
+   * on the order the draw happened to produce; `scorers` stays in draw order,
+   * because the order the beacon picked them in is part of what is checkable.
+   *
+   * The event is not entry-scoped, though every probe names an entry: an
+   * attestation is about a model and not about any one of the ten entries it
+   * asks about, and a single entry_id would be a lie about which entry's
+   * lifecycle it belongs to.
+   */
+  attestation_requested: {
+    attestation: string;
+    model: string;
+    model_operator: string | null;
+    probes: readonly Probe[];
+    probe_hash: string;
+    probe_count: number;
+    pool_snapshot_seq: number;
+    beacon_round: number;
+    beacon_randomness: string;
+    scorers: readonly AttestationScorer[];
+    deadline: string;
+  };
+  /**
+   * The model answered. "The model answers the probes."
+   *
+   * Only the hash is in the log: the answers themselves are the model's output
+   * and can be long, and what the scorers must agree about is that they all
+   * scored the same answers, which the hash settles (src/probe.ts,
+   * `answersHash`). The answers are stored beside the attestation and served
+   * from there. `at` is the answered time.
+   */
+  attestation_answered: { attestation: string; answers_hash: string };
+  /**
+   * One scorer's signed verdict. "Three operators from the trusted pool ...
+   * score its answers against the log and sign the result."
+   *
+   * The signature travels beside the record rather than inside it, exactly as a
+   * validation's does (decision D-034, src/records.ts), and it is over the
+   * `attestation_score` kind with the attestation id in the entry_id slot of the
+   * signing bytes — so a score signed for one attestation can never be replayed
+   * onto another, and a validation can never be replayed as a score.
+   */
+  attestation_scored: {
+    attestation: string;
+    record: AttestationScoreRecord;
+    signature: string;
+  };
+  /**
+   * The window ran out. `missing` is the scorer operators that never scored,
+   * which is what makes an expiry say who did not answer rather than only that
+   * nobody finished.
+   *
+   * An attestation that expires is not a failing score: it is no score at all,
+   * and the model's operator asks for a new one. Nothing about drift is claimed
+   * by an expiry.
+   */
+  attestation_expired: { attestation: string; missing: readonly string[] };
 };
 
 /** One entry's reads on a published day. */
@@ -268,13 +382,18 @@ export const EVENT_TYPES: readonly EventType[] = [
   "revalidation_resolved",
   "failure_report",
   "read_count",
+  "attestation_requested",
+  "attestation_answered",
+  "attestation_scored",
+  "attestation_expired",
 ] as const;
 
 /**
- * Events scoped to an entry carry entry_id; the operator, pool and read-count
- * events carry null. Whitepaper Section 6: an entry's lifecycle is the
- * sub-sequence of the log bearing its id, so the scope must be unambiguous for
- * every event — and a day's read counts belong to no single entry.
+ * Events scoped to an entry carry entry_id; the operator, pool, read-count and
+ * attestation events carry null. Whitepaper Section 6: an entry's lifecycle is
+ * the sub-sequence of the log bearing its id, so the scope must be unambiguous
+ * for every event — and a day's read counts, like an attestation's ten probes,
+ * belong to no single entry.
  */
 export const ENTRY_SCOPED_TYPES: readonly EventType[] = [
   "entry_submitted",

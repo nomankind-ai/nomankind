@@ -20,11 +20,14 @@
 
 import { utcDay, type Anchor, type AnchorExternal } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
+import type { DerivedAttestation } from "../attest.js";
 import type { BountyAccrual } from "../bounty.js";
 import type { Sidecar } from "../derive.js";
 import type { LedgerRow } from "../ledger.js";
+import type { ProbeAnswer } from "../probe.js";
 import {
   appendEvent,
+  type AttestationScorer,
   type Event,
   type EventInput,
   type EventType,
@@ -3983,4 +3986,494 @@ export async function validationsByOperator(
     seq: readInteger(row, "seq"),
     signed_at: readText(row, "signed_at"),
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Drift attestation (M22)
+// ---------------------------------------------------------------------------
+
+/**
+ * One attestation as the store holds it: the derived record, and the model's
+ * answers.
+ *
+ * The answers are the one thing here that is not in the log. Whitepaper Section
+ * 8, "Drift attestation": what is sealed is "the score and the probe hash", and
+ * the answers themselves are hashed and stored (src/events.ts,
+ * `attestation_answered`), so this is where a reader that wants to see what the
+ * model actually said comes to look. Null until the model answers.
+ */
+export interface StoredAttestation {
+  readonly attestation: DerivedAttestation;
+  readonly answers: readonly ProbeAnswer[] | null;
+}
+
+const ATTESTATION_COLUMNS = `attestation_json, answers_json`;
+
+function toStoredAttestation(row: Row): StoredAttestation {
+  const answers = readNullableText(row, "answers_json");
+  return {
+    attestation: readJson<DerivedAttestation>(row, "attestation_json"),
+    answers: answers === null ? null : (JSON.parse(answers) as ProbeAnswer[]),
+  };
+}
+
+/**
+ * The states an attestation can still be acted on in: still waiting for the
+ * model, or waiting for its scorers.
+ *
+ * Not a policy number and not a knob — two of the four values `AttestationStatus`
+ * declares, named here because two queries ask for exactly them: which
+ * attestation is open for a model, and which have run out of time.
+ */
+const LIVE_ATTESTATION_STATUSES: readonly string[] = ["open", "answered"];
+
+/**
+ * The four event types an attestation's story is told in. Not a knob either:
+ * the same four `EventPayloads` declares, named here because the one query that
+ * reads them narrows on the type column before it touches the JSON.
+ */
+const ATTESTATION_EVENT_TYPES: readonly EventType[] = [
+  "attestation_requested",
+  "attestation_answered",
+  "attestation_scored",
+  "attestation_expired",
+];
+
+/**
+ * The upsert that stores one attestation row. Taken as a statement rather than
+ * run on the spot so the event that changed it and the row itself go into one
+ * atomic batch, exactly as `entryStatement` does for an entry.
+ *
+ * Every column but `answers_json` is a copy of a field inside the derived
+ * record; nothing is computed here. `answers` is passed separately because it is
+ * not in the record and not in the log: on a write that does not touch them the
+ * caller passes what it already had, so a rewrite of the row never loses them.
+ */
+function attestationStatement(
+  db: D1Like,
+  attestation: DerivedAttestation,
+  answers: readonly ProbeAnswer[] | null,
+): D1LikeStatement {
+  const lastScore = attestation.scores.reduce<number | null>(
+    (latest, score) =>
+      latest === null || score.seq > latest ? score.seq : latest,
+    null,
+  );
+  return db
+    .prepare(
+      `INSERT INTO attestations (
+         id, model, model_operator, status, probe_hash, probe_count,
+         requested_seq, requested_at, deadline,
+         answers_json, answers_hash, scored_seq, score_agreed, "date",
+         attestation_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET
+         model = excluded.model,
+         model_operator = excluded.model_operator,
+         status = excluded.status,
+         probe_hash = excluded.probe_hash,
+         probe_count = excluded.probe_count,
+         requested_seq = excluded.requested_seq,
+         requested_at = excluded.requested_at,
+         deadline = excluded.deadline,
+         answers_json = excluded.answers_json,
+         answers_hash = excluded.answers_hash,
+         scored_seq = excluded.scored_seq,
+         score_agreed = excluded.score_agreed,
+         "date" = excluded."date",
+         attestation_json = excluded.attestation_json`,
+    )
+    .bind(
+      attestation.id,
+      attestation.model,
+      attestation.model_operator,
+      attestation.status,
+      attestation.probe_hash,
+      attestation.probe_count,
+      attestation.requested_seq,
+      attestation.requested_at,
+      attestation.deadline,
+      answers === null ? null : writeJson(answers),
+      attestation.answers_hash,
+      lastScore,
+      attestation.score === null ? null : attestation.score.agreed,
+      attestation.date,
+      writeJson(attestation),
+    );
+}
+
+/** Where the probe draw looks for candidates, and where it resumes. */
+export interface ProbeCandidatesQuery {
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+  /** Resume strictly after this id; omit for the first page. */
+  readonly afterId?: string;
+}
+
+/**
+ * The entries a probe set may be drawn from: verified, observed, and fresh.
+ *
+ * Whitepaper Section 8, "Drift attestation": "A probe set is drawn from
+ * verified, observed, fresh entries by public randomness." All three are stored
+ * fields and reading them is not a rule, which is why they are here and the draw
+ * itself is in src/probe.ts. `stale = 0` is "fresh" as derivation wrote it, and
+ * the tier is the sidecar's `effective_tier` rather than the core's
+ * `evidence_tier`: Section 4's gate says an observed entry whose test a majority
+ * rejected "is validated as a document and its effective tier is stated", and an
+ * entry the log itself treats as a document is not a measurement to probe on.
+ *
+ * Keyset by id and not by submitted_seq, because the caller reads EVERY page to
+ * draw from the whole candidate set rather than a recent slice of it: id is the
+ * primary key, so the walk is the cheapest total order the table has, and an
+ * entry rewritten between two pages cannot shift a row across the boundary.
+ */
+export async function probeCandidates(
+  db: D1Like,
+  query: ProbeCandidatesQuery,
+): Promise<StoredEntry[]> {
+  const bindings: unknown[] = [];
+  let after = "";
+  if (query.afterId !== undefined) {
+    after = "AND id > ? ";
+    bindings.push(query.afterId);
+  }
+  bindings.push(query.limit);
+
+  const rows = await db
+    .prepare(
+      `SELECT ${ENTRY_COLUMNS} FROM entries
+       WHERE status = 'verified' AND stale = 0 ${after}
+         AND json_extract(sidecar_json, '$.effective_tier') = 'observed'
+       ORDER BY id LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map(toStoredEntry);
+}
+
+/**
+ * What an attestation writer stores.
+ *
+ * `row` and `attestation` are callbacks rather than values for the reason
+ * `recordValidation` gives: the event does not exist until it is sealed onto the
+ * head, and the derived record has to be computed from a log that already holds
+ * it — `requested_seq` is the request event's own position, and each score
+ * carries the position of the event that made it. So the caller is handed the
+ * sealed event and returns what derivation made of it, and nothing here derives
+ * a field.
+ */
+export interface AttestationWrite<T extends EventType> {
+  readonly event: EventInput<T>;
+  readonly attestation: (event: Event<T>) => DerivedAttestation;
+}
+
+/**
+ * Record an attestation request: the event, the attestation row, and one row per
+ * drawn scorer, atomically.
+ *
+ * Section 8: the probes and the three scorers are both drawn by public
+ * randomness from a snapshot sealed before the beacon round, and the event
+ * carries everything either draw was computed from. The event is the record and
+ * the rows are the index into it, so an attestations row without its event would
+ * be an attestation nobody can recompute offline, and an event without its rows
+ * would be an attestation the sweep cannot see when its deadline passes. One
+ * `batch` makes both impossible.
+ *
+ * The id is the request's own: `attestationId` hashes the model, the snapshot
+ * position, the round and the probe hash, so a second request by the same model
+ * against the same round is the same id and the primary key is what refuses it —
+ * which is how "one model attests at most once per beacon round" is enforced by
+ * the shape of the data rather than by a check somebody could forget.
+ */
+export async function recordAttestationRequest(
+  db: D1Like,
+  input: {
+    readonly event: EventInput<"attestation_requested">;
+    readonly row: (event: Event<"attestation_requested">) => DerivedAttestation;
+    readonly scorers: readonly AttestationScorer[];
+  },
+): Promise<Event<"attestation_requested">> {
+  const { event, statements } = await sealOntoHead(db, input.event);
+  const requested = event as Event<"attestation_requested">;
+  const attestation = input.row(requested);
+
+  statements.push(attestationStatement(db, attestation, null));
+  for (const scorer of input.scorers) {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO attestation_scorers (attestation, operator, agent, scored_seq)
+           VALUES (?, ?, ?, NULL)`,
+        )
+        .bind(attestation.id, scorer.operator, scorer.agent),
+    );
+  }
+  await db.batch(statements);
+  return requested;
+}
+
+/**
+ * Record the model's answers: the event, and the row rewritten around them.
+ *
+ * The log gets the hash and this row gets the answers themselves, which is the
+ * whole reason `answers_json` exists (migrations/0011_attestations.sql). They are
+ * written in the same batch as the event that hashed them, so a stored set of
+ * answers can never be one the log never saw.
+ */
+export async function recordAttestationAnswers(
+  db: D1Like,
+  input: AttestationWrite<"attestation_answered"> & {
+    readonly id: string;
+    readonly answers: readonly ProbeAnswer[];
+  },
+): Promise<Event<"attestation_answered">> {
+  const { event, statements } = await sealOntoHead(db, input.event);
+  const answered = event as Event<"attestation_answered">;
+  statements.push(
+    attestationStatement(db, input.attestation(answered), input.answers),
+  );
+  await db.batch(statements);
+  return answered;
+}
+
+/**
+ * Record one scorer's verdict: the event, the row rewritten from the derived
+ * record, and that scorer's own row closed.
+ *
+ * `operator` is the scorer, and its row is what "who has not scored yet" is read
+ * from: the third score is the one that turns the status to `scored` and fills
+ * the published score and date, and all of it has to land in the same batch as
+ * the event, or a reader between two writes would see three scores and an
+ * attestation still waiting.
+ *
+ * The answers are carried through unchanged: a rewrite of the row must not lose
+ * what the model said.
+ */
+export async function recordAttestationScore(
+  db: D1Like,
+  input: AttestationWrite<"attestation_scored"> & {
+    readonly id: string;
+    readonly operator: string;
+    readonly answers: readonly ProbeAnswer[] | null;
+  },
+): Promise<Event<"attestation_scored">> {
+  const { event, statements } = await sealOntoHead(db, input.event);
+  const scored = event as Event<"attestation_scored">;
+  statements.push(
+    attestationStatement(db, input.attestation(scored), input.answers ?? null),
+    db
+      .prepare(
+        `UPDATE attestation_scorers SET scored_seq = ?
+         WHERE attestation = ? AND operator = ?`,
+      )
+      .bind(scored.seq, input.id, input.operator),
+  );
+  await db.batch(statements);
+  return scored;
+}
+
+/**
+ * Record an expiry: the event, and the row rewritten around it.
+ *
+ * The sweep's write. An expiry claims nothing about drift — it says the window
+ * ran out and names who never scored — so nothing but the status and the record
+ * change, and the partial scores stay exactly where they are.
+ */
+export async function recordAttestationExpired(
+  db: D1Like,
+  input: AttestationWrite<"attestation_expired"> & {
+    readonly id: string;
+    readonly answers: readonly ProbeAnswer[] | null;
+  },
+): Promise<Event<"attestation_expired">> {
+  const { event, statements } = await sealOntoHead(db, input.event);
+  const expired = event as Event<"attestation_expired">;
+  statements.push(
+    attestationStatement(db, input.attestation(expired), input.answers ?? null),
+  );
+  await db.batch(statements);
+  return expired;
+}
+
+/** One attestation by id, with the model's answers, or null. */
+export async function getAttestation(
+  db: D1Like,
+  id: string,
+): Promise<StoredAttestation | null> {
+  const row = await db
+    .prepare(
+      `SELECT ${ATTESTATION_COLUMNS} FROM attestations WHERE id = ? ${ONE_ROW}`,
+    )
+    .bind(id)
+    .first<Row>();
+  return row === null ? null : toStoredAttestation(row);
+}
+
+/**
+ * The attestation this model still has running, or null.
+ *
+ * The check behind the request route's refusal: a model with one open or
+ * answered attestation does not get a second, so a model's operator cannot keep
+ * redrawing until it likes the questions. Newest first, because an expired one
+ * is not running and a scored one is finished. Served by the (model, status)
+ * index.
+ */
+export async function openAttestationForModel(
+  db: D1Like,
+  model: string,
+): Promise<StoredAttestation | null> {
+  const row = await db
+    .prepare(
+      `SELECT ${ATTESTATION_COLUMNS} FROM attestations
+       WHERE model = ? AND status IN (?, ?)
+       ORDER BY requested_seq DESC ${ONE_ROW}`,
+    )
+    .bind(model, ...LIVE_ATTESTATION_STATUSES)
+    .first<Row>();
+  return row === null ? null : toStoredAttestation(row);
+}
+
+/** Where the attestation sweep looks, and how much of it takes at a time. */
+export interface DueAttestationsQuery {
+  readonly now: string;
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+}
+
+/**
+ * The attestations whose window has run out: still open or answered, and past
+ * `now`.
+ *
+ * The third of the sweep's deadline-first reads, after `dueAssignments` and
+ * `dueRevalidationAssignments`, and it holds the same rule they do: strictly
+ * before, because the deadline instant itself is still inside the window
+ * (src/attest.ts, `attestationDue`), and oldest deadline first so a sweep that
+ * can only get through so many gets through the longest-overdue ones. Served by
+ * the (status, deadline) index.
+ */
+export async function dueAttestations(
+  db: D1Like,
+  query: DueAttestationsQuery,
+): Promise<StoredAttestation[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${ATTESTATION_COLUMNS} FROM attestations
+       WHERE status IN (?, ?) AND deadline < ?
+       ORDER BY deadline LIMIT ?`,
+    )
+    .bind(...LIVE_ATTESTATION_STATUSES, query.now, query.limit)
+    .all<Row>();
+  return rows.results.map(toStoredAttestation);
+}
+
+/** What an attestation listing may narrow by, and where it resumes. */
+export interface ListAttestationsQuery {
+  readonly model?: string;
+  readonly operator?: string;
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+  /** Resume strictly before this requested_seq; omit for the first page. */
+  readonly beforeSeq?: number;
+}
+
+/**
+ * A page of attestations, newest request first.
+ *
+ * Keyset downward by requested_seq, not offset: the caller passes back the last
+ * position it saw, so the page is an index seek whose cost does not grow with
+ * how far in it is. `operator` narrows to the model's operator — what a scorer
+ * was drawn for is `attestationsForOperator`'s other half, which is a different
+ * question and a different index.
+ */
+export async function listAttestations(
+  db: D1Like,
+  query: ListAttestationsQuery,
+): Promise<StoredAttestation[]> {
+  const conditions: string[] = [];
+  const bindings: unknown[] = [];
+  if (query.model !== undefined) {
+    conditions.push("model = ?");
+    bindings.push(query.model);
+  }
+  if (query.operator !== undefined) {
+    conditions.push("model_operator = ?");
+    bindings.push(query.operator);
+  }
+  if (query.beforeSeq !== undefined) {
+    conditions.push("requested_seq < ?");
+    bindings.push(query.beforeSeq);
+  }
+  bindings.push(query.limit);
+  const where =
+    conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")} `;
+
+  const rows = await db
+    .prepare(
+      `SELECT ${ATTESTATION_COLUMNS} FROM attestations ${where}ORDER BY requested_seq DESC LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map(toStoredAttestation);
+}
+
+/**
+ * What one operator has to do with attestation, from both sides: the ones its
+ * own model asked for, and the ones it was drawn to score.
+ *
+ * Two lists and not one, because they are two different relationships and the
+ * paper is careful about the difference — Section 8's whole point is that the
+ * scorers are "parties its lab does not control", so an operator's page must
+ * never blur what it attested with what it judged. Newest request first on both
+ * sides, and the caller's limit applies to each.
+ */
+export async function attestationsForOperator(
+  db: D1Like,
+  operator: string,
+  limit: number,
+): Promise<{ asModel: StoredAttestation[]; asScorer: StoredAttestation[] }> {
+  const asModel = await db
+    .prepare(
+      `SELECT ${ATTESTATION_COLUMNS} FROM attestations
+       WHERE model_operator = ? ORDER BY requested_seq DESC LIMIT ?`,
+    )
+    .bind(operator, limit)
+    .all<Row>();
+
+  const asScorer = await db
+    .prepare(
+      `SELECT a.attestation_json, a.answers_json FROM attestation_scorers AS s
+       JOIN attestations AS a ON a.id = s.attestation
+       WHERE s.operator = ? ORDER BY a.requested_seq DESC LIMIT ?`,
+    )
+    .bind(operator, limit)
+    .all<Row>();
+
+  return {
+    asModel: asModel.results.map(toStoredAttestation),
+    asScorer: asScorer.results.map(toStoredAttestation),
+  };
+}
+
+/**
+ * One attestation's whole story: the four events carrying its id, in seq order.
+ *
+ * The mirror of `eventsForEntry` for the training path. An attestation is not
+ * entry-scoped, so its id lives in the payload rather than in the `entry_id`
+ * column and the narrowing is a JSON path — bounded by the attestation and by
+ * the four types, never a scan of the log, and served by the (type, seq) index
+ * from 0001.
+ */
+export async function eventsForAttestation(
+  db: D1Like,
+  id: string,
+): Promise<Event[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${EVENT_COLUMNS} FROM events
+       WHERE type IN (?, ?, ?, ?) AND json_extract(payload, '$.attestation') = ?
+       ORDER BY seq`,
+    )
+    .bind(...ATTESTATION_EVENT_TYPES, id)
+    .all<Row>();
+  return rows.results.map(toEvent);
 }
