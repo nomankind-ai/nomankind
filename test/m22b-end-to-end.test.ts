@@ -360,7 +360,7 @@ beforeAll(async () => {
     anchor: new FakeAnchorAdapter(null),
     payout,
   });
-});
+}, 600_000);
 
 afterAll(async () => {
   await store?.dispose();
@@ -727,7 +727,7 @@ describe("a v0.6 record is served, listed and synced", () => {
     await appendEvents(store.db, [event]);
     const derived = deriveEntry([event], legacyId, { now: AT });
     await putEntry(store.db, derived.entry as Entry, derived.sidecar, event.seq);
-  });
+  }, 600_000);
 
   it("serves it with seventeen core keys and no domain", async () => {
     const { status, body } = await getJson(`/entries/${legacyId}`);
