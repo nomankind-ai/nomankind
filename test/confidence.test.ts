@@ -21,7 +21,7 @@ const SIDECAR: Sidecar = {
   source: {
     class: "official",
     matched_host: "platform.openai.com",
-    provider: "openai",
+    authority: "openai",
   },
 };
 

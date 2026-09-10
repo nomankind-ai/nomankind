@@ -126,7 +126,7 @@ describe("renderPolicy", () => {
   });
 
   it("publishes every domain's source policy, all three tables, from POLICY", () => {
-    // Decision D-080. The gate, the provider table and the recognized list are
+    // Decision D-080. The gate, the authority table and the recognized list are
     // published under the path they live at, and every value is read off the
     // frozen object: a host typed into the page would be a second place the
     // policy lives, which is the one thing this page exists to prevent.
@@ -140,10 +140,10 @@ describe("renderPolicy", () => {
         `<td class="mono">${domain.sources.official_required.join(", ")}</td>`,
       );
 
-      for (const [provider, row] of Object.entries(domain.sources.providers)) {
-        const label = row.fixture === true ? `${provider} (fixture)` : provider;
-        expect(page, `${provider} has no row`).toContain(label);
-        expect(page, `${provider} does not publish its hosts`).toContain(
+      for (const [authority, row] of Object.entries(domain.sources.authorities)) {
+        const label = row.fixture === true ? `${authority} (fixture)` : authority;
+        expect(page, `${authority} has no row`).toContain(label);
+        expect(page, `${authority} does not publish its hosts`).toContain(
           `<td class="mono">${row.hosts.join(", ")}</td>`,
         );
       }
@@ -167,7 +167,7 @@ describe("renderPolicy", () => {
     // And the host rule itself, exactly, including the subdomain trap.
     expect(page).toContain("anthropic.com.evil.tld");
     expect(page).toContain("source_not_official");
-    expect(page).toContain("unknown_provider");
+    expect(page).toContain("unknown_authority");
   });
 
   it("publishes the two status thresholds as their own group", () => {
@@ -657,7 +657,7 @@ describe("renderApi", () => {
       "dispute_open",
       // Decision D-080: the source gate is asked a second time here, about the
       // entry being challenged, after the filing rules and before the links.
-      "unknown_provider",
+      "unknown_authority",
       "source_not_official",
       "bad_report_link",
       "bad_revalidation_link",
@@ -832,7 +832,7 @@ describe("renderApi", () => {
       "missing_domain",
       "unregistered_domain",
       "category_not_in_domain",
-      "unknown_provider",
+      "unknown_authority",
       "source_not_official",
     ]);
     let at = page.indexOf('<td class="mono">/entries</td>', page.indexOf("Write path"));
@@ -855,7 +855,7 @@ describe("renderApi", () => {
       "recognized",
       "other",
       "source_not_official",
-      "unknown_provider",
+      "unknown_authority",
       "min_source",
     ]) {
       expect(page, `${word} is not documented`).toContain(word);

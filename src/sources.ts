@@ -18,7 +18,7 @@
  * offline verifier re-deriving from the mirror gets the same answer.
  *
  * Pure: no I/O, no clock, no storage, and no table of its own. Every host, every
- * category and every provider row comes from src/policy.ts, because a second
+ * category and every authority row comes from src/policy.ts, because a second
  * list of who is authoritative would be a second published policy.
  *
  * What this module deliberately does not do: say whether the cited page supports
@@ -28,14 +28,14 @@
 
 import {
   isOfficialRequiredCategory,
-  providerSources,
+  authoritySources,
   recognizedHosts,
 } from "./policy.js";
 
 /**
  * What a citation's host earned.
  *
- * `official`: the subject's own provider published this host. `recognized`: a
+ * `official`: the subject's own authority published this host. `recognized`: a
  * source with an editorial process, a standards body, a court or regulator, a
  * journal or a preprint server -- a label, never a gate. `other`: everything
  * else, which is not an accusation. It says this log publishes no authority for
@@ -83,34 +83,35 @@ export function isSourceClass(value: unknown): value is SourceClass {
 
 /**
  * What the sidecar carries about an entry's citation: the class, the listed host
- * that matched it, and the provider its subject names.
+ * that matched it, and the authority its subject names.
  *
  * `matched_host` is null exactly when the class is other, because no listed host
- * matched. `provider` is the subject's first path segment and is null when the
- * subject carries none -- it is reported either way, so a reader can see whether
- * a claim was even about a named provider.
+ * matched. `authority` is the subject's primary party, its first path segment,
+ * and is null when the subject carries none -- it is reported either way, so a
+ * reader can see whether a claim was even about a named authority.
  */
 export interface SourceClassification {
   readonly class: SourceClass;
   readonly matched_host: string | null;
-  readonly provider: string | null;
+  readonly authority: string | null;
 }
 
 /** The classification of a citation nothing in the tables matched. */
-function otherThan(provider: string | null): SourceClassification {
-  return { class: "other", matched_host: null, provider };
+function otherThan(authority: string | null): SourceClassification {
+  return { class: "other", matched_host: null, authority };
 }
 
 /**
- * The provider a subject names: the first segment before `/`, lowercased.
+ * The primary party a subject names: the first segment before `/`, lowercased.
  *
- * The subject convention is `<provider>/<model or product>`
- * (schema/nomankind-domain-registry-v1.md), so the provider is a fact about the
- * subject string and never a lookup. A subject with no slash names no provider
- * and answers null -- which for an official-required category is a refusal, and
- * everywhere else is simply a subject the tables have no opinion about.
+ * The subject convention names that party first, `<provider>/<model or product>`
+ * (schema/nomankind-domain-registry-v1.md), so the primary party is a fact about
+ * the subject string and never a lookup. A subject with no slash names no
+ * primary party and answers null -- which for an official-required category is
+ * a refusal, and everywhere else is simply a subject the tables have no opinion
+ * about.
  */
-export function providerOf(subject: unknown): string | null {
+export function primaryPartyOf(subject: unknown): string | null {
   if (typeof subject !== "string") return null;
   const slash = subject.indexOf("/");
   if (slash <= 0) return null;
@@ -187,13 +188,13 @@ function longestMatch(host: string, listed: readonly string[]): string | null {
 /**
  * The class one entry's citation earns, in one domain, for one subject.
  *
- * Official first: a host the subject's own provider published outranks anything
- * else, and a provider page about its own product is the strongest source there
- * is for what that product costs or when it was deprecated. Recognized next,
- * from the domain's list. Otherwise other.
+ * Official first: a host the subject's own authority published outranks
+ * anything else, and an authority's page about its own product is the strongest
+ * source there is for what that product costs or when it was deprecated.
+ * Recognized next, from the domain's list. Otherwise other.
  *
  * Deterministic and total. Every input is data -- an unregistered domain, a
- * subject with no provider, a citation that is not a URL at all -- and each of
+ * subject with no authority, a citation that is not a URL at all -- and each of
  * them answers `other` rather than throwing, because this runs over stored rows
  * that may have been written by an older Worker and over a stranger's file in
  * the offline verifier.
@@ -203,34 +204,34 @@ export function sourceClassOf(
   subject: unknown,
   citation: unknown,
 ): SourceClassification {
-  const provider = providerOf(subject);
+  const authority = primaryPartyOf(subject);
   const host = hostOf(citation);
-  if (host === null) return otherThan(provider);
+  if (host === null) return otherThan(authority);
 
-  if (provider !== null) {
-    const row = providerSources(domain, provider);
+  if (authority !== null) {
+    const row = authoritySources(domain, authority);
     if (row !== null) {
       const matched = longestMatch(host, row.hosts);
       if (matched !== null) {
-        return { class: "official", matched_host: matched, provider };
+        return { class: "official", matched_host: matched, authority };
       }
     }
   }
 
   const recognized = longestMatch(host, recognizedHosts(domain));
   if (recognized !== null) {
-    return { class: "recognized", matched_host: recognized, provider };
+    return { class: "recognized", matched_host: recognized, authority };
   }
 
-  return otherThan(provider);
+  return otherThan(authority);
 }
 
 /** Why a submission's citation was refused. */
-export type SourceRefusal = "unknown_provider" | "source_not_official";
+export type SourceRefusal = "unknown_authority" | "source_not_official";
 
 /** Both source refusals, in check order: the first one wins. */
 export const SOURCE_REFUSALS: readonly SourceRefusal[] = Object.freeze([
-  "unknown_provider",
+  "unknown_authority",
   "source_not_official",
 ]);
 
@@ -248,11 +249,12 @@ export type SourceVerdict =
  *
  * For an official-required category, in order:
  *
- * unknown_provider: the subject names no provider, or names one the domain's
- * table has no row for. The refusal is deliberate and it is not a shrug -- the
- * log has published no official source for this subject, so it cannot tell an
- * official page from a lookalike, and accepting the claim from anywhere is
- * exactly the hole this policy exists to close. A row is added by decision.
+ * unknown_authority: the subject names no primary party, or names one the
+ * domain's authorities table has no row for. The refusal is deliberate and it
+ * is not a shrug -- the log has published no official source for this subject,
+ * so it cannot tell an official page from a lookalike, and accepting the claim
+ * from anywhere is exactly the hole this policy exists to close. A row is added
+ * by decision.
  *
  * source_not_official: there is a row, and the citation is not one of its hosts.
  * An http citation of an official host lands here too, by way of the host rule.
@@ -265,9 +267,9 @@ export function checkSource(
 ): SourceVerdict {
   if (!isOfficialRequiredCategory(domain, category)) return { ok: true };
 
-  const provider = providerOf(subject);
-  if (provider === null || providerSources(domain, provider) === null) {
-    return { ok: false, reason: "unknown_provider" };
+  const authority = primaryPartyOf(subject);
+  if (authority === null || authoritySources(domain, authority) === null) {
+    return { ok: false, reason: "unknown_authority" };
   }
 
   if (sourceClassOf(domain, subject, citation).class !== "official") {

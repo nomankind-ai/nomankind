@@ -136,7 +136,7 @@ export interface Sidecar {
   /**
    * Whitepaper Section 4, the source policy (decision D-080): the class the
    * entry's own citation earned, the listed host that matched it, and the
-   * provider its subject names.
+   * authority its subject names.
    *
    * A derived field and not a signed one. The citation was always in the core;
    * this is a reading of it against the domain's published tables, computed the

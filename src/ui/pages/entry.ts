@@ -180,29 +180,32 @@ function derivedValue(entry: Record_, key: string): Safe {
 }
 
 /**
- * The entry's source class, its matched host and its provider (decision D-080).
+ * The entry's source class, its matched host and its authority (decision D-080,
+ * renamed by D-081).
  *
  * `other` is spelt out rather than left as a bare word. A reader who sees
  * `official` beside a host has been told something; a reader who sees `other`
  * has been told that this log publishes no authority for this subject, which is
  * a different statement from "the source is bad" and the page says the one it
  * means. The matched host is null exactly when the class is other, so it is not
- * printed there; the provider is the subject's own and is null when the subject
- * carries no provider segment.
+ * printed there; the authority is the subject's own primary party and is null
+ * when the subject carries no such segment.
  */
 function sourceValue(source: EntryData["sidecar"]["source"]): Safe {
-  const provider =
-    source.provider === null
-      ? html`<span class="muted">no provider in the subject</span>`
-      : html`${source.provider}`;
+  const authority =
+    source.authority === null
+      ? html`<span class="muted">no primary party in the subject</span>`
+      : html`${source.authority}`;
   if (source.class === "other") {
     return html`<span class="break"
         >other: no published authority for this subject</span
       >
-      <span class="note">provider ${provider}</span>`;
+      <span class="note">authority ${authority}</span>`;
   }
   return html`<span class="break">${source.class}</span>
-    <span class="note">${source.matched_host ?? EM_DASH} · provider ${provider}</span>`;
+    <span class="note"
+      >${source.matched_host ?? EM_DASH} · authority ${authority}</span
+    >`;
 }
 
 /** The derived block: recomputed from the events, never written. */

@@ -446,7 +446,7 @@ export type SubmissionAttempt =
  * refusal here leaves the log and the archive exactly where they were.
  *
  * The source policy (decision D-080) needs nothing of its own here, which is the
- * point of putting it in `checkSubmission`: `unknown_provider` and
+ * point of putting it in `checkSubmission`: `unknown_authority` and
  * `source_not_official` are two more of that function's verdicts, refused in its
  * own order — after `category_not_in_domain`, before `bad_submitted_at` — and
  * mapped to 422 by the same rule every other verdict but `author_mismatch` is.

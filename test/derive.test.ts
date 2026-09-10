@@ -199,7 +199,7 @@ describe("the derived entry", () => {
     expect(sidecar.source).toEqual({
       class: "official",
       matched_host: "platform.openai.com",
-      provider: "openai",
+      authority: "openai",
     });
     expect(Object.keys(entry)).not.toContain("source");
     expect(Object.keys(entry)).not.toContain("effective_tier");

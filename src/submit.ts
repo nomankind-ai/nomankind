@@ -194,7 +194,7 @@ export const SUBMISSION_REFUSALS: readonly SubmissionRefusal[] = Object.freeze([
   "missing_domain",
   "unregistered_domain",
   "category_not_in_domain",
-  "unknown_provider",
+  "unknown_authority",
   "source_not_official",
   "bad_submitted_at",
   "author_mismatch",
@@ -260,13 +260,14 @@ function instant(value: unknown): number {
  * domain does not admit. The schema cannot express a per-domain enum, so this is
  * where that rule is actually enforced.
  *
- * unknown_provider and source_not_official: the source policy (decision D-080,
+ * unknown_authority and source_not_official: the source policy (decision D-080,
  * src/sources.ts). A category with an authoritative source by nature -- pricing,
  * limit, deprecation, release, outage -- must cite the subject's own official
- * source. The subject's provider must have a published row, and the citation
- * must be one of its hosts over https. A correction entry is a submission like
- * any other and passes here too -- under its own category, which no domain
- * requires an official source for, so nothing here gates it. What makes a
+ * source. The subject's primary party must have a published row in the domain's
+ * authorities table, and the citation must be one of its hosts over https. A
+ * correction entry is a submission like any other and passes here too -- under
+ * its own category, which no domain requires an official source for, so nothing
+ * here gates it. What makes a
  * correction of a pricing claim cite the official source a pricing claim does is
  * the dispute door's own second call, against the challenged entry's category
  * (src/worker/dispute.ts).

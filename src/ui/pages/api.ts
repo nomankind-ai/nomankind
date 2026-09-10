@@ -198,7 +198,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/policy",
     parameters: "—",
     answers:
-      "The published policy object, served from the same module the kernel reads. Every number on the policy page, as JSON, DOMAINS among them — each registered domain's categories, staleness windows, transcript categories, excluded parties, attestation, subject convention and sources (the official-required categories, the provider table of official hosts, and the recognized hosts).",
+      "The published policy object, served from the same module the kernel reads. Every number on the policy page, as JSON, DOMAINS among them — each registered domain's categories, staleness windows, transcript categories, excluded parties, attestation, subject convention and sources (the official-required categories, the authorities table of official hosts, and the recognized hosts).",
     refusals: "405 with Allow: GET.",
   },
   {
@@ -321,7 +321,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry and a Location header. The entry is draft: status is recomputed from the log and is never sent in. The Worker fetches the citation itself under the norm rule and refuses unless what it fetched hashes to the snapshot_hash the author signed.",
     refusals:
-      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, unknown_provider (the subject's provider has no row in this domain's source table and the category needs an official source), source_not_official (the category has an authoritative source by nature and the citation is not it), bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 schema_invalid; 409 chain_moved.",
+      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, unknown_authority (the subject's primary party has no row in this domain's authorities table and the category needs an official source), source_not_official (the category has an authoritative source by nature and the citation is not it), bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 schema_invalid; 409 chain_moved.",
   },
   {
     method: "POST",
@@ -351,7 +351,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with { correction, target }: the correction entry as submitted, and the disputed entry as derivation left it. The correction enters the log as its own draft entry and is validated like any other, so nothing about the target moves until the challenge is upheld.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 author_mismatch; then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch, self_dispute; 409 dispute_open; 422 unknown_provider and source_not_official read against the entry being challenged (a correction's own category is never official-required, so the gate here is the target's domain and category: overturning a pricing, limit, deprecation, release or outage claim takes a citation of the target subject's own official source), bad_report_link, bad_revalidation_link, insufficient_standing (a registered operator's available standing, less what its open stakes already hold, is below the published dispute stake), schema_invalid.",
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 author_mismatch; then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch, self_dispute; 409 dispute_open; 422 unknown_authority and source_not_official read against the entry being challenged (a correction's own category is never official-required, so the gate here is the target's domain and category: overturning a pricing, limit, deprecation, release or outage claim takes a citation of the target subject's own official source), bad_report_link, bad_revalidation_link, insufficient_standing (a registered operator's available standing, less what its open stakes already hold, is below the published dispute stake), schema_invalid.",
   },
   {
     method: "POST",
@@ -560,7 +560,7 @@ POST
         <p class="note">
           Every entry carries a source class derived from its own citation and
           nothing else: <span class="mono">official</span> when the host is one
-          the subject's provider publishes under,
+          the subject's authority publishes under,
           <span class="mono">recognized</span> for an editorial, standards,
           court, regulator or journal host, and
           <span class="mono">other</span> for everything else. The citation was
@@ -577,9 +577,9 @@ POST
           <span class="mono">POST /entries</span> refuses it
           <span class="mono">source_not_official</span> before the citation is
           fetched and before anything is written —
-          <span class="mono">unknown_provider</span> when the table holds no row
-          for the subject's provider at all. A dispute's correction entry goes
-          through the same pipeline, so a correction of a pricing claim must
+          <span class="mono">unknown_authority</span> when the table holds no row
+          for the subject's primary party at all. A dispute's correction entry
+          goes through the same pipeline, so a correction of a pricing claim must
           cite the official source too. Everything else is labeled and served,
           and a reader who wants the gate for themselves asks for it with
           <span class="mono">min_source</span> on
