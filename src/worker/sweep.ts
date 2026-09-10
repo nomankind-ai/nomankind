@@ -32,6 +32,13 @@
  * newest day it may publish, because today is not over. A log that has served no
  * reads publishes nothing at all.
  *
+ * The sixth is Section 8's, "Drift attestation": a model has one window in which
+ * to answer its probes and its three drawn scorers have the same one in which to
+ * score them, and an attestation still waiting when the window runs out is closed
+ * with an `attestation_expired` naming the scorers that never answered. It runs
+ * before the seal for the same reason the read counts do. An expiry is not a
+ * failing score and claims nothing about drift.
+ *
  * Three more follow, and they are the Seal paragraph's: "Everything gets sealed,
  * including drafts and rejections ... with the registry head countersigned by
  * witnesses nomankind does not control ... at an initial interval of five
@@ -93,6 +100,7 @@ import {
   poolSnapshotDue,
   type Beacon,
 } from "../assign.js";
+import { attestationDue, deriveAttestation } from "../attest.js";
 import type { BountyAccrual } from "../bounty.js";
 import {
   deriveEntry,
@@ -141,9 +149,11 @@ import {
   bountiesForEntry,
   bountyPoolRows,
   dueAssignments,
+  dueAttestations,
   dueRevalidationAssignments,
   earliestReadReceiptDay,
   eventsAfter,
+  eventsForAttestation,
   eventsForEntry,
   eventsInRange,
   eventsOfType,
@@ -166,6 +176,7 @@ import {
   readCountsOn,
   recordAssignment,
   recordAssignmentMissed,
+  recordAttestationExpired,
   recordPayout,
   recordPoolSnapshot,
   recordRevalidationAssignment,
@@ -328,6 +339,15 @@ export interface SweepReport {
     readonly total: number;
     readonly seq: number;
   }[];
+  /**
+   * The attestations whose window this run closed. Ids only, oldest deadline
+   * first, and empty when nothing was owed.
+   *
+   * Whitepaper Section 8: an expiry is not a failing score and claims nothing
+   * about drift, so there is nothing here but which attestations stopped
+   * waiting — who never scored is in the event the run appended.
+   */
+  readonly attestations: { readonly expired: readonly string[] };
   /** The seal this run made, or null when nothing new was there to seal. */
   readonly sealed: {
     readonly seq: number;
@@ -541,6 +561,75 @@ async function publishStep(
   }
 
   return published;
+}
+
+// ---------------------------------------------------------------------------
+// (e2): the attestations whose window ran out
+// ---------------------------------------------------------------------------
+
+/**
+ * Close every attestation whose seventy-two hours are up.
+ *
+ * Whitepaper Section 8, "Drift attestation": the model answers and three drawn
+ * operators score, and this is what happens when one of them never does. An
+ * expiry is not a failing score — a model whose scorers went quiet has not
+ * drifted, it has not been scored — so the event says only that the window ran
+ * out and names the scorer operators that never answered (src/attest.ts,
+ * `attestationDue`). The model's operator asks for a new one.
+ *
+ * The rows say which attestations are past their deadline; the kernel says
+ * whether each one is really owed an expiry, because the row is only an index
+ * into the log and the log is the record. Bounded by the page size like every
+ * other step, oldest deadline first.
+ *
+ * Before the seal, so an attestation that stopped waiting during this run is
+ * sealed by the same run that closed it.
+ *
+ * A racing timer is a refusal rather than a repair, exactly as it is for the
+ * seal and the read counts: the chain rule refuses the loser's event, the loser
+ * counts `attestation_expired_conflict`, stops expiring, and carries on to its
+ * later steps.
+ */
+async function attestationStep(
+  db: D1Like,
+  at: string,
+  skip: Skip,
+): Promise<SweepReport["attestations"]> {
+  const expired: string[] = [];
+  for (const due of await dueAttestations(db, {
+    now: at,
+    limit: LIST_PAGE_LIMIT,
+  })) {
+    const id = due.attestation.id;
+    const events = await eventsForAttestation(db, id);
+    const derived = deriveAttestation(events, { now: at });
+    const payload = attestationDue(derived, at);
+    if (payload === null) {
+      // The column said the window had run out; the log is the authority on
+      // whether it actually has, and on whether the attestation is still
+      // waiting for anybody at all.
+      skip("attestation_not_due");
+      continue;
+    }
+
+    try {
+      await recordAttestationExpired(db, {
+        event: { at, type: "attestation_expired", entry_id: null, payload },
+        id,
+        answers: due.answers,
+        attestation: (event) =>
+          deriveAttestation([...events, event], { now: at }),
+      });
+    } catch (error) {
+      if (error instanceof EventAppendError) {
+        skip("attestation_expired_conflict");
+        break;
+      }
+      throw error;
+    }
+    expired.push(id);
+  }
+  return { expired };
 }
 
 // ---------------------------------------------------------------------------
@@ -1721,6 +1810,11 @@ export async function runSweep(
   // nothing but the clock, so it runs on every environment.
   const published = await publishStep(db, deps.now, at, skip);
 
+  // (e2) The attestations whose window ran out. Before the seal for the same
+  // reason the read counts are: an expiry appended here is sealed by this same
+  // run, so the log commits to it at once rather than a cycle later.
+  const attestations = await attestationStep(db, at, skip);
+
   // (f), (g) and (h). The seal, the countersignatures, and yesterday's anchor,
   // in that order: a seal has to exist before anyone can countersign it, and a
   // day's roots have to be fixed before the day is anchored. Every refusal is
@@ -1770,6 +1864,7 @@ export async function runSweep(
     revalidation_missed: revalidationMissed,
     staled,
     published,
+    attestations,
     sealed,
     witnessed,
     anchored,

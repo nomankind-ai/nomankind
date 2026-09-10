@@ -24,11 +24,20 @@
  * (`author_operator_mismatch`), so the registry is the only answer that can be
  * right. A bare key has none and the entry names none.
  *
- * What this command does not carry: the receipt of an observed entry and the
- * frozen transcript of a behavior or misbehavior entry. Those two snapshot
- * their evidence rather than the cited page, so their hashes are not this
- * command's to compute; a fields file naming one is submitted honestly and the
- * Worker's own refusal is printed.
+ * `--receipt <file.json>` carries the measurement receipt of an observed entry
+ * (M22, closing the M15 gap's client half). The artifact is checked with the
+ * kernel's own `checkReceiptArtifact` and hashed with `receiptArtifactHash`
+ * before anything is fetched, the hash fills `observation.receipt_hash` when the
+ * fields file leaves it null, and the artifact itself goes out as the body's
+ * `receipt`, which is where the submit door archives it at that hash. A fields
+ * file that already names a receipt_hash is left alone: the author is claiming a
+ * receipt already archived, and quietly overwriting the claim would hide the
+ * disagreement rather than let the Worker refuse it.
+ *
+ * What this command still does not carry: the frozen transcript of a behavior or
+ * misbehavior entry, which snapshots its evidence rather than the cited page. A
+ * fields file naming one is submitted honestly and the Worker's own refusal is
+ * printed.
  *
  * The core is exported over injected io — an http client, a snapshot fetcher, a
  * clock and a key — so a test drives it in process against handleRequest with
@@ -40,6 +49,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
+import { checkReceiptArtifact, receiptArtifactHash } from "../artifact.js";
 import type { Core } from "../core.js";
 import { signCore } from "../sign.js";
 import { buildSubmittedCore } from "../submit.js";
@@ -56,7 +66,8 @@ import {
   type ValidatorKey,
 } from "./validator.js";
 
-const USAGE = "usage: submit <key.json> <base-url> <fields.json>";
+const USAGE =
+  "usage: submit <key.json> <base-url> <fields.json> [--receipt <file.json>]";
 
 /** The one refusal this command makes for itself, before any request. */
 export const BAD_FIELDS = "bad_fields";
@@ -303,14 +314,60 @@ export async function runSubmit(input: {
   readonly key: ValidatorKey;
   readonly baseUrl: string;
   readonly fields: Record<string, unknown>;
+  /** The measurement receipt of an observed entry, when there is one. */
+  readonly receipt?: unknown;
   readonly deps: SubmitDeps;
 }): Promise<SubmitRun> {
   const { deps } = input;
 
+  // The receipt first, because its hash goes INTO the signed core: an artifact
+  // the kernel refuses is a usage failure and never reaches the network, and a
+  // hash computed after the core was built would be a hash of something the
+  // author never signed.
+  let fields = input.fields;
+  if (input.receipt !== undefined) {
+    const checked = checkReceiptArtifact(input.receipt);
+    if (!checked.ok) {
+      deps.io.stderr(`${checked.reason}: ${checked.detail}`);
+      return {
+        ok: false,
+        code: 2,
+        status: null,
+        error: checked.reason,
+        entryId: null,
+        entryStatus: null,
+      };
+    }
+    const hashed = await receiptArtifactHash(input.receipt);
+    /* c8 ignore next 12 -- unreachable: the check above already passed. */
+    if (!hashed.ok) {
+      deps.io.stderr(`${hashed.reason}: ${hashed.detail}`);
+      return {
+        ok: false,
+        code: 2,
+        status: null,
+        error: hashed.reason,
+        entryId: null,
+        entryStatus: null,
+      };
+    }
+    const observation = fields["observation"];
+    if (
+      isRecord(observation) &&
+      (observation["receipt_hash"] === null ||
+        observation["receipt_hash"] === undefined)
+    ) {
+      fields = {
+        ...fields,
+        observation: { ...observation, receipt_hash: hashed.hash },
+      };
+    }
+  }
+
   const built = await buildAuthoredCore({
     key: input.key,
     baseUrl: input.baseUrl,
-    fields: input.fields,
+    fields,
     deps,
   });
   if (!built.ok) {
@@ -332,7 +389,12 @@ export async function runSubmit(input: {
   const request = await signedPost({
     baseUrl: input.baseUrl,
     path: "/entries",
-    body: { entry: { ...core, signature } },
+    body: {
+      entry: { ...core, signature },
+      // The artifact itself, untouched: the hash the Worker takes is over
+      // exactly these bytes, and it archives it at that hash.
+      ...(input.receipt === undefined ? {} : { receipt: input.receipt }),
+    },
     key: input.key,
     now: deps.now,
   });
@@ -371,12 +433,20 @@ if (
   process.argv[1] !== undefined &&
   import.meta.filename === resolve(process.argv[1])
 ) {
-  const [keyPath, baseUrl, fieldsPath] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const receiptAt = argv.indexOf("--receipt");
+  const receiptPath = receiptAt === -1 ? undefined : argv[receiptAt + 1];
+  const positional = argv.filter(
+    (argument, index) =>
+      index !== receiptAt && index !== receiptAt + 1 && !argument.startsWith("--"),
+  );
+  const [keyPath, baseUrl, fieldsPath] = positional;
   if (
     keyPath === undefined ||
     baseUrl === undefined ||
     fieldsPath === undefined ||
-    process.argv.length > 5
+    positional.length > 3 ||
+    (receiptAt !== -1 && receiptPath === undefined)
   ) {
     console.error(USAGE);
     process.exit(2);
@@ -396,12 +466,24 @@ if (
     process.exit(2);
   }
 
+  // A receipt file that cannot be read or parsed is a usage failure too.
+  let receipt: unknown;
+  if (receiptPath !== undefined) {
+    try {
+      receipt = JSON.parse(await readFile(resolve(receiptPath), "utf8"));
+    } catch (error) {
+      io.stderr(`${receiptPath}: ${reasonOf(error)}`);
+      process.exit(2);
+    }
+  }
+
   let code = 1;
   try {
     const run = await runSubmit({
       key: await readKeyFile(keyPath),
       baseUrl,
       fields: fields as Record<string, unknown>,
+      ...(receipt === undefined ? {} : { receipt }),
       deps: {
         http: new WebHttpClient(),
         fetcher: new WebFetcher(),

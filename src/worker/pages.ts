@@ -26,6 +26,7 @@
  * from src/policy.ts. No wall clock either — `deps.now` is the instant the router read once.
  */
 
+import { confidenceInputs } from "../confidence.js";
 import type { Event } from "../events.js";
 import { ledgerBalance } from "../ledger.js";
 import {
@@ -44,6 +45,7 @@ import type { D1Like } from "../storage/d1.js";
 import {
   agentCountsByOperator,
   agentsForOperator,
+  attestationsForOperator,
   countEntries,
   countSeals,
   countTrustedOperators,
@@ -332,6 +334,7 @@ async function entry(
   db: D1Like,
   ctx: PageContext,
   id: string,
+  now: Date,
 ): Promise<Response> {
   const stored = await getEntry(db, id);
   if (stored === null) return htmlResponse(renderNotFound(ctx), 404);
@@ -437,6 +440,15 @@ async function entry(
       ledger,
       readShares,
       disputeOf: disputeTarget,
+      // Section 8's raw inputs to the null confidence field, computed here
+      // rather than on the page: `age_ratio` is the entry's age against its own
+      // window, which is a question about an instant, and the instant is the
+      // router's own — the same one the JSON endpoint answers at.
+      confidenceInputs: confidenceInputs({
+        entry: stored.entry,
+        sidecar: stored.sidecar,
+        now: now.toISOString(),
+      }),
     }),
   );
 }
@@ -510,6 +522,11 @@ async function operator(
   // has none; the page adds nothing up.
   const ledger = await ledgerRowsForOperator(db, id, LIST_PAGE_LIMIT);
   const payouts = await payoutRows(db, LIST_PAGE_LIMIT, id);
+  // Both sides of Section 8's drift attestation, one keyset page each, at the
+  // same explicit limit every other panel on this page reads at. The derived
+  // record is carried through as the row: the page picks columns off it and
+  // folds nothing.
+  const attestations = await attestationsForOperator(db, id, LIST_PAGE_LIMIT);
   const balance = ledgerBalance(ledger, now.toISOString());
   const attestation = record.details["attestation"];
   const namedBy = record.details["named_by"];
@@ -535,6 +552,10 @@ async function operator(
       namedBy: typeof namedBy === "string" ? namedBy : null,
       payoutStatus: typeof payoutStatus === "string" ? payoutStatus : null,
       validations,
+      attestations: {
+        asModel: attestations.asModel.map((each) => each.attestation),
+        asScorer: attestations.asScorer.map((each) => each.attestation),
+      },
     }),
   );
 }
@@ -615,7 +636,7 @@ async function route(
   if (entryId !== null) {
     if (!wants) return null;
     return ENTRY_ID_PATTERN.test(entryId)
-      ? entry(db, ctx, entryId)
+      ? entry(db, ctx, entryId, now)
       : htmlResponse(renderNotFound(ctx), 404);
   }
 

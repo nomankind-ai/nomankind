@@ -188,6 +188,118 @@ function derived(data: EntryData): Safe {
   </section>`;
 }
 
+/**
+ * One row of the confidence inputs table: the field's own dotted name, and what
+ * the endpoint holds under it.
+ */
+interface InputRow {
+  readonly name: string;
+  readonly value: unknown;
+}
+
+/**
+ * A nested object, which becomes rows; anything else, null and an array
+ * included, is a value and becomes one row.
+ */
+function isNested(value: unknown): value is Record_ {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Every field of the inputs object, flattened to `parent.child` names in the
+ * object's own order.
+ *
+ * Walked rather than listed. The inputs are `confidenceInputs`' own return
+ * value, so a field added to it appears here without an edit — which is the
+ * point of Section 8's promise that every input is exposed: a page holding its
+ * own list of them could quietly stop showing one. `age_ratio` is null for an
+ * entry with no window and is one row saying so, rather than two rows of
+ * nothing.
+ */
+function flattenInputs(value: unknown, prefix: string, into: InputRow[]): void {
+  if (isNested(value)) {
+    for (const [key, nested] of Object.entries(value)) {
+      flattenInputs(nested, prefix === "" ? key : `${prefix}.${key}`, into);
+    }
+    return;
+  }
+  into.push({ name: prefix, value });
+}
+
+/** One input value. Null is the word null, because here it is a reading. */
+function inputValue(value: unknown): Safe {
+  if (value === null || value === undefined) {
+    return html`<span class="dim">null</span>`;
+  }
+  if (typeof value === "boolean") return html`${value ? "true" : "false"}`;
+  return html`<span class="break">${value}</span>`;
+}
+
+/**
+ * The confidence field, and the receipts it would have been computed from
+ * (Section 8, The confidence field).
+ *
+ * The field is the word null and the formula is the word null, and neither is
+ * a placeholder for a number this page is waiting on: "the formula is not
+ * published at launch, on purpose, and until it is, the field is null". What
+ * the paper promises instead is underneath — every input raw and unweighted,
+ * by the name the endpoint uses for it, so a reader can do their own weighting
+ * rather than trust a number nobody has calibrated. The page weights nothing
+ * and adds nothing up; the route computed these at its own clock.
+ */
+function confidence(ctx: PageContext, data: EntryData): Safe {
+  const rows: InputRow[] = [];
+  flattenInputs(data.confidenceInputs, "", rows);
+  const id = text(data.entry, "id") ?? "";
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Confidence</h2>
+      <span class="panel-label">conf-v1 unpublished</span>
+    </div>
+    <div class="panel-body">
+      <p class="lede">
+        confidence <span class="dim">null</span> ·
+        <span class="mono">conf-v1 unpublished</span>
+      </p>
+      <p class="note">
+        There is no confidence number for any entry and there is no formula to
+        name: a bad formula would be the most damaging thing in the system,
+        because learners weight on it, and there is nothing to calibrate it
+        against until the log holds enough dispute and failure-report history.
+        Every input it would have been computed from is below, raw and
+        unweighted, exactly as the endpoint serves them.
+      </p>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>input</th>
+            <th>value</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(
+            (row) => html`<tr class="row">
+              <td class="break">${row.name}</td>
+              <td>${inputValue(row.value)}</td>
+            </tr>`,
+          )}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel-body">
+      <pre class="block mono">GET ${ctx.origin}/entries/${id}/confidence-inputs</pre>
+      <p class="note">
+        The same object as JSON, computed at the request's own clock, which is
+        the only thing on it that moves: age_ratio is whole UTC days from
+        last_confirmed against the entry's own window, and null for an entry
+        that has no window to age against.
+      </p>
+    </div>
+  </section>`;
+}
+
 /** The state beside the entry that the schema cannot hold. */
 function sidecar(data: EntryData): Safe {
   const slots = data.sidecar.read_share_slots;
@@ -889,6 +1001,7 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
       </p>
 
       <div class="cols">${core(data)} ${derived(data)}</div>
+      ${confidence(ctx, data)}
       <div class="cols">${sidecar(data)} ${seal(data)}</div>
       ${approvers(data)} ${reconfirmations(data)} ${disputes(data)}
       ${failureReports(data)} ${revalidations(data)} ${stakes(data)}

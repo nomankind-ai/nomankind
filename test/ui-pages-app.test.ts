@@ -17,8 +17,10 @@
 
 import { describe, expect, it } from "vitest";
 
+import { confidenceInputs } from "../src/confidence.js";
 import { CORE_KEYS } from "../src/core.js";
 import type { Sidecar } from "../src/derive.js";
+import type { Entry } from "../src/schema.js";
 import type { Event } from "../src/events.js";
 import { ledgerBalance, type LedgerRow } from "../src/ledger.js";
 import { LIST_PAGE_LIMIT, TRUSTED_POOL_SWITCH } from "../src/policy.js";
@@ -38,8 +40,10 @@ import {
 } from "../src/ui/html.js";
 import { APP_CSS } from "../src/ui/styles.js";
 import type {
+  AttestationRow,
   EntryData,
   EntryRow,
+  OperatorData,
   OperatorRow,
   PageContext,
 } from "../src/ui/types.js";
@@ -373,9 +377,27 @@ const seal: Seal = {
   registry: null,
 };
 
+/**
+ * The confidence inputs, computed by the kernel at a fake clock (M22).
+ *
+ * The endpoint's own function over the same fixture the page is handed, not a
+ * hand-written object: the page's promise is that it shows every field the
+ * endpoint holds, and a fixture written by hand here could agree with the page
+ * while both disagreed with `confidenceInputs`. The clock is fixed because
+ * `age_ratio.days` counts UTC days against `last_confirmed`, and a suite that
+ * read the wall clock would say something different every day.
+ */
+const CONFIDENCE_NOW = "2026-09-20T06:00:00.000Z";
+const confidence = confidenceInputs({
+  entry: entryRecord as unknown as Entry,
+  sidecar,
+  now: CONFIDENCE_NOW,
+});
+
 const entryData: EntryData = {
   entry: entryRecord,
   sidecar,
+  confidenceInputs: confidence,
   position: 12,
   events,
   seal,
@@ -504,6 +526,49 @@ const operatorPayouts: LedgerRow[] = operatorLedger.filter(
 );
 const operatorBalance = ledgerBalance(operatorLedger, LEDGER_NOW);
 
+/**
+ * Drift attestation, from both sides (M22).
+ *
+ * One finished attestation of a model under this operator, and one still open
+ * that this operator was drawn to score. Two rows and not one, because the two
+ * tables are two relationships and a fixture that filled only one of them would
+ * let a page that ran them together pass.
+ */
+const ATTESTATION_ID = "att_0123456789abcdef0123456789abcdef";
+const OTHER_ATTESTATION_ID = "att_fedcba9876543210fedcba9876543210";
+const MODEL_AGENT = "1F916:kestrel-1-model-key-abcdefghijklmnop";
+const PROBE_HASH =
+  "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+
+const scoredAttestation: AttestationRow = {
+  id: ATTESTATION_ID,
+  model: MODEL_AGENT,
+  status: "scored",
+  score: { agreed: 8, probe_count: 10 },
+  date: "2026-09-09",
+  probe_hash: PROBE_HASH,
+  probe_count: 10,
+};
+
+const openAttestation: AttestationRow = {
+  ...scoredAttestation,
+  id: OTHER_ATTESTATION_ID,
+  status: "open",
+  score: null,
+  date: null,
+};
+
+const attestations: OperatorData["attestations"] = {
+  asModel: [scoredAttestation],
+  asScorer: [openAttestation],
+};
+
+/** An operator neither side of attestation has touched. */
+const NO_ATTESTATIONS: OperatorData["attestations"] = {
+  asModel: [],
+  asScorer: [],
+};
+
 /** Every page, so the escaping check runs over all of them at once. */
 function everyPage(): Record<string, string> {
   return {
@@ -550,6 +615,7 @@ function everyPage(): Record<string, string> {
       ledger: operatorLedger,
       payouts: operatorPayouts,
       balance: operatorBalance,
+      attestations,
     }),
   };
 }
@@ -995,6 +1061,91 @@ describe("the entry page's disputes, reports, revalidations and stakes", () => {
   });
 });
 
+/**
+ * Every field name of the inputs object, flattened to `parent.child` the way
+ * the page has to show them. Written here independently of the page, so a page
+ * that dropped a field fails rather than agreeing with itself.
+ */
+function inputNames(value: unknown, prefix = ""): string[] {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return Object.entries(value).flatMap(([key, nested]) =>
+      inputNames(nested, prefix === "" ? key : `${prefix}.${key}`),
+    );
+  }
+  return [prefix];
+}
+
+/**
+ * The confidence field and its raw inputs (M22, Section 8).
+ *
+ * The panel's whole job is to publish a null and the receipts behind it. So the
+ * assertions are: the word null and never a number, the reason it is null named
+ * as the unpublished formula, every field the endpoint holds shown by the
+ * endpoint's own name, and the endpoint itself spelled out so a reader can go
+ * and get the same object as JSON.
+ */
+describe("the entry page's confidence panel", () => {
+  const document = renderEntry(ctx, entryData);
+
+  it("shows the confidence as the word null, with the formula unpublished", () => {
+    expect(document).toContain(">Confidence</h2>");
+    expect(document).toContain("conf-v1 unpublished");
+    expect(document).toContain(`confidence <span class="dim">null</span>`);
+    // The two null fields are rows of their own as well, by their own names.
+    expect(document).toContain(`<td class="break">confidence</td>`);
+    expect(document).toContain(`<td class="break">formula</td>`);
+  });
+
+  it("shows every input field the endpoint holds, by its own name", () => {
+    const names = inputNames(confidence);
+    // The nested ones are the dotted form, and the walk found them.
+    expect(names).toContain("counts.reproductions.runs");
+    expect(names).toContain("age_ratio.days");
+    expect(names).toContain("age_ratio.window_days");
+    for (const name of names) {
+      expect([name, document.includes(`<td class="break">${name}</td>`)]).toEqual(
+        [name, true],
+      );
+    }
+  });
+
+  it("shows the values the kernel computed, and never a weighting of them", () => {
+    // Two approvers, one of them carrying a reproduction of ten runs and nine
+    // holds, one reconfirmation, one dispute upheld, one report from a bare key.
+    expect(confidence.counts.reproductions).toEqual({
+      records: 1,
+      runs: 10,
+      holds: 9,
+    });
+    expect(confidence.age_ratio).toEqual({ days: 12, window_days: 30 });
+    expect(document).toContain(`<td><span class="break">12</span></td>`);
+    expect(document).toContain(`<td><span class="break">30</span></td>`);
+    // No ratio anywhere: the two numbers are shown and the reader weights them.
+    expect(document).not.toContain("0.4");
+  });
+
+  it("says the word null for an entry with no window to age against", () => {
+    const draft = { ...entryRecord, status: "draft", stale: false };
+    const unwindowed = renderEntry(ctx, {
+      ...entryData,
+      entry: draft,
+      confidenceInputs: confidenceInputs({
+        entry: draft as unknown as Entry,
+        sidecar,
+        now: CONFIDENCE_NOW,
+      }),
+    });
+    expect(unwindowed).toContain(`<td class="break">age_ratio</td>`);
+    expect(unwindowed).not.toContain(`<td class="break">age_ratio.days</td>`);
+  });
+
+  it("names the endpoint that serves the same object as JSON", () => {
+    expect(document).toContain(
+      `GET ${ctx.origin}/entries/${ENTRY_ID}/confidence-inputs`,
+    );
+  });
+});
+
 describe("the operator pages", () => {
   const directory = renderOperators(ctx, {
     rows: [
@@ -1029,6 +1180,7 @@ describe("the operator pages", () => {
     ledger: [],
     payouts: [],
     balance: ledgerBalance([], LEDGER_NOW),
+    attestations: NO_ATTESTATIONS,
   });
 
   it("names the maintainer as one that cannot validate", () => {
@@ -1110,6 +1262,7 @@ describe("the operator pages", () => {
       ledger: operatorLedger,
       payouts: operatorPayouts,
       balance: operatorBalance,
+      attestations: NO_ATTESTATIONS,
     });
     expect(one).toContain("nomankind-independence-v1");
     expect(one).toContain("YXR0ZXN0");
@@ -1144,6 +1297,7 @@ describe("the operator pages", () => {
       ledger: operatorLedger,
       payouts: operatorPayouts,
       balance: operatorBalance,
+      attestations: NO_ATTESTATIONS,
     });
     expect(one).toContain("<h2>Standing</h2>");
     expect(one).toContain("<dd>14</dd>");
@@ -1176,6 +1330,7 @@ describe("the operator pages", () => {
       ledger: operatorLedger,
       payouts: operatorPayouts,
       balance: operatorBalance,
+      attestations: NO_ATTESTATIONS,
     });
     // The balance is the one `ledgerBalance` computed at the fixture's clock, so
     // the page is checked against the kernel and never against a number typed
@@ -1218,6 +1373,7 @@ describe("the operator pages", () => {
       ledger: operatorLedger,
       payouts: operatorPayouts,
       balance: operatorBalance,
+      attestations: NO_ATTESTATIONS,
     });
     expect(one).toContain("<th>available_at</th>");
     expect(one).toContain("<td>read_share</td>");
@@ -1233,6 +1389,74 @@ describe("the operator pages", () => {
     expect(quiet).toContain(
       "Nothing has been recorded against this operator: no read share, no",
     );
+  });
+});
+
+/**
+ * Drift attestation on the operator page (M22, Section 8).
+ *
+ * Two tables and two empty states. The separation is the assertion that matters:
+ * an attestation of a model under this operator and an attestation this operator
+ * was drawn to score are different facts, and the page has to say which is
+ * which — the scorers being outside the model's operator is the whole reason the
+ * score means anything.
+ */
+describe("the operator page's attestations", () => {
+  const base = {
+    row: operatorRow,
+    agents: ["1F916:k1"],
+    attestation: null,
+    namedBy: null,
+    payoutStatus: null,
+    validations: [],
+    ledger: operatorLedger,
+    payouts: operatorPayouts,
+    balance: operatorBalance,
+  } satisfies Omit<OperatorData, "attestations">;
+
+  const document = renderOperator(ctx, { ...base, attestations });
+  const quiet = renderOperator(ctx, {
+    ...base,
+    attestations: NO_ATTESTATIONS,
+  });
+
+  it("shows both tables, each side under its own heading", () => {
+    expect(document).toContain(">Attestations</h2>");
+    expect(document).toContain("As the model&#39;s operator");
+    expect(document).toContain("As a scorer");
+  });
+
+  it("shows a scored attestation as agreed over the probes asked", () => {
+    expect(document).toContain(ATTESTATION_ID);
+    expect(document).toContain(`title="${MODEL_AGENT}"`);
+    expect(document).toContain(shortHash(MODEL_AGENT));
+    expect(document).toContain(`<span class="badge b-scored">scored</span>`);
+    expect(document).toContain("8 / 10");
+    expect(document).toContain("2026-09-09");
+    expect(document).toContain(`title="${PROBE_HASH}"`);
+    expect(document).toContain(shortHash(PROBE_HASH));
+    // The fraction is never worked out for the reader: a score over a thin
+    // probe set is a small claim, and 0.8 would hide the probe count.
+    expect(document).not.toContain("0.8");
+  });
+
+  it("shows a dash, and never a zero, for a score nobody has signed yet", () => {
+    expect(document).toContain(`<span class="badge b-open">open</span>`);
+    expect(document).toContain(OTHER_ATTESTATION_ID);
+    expect(document).toContain(`<span class="dim">—</span>`);
+    expect(document).toContain(`<td class="dim">—</td>`);
+  });
+
+  it("says in words when neither side has happened", () => {
+    expect(quiet).toContain(
+      "No attestation has been requested for a model under this operator.",
+    );
+    expect(quiet).toContain(
+      "This operator has not been drawn to score an attestation.",
+    );
+    expect(quiet).not.toContain("<th>probe_hash</th>");
+    expect(quiet).not.toContain("<script");
+    expect(quiet).not.toContain(' style="');
   });
 });
 

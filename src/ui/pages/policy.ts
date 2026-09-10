@@ -359,6 +359,33 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
     },
   ];
 
+  const attestation: Row[] = [
+    {
+      name: "PROBE_SET_SIZE",
+      value: `${policy.PROBE_SET_SIZE} probes`,
+      means:
+        "Probes drawn for one drift attestation when the log holds at least that many candidates — verified, observed, fresh entries — picked by the same beacon-and-snapshot draw a validator is assigned by, so neither the model's operator nor the maintainer chooses the questions.",
+    },
+    {
+      name: "PROBE_SET_MIN_CANDIDATES",
+      value: String(policy.PROBE_SET_MIN_CANDIDATES),
+      means:
+        "The floor below which no attestation is drawn at all. Between the floor and the size every candidate is drawn, because the observed tier is thin at genesis: an attestation over three probes is a small attestation and never a refused one.",
+    },
+    {
+      name: "ATTESTATION_SCORERS",
+      value: String(policy.ATTESTATION_SCORERS),
+      means:
+        "Operators drawn from the trusted pool to score the model's answers against the log and sign the result. None of them may be under the model's own operator, and no maintainer or provider operator is eligible.",
+    },
+    {
+      name: "ATTESTATION_WINDOW_HOURS",
+      value: `${policy.ATTESTATION_WINDOW_HOURS} hours`,
+      means:
+        "How long an attestation stays open: from the request to the deadline for the model's answers and for its scorers' scores. Past it the sweep records the attestation expired and names the scorers that never scored.",
+    },
+  ];
+
   const sealing: Row[] = [
     {
       name: "SEAL_INTERVAL_MINUTES",
@@ -463,6 +490,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       ${group("Validation", validation)} ${group("Evidence", evidence)}
       ${group("Freshness", staleness)} ${group("Money and standing", money)}
       ${group("Standing", standing)} ${group("Disputes and reports", disputes)}
+      ${group("Attestation", attestation)}
 
       <p class="note">
         Those numbers and the two stakes below are the whole standing formula:

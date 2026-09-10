@@ -31,7 +31,13 @@
  * mounts Section 9's own reads (src/worker/standing.ts) — the standing table,
  * one operator's standing, one operator's ledger, and the ledger page — and
  * gives the sweep the three steps that produce them: price what the seal
- * committed to, recompute standing, and pay the cycle. The final
+ * committed to, recompute standing, and pay the cycle. M22 mounts Section 8's
+ * training path (src/worker/attest.ts) last: the three doors a drift
+ * attestation moves through — a model asks for a probe set drawn by public
+ * randomness, answers it, and three drawn operators sign what they made of the
+ * answers — the reads beside them, and the confidence field's raw inputs, which
+ * is where `confidence: null` is served from. The sweep gains the step that
+ * closes an attestation nobody finished. The final
  * refusal below answers in the same two voices for the same reason.
  *
  * This file is the one place in the system that reads a wall clock, and it
@@ -51,13 +57,14 @@
  * here either: `ENVIRONMENT` is read from the binding and echoed back.
  */
 
-import { DrandReader } from "../adapters/beacon.js";
+import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
 import { DohResolver, type DnsResolver } from "../adapters/dns.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import { htmlResponse } from "../ui/html.js";
 import { renderNotFound } from "../ui/pages/errors.js";
 import type { Env } from "./env.js";
+import { handleAttest } from "./attest.js";
 import { handleDispute } from "./dispute.js";
 import { handleEvents } from "./events.js";
 import { handleFailureReports } from "./failure-reports.js";
@@ -126,6 +133,13 @@ export interface RequestDeps {
   readonly dns?: DnsResolver;
   readonly payout?: PayoutAdapter;
   readonly fetcher?: SnapshotFetcher;
+  /**
+   * Where the attestation door reads public randomness (M22). The deployed
+   * Worker passes none and gets the real drand reader, exactly as the cron
+   * door's sweep does; the fixture beacon is for tests and is never reachable
+   * from here (decision D-013 as amended).
+   */
+  readonly beacon?: BeaconReader;
 }
 
 /** The router. Exported by name so tests can call it without a fetch stack. */
@@ -205,6 +219,16 @@ export async function handleRequest(
   // beside them. JSON only, whatever the caller asks for.
   const standing = await handleStanding(request, env, { now });
   if (standing !== null) return standing;
+
+  // M22's three doors and four reads, Section 8's "Drift attestation" and "The
+  // confidence field": a model asks for a probe set drawn by public randomness,
+  // answers it, and three drawn operators sign what they made of the answers;
+  // beside them, the raw inputs to the confidence field, which is null.
+  const attested = await handleAttest(request, env, {
+    now,
+    beacon: deps?.beacon ?? new DrandReader(),
+  });
+  if (attested !== null) return attested;
 
   // Nothing answered. A browser gets the 404 page, which tells a reader what
   // kinds of address land there; everything else gets the same JSON refusal it

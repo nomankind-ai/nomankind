@@ -16,6 +16,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { ANSWER_REFUSALS, SCORE_REFUSALS } from "../src/attest.js";
 import {
   LIST_PAGE_LIMIT,
   POLICY,
@@ -191,6 +192,31 @@ describe("renderPolicy", () => {
     expect(page).toContain("no money");
   });
 
+  it("groups the attestation numbers, and reads all four from POLICY", () => {
+    // M22's four, in their own group after the disputes. A literal here would
+    // be a second place a published number lives, which is the one thing this
+    // page exists to prevent.
+    expect(page).toContain("Attestation");
+    for (const [name, value] of [
+      ["PROBE_SET_SIZE", `${POLICY.PROBE_SET_SIZE} probes`],
+      ["PROBE_SET_MIN_CANDIDATES", String(POLICY.PROBE_SET_MIN_CANDIDATES)],
+      ["ATTESTATION_SCORERS", String(POLICY.ATTESTATION_SCORERS)],
+      ["ATTESTATION_WINDOW_HOURS", `${POLICY.ATTESTATION_WINDOW_HOURS} hours`],
+    ] as const) {
+      expect(page, `${name} has no row`).toContain(
+        `<td class="mono">${name}</td>`,
+      );
+      expect(page, `${name} does not print its value`).toContain(
+        `<td class="mono">${value}</td>`,
+      );
+    }
+    // What each one fixes, in one line: the draw nobody controls, the thin
+    // genesis tier, the scorers outside the model's operator, the deadline.
+    expect(page).toContain("neither the model&#39;s operator nor the maintainer");
+    expect(page).toContain("thin at genesis");
+    expect(page).toContain("None of them may be under the model&#39;s own operator");
+  });
+
   it("points at the JSON the kernel serves from the same module", () => {
     expect(page).toContain(`href="/policy"`);
     expect(page).toContain("Accept: application/json");
@@ -300,13 +326,109 @@ describe("renderApi", () => {
   });
 
   it("names what is not built yet with its milestone", () => {
-    expect(page).toContain("M22");
     expect(page).toContain("M23");
     expect(page).toContain("M24");
     // M21 built standing and the ledger, so the row is gone: a path that exists
     // listed as unbuilt is the same lie as a documented path that answers 404.
     expect(page).not.toContain("Standing and the ledger endpoints");
     expect(page).not.toContain(`<td class="mono">M21</td>`);
+    // M22 built the attestation doors and the confidence inputs, so the row is
+    // gone: a path that exists listed as unbuilt is the same lie as a
+    // documented path that answers 404.
+    expect(page).not.toContain("Drift attestation and confidence inputs");
+    expect(page).not.toContain(`<td class="mono">M22</td>`);
+  });
+
+  it("documents all seven attestation and confidence routes, in order", () => {
+    const paths = [
+      "POST",
+      "/attestations",
+      "/attestations/{id}/answers",
+      "/attestations/{id}/score",
+      "/attestations/{id}",
+      "/operators/{id}/attestations",
+      "/entries/{id}/confidence-inputs",
+    ];
+    for (const path of paths) {
+      expect(page, `${path} is not documented`).toContain(path);
+    }
+    // The three writes come before the reads that serve what they produced: an
+    // attestation is one sequence, and the score route read on its own is the
+    // end of a story.
+    let at = page.indexOf(">Attestation and confidence</h2>");
+    expect(at).toBeGreaterThan(-1);
+    for (const path of [
+      "/attestations/{id}/answers",
+      "/attestations/{id}/score",
+      "/operators/{id}/attestations",
+      "/entries/{id}/confidence-inputs",
+    ]) {
+      const next = page.indexOf(path, at);
+      expect(next, `${path} is out of order`).toBeGreaterThan(at);
+      at = next;
+    }
+  });
+
+  it("lists the answer and score refusals in the kernel's own order", () => {
+    let at = page.indexOf("/attestations/{id}/answers");
+    for (const reason of ANSWER_REFUSALS) {
+      const next = page.indexOf(reason, at);
+      expect(next, `${reason} is out of order`).toBeGreaterThan(at);
+      at = next;
+    }
+    at = page.indexOf("/attestations/{id}/score");
+    for (const reason of SCORE_REFUSALS) {
+      const next = page.indexOf(reason, at);
+      expect(next, `${reason} is out of order`).toBeGreaterThan(at);
+      at = next;
+    }
+    // The request door's own refusals, in the order it checks them.
+    at = page.indexOf(">Attestation and confidence</h2>");
+    for (const reason of [
+      "bad_body",
+      "attestation_open",
+      "beacon_unavailable",
+      "no_pool_snapshot",
+      "snapshot_after_beacon",
+      "insufficient_candidates",
+      "empty_pool",
+      "insufficient_scorers",
+      // The draw names operators; the scorer beside each one is the first agent
+      // bound under it, and an operator with none is refused rather than
+      // published as a scorer nobody can answer for.
+      "no_agent_for_operator",
+    ]) {
+      const next = page.indexOf(reason, at);
+      expect(next, `${reason} is out of order`).toBeGreaterThan(at);
+      at = next;
+    }
+  });
+
+  it("says what the attestation reads do, rather than a refusal they cannot make", () => {
+    // A documented refusal a route never makes is the same lie as a documented
+    // path that answers 404. The listing narrows a bad query instead of
+    // refusing it, and the operator read answers two empty lists for an
+    // operator it has never heard of, so neither row may claim one.
+    const from = page.indexOf(">Attestation and confidence</h2>");
+    expect(from).toBeGreaterThan(-1);
+    const to = page.indexOf('<h2 class="panel-title">', from + 1);
+    expect(to).toBeGreaterThan(from);
+    const section = page.slice(from, to);
+    expect(section).not.toContain("bad_query");
+    // The single read parses the id before it looks for the row, so it has a
+    // refusal of its own and the page says both.
+    expect(section).toContain("400 bad_id; 404 not_found.");
+    expect(section).toContain("both lists empty");
+  });
+
+  it("gives the attestation writes their commands, and submit its receipt", () => {
+    expect(page).toContain(
+      `npm run attest -- request &lt;model-key.json&gt; ${ctx.origin}`,
+    );
+    expect(page).toContain("npm run attest -- answer");
+    expect(page).toContain("npm run attest -- score");
+    expect(page).toContain("--drift");
+    expect(page).toContain("--receipt &lt;receipt.json&gt;");
   });
 
   it("lists POST validate's refusals in VALIDATION_REFUSALS order", () => {
