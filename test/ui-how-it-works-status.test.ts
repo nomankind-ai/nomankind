@@ -25,6 +25,10 @@ import {
   TRUSTED_POOL_SWITCH,
 } from "../src/policy.js";
 import type { Counter, Exercised, Stage } from "../src/status.js";
+import {
+  WHITEPAPER_DOCUMENT,
+  WHITEPAPER_VERSION,
+} from "../src/ui/pages/document.js";
 import { renderHowItWorks } from "../src/ui/pages/how-it-works.js";
 import { APP_CSS } from "../src/ui/styles.js";
 import { renderStatus } from "../src/ui/pages/status.js";
@@ -192,6 +196,17 @@ describe("renderHowItWorks", () => {
     expect(page.indexOf("RELEASE_WINDOW_DAYS")).toBeLessThan(next);
     expect(page).not.toContain("<script");
     expect(page).not.toContain(' style="');
+  });
+
+  /**
+   * The paper's version is one constant, exported beside the document it is the
+   * version of, so the head line here and the Docs hub can never drift apart.
+   */
+  it("heads the page with the whitepaper version the document page names", () => {
+    expect(flat(page)).toContain(
+      `whitepaper ${WHITEPAPER_VERSION} · schema ${SCHEMA_VERSION} · ${NORM_VERSION}`,
+    );
+    expect(WHITEPAPER_DOCUMENT.note).toContain(WHITEPAPER_VERSION);
   });
 
   it("carries the ten panels, each with its heading and its section label", () => {
@@ -563,28 +578,31 @@ describe("renderStatus", () => {
 // ---------------------------------------------------------------------------
 
 describe("the nav", () => {
-  it("carries both pages, after Genesis and before the paper", () => {
+  /**
+   * D-104 took the six documentation pages out of the nav and put them behind
+   * one Docs item, so neither of these two pages is a nav item any more: How it
+   * works is a card on /docs, and Status is the last item in a nav of five.
+   */
+  it("carries Docs before Status, and no item of its own for how-it-works", () => {
     const page = renderStatus(statusCtx, HEALTHY);
-    const genesis = page.indexOf('href="/genesis"');
-    const how = page.indexOf('href="/how-it-works"');
-    const status = page.indexOf('href="/status"');
-    const paper = page.indexOf("WHITEPAPER.md");
-    expect(genesis).toBeGreaterThan(-1);
-    expect(how).toBeGreaterThan(genesis);
-    expect(status).toBeGreaterThan(how);
-    expect(paper).toBeGreaterThan(status);
-    expect(page).toContain("How it works");
+    const nav = page.slice(
+      page.indexOf('<nav class="nav-list">'),
+      page.indexOf("</nav>"),
+    );
+    expect(nav).toContain('href="/docs"');
+    expect(nav).toContain('href="/status"');
+    expect(nav.indexOf('href="/docs"')).toBeLessThan(nav.indexOf('href="/status"'));
+    expect(nav).not.toContain('href="/how-it-works"');
+    expect(nav).not.toContain("WHITEPAPER.md");
   });
 
-  it("marks each of them active on its own path and nowhere else", () => {
+  it("marks Docs active on how-it-works, and Status on its own path", () => {
     const how = renderHowItWorks(ctx, EMPTY);
-    expect(how).toContain('<a class="nav nav-active" href="/how-it-works">');
+    expect(how).toContain('<a class="nav nav-active" href="/docs">');
     expect(how).not.toContain('<a class="nav nav-active" href="/status">');
 
     const status = renderStatus(statusCtx, HEALTHY);
     expect(status).toContain('<a class="nav nav-active" href="/status">');
-    expect(status).not.toContain(
-      '<a class="nav nav-active" href="/how-it-works">',
-    );
+    expect(status).not.toContain('<a class="nav nav-active" href="/docs">');
   });
 });

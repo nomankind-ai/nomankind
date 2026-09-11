@@ -175,7 +175,47 @@ describe("layout", () => {
 
   it("marks the nav item whose href is a prefix of the path", () => {
     expect(document).toContain(`<a class="nav nav-active" href="/entries">Entries</a>`);
-    expect(document).toContain(`<a class="nav" href="/policy">Policy</a>`);
+    expect(document).toContain(`<a class="nav" href="/domains">Domains</a>`);
+  });
+
+  /**
+   * D-104: the nav is five items, and Docs stands for the six documentation
+   * pages that used to each have one of their own. A reader who opens the
+   * policy tables is still somewhere the nav can show them.
+   */
+  it("carries five items and marks Docs active on every documentation path", () => {
+    const nav = document.slice(
+      document.indexOf(`<nav class="nav-list">`),
+      document.indexOf("</nav>"),
+    );
+    const labels = [...nav.matchAll(/<a class="nav[^"]*" href="([^"]+)">([^<]+)</g)].map(
+      (each) => [each[1], each[2]],
+    );
+    expect(labels).toEqual([
+      ["/entries", "Entries"],
+      ["/domains", "Domains"],
+      ["/operators", "Operators"],
+      ["/docs", "Docs"],
+      ["/status", "Status"],
+    ]);
+    for (const path of [
+      "/docs",
+      "/docs/whitepaper",
+      "/how-it-works",
+      "/api",
+      "/policy",
+      "/genesis",
+      "/dry-run",
+    ]) {
+      const page = layout({ ...ctx, path }, { title: "Docs", body: html`` });
+      expect(page).toContain(`<a class="nav nav-active" href="/docs">Docs</a>`);
+    }
+    // And nowhere else: a log page is not a documentation page.
+    const entries = layout(
+      { ...ctx, path: "/entries" },
+      { title: "Entries", body: html`` },
+    );
+    expect(entries).toContain(`<a class="nav" href="/docs">Docs</a>`);
   });
 
   it("marks the section active from a page below it", () => {
@@ -225,7 +265,11 @@ describe("layout", () => {
 
   it("links the repository, the mirror, the paper and a way to write in the footer", () => {
     expect(document).toContain("https://github.com/nomankind-ai/nomankind");
-    expect(document).toContain(
+    // D-104: the paper is a page of this site now, served from the
+    // repository's own bytes, so the footer links it relatively — no new tab
+    // and no nofollow, which are for somebody else's URL.
+    expect(document).toContain(`<a href="/docs/whitepaper">Whitepaper</a>`);
+    expect(document).not.toContain(
       "https://github.com/nomankind-ai/nomankind/blob/main/paper/WHITEPAPER.md",
     );
     expect(document).toContain("Apache-2.0");

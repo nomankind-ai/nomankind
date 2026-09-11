@@ -594,6 +594,27 @@ export interface DomainsData {
 }
 
 /**
+ * What a served document page is handed (D-104).
+ *
+ * The whitepaper, its summary and the fork guide are markdown in this
+ * repository, read into src/ui/docs.generated.ts ahead of time, so this shape
+ * is the document itself rather than a reading of the log: no counter, no
+ * clock, nothing gathered. `sourcePath` is the file the markdown came from, and
+ * the page prints it, because a document served from somewhere the reader
+ * cannot see is a document they cannot check against the repository.
+ */
+export interface DocumentData {
+  /** The page's title, and the last crumb: "Whitepaper", "Summary". */
+  readonly title: string;
+  /** The path from the repository root, exactly as the generator read it. */
+  readonly sourcePath: string;
+  /** The document, verbatim. */
+  readonly markdown: string;
+  /** One line under the title saying what this document is. */
+  readonly note: string;
+}
+
+/**
  * What the Status page is handed (D-076).
  *
  * The same object `GET /status` answers as JSON, in the same order: the page and

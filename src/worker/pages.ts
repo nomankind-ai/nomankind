@@ -13,7 +13,8 @@
  * text/html. `/entries/{id}`, `/operators`, `/operators/{id}`, `/policy` and
  * `/mirror/latest` are
  * shared with the JSON doors and answer HTML only to a browser; `/entries`,
- * `/api`, `/genesis` and `/landing` are pages and nothing else. Every HTML
+ * `/api`, `/genesis`, `/docs` with the three documents under it, and
+ * `/landing` are pages and nothing else. Every HTML
  * response carries `Vary: Accept` (src/ui/html.ts), because a shared cache that
  * confused the two would hand an agent a web page.
  *
@@ -102,6 +103,13 @@ import {
 } from "../storage/repository.js";
 import { htmlResponse, cssResponse } from "../ui/html.js";
 import { renderApi } from "../ui/pages/api.js";
+import {
+  FORK_DOCUMENT,
+  SUMMARY_DOCUMENT,
+  WHITEPAPER_DOCUMENT,
+  renderDocument,
+} from "../ui/pages/document.js";
+import { renderDocs } from "../ui/pages/docs.js";
 import { renderDomains } from "../ui/pages/domains.js";
 import { renderDryRun } from "../ui/pages/dry-run.js";
 import { renderEntries } from "../ui/pages/entries.js";
@@ -1285,6 +1293,20 @@ async function route(
   }
 
   if (path === "/api") return htmlResponse(renderApi(ctx));
+
+  // The documentation hub and the three documents it serves (D-104). Like /api
+  // and /dry-run they answer HTML to any GET: there is no JSON twin of a
+  // whitepaper for a request to have meant instead, and the markdown they
+  // render is in the repository for anyone who wants the source.
+  if (path === "/docs") return htmlResponse(renderDocs(ctx));
+  if (path === "/docs/fork") return htmlResponse(renderDocument(ctx, FORK_DOCUMENT));
+  if (path === "/docs/whitepaper") {
+    return htmlResponse(renderDocument(ctx, WHITEPAPER_DOCUMENT));
+  }
+  if (path === "/docs/summary") {
+    return htmlResponse(renderDocument(ctx, SUMMARY_DOCUMENT));
+  }
+
   if (path === "/dry-run") return htmlResponse(renderDryRun(ctx));
   if (path === "/genesis") return genesis(db, ctx, env);
   if (path === "/how-it-works") return howItWorks(db, ctx, env);

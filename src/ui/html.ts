@@ -246,10 +246,20 @@ export const APEX_URL = "https://nomankind.ai/";
 /** The way to reach a person, free and needing no account (D-085). */
 export const CONTACT_EMAIL = "hello@nomankind.ai";
 
-/** The repository and the paper, linked from the header and the footer. */
+/** The repository, linked from the footer. */
 const REPOSITORY_URL = "https://github.com/nomankind-ai/nomankind";
-const PAPER_URL =
-  "https://github.com/nomankind-ai/nomankind/blob/main/paper/WHITEPAPER.md";
+
+/**
+ * The paper, served by this Worker from the repository's own bytes (D-104).
+ *
+ * It used to be a link out to GitHub, on the grounds that the paper is the
+ * record of what this thing claims to be and belongs with the code. It still
+ * does — /docs/whitepaper renders paper/WHITEPAPER.md verbatim, generated into
+ * src/ui/docs.generated.ts — and now a reader does not have to leave the record
+ * to read what the record says about itself. Relative, because it is a page of
+ * this site on whichever host is serving it.
+ */
+const PAPER_PATH = "/docs/whitepaper";
 
 /**
  * The daily CC0 export of the sealed log (Section 11), linked from the footer
@@ -260,22 +270,35 @@ const PAPER_URL =
 const MIRROR_PATH = "/mirror/latest";
 
 /**
- * The nav, in the order the prototype shows it. Paper is external because the
- * paper is the record of what this thing claims to be and it lives with the
- * code, not in a page that could paraphrase it.
+ * The nav, in the order the prototype shows it (D-104).
+ *
+ * Five items, because a nav of nine was a table of contents: the log (Entries),
+ * the registry (Domains), the people (Operators), everything written about the
+ * record (Docs), and whether it is running (Status). The six documentation
+ * pages that used to sit here each have their own card on /docs, and Docs is
+ * the active item while a reader is on any of them — a nav that went quiet when
+ * you opened the policy tables would be a nav that had lost you.
+ *
+ * Paper is gone from here: the whitepaper is one of the pages under Docs now,
+ * served from the repository's own bytes rather than linked out to GitHub.
  */
-const NAV: readonly { readonly href: string; readonly label: string; readonly external?: boolean }[] =
-  [
-    { href: "/entries", label: "Entries" },
-    { href: "/domains", label: "Domains" },
-    { href: "/operators", label: "Operators" },
-    { href: "/policy", label: "Policy" },
-    { href: "/api", label: "API" },
-    { href: "/genesis", label: "Genesis" },
-    { href: "/how-it-works", label: "How it works" },
-    { href: "/status", label: "Status" },
-    { href: PAPER_URL, label: "Paper", external: true },
-  ];
+const NAV: readonly {
+  readonly href: string;
+  readonly label: string;
+  readonly external?: boolean;
+  /** Other paths this item is active on: its section, spelled out. */
+  readonly covers?: readonly string[];
+}[] = [
+  { href: "/entries", label: "Entries" },
+  { href: "/domains", label: "Domains" },
+  { href: "/operators", label: "Operators" },
+  {
+    href: "/docs",
+    label: "Docs",
+    covers: ["/how-it-works", "/api", "/policy", "/genesis", "/dry-run"],
+  },
+  { href: "/status", label: "Status" },
+];
 
 /** The wordmark's inline SVG. No emoji anywhere in this UI (D-018). */
 const WORDMARK_ICON = raw(
@@ -285,9 +308,17 @@ const WORDMARK_ICON = raw(
     `<path d="M7 10h6M10 7v6"></path></svg>`,
 );
 
+/** Whether a path is inside a section: the section itself, or a page under it. */
+function within(path: string, section: string): boolean {
+  return path === section || path.startsWith(`${section}/`);
+}
+
 function navItems(path: string): Safe[] {
   return NAV.map((item) => {
-    const active = !item.external && path.startsWith(item.href);
+    const active =
+      item.external !== true &&
+      (path.startsWith(item.href) ||
+        (item.covers ?? []).some((each) => within(path, each)));
     const classes = active ? "nav nav-active" : "nav";
     return item.external === true
       ? html`<a class="${classes}" href="${item.href}" target="_blank" rel="noopener noreferrer nofollow">${item.label}</a>`
@@ -342,7 +373,7 @@ export function layout(
       <span class="footer-links">
         ${link(REPOSITORY_URL, "Repository", true)}
         <a href="${MIRROR_PATH}">Mirror</a>
-        ${link(PAPER_URL, "Whitepaper", true)}
+        <a href="${PAPER_PATH}">Whitepaper</a>
         <a href="mailto:${CONTACT_EMAIL}">Contact</a>
       </span>
     </footer>
