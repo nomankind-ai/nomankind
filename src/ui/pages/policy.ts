@@ -409,16 +409,14 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       means:
         "How long accrued fees are held before payout, so an upheld dispute can claw them back before they leave.",
     },
-    {
-      name: "READ_SHARE_SPLIT.submitter",
-      value: `${policy.READ_SHARE_SPLIT.submitter} percent`,
-      means: "The submitter's share of paid-read revenue on their entry.",
-    },
-    {
-      name: "READ_SHARE_SPLIT.validator",
-      value: `${policy.READ_SHARE_SPLIT.validator} percent`,
-      means: "Each read-share slot holder's share of paid-read revenue.",
-    },
+    ...Object.entries(policy.READ_SHARE_SPLIT).map(([tier, split]) => ({
+      name: `READ_SHARE_SPLIT.${tier}`,
+      value: `submitter ${split.submitter} percent · validator ${split.validator} percent`,
+      means:
+        tier === "observed"
+          ? "Section 9, on an observed entry: the submitter's share and each read-share slot holder's share of paid-read revenue, both larger than the stated row above, so the operators who measure are paid more than the operators who copy (Section 4). A slot holder takes this validator rate only when its own signed record carried a passing measurement; one that accepted the test without running it takes the stated rate beside it. The difference between the two rows comes out of nomankind's share and never out of the reader's price, which is one number per read whatever tier the entry is."
+          : "Section 9's launch split, on a stated entry: the submitter's share and each read-share slot holder's share of paid-read revenue. The tier that prices an entry is the one fixed when it verified, so a split that moved by decision never reprices a read that was already published.",
+    })),
     {
       name: "SLOT_COUNT",
       value: String(policy.SLOT_COUNT),
@@ -431,6 +429,19 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       means:
         `The price a paid read is charged at, and the number every read share is computed from: ${dollarsPerThousandReads(policy.READ_PRICE_MICROS_PER_READ)} per thousand reads. Micro-USD, a millionth of a dollar, because one read's submitter share is a fraction of a cent and a ledger that rounded it to cents would pay the long tail nothing.`,
     },
+    {
+      name: "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
+      value: `${policy.CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent`,
+      means:
+        "Section 9: the contributor share is a floor that only rises. So the floor is published as a number of its own, and every tier's share beside it is checked against it — a share below this would be a broken promise rather than a smaller payment.",
+    },
+    ...Object.entries(policy.CONTRIBUTOR_SHARE_PERCENT).map(
+      ([tier, percent]) => ({
+        name: `CONTRIBUTOR_SHARE_PERCENT.${tier}`,
+        value: `${percent} percent`,
+        means: `The contributor pool's share of paid-read revenue on a ${tier} entry today: at or above the floor above, and exactly the split it is made of (one READ_SHARE_SPLIT.${tier}.submitter share and SLOT_COUNT READ_SHARE_SPLIT.${tier}.validator shares). It rises on published milestones and never falls.`,
+      }),
+    ),
     {
       name: "PAYOUT_MINIMUM_MICROS",
       value: `${policy.PAYOUT_MINIMUM_MICROS} micro-USD`,
@@ -460,18 +471,6 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       value: policy.FREE_TIER,
       means:
         "Which of the tiers above is the one a request with no key is served on.",
-    },
-    {
-      name: "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
-      value: `${policy.CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent`,
-      means:
-        "Section 9: the contributor share is a floor that only rises. So the floor is published as a number of its own, and the share beside it is checked against it — a share below this would be a broken promise rather than a smaller payment.",
-    },
-    {
-      name: "CONTRIBUTOR_SHARE_PERCENT",
-      value: `${policy.CONTRIBUTOR_SHARE_PERCENT} percent`,
-      means:
-        "The contributor pool's share of paid-read revenue today: at or above the floor above, and exactly the split it is made of (one submitter share and SLOT_COUNT validator shares). It rises on published milestones and never falls.",
     },
     {
       name: "ALERT_ENDPOINTS_PER_KEY",
@@ -546,6 +545,12 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       value: `${policy.STANDING_VALIDATION_ASSIGNED} standing`,
       means:
         "Earned for a completed validation the beacon assigned. Assigned work weighs highest, which is what makes an assignment on an entry nobody will read worth doing.",
+    },
+    {
+      name: "STANDING_VALIDATION_REPRODUCED",
+      value: `${policy.STANDING_VALIDATION_REPRODUCED} standing`,
+      means:
+        "Earned beside the amount above when the validation's own signed record carries a passing measurement, and likewise for a measured reconfirmation, so the trusted pool tilts toward the operators who run the test rather than accept it. The money side of the same rule is READ_SHARE_SPLIT.observed above.",
     },
     {
       name: "STANDING_SUBMISSION_VERIFIED",

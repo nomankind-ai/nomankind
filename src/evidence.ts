@@ -155,6 +155,34 @@ function passingMeasurement(value: unknown): boolean {
   return value !== null && value !== undefined && isWellFormedMeasurement(value) && measurementPasses(value);
 }
 
+/**
+ * Whether one signed record measured anything (decision D-087).
+ *
+ * The money side of Section 4's "the operators who measure are paid more than
+ * the operators who copy" and the standing side of the same sentence both ask
+ * one question of one record: does the slot it seats carry a measurement of its
+ * own that passes the n-of-k rule? Whichever slot the category uses — a
+ * transcript entry's `reproduction`, any other observed entry's `observation` —
+ * counts, because the rule is about the work and not about where the schema
+ * files it.
+ *
+ * Total and pure: anything that is not a well-formed passing measurement — an
+ * absent one, a null, a malformed one, a run count at some other n, holds below
+ * k, a record that is not an object at all — is false. It never throws, because
+ * a validator who accepted a test without running it is a fact to be priced at
+ * the stated rate and not an error to be reported.
+ */
+export function recordMeasured(record: {
+  reproduction?: unknown;
+  observation?: unknown;
+}): boolean {
+  const fields = asObject(record);
+  if (fields === null) {
+    return false;
+  }
+  return passingMeasurement(fields.reproduction) || passingMeasurement(fields.observation);
+}
+
 export type RecordEvidenceRefusal =
   | "missing_test_accepted"
   | "unexpected_test_accepted"

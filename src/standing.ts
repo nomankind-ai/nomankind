@@ -30,6 +30,7 @@
  */
 
 import type { ApproverRecord, Event, EventType } from "./events.js";
+import { recordMeasured } from "./evidence.js";
 import {
   deriveEntry,
   operatorDomainsAt,
@@ -48,17 +49,25 @@ import {
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
   STANDING_VALIDATION_ASSIGNED,
+  STANDING_VALIDATION_REPRODUCED,
   STANDING_VALIDATION_VOLUNTEERED,
 } from "./policy.js";
 
 /**
  * What an operator did, counted. The numbers beside `standing` are what make an
  * operator page checkable: a reader who disagrees with the total can see which
- * of the seven kinds of move it came from.
+ * of the kinds of move it came from.
  */
 export interface StandingCounts {
   readonly validations_volunteered: number;
   readonly validations_assigned: number;
+  /**
+   * Of those validations and reconfirmations, the ones whose signed record
+   * carried a passing measurement (decision D-087). Counted beside the two
+   * above rather than instead of them: a reproducing validator did a
+   * validation AND measured, and both facts are paid.
+   */
+  readonly validations_reproduced: number;
   readonly submissions_verified: number;
   readonly disputes_upheld: number;
   readonly overturned: number;
@@ -97,6 +106,7 @@ interface Accumulator {
   locked: number;
   validations_volunteered: number;
   validations_assigned: number;
+  validations_reproduced: number;
   submissions_verified: number;
   disputes_upheld: number;
   overturned: number;
@@ -116,6 +126,7 @@ interface Accumulator {
 export const STANDING_FORMULA: readonly string[] = Object.freeze([
   "STANDING_VALIDATION_VOLUNTEERED",
   "STANDING_VALIDATION_ASSIGNED",
+  "STANDING_VALIDATION_REPRODUCED",
   "STANDING_SUBMISSION_VERIFIED",
   "STANDING_DISPUTE_UPHELD",
   "STANDING_OVERTURNED_SIGNER",
@@ -144,6 +155,7 @@ function empty(operator: string): Accumulator {
     locked: 0,
     validations_volunteered: 0,
     validations_assigned: 0,
+    validations_reproduced: 0,
     submissions_verified: 0,
     disputes_upheld: 0,
     overturned: 0,
@@ -164,6 +176,7 @@ function freeze(accumulator: Accumulator, position: number): Standing {
     counts: {
       validations_volunteered: accumulator.validations_volunteered,
       validations_assigned: accumulator.validations_assigned,
+      validations_reproduced: accumulator.validations_reproduced,
       submissions_verified: accumulator.submissions_verified,
       disputes_upheld: accumulator.disputes_upheld,
       overturned: accumulator.overturned,
@@ -297,6 +310,16 @@ export function standingAt(
         validator.validations_volunteered += 1;
       }
 
+      // Section 4: "the operators who measure are paid more than the operators
+      // who copy" (D-087). The standing side of that rule: a record carrying a
+      // passing n-of-k measurement earns beside the credit for the decision
+      // itself, so the trusted pool tilts toward the operators who ran the
+      // test rather than the ones who accepted it.
+      if (recordMeasured(record)) {
+        validator.earned += STANDING_VALIDATION_REPRODUCED;
+        validator.validations_reproduced += 1;
+      }
+
       // "Earned by approved submissions": the submitter's operator is paid the
       // first time the entry actually derives verified, which is a question
       // about the whole log up to here and not about this one decision. The
@@ -324,6 +347,10 @@ export function standingAt(
       const reconfirmer = of(event.payload.record.operator);
       reconfirmer.earned += STANDING_VALIDATION_VOLUNTEERED;
       reconfirmer.validations_volunteered += 1;
+      if (recordMeasured(event.payload.record)) {
+        reconfirmer.earned += STANDING_VALIDATION_REPRODUCED;
+        reconfirmer.validations_reproduced += 1;
+      }
       continue;
     }
 

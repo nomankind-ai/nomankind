@@ -14,6 +14,7 @@ import {
   ASSIGNMENT_WINDOW_HOURS,
   BEACON,
   CAPTURE_MAX_BYTES,
+  CONTRIBUTOR_SHARE_FLOOR_PERCENT,
   CONTRIBUTOR_SHARE_PERCENT,
   FAILURE_REPORT_THRESHOLD,
   FETCH_MAX_REDIRECTS,
@@ -49,6 +50,7 @@ import {
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
   STANDING_VALIDATION_ASSIGNED,
+  STANDING_VALIDATION_REPRODUCED,
   STANDING_VALIDATION_VOLUNTEERED,
   SWEEP_INTERVAL_MINUTES,
   TRUSTED_POOL_SWITCH,
@@ -67,6 +69,7 @@ const examplePath = fileURLToPath(
 const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as {
   properties: {
     category: { enum: string[] };
+    evidence_tier: { enum: string[] };
     norm_version: { pattern: string };
   };
 };
@@ -109,6 +112,7 @@ const EXPECTED_POLICY_KEYS = [
   "STANDING_DISPUTE_UPHELD",
   "STANDING_OVERTURNED_SIGNER",
   "STANDING_ASSIGNMENT_MISSED",
+  "STANDING_VALIDATION_REPRODUCED",
   "STANDING_TRUSTED_ENTRY",
   "STANDING_TRUSTED_STAY",
   "STANDING_DECAY_PAUSED",
@@ -153,15 +157,55 @@ describe("policy numbers", () => {
     expect(SEAL_INTERVAL_MINUTES).toBe(5);
   });
 
-  it("holds the money numbers from the whitepaper", () => {
+  it("holds the money numbers from the whitepaper, per tier (D-087)", () => {
     expect(HOLDBACK_DAYS).toBe(30);
-    expect(READ_SHARE_SPLIT.submitter).toBe(15);
-    expect(READ_SHARE_SPLIT.validator).toBe(5);
     expect(SLOT_COUNT).toBe(3);
-    expect(CONTRIBUTOR_SHARE_PERCENT).toBe(30);
-    expect(
-      READ_SHARE_SPLIT.submitter + SLOT_COUNT * READ_SHARE_SPLIT.validator,
-    ).toBe(CONTRIBUTOR_SHARE_PERCENT);
+
+    // The paper's launch split, on a stated entry.
+    expect(READ_SHARE_SPLIT.stated.submitter).toBe(15);
+    expect(READ_SHARE_SPLIT.stated.validator).toBe(5);
+    expect(CONTRIBUTOR_SHARE_PERCENT.stated).toBe(30);
+
+    // Section 4: "A submitter who can measure a fact may submit it as observed,
+    // and is paid more for it"; Section 9: "observed entries take a larger read
+    // share than stated ones". Larger in both roles, never equal.
+    expect(READ_SHARE_SPLIT.observed.submitter).toBeGreaterThan(
+      READ_SHARE_SPLIT.stated.submitter,
+    );
+    expect(READ_SHARE_SPLIT.observed.validator).toBeGreaterThan(
+      READ_SHARE_SPLIT.stated.validator,
+    );
+
+    // Every tier's share is exactly the split it is made of, and every tier's
+    // share is at or above the floor that only rises.
+    for (const tier of ["stated", "observed"] as const) {
+      const split = READ_SHARE_SPLIT[tier];
+      expect([tier, split.submitter + SLOT_COUNT * split.validator]).toEqual([
+        tier,
+        CONTRIBUTOR_SHARE_PERCENT[tier],
+      ]);
+      expect(CONTRIBUTOR_SHARE_PERCENT[tier]).toBeGreaterThanOrEqual(
+        CONTRIBUTOR_SHARE_FLOOR_PERCENT,
+      );
+    }
+
+    // The tiers the split is keyed by are the schema's own evidence tiers, not
+    // a second pair of names: policy declares them locally because evidence
+    // imports policy, and this is what keeps the two readings one.
+    expect(Object.keys(READ_SHARE_SPLIT).sort()).toEqual(
+      [...schema.properties.evidence_tier.enum].sort(),
+    );
+    expect(Object.keys(CONTRIBUTOR_SHARE_PERCENT).sort()).toEqual(
+      Object.keys(READ_SHARE_SPLIT).sort(),
+    );
+  });
+
+  it("pays standing for a measurement beside the credit for the decision (D-087)", () => {
+    // Section 4's "the operators who measure are paid more than the operators
+    // who copy", on the standing side: a placeholder, and a positive one, or
+    // the rule would say nothing.
+    expect(STANDING_VALIDATION_REPRODUCED).toBe(2);
+    expect(STANDING_VALIDATION_REPRODUCED).toBeGreaterThan(0);
   });
 
   it("covers every category of the default domain with a staleness window", () => {
@@ -410,6 +454,7 @@ describe("policy numbers", () => {
       STANDING_DISPUTE_UPHELD,
       STANDING_OVERTURNED_SIGNER,
       STANDING_ASSIGNMENT_MISSED,
+      STANDING_VALIDATION_REPRODUCED,
       STANDING_TRUSTED_ENTRY,
     ]) {
       expect(Number.isInteger(value)).toBe(true);
@@ -438,10 +483,12 @@ describe("policy numbers", () => {
     expect(READ_PRICE_MICROS_PER_READ).toBe(500);
     expect(READ_PRICE_MICROS_PER_READ * 1000).toBe(500_000);
     const reads = 10_000;
-    expect((reads * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.submitter) / 100)
-      .toBe(750_000);
-    expect((reads * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.validator) / 100)
-      .toBe(250_000);
+    expect(
+      (reads * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.stated.submitter) / 100,
+    ).toBe(750_000);
+    expect(
+      (reads * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.stated.validator) / 100,
+    ).toBe(250_000);
   });
 
   it("carries the payout floor and cycle (D-053)", () => {
@@ -504,6 +551,9 @@ describe("policy numbers", () => {
     expect(POLICY.READ_SHARE_SPLIT).toBe(READ_SHARE_SPLIT);
     expect(POLICY.SLOT_COUNT).toBe(SLOT_COUNT);
     expect(POLICY.CONTRIBUTOR_SHARE_PERCENT).toBe(CONTRIBUTOR_SHARE_PERCENT);
+    expect(POLICY.STANDING_VALIDATION_REPRODUCED).toBe(
+      STANDING_VALIDATION_REPRODUCED,
+    );
     expect(POLICY.SEAL_INTERVAL_MINUTES).toBe(SEAL_INTERVAL_MINUTES);
     expect(POLICY.SWEEP_INTERVAL_MINUTES).toBe(SWEEP_INTERVAL_MINUTES);
     expect(POLICY.FAILURE_REPORT_THRESHOLD).toBe(FAILURE_REPORT_THRESHOLD);

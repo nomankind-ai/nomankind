@@ -1335,6 +1335,101 @@ describe("the entry page's disputes, reports, revalidations and stakes", () => {
     expect(document).toContain("2026-10-08 00:00:00Z");
   });
 
+  it("names each read share's rate from the row's own ref (D-087)", () => {
+    // Section 9: the split is published per evidence tier, so an amount alone
+    // no longer says why it is that amount. The page reads the rate back out of
+    // ref — never recomputing it — so a row says what it was actually priced at.
+    // Five rows, one per case the rule has: the submitter of an observed entry,
+    // which takes its tier's rate; a slot holder that measured, which earns the
+    // observed validator rate; one beside it that did not, which takes the
+    // stated rate on the same observed entry; a stated entry's holder; and a row
+    // written before the tier was in ref at all.
+    const base = entryShares[0]!;
+    const priced = renderEntry(ctx, {
+      ...entryData,
+      readShares: [
+        {
+          ...base,
+          id: "read_share:60:observed:submitter",
+          role: "submitter",
+          amount: 100_000,
+          ref: {
+            price_micros_per_read: 500,
+            share_percent: 20,
+            stale: false,
+            tier: "observed",
+          },
+        },
+        {
+          ...base,
+          id: "read_share:60:observed:validator:measured",
+          role: "validator",
+          amount: 35_000,
+          ref: {
+            price_micros_per_read: 500,
+            share_percent: 7,
+            stale: false,
+            tier: "observed",
+            measured: true,
+          },
+        },
+        {
+          ...base,
+          id: "read_share:60:observed:validator:unmeasured",
+          role: "validator",
+          amount: 25_000,
+          ref: {
+            price_micros_per_read: 500,
+            share_percent: 5,
+            stale: false,
+            tier: "observed",
+            measured: false,
+          },
+        },
+        {
+          ...base,
+          id: "read_share:60:stated:validator",
+          role: "validator",
+          amount: 25_000,
+          ref: {
+            price_micros_per_read: 500,
+            share_percent: 5,
+            stale: false,
+            tier: "stated",
+            measured: false,
+          },
+        },
+        {
+          ...base,
+          id: "read_share:10:legacy:submitter",
+          role: "submitter",
+          amount: 60_000,
+          ref: { price_micros_per_read: 500, share_percent: 12, stale: false },
+        },
+      ],
+    });
+    expect(priced).toContain("<th>rate</th>");
+    // The submitter of an observed entry: its tier's rate, and no measured note,
+    // because measuring is what a slot holder does and not what it does.
+    expect(priced).toContain(
+      '<td class="dim">20 percent · observed rate</td>',
+    );
+    // The holder that measured, and the one beside it that did not: the same
+    // entry, the same tier, two rates.
+    expect(priced).toContain(
+      '<td class="dim">7 percent · observed rate · measured</td>',
+    );
+    expect(priced).toContain('<td class="dim">5 percent · stated rate</td>');
+    // A row written before D-087 carries no tier, so it names its percent alone
+    // rather than being labeled with a tier nobody priced it under.
+    expect(priced).toContain('<td class="dim">12 percent</td>');
+    expect(priced).not.toContain('12 percent · ');
+    // The rule itself is on the page beside the column, in words.
+    expect(priced).toContain("says measured when that holder");
+    expect(priced).not.toContain("<script");
+    expect(priced).not.toContain(" style=");
+  });
+
   it("says no read has been priced rather than showing an empty table", () => {
     const unread = renderEntry(ctx, { ...entryData, readShares: [] });
     expect(unread).toContain("No read of this entry has been priced.");

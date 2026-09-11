@@ -3995,9 +3995,10 @@ describe("the ledger", () => {
     });
     return readShareRows(log[log.length - 1] as Event<"read_count">, () => ({
       author_operator: LEDGER_OPERATOR,
-      read_share_slots: [{ operator: SLOT_OPERATOR, seq: 1 }],
+      read_share_slots: [{ operator: SLOT_OPERATOR, seq: 1, measured: false }],
       stale,
       verified: true,
+      effective_tier: "stated",
     }));
   }
 

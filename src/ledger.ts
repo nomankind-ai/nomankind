@@ -30,7 +30,7 @@
  * injected clock.
  */
 
-import type { ReadShareSlot } from "./derive.js";
+import type { EvidenceTier } from "./evidence.js";
 import type { Event, ReadCountRow } from "./events.js";
 import type { BountyAccrual } from "./bounty.js";
 import type { StakeKind } from "./stake.js";
@@ -104,11 +104,34 @@ export interface LedgerRow {
  * because pricing a day means asking about the entry as it stood on that day and
  * a fold that rederived here would answer about today.
  */
+/**
+ * One read-share slot as pricing sees it: who holds it, the event that seated
+ * the holder, and whether that holder's own signed record carried a passing
+ * measurement (decision D-087).
+ *
+ * `measured` is a fact about the holder and not about the entry: it is read off
+ * the seating event's record by src/evidence.ts's `recordMeasured`, and a slot
+ * whose seating event cannot be found is false — a stated rate, never an
+ * invented observed one.
+ */
+export interface ReadShareSlotState {
+  readonly operator: string;
+  readonly seq: number;
+  readonly measured: boolean;
+}
+
 export interface EntryShareState {
   readonly author_operator: string | null;
-  readonly read_share_slots: readonly ReadShareSlot[] | null;
+  readonly read_share_slots: readonly ReadShareSlotState[] | null;
   readonly stale: boolean;
   readonly verified: boolean;
+  /**
+   * The tier the entry actually verified at, fixed at verification (D-035) and
+   * never moved by a later reconfirmation. Null while nothing has verified,
+   * which prices nothing: an unverified entry is skipped before any rate is
+   * read.
+   */
+  readonly effective_tier: EvidenceTier | null;
 }
 
 const MILLISECONDS_PER_DAY = 86_400_000;
@@ -146,27 +169,56 @@ function shareMicros(count: number, percent: number): number {
   return Math.floor((count * READ_PRICE_MICROS_PER_READ * percent) / 100);
 }
 
-/** Who is owed a share of an entry's reads, and at what percent. */
+/**
+ * Who is owed a share of an entry's reads, at what percent, and — for a slot
+ * holder — whether its own record measured anything.
+ */
 interface ShareHolder {
   readonly operator: string;
   readonly role: ShareRole;
   readonly percent: number;
+  /** Null on the submitter's row: the question is only asked of a slot. */
+  readonly measured: boolean | null;
 }
 
+/**
+ * The rates one entry pays, per tier and per holder (decision D-087).
+ *
+ * Section 9: "observed entries take a larger read share than stated ones, by
+ * published policy, so the operators who measure are paid more than the
+ * operators who copy." So the submitter's rate is the entry's tier's, and a
+ * slot holder takes the observed validator rate only when BOTH are true: the
+ * entry verified as observed, and this holder's own signed record carried a
+ * passing measurement. A validator who accepted the test without running it is
+ * paid the stated rate beside a holder who ran it, and on a stated entry every
+ * holder takes the stated rate whatever its record carried — the tier is the
+ * one verification fixed (D-035) and no later measurement moves it.
+ *
+ * An entry whose tier is null is not verified and is skipped before this is
+ * reached; the stated split is the safe reading if it ever is, because a rate
+ * nobody earned must never be the larger one.
+ */
 function holdersOf(state: EntryShareState): ShareHolder[] {
+  const tier: EvidenceTier = state.effective_tier ?? "stated";
+  const split = READ_SHARE_SPLIT[tier];
   const holders: ShareHolder[] = [];
   if (state.author_operator !== null) {
     holders.push({
       operator: state.author_operator,
       role: "submitter",
-      percent: READ_SHARE_SPLIT.submitter,
+      percent: split.submitter,
+      measured: null,
     });
   }
   for (const slot of state.read_share_slots ?? []) {
+    const paidForMeasuring = tier === "observed" && slot.measured;
     holders.push({
       operator: slot.operator,
       role: "validator",
-      percent: READ_SHARE_SPLIT.validator,
+      percent: paidForMeasuring
+        ? READ_SHARE_SPLIT.observed.validator
+        : READ_SHARE_SPLIT.stated.validator,
+      measured: slot.measured,
     });
   }
   return holders;
@@ -247,10 +299,16 @@ export function readShareRows(
         available_at: availableAt,
         seq: event.seq,
         at: event.at,
+        // The rate, and what made it that rate: the entry's tier, and on a
+        // slot holder's row whether that holder's own record measured. A
+        // reader who disagrees with the amount can see which rule produced it
+        // without rederiving the entry.
         ref: {
           price_micros_per_read: READ_PRICE_MICROS_PER_READ,
           share_percent: holder.percent,
           stale: state.stale,
+          tier: state.effective_tier ?? "stated",
+          ...(holder.measured === null ? {} : { measured: holder.measured }),
         },
       });
     }

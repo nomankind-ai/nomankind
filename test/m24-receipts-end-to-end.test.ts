@@ -578,7 +578,7 @@ describe("the ledger over a day with free reads in it", () => {
     expect(submitter).toBeUndefined();
     expect(rows.map((row) => row.amount)).toEqual(
       rows.map(() =>
-        Math.floor((3 * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.validator) / 100),
+        Math.floor((3 * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.stated.validator) / 100),
       ),
     );
   }, 600_000);

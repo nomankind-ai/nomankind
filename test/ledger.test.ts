@@ -15,6 +15,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  CONTRIBUTOR_SHARE_PERCENT,
   HOLDBACK_DAYS,
   PAYOUT_MINIMUM_MICROS,
   READ_PRICE_MICROS_PER_READ,
@@ -66,17 +67,40 @@ async function readCount(
   return log[0] as Event<"read_count">;
 }
 
+/**
+ * A stated entry whose three slot holders measured nothing: the launch case,
+ * and the one the paper's worked example is about. The observed cases pass
+ * `effective_tier` and `measured` of their own (D-087).
+ */
 function state(overrides: Partial<EntryShareState> = {}): EntryShareState {
   return {
     author_operator: SUBMITTER,
     read_share_slots: SLOTS.map((operator, index) => ({
       operator,
       seq: index + 1,
+      measured: false,
     })),
     stale: false,
     verified: true,
+    effective_tier: "stated",
     ...overrides,
   };
+}
+
+/** The same entry, verified observed, with `measured` per slot in order. */
+function observedState(
+  measured: readonly boolean[],
+  overrides: Partial<EntryShareState> = {},
+): EntryShareState {
+  return state({
+    read_share_slots: SLOTS.map((operator, index) => ({
+      operator,
+      seq: index + 1,
+      measured: measured[index] ?? false,
+    })),
+    effective_tier: "observed",
+    ...overrides,
+  });
 }
 
 /** The whole share of one day's reads, before the stale rule halves it. */
@@ -106,18 +130,19 @@ describe("readShareRows", () => {
       amount: 750_000,
       available_at: releaseOf(DAY),
     });
-    expect(submitter.amount).toBe(share(READ_SHARE_SPLIT.submitter));
+    expect(submitter.amount).toBe(share(READ_SHARE_SPLIT.stated.submitter));
     expect(submitter.ref).toEqual({
       price_micros_per_read: READ_PRICE_MICROS_PER_READ,
-      share_percent: READ_SHARE_SPLIT.submitter,
+      share_percent: READ_SHARE_SPLIT.stated.submitter,
       stale: false,
+      tier: "stated",
     });
 
     for (const operator of SLOTS) {
       const row = rows.find((candidate) => candidate.operator === operator)!;
       expect(row.role).toBe("validator");
       expect(row.amount).toBe(250_000);
-      expect(row.amount).toBe(share(READ_SHARE_SPLIT.validator));
+      expect(row.amount).toBe(share(READ_SHARE_SPLIT.stated.validator));
       expect(row.id).toBe(
         `read_share:${event.seq}:${ENTRY}:validator:${operator}`,
       );
@@ -142,8 +167,8 @@ describe("readShareRows", () => {
     for (const row of shares) {
       const percent =
         row.role === "submitter"
-          ? READ_SHARE_SPLIT.submitter
-          : READ_SHARE_SPLIT.validator;
+          ? READ_SHARE_SPLIT.stated.submitter
+          : READ_SHARE_SPLIT.stated.validator;
       const full = share(percent);
       expect(row.amount).toBe(Math.floor(full / 2));
       expect(row.ref).toMatchObject({ stale: true });
@@ -198,7 +223,7 @@ describe("readShareRows", () => {
     );
     expect(rows.filter((row) => row.entry_id === OTHER)).toHaveLength(1);
     expect(rows.find((row) => row.entry_id === OTHER)!.amount).toBe(
-      share(READ_SHARE_SPLIT.submitter, 1),
+      share(READ_SHARE_SPLIT.stated.submitter, 1),
     );
   });
 
@@ -208,6 +233,104 @@ describe("readShareRows", () => {
     const second = readShareRows(event, () => state());
     expect(second).toEqual(first);
     expect(new Set(first.map((row) => row.id)).size).toBe(first.length);
+  });
+});
+
+describe("the per-tier split (D-087)", () => {
+  it("prices an observed entry whose holders all measured at the observed split", async () => {
+    const event = await readCount([{ entry_id: ENTRY, count: READS }]);
+    const rows = readShareRows(event, () => observedState([true, true, true]));
+
+    const submitter = rows.find((row) => row.role === "submitter")!;
+    expect(submitter.amount).toBe(share(READ_SHARE_SPLIT.observed.submitter));
+    expect(submitter.ref).toEqual({
+      price_micros_per_read: READ_PRICE_MICROS_PER_READ,
+      share_percent: READ_SHARE_SPLIT.observed.submitter,
+      stale: false,
+      tier: "observed",
+    });
+
+    for (const operator of SLOTS) {
+      const row = rows.find((candidate) => candidate.operator === operator)!;
+      expect(row.amount).toBe(share(READ_SHARE_SPLIT.observed.validator));
+      expect(row.ref).toMatchObject({ tier: "observed", measured: true });
+      // The id says who was paid for what, and never at what rate: the same
+      // day repriced writes over the same row rather than beside it.
+      expect(row.id).toBe(`read_share:${event.seq}:${ENTRY}:validator:${operator}`);
+    }
+
+    // The whole day, at the observed share and no more.
+    expect(rows.reduce((sum, row) => sum + row.amount, 0)).toBe(
+      share(CONTRIBUTOR_SHARE_PERCENT.observed),
+    );
+  });
+
+  it("pays an approver who did not measure the stated rate beside one who did", async () => {
+    const event = await readCount([{ entry_id: ENTRY, count: READS }]);
+    // The middle holder accepted the test and ran nothing: Section 4's operator
+    // who copies, beside two who measured.
+    const rows = readShareRows(event, () => observedState([true, false, true]));
+
+    const unmeasured = rows.find((row) => row.operator === SLOTS[1])!;
+    expect(unmeasured.amount).toBe(share(READ_SHARE_SPLIT.stated.validator));
+    expect(unmeasured.ref).toMatchObject({ tier: "observed", measured: false });
+
+    for (const operator of [SLOTS[0], SLOTS[2]]) {
+      const row = rows.find((candidate) => candidate.operator === operator)!;
+      expect(row.amount).toBe(share(READ_SHARE_SPLIT.observed.validator));
+    }
+    // The submitter is paid for the entry's tier and not for anyone else's work.
+    expect(rows.find((row) => row.role === "submitter")!.amount).toBe(
+      share(READ_SHARE_SPLIT.observed.submitter),
+    );
+    // And the difference stays with nomankind rather than moving the price.
+    expect(rows.reduce((sum, row) => sum + row.amount, 0)).toBeLessThan(
+      share(CONTRIBUTOR_SHARE_PERCENT.observed),
+    );
+  });
+
+  it("keeps a stated entry at the stated rate however its holders measured (D-035)", async () => {
+    const event = await readCount([{ entry_id: ENTRY, count: READS }]);
+    const rows = readShareRows(event, () =>
+      state({
+        read_share_slots: SLOTS.map((operator, index) => ({
+          operator,
+          seq: index + 1,
+          measured: true,
+        })),
+      }),
+    );
+    for (const row of rows) {
+      const percent =
+        row.role === "submitter"
+          ? READ_SHARE_SPLIT.stated.submitter
+          : READ_SHARE_SPLIT.stated.validator;
+      expect(row.amount).toBe(share(percent));
+      expect(row.ref).toMatchObject({ tier: "stated" });
+    }
+    expect(rows.reduce((sum, row) => sum + row.amount, 0)).toBe(
+      share(CONTRIBUTOR_SHARE_PERCENT.stated),
+    );
+  });
+
+  it("halves the observed rates on a stale day, pool and all", async () => {
+    const event = await readCount([{ entry_id: ENTRY, count: READS }]);
+    const rows = readShareRows(event, () =>
+      observedState([true, true, true], { stale: true }),
+    );
+    const shares = rows.filter((row) => row.kind === "read_share");
+    const pool = rows.find((row) => row.kind === "bounty_pool")!;
+    let withheld = 0;
+    for (const row of shares) {
+      const percent =
+        row.role === "submitter"
+          ? READ_SHARE_SPLIT.observed.submitter
+          : READ_SHARE_SPLIT.observed.validator;
+      const full = share(percent);
+      expect(row.amount).toBe(Math.floor(full / 2));
+      withheld += full - row.amount;
+    }
+    expect(pool.amount).toBe(withheld);
   });
 });
 
@@ -621,7 +744,7 @@ describe("a published day with a paid block", () => {
     // Four reads, not ten thousand and seven: the rest of the day was free.
     expect(rows.every((row) => row.entry_id === ENTRY)).toBe(true);
     expect(rows.every((row) => row.reads === 4)).toBe(true);
-    expect(rows[0]!.amount).toBe(share(READ_SHARE_SPLIT.submitter, 4));
+    expect(rows[0]!.amount).toBe(share(READ_SHARE_SPLIT.stated.submitter, 4));
   });
 
   it("reconciles against the paid rows, and says ok", async () => {

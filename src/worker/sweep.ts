@@ -115,6 +115,7 @@ import {
 } from "../derive.js";
 import { openRevalidation, revalidationDrawExclusions } from "../dispute.js";
 import { duplicateKey, sameDuplicateKey } from "../duplicate.js";
+import { recordMeasured } from "../evidence.js";
 import {
   appendEvent,
   type Event,
@@ -131,6 +132,7 @@ import {
   reconciliationRow,
   type EntryShareState,
   type LedgerRow,
+  type ReadShareSlotState,
 } from "../ledger.js";
 import {
   DEFAULT_DOMAIN,
@@ -170,6 +172,7 @@ import {
   dueRevalidationAssignments,
   earliestReadReceiptDay,
   entryIdsThrough,
+  eventBySeq,
   eventsAfter,
   eventsForAttestation,
   eventsForEntry,
@@ -1642,6 +1645,24 @@ function cycleOf(at: string): string {
 }
 
 /**
+ * Whether the holder of one read-share slot measured anything (D-087).
+ *
+ * The slot carries the seq of the event that seated it, so the answer is one
+ * event read back by position and one pure question asked of the record it
+ * carries — a validation's ApproverRecord or a reconfirmation's. Anything else
+ * at that position, and an event that is no longer there at all, is false: the
+ * stated rate, never an invented observed one.
+ */
+async function slotMeasured(db: D1Like, seq: number): Promise<boolean> {
+  const event = await eventBySeq(db, seq);
+  if (event === null) return false;
+  if (isEvent(event, "validation") || isEvent(event, "reconfirmation")) {
+    return recordMeasured(event.payload.record);
+  }
+  return false;
+}
+
+/**
  * What pricing needs to know about an entry, read off its stored row.
  *
  * Every field is derivation's, exactly as `EntryShareState` asks: the author
@@ -1650,15 +1671,32 @@ function cycleOf(at: string): string {
  * rather than against today — the day is what is being paid for, and an entry
  * that has gone stale since must not turn a fresh day's reads into half a day's.
  */
-function shareStateOf(stored: StoredEntry, date: string): EntryShareState {
+async function shareStateOf(
+  db: D1Like,
+  stored: StoredEntry,
+  date: string,
+): Promise<EntryShareState> {
   const entry = stored.entry as unknown as Record<string, unknown>;
   const author = entry["author_operator"];
   const expires = entry["expires_at"];
+  const slots = stored.sidecar.read_share_slots;
+  let seated: ReadShareSlotState[] | null = null;
+  if (slots !== null) {
+    seated = [];
+    for (const slot of slots) {
+      seated.push({
+        operator: slot.operator,
+        seq: slot.seq,
+        measured: await slotMeasured(db, slot.seq),
+      });
+    }
+  }
   return {
     author_operator: typeof author === "string" ? author : null,
-    read_share_slots: stored.sidecar.read_share_slots,
+    read_share_slots: seated,
     stale: typeof expires === "string" && expires < date,
     verified: typeof entry["verified_at"] === "string",
+    effective_tier: stored.sidecar.effective_tier,
   };
 }
 
@@ -1680,7 +1718,7 @@ async function priceDay(
   for (const read of event.payload.reads as readonly ReadCountRow[]) {
     const stored = await getEntry(db, read.entry_id);
     if (stored === null) continue;
-    states.set(read.entry_id, shareStateOf(stored, date));
+    states.set(read.entry_id, await shareStateOf(db, stored, date));
   }
 
   const rows = readShareRows(event, (entryId) => states.get(entryId) ?? null);
