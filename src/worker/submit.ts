@@ -295,27 +295,32 @@ async function transcriptCapture(
 }
 
 /**
- * The snapshot of every other entry: the cited page, fetched now.
+ * One page, pinned under the norm rule: steps 1 to 5 in order — fetch under the
+ * fixed headers, keep the raw body, extract by media type, normalize, hash.
  *
- * Steps 1 to 5 of the norm rule in order — fetch under the fixed headers,
- * archive the raw body, extract by media type, normalize, hash — and then the
- * one comparison the whole route exists for: the hash of what we just fetched
- * against the hash the author signed. A page that needs JavaScript is refused
- * with the rule's own reason and is never archived as a snapshot.
+ * The URL checks come first, so a citation that is not http(s) is refused
+ * before the network is reached; then the fetch's own five refusals, unchanged;
+ * then the rule's two, so a page that needs JavaScript or is not the JSON it
+ * claims is refused with the rule's own reason and is never archived.
+ *
+ * No hash comparison lives here. What a caller does with the capture is the
+ * caller's: the snapshot is compared against the hash the author signed, and
+ * the provider statement is compared against nothing at all, because the author
+ * signed no hash of it.
  */
-async function fetchedCapture(
-  core: Core,
+async function capturedFromUrl(
+  target: unknown,
+  role: CaptureRecord["role"],
   deps: SubmitDeps,
   at: string,
   fetcher: string,
 ): Promise<CaptureAttempt> {
-  const citation = core["citation"];
-  if (typeof citation !== "string") {
+  if (typeof target !== "string") {
     return { ok: false, reason: "unsupported_citation" };
   }
   let url: URL;
   try {
-    url = new URL(citation);
+    url = new URL(target);
   } catch {
     return { ok: false, reason: "unsupported_citation" };
   }
@@ -323,20 +328,17 @@ async function fetchedCapture(
     return { ok: false, reason: "unsupported_citation" };
   }
 
-  const fetched = await deps.fetcher.fetch(citation);
+  const fetched = await deps.fetcher.fetch(target);
   if (!fetched.ok) return { ok: false, reason: fetched.reason };
 
   const contentType = fetched.headers["content-type"] ?? null;
   const hashed = await snapshotHash(fetched.bytes, contentType);
   if (!hashed.ok) return { ok: false, reason: hashed.reason };
-  if (hashed.hash !== core["snapshot_hash"]) {
-    return { ok: false, reason: "snapshot_mismatch" };
-  }
 
   return {
     ok: true,
     capture: {
-      role: "snapshot",
+      role,
       contentHash: hashed.hash,
       archiveHash: await archiveAddress(fetched.bytes),
       kind: hashed.kind,
@@ -351,6 +353,65 @@ async function fetchedCapture(
       },
     },
   };
+}
+
+/**
+ * The snapshot of every other entry: the cited page, fetched now.
+ *
+ * The norm rule, and then the one comparison the whole route exists for: the
+ * hash of what we just fetched against the hash the author signed.
+ */
+async function fetchedCapture(
+  core: Core,
+  deps: SubmitDeps,
+  at: string,
+  fetcher: string,
+): Promise<CaptureAttempt> {
+  const attempt = await capturedFromUrl(
+    core["citation"],
+    "snapshot",
+    deps,
+    at,
+    fetcher,
+  );
+  if (!attempt.ok) return attempt;
+  if (attempt.capture.contentHash !== core["snapshot_hash"]) {
+    return { ok: false, reason: "snapshot_mismatch" };
+  }
+  return attempt;
+}
+
+/**
+ * The provider statement a transcript entry points at, fetched now.
+ *
+ * Section 4 makes a provider's own statement the verification basis of a
+ * behavior or misbehavior entry: an operator confirms the transcript against
+ * what the provider published. The page that says it is a page, and pages
+ * change — so it is captured at submit under the same norm rule as any
+ * citation, and the capture is the record of what the statement said at the
+ * moment the claim was made. Before this, a validator fetched what they were
+ * checking, months later, and nobody could tell a changed page from a wrong
+ * claim.
+ *
+ * There is no hash of it in the signed core, so there is no comparison and no
+ * mismatch refusal: a statement capture can only fail the way any fetch fails.
+ * It is a storage pointer like every other capture row — served by
+ * GET /captures/{hash}, listed by capturesForEntry — and it goes into no
+ * sidecar, no derived field and no event.
+ *
+ * When `provider_statement` is null there is nothing to fetch: the transcript
+ * is the whole snapshot, as it was.
+ */
+async function statementCapture(
+  core: Core,
+  deps: SubmitDeps,
+  at: string,
+  fetcher: string,
+): Promise<CaptureAttempt | null> {
+  const evidence = isRecord(core["evidence"]) ? core["evidence"] : {};
+  const statement = evidence["provider_statement"];
+  if (typeof statement !== "string") return null;
+  return capturedFromUrl(statement, "statement", deps, at, fetcher);
 }
 
 /**
@@ -525,11 +586,24 @@ export async function prepareSubmission(
 
   // Which categories carry a transcript is the entry's own domain's table
   // (decision D-071), read off the signed core rather than off a global.
-  const snapshot = isTranscriptCategory(domainOf(core), core["category"])
+  const transcript = isTranscriptCategory(domainOf(core), core["category"]);
+  const snapshot = transcript
     ? await transcriptCapture(core, at, fetcher)
     : await fetchedCapture(core, deps, at, fetcher);
   if (!snapshot.ok) return refused(refuse(422, snapshot.reason));
   const captures: PreparedCapture[] = [snapshot.capture];
+
+  // The provider statement, after the transcript is accepted and before the
+  // receipt, and like every other refusal here before anything is written. The
+  // dispute door comes through this same function, and a correction's category
+  // is never a transcript category, so a challenge reaches neither branch.
+  if (transcript) {
+    const statement = await statementCapture(core, deps, at, fetcher);
+    if (statement !== null) {
+      if (!statement.ok) return refused(refuse(422, statement.reason));
+      captures.push(statement.capture);
+    }
+  }
 
   if (core["observation"] !== null) {
     const receipt = await receiptCapture(core, body.receipt, at, fetcher);

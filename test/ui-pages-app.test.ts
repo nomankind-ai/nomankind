@@ -475,7 +475,16 @@ const entryData: EntryData = {
   ledger,
   readShares: entryShares,
   disputeOf: DISPUTED_ID,
+  // No provider statement on the default fixture: the entry page's ordinary
+  // shape is one frozen source, and the statement note is the exception a test
+  // below turns on explicitly. Null and never absent — the field is on every
+  // EntryData the route builds, so it is on every one the suite builds too.
+  statement: null,
 };
+
+/** The statement capture a transcript entry with a provider statement carries. */
+const STATEMENT_HASH =
+  "sha256:5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d";
 
 const operatorRow: OperatorRow = {
   id: "k1.example",
@@ -1072,6 +1081,47 @@ describe("the entry page", () => {
     expect(legacy).toContain(
       `absent (v0.6 record, read as ${DEFAULT_DOMAIN})`,
     );
+  });
+
+  it("links the provider statement's capture and its sidecar", () => {
+    // Section 4 and decision D-059: a transcript entry whose evidence names a
+    // provider statement rests on two frozen sources, and the page shows both
+    // — the transcript through snapshot_hash, the statement through the same
+    // two archive routes. A verifier that had to go looking for the second
+    // would be missing an input this page promises to carry.
+    const withStatement = renderEntry(ctx, {
+      ...entryData,
+      statement: { hash: STATEMENT_HASH, host: "kestrel.example" },
+    });
+    expect(withStatement).toContain("provider statement");
+    expect(withStatement).toContain(`<a href="/captures/${STATEMENT_HASH}">`);
+    expect(withStatement).toContain(
+      `<a href="/captures/${STATEMENT_HASH}/sidecar">`,
+    );
+    // The note sits with the evidence it belongs to, not somewhere else on the
+    // page: `evidence.provider_statement` is what the capture froze.
+    const evidenceAt = withStatement.indexOf("<dt>evidence</dt>");
+    const citationAt = withStatement.indexOf("<dt>citation</dt>");
+    const noteAt = withStatement.indexOf("provider statement ·");
+    expect(noteAt).toBeGreaterThan(evidenceAt);
+    expect(noteAt).toBeLessThan(citationAt);
+    // The short hash, so a reader can tell one capture from the other at a
+    // glance, and the cited host, both inside the note itself.
+    const note = withStatement.slice(noteAt, citationAt);
+    expect(note).toContain("5d5d5d5d5d5d…");
+    expect(note).toContain("kestrel.example");
+    // And still no script and no inline style: the CSP names no source for
+    // either, so a note that introduced one would be a note a browser blocks.
+    expect(withStatement).not.toContain("<script");
+    expect(withStatement).not.toContain(' style="');
+  });
+
+  it("shows no statement note at all when there is no statement capture", () => {
+    // Null is "this entry never carried a provider statement", which is not an
+    // empty field: a dash or a bare label would read as a capture gone missing.
+    expect(entryData.statement).toBeNull();
+    expect(document).not.toContain("provider statement");
+    expect(document).not.toContain(`/captures/${STATEMENT_HASH}`);
   });
 
   it("shows every derived field name and never a confidence number", () => {
