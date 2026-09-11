@@ -527,14 +527,16 @@ describe("an operator is registered into a domain", () => {
   });
 
   it("keeps the attestation refusals in the join's own order", async () => {
-    // While ai-ecosystem is the only registered domain, every registered
-    // operator already holds every domain there is, so `already_joined` stands
-    // in front of all three attestation refusals and no request can reach them
-    // -- `attestation_domain_mismatch` least of all, since the domain asked for
-    // and the domain the record declares would both have to be registered and
-    // different. They are pinned here in their contracted order instead; the
-    // day a second domain is registered a request can reach them.
-    expect(DOMAIN_SLUGS).toEqual([DEFAULT_DOMAIN]);
+    // An operator that already holds the domain it asks for is refused
+    // `already_joined` before any attestation is read, which is the order the
+    // refusals are contracted in. Three domains are registered (D-096), so a
+    // request can now reach the three behind it; the order itself is pinned
+    // here, and the M24c end-to-end walks the requests.
+    expect([...DOMAIN_SLUGS]).toEqual([
+      DEFAULT_DOMAIN,
+      "ai-governance",
+      "ai-safety",
+    ]);
     const unreachable = await checkDomainJoin({
       operator: k1.operator,
       agent: k1.agent.agentId,
@@ -615,9 +617,15 @@ describe("an operator judges only where it is attested", () => {
     expect(checkValidation(record(), context(undefined)).ok).toBe(true);
   });
 
-  it("puts the refusal straight after provider_operator", () => {
+  it("puts the refusal straight after the subject-authority one", () => {
+    // Which itself sits straight after provider_operator: D-096 added one
+    // exclusion between the standing rules about who an operator is and the
+    // per-domain rule about where it attested (src/validate.ts).
     const order = [...VALIDATION_REFUSALS];
     expect(order[order.indexOf("provider_operator") + 1]).toBe(
+      "subject_authority",
+    );
+    expect(order[order.indexOf("subject_authority") + 1]).toBe(
       "operator_not_in_domain",
     );
   });

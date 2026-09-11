@@ -66,6 +66,19 @@ export interface ValidationContext {
    * challenged entry; this module only applies it.
    */
   readonly excludedOperators?: readonly string[];
+  /**
+   * The official hosts of the authority this entry's subject names
+   * (`authorityHostsFor` in src/policy.ts). Empty by default, so every caller
+   * that had no such exclusion -- and every entry in a domain whose
+   * `subject_authority` is false -- is unchanged.
+   *
+   * Decision D-096: the body that issued the instrument, or published the
+   * commitment, is the party the record is checking, and it is named by the
+   * entry's own subject rather than by a list. An operator whose own domain is
+   * one of these hosts, or a subdomain of one, is too close to judge this
+   * particular entry.
+   */
+  readonly authority_hosts?: readonly string[];
 }
 
 /** Every reason a record can be refused. One string per rule, in check order. */
@@ -78,6 +91,7 @@ export type ValidationRefusal =
   | "original_signer"
   | "maintainer_operator"
   | "provider_operator"
+  | "subject_authority"
   | "operator_not_in_domain"
   | "missing_snapshot_hash"
   | "missing_reason"
@@ -95,6 +109,7 @@ export const VALIDATION_REFUSALS: readonly ValidationRefusal[] = Object.freeze([
   "original_signer",
   "maintainer_operator",
   "provider_operator",
+  "subject_authority",
   "operator_not_in_domain",
   "missing_snapshot_hash",
   "missing_reason",
@@ -176,7 +191,20 @@ export function checkValidation(
   if (operator.maintainer) return refuse("maintainer_operator");
   if (operator.provider) return refuse("provider_operator");
 
-  // 8a. Decision D-071: the independence attestation is per domain, so
+  // 8a. Decision D-096: the authority the entry's subject names is the party
+  // the entry is about, so an operator under one of its official hosts is
+  // barred from judging it. The hosts are the caller's, computed from policy
+  // (`authorityHostsFor`), and empty for every domain and every subject that
+  // excludes nobody -- which is why ai-ecosystem is untouched. It sits beside
+  // the provider rule because it is the same kind of rule, one entry wide
+  // instead of one domain wide.
+  if (context.authority_hosts !== undefined) {
+    for (const host of context.authority_hosts) {
+      if (underHost(record.operator, host)) return refuse("subject_authority");
+    }
+  }
+
+  // 8b. Decision D-071: the independence attestation is per domain, so
   // eligibility is too. An operator judges an entry only in a domain it has
   // signed that domain's attestation for -- and an operator excluded from one
   // domain stays eligible in another, which is exactly what a per-domain check
@@ -226,6 +254,20 @@ export function checkValidation(
   }
 
   return { ok: true, record };
+}
+
+/**
+ * Whether an operator's own domain is a listed host, or a subdomain of one.
+ *
+ * `eu.example.europa.eu` is under `europa.eu`; `europa.eu.evil.tld` is not, and
+ * the dot is the whole point -- a bare suffix test would hand every lookalike
+ * domain in the world the exclusion, and, worse, would miss none of them while
+ * excluding strangers.
+ */
+export function underHost(operator: string, host: string): boolean {
+  const listed = host.toLowerCase();
+  const own = operator.toLowerCase();
+  return own === listed || own.endsWith(`.${listed}`);
 }
 
 function refuse(reason: ValidationRefusal): ValidationVerdict {

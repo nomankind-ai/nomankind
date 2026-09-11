@@ -208,6 +208,22 @@ export interface EntryData {
    * show, and a dash here would look like a capture that went missing.
    */
   statement: { hash: string; host: string } | null;
+  /**
+   * The delayed-disclosure payload of a redacted transcript, null when the
+   * entry redacted nothing (decision D-096).
+   *
+   * `hash` is the capture's content hash, which addresses the payload at
+   * `/captures/{hash}`, and `disclose_after` is the day it becomes public: the
+   * entry's `submitted_at` plus the domain's published window, computed by the
+   * route from the entry and src/policy.ts, never stored. Before that day the
+   * link answers 403 to an unsigned read, which is the whole point of printing
+   * the date beside it.
+   *
+   * Null is "nothing was held back" and is rendered as nothing at all: almost
+   * every entry carries its evidence whole, and a line saying so would read as
+   * a payload that had gone missing.
+   */
+  disclosure: { hash: string; disclose_after: string } | null;
 }
 
 /**

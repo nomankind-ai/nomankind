@@ -44,7 +44,13 @@ import {
 import { disputeExclusions, openDispute } from "../dispute.js";
 import type { ApproverRecord, Event, EventInput } from "../events.js";
 import { checkRecordEvidence } from "../evidence.js";
-import { LIST_PAGE_LIMIT, REQUEST_CLOCK_SKEW_SECONDS } from "../policy.js";
+import {
+  authorityHostsFor,
+  isVersionStalenessCategory,
+  LIST_PAGE_LIMIT,
+  REQUEST_CLOCK_SKEW_SECONDS,
+  versionedSubjectOf,
+} from "../policy.js";
 import { verifyRecordSignature } from "../records.js";
 import { validateEntry, type ValidationError } from "../schema.js";
 import { disputeOutcomeStakes } from "../stake.js";
@@ -55,6 +61,7 @@ import {
   headSeq,
   listOperators,
   recordValidation,
+  versionSiblingsOf,
   type StoredEntryInput,
 } from "../storage/repository.js";
 import { checkValidation, type OperatorInfo } from "../validate.js";
@@ -274,6 +281,57 @@ async function supersessionTarget(
   return submitted ? { id: declared, world } : null;
 }
 
+/** One older version of the same model, and the world it is derived over. */
+interface VersionSibling {
+  readonly id: string;
+  readonly world: EntryWorld;
+}
+
+/**
+ * Every entry about another version of the model this one observes, with the
+ * world each is derived over (decision D-096).
+ *
+ * schema/nomankind-domain-registry-v1.md, "Staleness on a version change": the
+ * older version's entry goes stale from the position of the validation that
+ * verifies this one, so its stored row is rewritten in the same batch as that
+ * validation -- exactly as a supersession rewrites its target, and for the same
+ * reason: a reader between two writes must never see the newer version verified
+ * and the older one still fresh.
+ *
+ * Gathered before the write because the batch's callbacks are synchronous, and
+ * only for the entries the rewrite could touch: a sibling whose row is already
+ * stale has nothing to learn from this decision, and an entry outside the
+ * version-staleness categories has no siblings at all. Whether each one
+ * actually goes stale is derivation's answer, asked in the batch.
+ */
+async function versionSiblings(
+  db: D1Like,
+  entryId: string,
+  core: Core,
+): Promise<VersionSibling[]> {
+  const domain = domainOf(core);
+  if (!isVersionStalenessCategory(domain, core["category"])) return [];
+  const versioned = versionedSubjectOf(core["subject"]);
+  if (versioned === null) return [];
+
+  const siblings: VersionSibling[] = [];
+  for (const row of await versionSiblingsOf(
+    db,
+    domain,
+    versioned.prefix,
+    LIST_PAGE_LIMIT,
+  )) {
+    if (row.id === entryId) continue;
+    const other = versionedSubjectOf(row.subject);
+    if (other === null || other.version === versioned.version) continue;
+    const stored = await getEntry(db, row.id);
+    if (stored === null) continue;
+    if ((stored.entry as Record<string, unknown>)["stale"] === true) continue;
+    siblings.push({ id: row.id, world: await entryWorld(db, row.id) });
+  }
+  return siblings;
+}
+
 /**
  * The derived entry did not validate against the schema.
  *
@@ -473,6 +531,11 @@ async function validate(
     // The entry's own domain, off its signed core: a legacy v0.6 core carries
     // none and reads as the default domain.
     domain: domainOf(core),
+    // Decision D-096: the official hosts of the authority this entry's subject
+    // names, from src/policy.ts and nowhere else. Empty for ai-ecosystem, for
+    // a subject with no authority row, and for the fixture row -- which is why
+    // every decision outside the two new domains is unchanged.
+    authority_hosts: authorityHostsFor(domainOf(core), core["subject"]),
     priorRecords: priorRecordsOf(entryEvents, id),
     openAssignment: open === null ? null : { operator: open.operator },
     excludedOperators,
@@ -499,6 +562,10 @@ async function validate(
     env.DB,
     typeof declared === "string" ? declared : null,
   );
+
+  // The older versions of the same model, gathered here for the same reason and
+  // rewritten in the same batch (decision D-096).
+  const siblings = await versionSiblings(env.DB, id, core);
 
   const at = deps.now.toISOString();
   let derivedEntry: Record<string, unknown> | null = null;
@@ -597,6 +664,7 @@ async function validate(
             registry: supersession.world.registry,
             entryEvents: supersession.world.entryEvents,
             superseders: [...supersession.world.superseders, ...entryEvents],
+            versionSiblings: supersession.world.versionSiblings,
             // The target's own seal, carried through: rewriting its row must not
             // erase a seal it really has.
             seal: supersession.world.seal,
@@ -609,6 +677,27 @@ async function validate(
             sidecar: target.sidecar,
             derivedThroughSeq: event.seq,
           });
+        }
+
+        // The older versions of the same model, rewritten from the same log
+        // position: this is where their `stale` appears. Each is rederived over
+        // its own world -- which already carries this entry's events, because
+        // this entry is one of its version siblings -- with this decision folded
+        // in, and derivation is what says whether it went stale. A sibling that
+        // comes back fresh is a newer version, or one this decision did not
+        // retire, and its row is left alone.
+        if (verifiedByThisDecision) {
+          for (const sibling of siblings) {
+            const target = rederive(sibling.world, sibling.id, deps.now, [event]);
+            if (!target.derived.stale) continue;
+            const result = validateEntry(target.entry);
+            if (!result.ok) throw new SchemaInvalid(result.errors);
+            rows.push({
+              entry: target.entry,
+              sidecar: target.sidecar,
+              derivedThroughSeq: event.seq,
+            });
+          }
         }
 
         // The challenged entry, rewritten from the same log position: this is

@@ -608,6 +608,52 @@ export async function supersedersOf(
   return rows.results.map((row) => readText(row, "id"));
 }
 
+/** One version sibling: the entry's id and the subject it names. */
+export interface VersionSibling {
+  readonly id: string;
+  readonly subject: string;
+}
+
+/**
+ * Every entry of one domain whose subject starts with a `<party>/<model>/`
+ * prefix, oldest submission first (decision D-096).
+ *
+ * schema/nomankind-domain-registry-v1.md, "Staleness on a version change": an
+ * observation goes stale when another entry about a later version of the same
+ * model verifies, so derivation has to be handed those entries or it cannot see
+ * the one that retires this one. This is the read that finds them: a prefix
+ * match over the indexed `domain` and `subject` columns, bounded by the
+ * caller's own limit, exactly as every other listing here is.
+ *
+ * A prefix and not a LIKE pattern: the three characters SQLite's LIKE treats as
+ * special are escaped here, so a subject carrying a `%` or a `_` matches
+ * itself and never everything.
+ *
+ * Which of the returned entries is actually a later version, and whether it
+ * verified, is derivation's answer (src/derive.ts, `isVersionStale`) and is
+ * never decided here.
+ */
+export async function versionSiblingsOf(
+  db: D1Like,
+  domain: string,
+  prefix: string,
+  limit: number,
+): Promise<VersionSibling[]> {
+  const escaped = `${prefix}/`.replace(/[\\%_]/g, (character) => `\\${character}`);
+  const rows = await db
+    .prepare(
+      `SELECT id, subject FROM entries
+       WHERE domain = ? AND subject LIKE ? ESCAPE '\\'
+       ORDER BY submitted_seq LIMIT ?`,
+    )
+    .bind(domain, `${escaped}%`, limit)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    id: readText(row, "id"),
+    subject: readText(row, "subject"),
+  }));
+}
+
 /** Where a staleness sweep looks, and where it resumes. */
 export interface StaleDueQuery {
   /**
@@ -701,8 +747,21 @@ export interface CaptureRecord {
    * a report's role carries the position of its own `failure_report` event. That
    * makes each report's artifact its own row and keeps it from overwriting the
    * entry's own captures, which is what a plain "receipt" role would have done.
+   *
+   * "disclosure" is the delayed-disclosure payload of a redacted transcript
+   * (decision D-096): the original values the artifact carries placeholders
+   * for, archived at their own content address. An entry has at most one, and
+   * it is the one role a read is gated on -- src/worker/submit.ts serves it to
+   * a signed operator request, and to anybody once the domain's window has run
+   * from the entry's `submitted_at`. The column is the existing one and this
+   * value is a new string in it: no migration.
    */
-  readonly role: "snapshot" | "receipt" | "statement" | `report:${number}`;
+  readonly role:
+    | "snapshot"
+    | "receipt"
+    | "statement"
+    | "disclosure"
+    | `report:${number}`;
   readonly contentHash: string;
   readonly archiveHash: string;
   readonly normVersion: string;
@@ -789,6 +848,31 @@ export async function captureForHash(
     .bind(contentHash)
     .first<Row>();
   return row === null ? null : toCapture(row);
+}
+
+/**
+ * Every index row that points at one content hash, oldest fetch first.
+ *
+ * `captureForHash` answers with the first of these, which is all a plain read
+ * of the bytes needs. This answers with all of them, because whether a capture
+ * may be served at all can depend on every role it is referenced under
+ * (decision D-096): a disclosure payload that some other entry also cites as
+ * its snapshot is that entry's evidence and is served as such, so the gate asks
+ * about the whole set and not about whichever row sorted first.
+ */
+export async function capturesForHash(
+  db: D1Like,
+  contentHash: string,
+  limit: number = LIST_PAGE_LIMIT,
+): Promise<CaptureRecord[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${CAPTURE_COLUMNS} FROM captures
+       WHERE content_hash = ? ORDER BY fetched_at, entry_id LIMIT ?`,
+    )
+    .bind(contentHash, limit)
+    .all<Row>();
+  return rows.results.map(toCapture);
 }
 
 /**

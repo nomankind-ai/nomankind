@@ -28,6 +28,7 @@
  */
 
 import { mirrorKindFor } from "../adapters/mirror.js";
+import { domainOf, extractCore } from "../core.js";
 import { confidenceInputs } from "../confidence.js";
 import type { Event } from "../events.js";
 import { ledgerBalance } from "../ledger.js";
@@ -37,6 +38,7 @@ import {
   TXT_RECORD_PREFIX,
 } from "../registry.js";
 import {
+  disclosureWindowDays,
   DOMAIN_SLUGS,
   HOME_LATEST_ENTRIES,
   LANDING_BAND_SEALS,
@@ -441,6 +443,25 @@ async function entry(
   const captures = await capturesForEntry(db, id, LIST_PAGE_LIMIT);
   const statementCapture =
     captures.find((each) => each.role === "statement") ?? null;
+  // The delayed-disclosure payload (D-096), and the day it opens: the entry's
+  // own submitted_at plus the domain's published window, computed here from
+  // src/policy.ts and never stored, so the date the page prints is the date the
+  // capture route enforces. Null for every entry that redacted nothing.
+  const disclosureCapture =
+    captures.find((each) => each.role === "disclosure") ?? null;
+  let discloseAfter: string | null = null;
+  if (disclosureCapture !== null) {
+    const window = disclosureWindowDays(domainOf(extractCore(stored.entry)));
+    const submittedAt = textField(record, "submitted_at");
+    if (window !== null && submittedAt !== null) {
+      const submitted = Date.parse(submittedAt);
+      if (!Number.isNaN(submitted)) {
+        discloseAfter = new Date(
+          submitted + window * 24 * 60 * 60 * 1000,
+        ).toISOString();
+      }
+    }
+  }
   // The host of the source the entry cites, for the line beside the capture,
   // parsed the same way the How it works reading parses one: a URL the store
   // already accepted, so a parse failure is "no host to name" rather than a
@@ -553,6 +574,13 @@ async function entry(
           : {
               hash: statementCapture.contentHash,
               host: statementHost ?? "the cited source",
+            },
+      disclosure:
+        disclosureCapture === null || discloseAfter === null
+          ? null
+          : {
+              hash: disclosureCapture.contentHash,
+              disclose_after: discloseAfter,
             },
     }),
   );

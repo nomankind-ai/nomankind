@@ -136,6 +136,41 @@ describe("renderPolicy", () => {
         );
       }
 
+      // The three fields D-096 added, each published where it lives: the
+      // per-entry half of the exclusion rule on every domain, and the two
+      // optional rules only on the domains that publish them. A domain without
+      // one gets no row at all, because "none" would be a rule nobody set.
+      expect(page).toContain(
+        `<td class="mono">${path}.excluded_parties.subject_authority</td>`,
+      );
+      const disclosure = domain.disclosure;
+      if (disclosure === undefined) {
+        expect(page).not.toContain(`${path}.disclosure.categories`);
+        expect(page).not.toContain(`${path}.disclosure.window_days`);
+      } else {
+        expect(page).toContain(`<td class="mono">${path}.disclosure.categories</td>`);
+        expect(page).toContain(
+          `<td class="mono">${disclosure.categories.join(", ")}</td>`,
+        );
+        expect(page).toContain(
+          `<td class="mono">${path}.disclosure.window_days</td>`,
+        );
+        expect(page).toContain(
+          `<td class="mono">${disclosure.window_days} days</td>`,
+        );
+      }
+      const versions = domain.version_staleness;
+      if (versions === undefined) {
+        expect(page).not.toContain(`${path}.version_staleness.categories`);
+      } else {
+        expect(page).toContain(
+          `<td class="mono">${path}.version_staleness.categories</td>`,
+        );
+        expect(page).toContain(
+          `<td class="mono">${versions.categories.join(", ")}</td>`,
+        );
+      }
+
       // And the excluded parties themselves, one row each, in order.
       domain.excluded_parties.domains.forEach((party, index) => {
         expect(page, `${party} is not published`).toContain(
@@ -1188,6 +1223,9 @@ describe("renderApi", () => {
       "missing_domain",
       "unregistered_domain",
       "category_not_in_domain",
+      // D-096: a subject that must carry a version and does not is refused
+      // where the category itself is, and before the source policy is asked.
+      "bad_subject_version",
       "unknown_authority",
       "source_not_official",
     ]);
@@ -1198,6 +1236,50 @@ describe("renderApi", () => {
       expect(next, `${reason} is out of order`).toBeGreaterThan(at);
       at = next;
     }
+  });
+
+  it("documents the six refusals the new domains brought, on their own doors", () => {
+    // Decision D-096. Each is named where the door that raises it is
+    // documented, and never anywhere else: a caller reading the validate row
+    // has to be told what a subject's own authority costs them, and a caller
+    // reading the captures row has to be told why bytes that exist are a 403.
+    // One table row is one door, so the needle has to be inside the row that
+    // names the path and not merely somewhere on the page.
+    const rows = page.split("<tr>");
+    const rowFor = (method: string, path: string): string => {
+      const found = rows.filter(
+        (row) =>
+          row.includes(`<td class="mono">${path}</td>`) &&
+          row.includes(`>${method}</td>`),
+      );
+      expect(found, `${method} ${path} is not a row of its own`).toHaveLength(1);
+      return found[0]!;
+    };
+    const documents = (
+      method: string,
+      path: string,
+      needles: readonly string[],
+    ): void => {
+      const row = rowFor(method, path);
+      for (const needle of needles) {
+        expect(row, `${method} ${path}: ${needle} is not documented`).toContain(
+          needle,
+        );
+      }
+    };
+    documents("GET", "/captures/{hash}", ["undisclosed", "disclose_after"]);
+    documents("POST", "/entries/{id}/validate", ["subject_authority"]);
+    documents("POST", "/entries/{id}/reconfirm", [
+      "version_stale",
+      "subject_authority",
+    ]);
+    documents("POST", "/entries", [
+      "bad_subject_version",
+      "disclosure_missing",
+      "disclosure_mismatch",
+    ]);
+    // And the body field the disclosure refusals are about.
+    expect(page).toContain("disclosure only when the transcript carries a");
   });
 
   it("documents the source policy: the classes, the gate and the host rule", () => {
@@ -1920,6 +2002,44 @@ describe("renderDomains", () => {
       "Operators join a later domain by signing that domain's attestation, a" +
         " public event in the log.",
     );
+  });
+
+  it("shows the disclosure rule and the version rule where policy has them", () => {
+    // Decision D-096. Both are optional, and the page reads them off the domain
+    // rather than naming a category or a window of its own: a domain that
+    // publishes neither shows neither row, and a domain that publishes one
+    // shows its categories badged and its window in days.
+    const count = (needle: string): number =>
+      page.split(needle).length - 1;
+    const withDisclosure = DOMAIN_SLUGS.filter(
+      (slug) => domainPolicy(slug).disclosure !== undefined,
+    );
+    const withVersions = DOMAIN_SLUGS.filter(
+      (slug) => domainPolicy(slug).version_staleness !== undefined,
+    );
+    expect(count("<dt>Delayed disclosure</dt>")).toBe(withDisclosure.length);
+    expect(count("<dt>Staleness on a version change</dt>")).toBe(
+      withVersions.length,
+    );
+
+    for (const slug of withDisclosure) {
+      const rule = domainPolicy(slug).disclosure!;
+      for (const category of rule.categories) {
+        expect(page, `${slug}/${category} is not badged`).toContain(
+          `<span class="badge ">${category}</span>`,
+        );
+      }
+      expect(squeeze(page)).toContain(
+        `published ${days(rule.window_days)} after it`,
+      );
+    }
+    for (const slug of withVersions) {
+      for (const category of domainPolicy(slug).version_staleness!.categories) {
+        expect(page, `${slug}/${category} is not badged`).toContain(
+          `<span class="badge ">${category}</span>`,
+        );
+      }
+    }
   });
 
   it("carries copy for exactly the registered domains, and no others", () => {

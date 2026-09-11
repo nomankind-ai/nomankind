@@ -34,6 +34,15 @@
  * receipt already archived, and quietly overwriting the claim would hide the
  * disagreement rather than let the Worker refuse it.
  *
+ * The fields file may also carry `disclosure` (D-096), which is not a core
+ * field and is never signed: an object mapping each redaction placeholder's
+ * JSON pointer into the transcript artifact to the value it replaced. It goes
+ * out as the body's `disclosure`, where the submit door hashes each value
+ * against its placeholder and archives the object at its own content address,
+ * to be published when the domain's disclosure window closes. The transcript's
+ * own hash is over the artifact as submitted, placeholders included, so nothing
+ * here changes what the author signed.
+ *
  * What this command still does not carry: the frozen transcript of a behavior or
  * misbehavior entry, which snapshots its evidence rather than the cited page. A
  * fields file naming one is submitted honestly and the Worker's own refusal is
@@ -71,6 +80,23 @@ const USAGE =
 
 /** The one refusal this command makes for itself, before any request. */
 export const BAD_FIELDS = "bad_fields";
+
+/**
+ * The fields file's keys that are not core fields but body fields (D-096).
+ *
+ * `disclosure` is the originals behind a redacted transcript payload: an object
+ * mapping each placeholder's JSON pointer into the artifact to the value it
+ * replaced. It is not signed and it is not in the core -- the transcript's hash
+ * is over the artifact as submitted, placeholders included, which is the whole
+ * point of the rule -- so it travels beside the entry in the body, exactly as
+ * `--receipt` does, and the door decides it.
+ *
+ * It is accepted from the fields file rather than from a flag because it is the
+ * author's own material about their own evidence, and because a transcript
+ * entry's evidence is already in that file; splitting the payload out to a
+ * second path would put the placeholder and its original in two places.
+ */
+export const BODY_FIELDS: readonly string[] = Object.freeze(["disclosure"]);
 
 /**
  * The author's own fields of the signed core: everything the schema puts in the
@@ -137,7 +163,7 @@ export function checkFields(fields: unknown): FieldsVerdict {
     return { ok: false, reason: BAD_FIELDS, detail: "not a JSON object" };
   }
   const unknown = Object.keys(fields).filter(
-    (key) => !AUTHOR_FIELDS.includes(key),
+    (key) => !AUTHOR_FIELDS.includes(key) && !BODY_FIELDS.includes(key),
   );
   if (unknown.length > 0) {
     return {
@@ -177,6 +203,22 @@ export function checkFields(fields: unknown): FieldsVerdict {
         detail: `${key}: not an object or null`,
       };
     }
+  }
+  // The shape and nothing more: which pointers a disclosure must carry, and
+  // whether each value hashes to the placeholder it stands for, is the door's
+  // judgment (`disclosure_missing`, `disclosure_mismatch`), and a client that
+  // decided it here would be a second rule to disagree with the first.
+  const disclosure = fields["disclosure"];
+  if (
+    disclosure !== undefined &&
+    disclosure !== null &&
+    !isRecord(disclosure)
+  ) {
+    return {
+      ok: false,
+      reason: BAD_FIELDS,
+      detail: "disclosure: not an object or null",
+    };
   }
   return { ok: true, fields };
 }
@@ -402,6 +444,14 @@ export async function runSubmit(input: {
       // The artifact itself, untouched: the hash the Worker takes is over
       // exactly these bytes, and it archives it at that hash.
       ...(input.receipt === undefined ? {} : { receipt: input.receipt }),
+      // The originals behind a redacted payload, as the fields file carried
+      // them and untouched for the same reason: the door hashes each value and
+      // refuses one that is not the placeholder's (D-096). Absent when the
+      // fields file names none, and never sent as null, because a body key
+      // present with nothing in it is a disclosure claim about nothing.
+      ...(isRecord(fields["disclosure"])
+        ? { disclosure: fields["disclosure"] }
+        : {}),
     },
     key: input.key,
     now: deps.now,

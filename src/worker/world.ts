@@ -22,9 +22,14 @@
  * src/policy.ts, and there is no other number.
  */
 
+import { domainOf } from "../core.js";
 import { deriveEntry, type DerivedEntry } from "../derive.js";
 import type { Event, EventType } from "../events.js";
-import { LIST_PAGE_LIMIT } from "../policy.js";
+import {
+  isVersionStalenessCategory,
+  LIST_PAGE_LIMIT,
+  versionedSubjectOf,
+} from "../policy.js";
 import { entrySeal, type EntrySeal } from "../seal.js";
 import type { D1Like } from "../storage/d1.js";
 import {
@@ -33,18 +38,25 @@ import {
   eventsOfType,
   sealCovering,
   supersedersOf,
+  versionSiblingsOf,
 } from "../storage/repository.js";
 
 /**
  * The event types that say who is registered, who is trusted, which agent
- * answers for which operator, and what the sealed pool snapshots are. Everything
- * the validation rules and the draw are recomputed from, and nothing else.
+ * answers for which operator, which domains each of them attested in, and what
+ * the sealed pool snapshots are. Everything the validation rules and the draw
+ * are recomputed from, and nothing else.
  */
 const REGISTRY_EVENT_TYPES: readonly EventType[] = Object.freeze([
   "operator_registered",
   "operator_trusted",
   "operator_untrusted",
   "agent_bound",
+  // Decision D-071: which domains an operator is attested in is folded from
+  // these (src/derive.ts, `operatorDomainsAt`), so a set without them tells
+  // every door that no operator ever joined a domain -- and every validation
+  // outside ai-ecosystem answers `operator_not_in_domain`.
+  "operator_joined_domain",
   "pool_snapshot",
 ] as const);
 
@@ -87,6 +99,18 @@ export interface EntryWorld {
   readonly entryEvents: readonly Event[];
   /** The events of every entry declaring it supersedes this one, in seq order. */
   readonly superseders: readonly Event[];
+  /**
+   * The events of every entry about another version of the same model, in seq
+   * order, and empty for every entry outside the version-staleness categories
+   * (decision D-096).
+   *
+   * Part of the world for exactly the reason the superseders are: `stale` is
+   * derived by asking whether a later version's entry verified
+   * (src/derive.ts, `isVersionStale`), so an entry read over its own events
+   * alone comes back fresh and the next write stores that answer over a
+   * staleness the log really holds.
+   */
+  readonly versionSiblings: readonly Event[];
   /**
    * The entry's own seal object, or null when nothing covers its submission
    * yet.
@@ -146,8 +170,51 @@ export async function entryWorld(
     if (candidateId === entryId) continue;
     superseders.push(...(await eventsForEntry(db, candidateId)));
   }
+  const versionSiblings = await versionSiblingEvents(db, entryId, entryEvents);
   const seal = await sealOf(db, entryId, entryEvents);
-  return { registry, entryEvents, superseders, seal };
+  return { registry, entryEvents, superseders, versionSiblings, seal };
+}
+
+/**
+ * The events of every entry about another version of the same model.
+ *
+ * Read off this entry's own signed core: the domain and the category say
+ * whether the rule applies at all (src/policy.ts,
+ * `isVersionStalenessCategory`), and the subject's first two segments are the
+ * prefix the siblings share. An entry outside those categories, or whose
+ * subject names no version, has none and costs no query.
+ *
+ * The prefix match returns this entry too and every version of the model
+ * including its own; which of them is later and whether it verified is
+ * derivation's answer, not this function's.
+ */
+async function versionSiblingEvents(
+  db: D1Like,
+  entryId: string,
+  entryEvents: readonly Event[],
+): Promise<Event[]> {
+  const submission = entryEvents.find(
+    (event) => event.type === "entry_submitted" && event.entry_id === entryId,
+  ) as Event<"entry_submitted"> | undefined;
+  if (submission === undefined) return [];
+
+  const core = submission.payload.core;
+  const domain = domainOf(core);
+  if (!isVersionStalenessCategory(domain, core["category"])) return [];
+  const versioned = versionedSubjectOf(core["subject"]);
+  if (versioned === null) return [];
+
+  const events: Event[] = [];
+  for (const sibling of await versionSiblingsOf(
+    db,
+    domain,
+    versioned.prefix,
+    LIST_PAGE_LIMIT,
+  )) {
+    if (sibling.id === entryId) continue;
+    events.push(...(await eventsForEntry(db, sibling.id)));
+  }
+  return events;
 }
 
 /**
@@ -172,6 +239,7 @@ export function worldAt(world: EntryWorld, position: number): EntryWorld {
     registry: upTo(world.registry),
     entryEvents: upTo(world.entryEvents),
     superseders: upTo(world.superseders),
+    versionSiblings: upTo(world.versionSiblings),
     seal: world.seal,
   };
 }
@@ -194,6 +262,7 @@ export function eventsOf(
     ...world.registry,
     ...world.entryEvents,
     ...world.superseders,
+    ...world.versionSiblings,
     ...extra,
   ]) {
     bySeq.set(event.seq, event);

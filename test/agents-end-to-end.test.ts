@@ -479,12 +479,15 @@ describe("POST /operators/{id}/agents", () => {
     );
   });
 
-  it("pins attestation_domain_mismatch, which no request can reach today", async () => {
-    // ai-ecosystem is the one registered domain (src/policy.ts), so every
-    // operator registered in it and a sentence for another domain would not
-    // verify at all. The refusal is pinned on the check's own context instead;
-    // the day a second domain is registered a request can reach it.
-    expect(DOMAIN_SLUGS).toEqual([DEFAULT_DOMAIN]);
+  it("pins attestation_domain_mismatch on the check's own context", async () => {
+    // Three domains are registered (src/policy.ts, D-096). The refusal is
+    // pinned here on the check's own context -- a registration domain the
+    // registry does not hold, which no bound agent's sentence can be for.
+    expect([...DOMAIN_SLUGS]).toEqual([
+      DEFAULT_DOMAIN,
+      "ai-governance",
+      "ai-safety",
+    ]);
     const stranger = await makeAgent();
     const verdict = await checkAgentBind({
       operator: v1.operator,

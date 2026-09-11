@@ -241,9 +241,15 @@ describe("policy numbers", () => {
   });
 
   it("covers every category of the default domain with a staleness window", () => {
-    const categories = schema.properties.category.enum;
+    // The domain's own categories, not the schema's enum: the enum is every
+    // registered domain's categories at once (D-096), and a window for a fact
+    // this domain cannot hold would be a window for nothing.
+    const categories = DOMAINS[DEFAULT_DOMAIN]!.categories;
     const table = DOMAINS[DEFAULT_DOMAIN]!.staleness_window_days;
     expect(Object.keys(table).sort()).toEqual([...categories].sort());
+    for (const category of categories) {
+      expect(schema.properties.category.enum).toContain(category);
+    }
     expect(stalenessWindowDays(DEFAULT_DOMAIN, "pricing")).toBe(90);
     expect(stalenessWindowDays(DEFAULT_DOMAIN, "limit")).toBe(90);
     expect(stalenessWindowDays(DEFAULT_DOMAIN, "behavior")).toBe(30);

@@ -15,9 +15,13 @@
  * fetched: `contains:<text>`, `absent:<text>`, and `status:<code>`. A predicate
  * in the allowlist is accepted and rerun under the n-of-k rule; a predicate
  * outside it is not accepted, and the entry is then validated as a document,
- * which is exactly what the paper says a rejected test means. A behavior or
- * misbehavior entry needs a model rerun, which this fixture has no way to make,
- * so its test is never accepted and it carries no reproduction.
+ * which is exactly what the paper says a rejected test means. An entry in a
+ * transcript category needs a model rerun, which this fixture has no way to
+ * make, so its test is never accepted and it carries no reproduction. Which
+ * categories those are is the entry's own domain's table and never a list here
+ * (`isTranscriptCategory`), so ai-safety's observed categories take the path
+ * ai-ecosystem's behavior and misbehavior take, by reading policy rather than
+ * by being named again (D-096).
  *
  * The core is exported over injected io — an http client, a snapshot fetcher, a
  * clock and a key — so the checkpoint drives it in process against handleRequest
@@ -309,10 +313,12 @@ export interface TestJudgement {
 /**
  * This validator's judgment of the entry's proposed test.
  *
- * A stated entry has none and gets null. A behavior or misbehavior entry needs a
- * model rerun this fixture cannot make, so its test is not accepted whatever it
- * says. Everything else is accepted exactly when its test is one of the
- * allowlist's forms.
+ * A stated entry has none and gets null, in every domain: a governance
+ * instrument and a published commitment are judged by the snapshot rule like
+ * any other stated fact. An entry in one of the entry's own domain's transcript
+ * categories needs a model rerun this fixture cannot make, so its test is not
+ * accepted whatever it says. Everything else is accepted exactly when its test
+ * is one of the allowlist's forms.
  */
 export function judgeTest(core: Core): TestJudgement {
   const test = proposedTest(core);

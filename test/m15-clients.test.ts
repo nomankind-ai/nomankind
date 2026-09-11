@@ -338,6 +338,32 @@ describe("submit, from the author's own fields", () => {
     });
   }
 
+  it("takes a disclosure beside the fields, and refuses one that is not an object", () => {
+    // Decision D-096: `disclosure` is not a core field and is never signed --
+    // it is the originals behind a redacted transcript payload, which travel
+    // in the body beside the entry, exactly as a receipt does. So the fields
+    // file may carry it, and the command checks its shape and nothing more:
+    // which pointers it must carry and whether each value hashes to its
+    // placeholder is the door's judgment, and a second rule here could only
+    // disagree with the first.
+    const accepted = checkFields(
+      fieldsFor("m15 clients: a claim", {
+        disclosure: { "/parameters/request/messages": [{ role: "user" }] },
+      }),
+    );
+    expect(accepted.ok).toBe(true);
+
+    const refused = checkFields(
+      fieldsFor("m15 clients: a claim", { disclosure: "a pointer, maybe" }),
+    );
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect([refused.reason, refused.detail.includes("disclosure")]).toEqual([
+      BAD_FIELDS,
+      true,
+    ]);
+  });
+
   it("submits a stated entry that comes back draft with the id the kernel derives", async () => {
     const claim = "m15 clients: the cited page documents the request limit";
     const run = await submitAt(maintainer, fieldsFor(claim));
