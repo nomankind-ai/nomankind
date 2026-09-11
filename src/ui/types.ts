@@ -498,6 +498,38 @@ export interface HowItWorksData {
 }
 
 /**
+ * What this log holds in one domain: the two numbers the Domains page shows
+ * live beside a domain's published tables.
+ *
+ * Both are counts and neither is derived here: `entries` is `countEntries` under
+ * that domain and `trustedOperators` is `countTrustedOperators` for it, which is
+ * the trusted pool narrowed to the operators attested in that domain (decision
+ * D-071) — the ones who could actually judge an entry in it. Zero is a reading
+ * and not a missing number: a registered domain nobody has submitted to yet has
+ * no entries, and saying so is the point of showing the count at all.
+ */
+export interface DomainCounts {
+  entries: number;
+  trustedOperators: number;
+}
+
+/**
+ * What the Domains page is handed.
+ *
+ * Almost nothing, deliberately. The page is the registry's published tables —
+ * categories, windows, transcripts, excluded parties, subjects, attestations,
+ * sources — and every one of those is read from src/policy.ts at render time
+ * rather than gathered here, because a table copied into a data object is a
+ * table that can disagree with the rule the log runs. What the policy module
+ * cannot know is what this environment's log holds, so that is what this shape
+ * carries: one reading per registered slug, keyed by slug exactly as `DOMAINS`
+ * is.
+ */
+export interface DomainsData {
+  counts: Readonly<Record<string, DomainCounts>>;
+}
+
+/**
  * What the Status page is handed (D-076).
  *
  * The same object `GET /status` answers as JSON, in the same order: the page and

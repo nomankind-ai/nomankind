@@ -25,10 +25,16 @@ import {
   ASSIGNMENT_WINDOW_HOURS,
   DEFAULT_DOMAIN,
   DOMAINS,
+  DOMAIN_SLUGS,
   LIST_PAGE_LIMIT,
   POLICY,
+  SCHEMA_VERSION,
   SEAL_INTERVAL_MINUTES,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
+  attestationFor,
+  domainPolicy,
+  excludedPartyDomains,
+  stalenessWindowDays,
 } from "../src/policy.js";
 import {
   ATTESTATION_TEXT,
@@ -40,11 +46,17 @@ import { READ_QUERY_REFUSALS } from "../src/read.js";
 import { SUBMISSION_REFUSALS } from "../src/submit.js";
 import { SYNC_QUERY_REFUSALS } from "../src/sync.js";
 import { renderApi } from "../src/ui/pages/api.js";
+import { DOMAIN_COPY, renderDomains } from "../src/ui/pages/domains.js";
 import { renderDryRun } from "../src/ui/pages/dry-run.js";
 import { VALIDATION_REFUSALS } from "../src/validate.js";
 import { renderGenesis } from "../src/ui/pages/genesis.js";
 import { renderHowItWorks } from "../src/ui/pages/how-it-works.js";
-import { APEX_URL, CONTACT_EMAIL, shortHash } from "../src/ui/html.js";
+import {
+  APEX_URL,
+  CONTACT_EMAIL,
+  escapeHtml,
+  shortHash,
+} from "../src/ui/html.js";
 import {
   LANDING_CSS,
   LANDING_CSS_HREF,
@@ -52,6 +64,7 @@ import {
 } from "../src/ui/pages/landing.js";
 import { renderPolicy } from "../src/ui/pages/policy.js";
 import type {
+  DomainsData,
   GenesisData,
   HowItWorksData,
   LandingData,
@@ -1699,6 +1712,228 @@ describe("renderDryRun", () => {
   });
 });
 
+/**
+ * The Domains page: the registry's published tables, read out of the module the
+ * kernel runs on.
+ *
+ * Every assertion below computes what it expects from src/policy.ts rather than
+ * spelling it out, which is the whole point of the page: a window moved, a host
+ * published or a category added by a later decision has to move this page with
+ * it, and a test that had typed the old value would pass while the page lied.
+ * The one thing the policy module does not hold is the copy, so the key set of
+ * `DOMAIN_COPY` is pinned against `DOMAIN_SLUGS`: a domain registered later
+ * arrives here with its own sentences or this file says so.
+ */
+describe("renderDomains", () => {
+  const domainsCtx: PageContext = { ...ctx, path: "/domains" };
+
+  /** A reading for every registered slug, as the route gathers it. */
+  function reading(entries: number, trustedOperators: number): DomainsData {
+    const counts: Record<
+      string,
+      { entries: number; trustedOperators: number }
+    > = {};
+    for (const slug of DOMAIN_SLUGS) counts[slug] = { entries, trustedOperators };
+    return { counts };
+  }
+
+  const page = renderDomains(domainsCtx, reading(4, 3));
+
+  /** One line of prose, however the template wrapped it. */
+  function squeeze(rendered: string): string {
+    return rendered.replace(/\s+/g, " ");
+  }
+
+  /** A sentence as the page had to escape it before writing it out. */
+  function written(text: string): string {
+    return squeeze(escapeHtml(text));
+  }
+
+  /** `90 days`, and `1 day` if a window ever were one. */
+  function days(count: number): string {
+    return count === 1 ? "1 day" : `${count} days`;
+  }
+
+  it("heads the page with the registry, the schema and how many there are", () => {
+    expect(squeeze(page)).toContain(
+      `registry v1 · schema ${SCHEMA_VERSION} · ${DOMAIN_SLUGS.length} registered`,
+    );
+    expect(squeeze(page)).toContain(
+      "A domain is a subject area the log records. The mechanism is the same in" +
+        " every one: a claim, a citation, a snapshot hash, and the signatures of" +
+        " operators no interested party controls.",
+    );
+    expect(squeeze(page)).toContain(
+      "Every entry names its domain in its signed core, so a fact can never be" +
+        " moved from one domain to another, by anyone.",
+    );
+  });
+
+  it("gives every registered domain a strip cell and a panel of its own", () => {
+    for (const slug of DOMAIN_SLUGS) {
+      const copy = DOMAIN_COPY[slug];
+      expect(copy, `${slug} has no copy`).toBeDefined();
+      expect(page, `${slug} has no anchor in the strip`).toContain(
+        `href="#${slug}"`,
+      );
+      expect(page, `${slug} has no panel`).toContain(
+        `<section class="panel" id="${slug}">`,
+      );
+      expect(squeeze(page)).toContain(domainPolicy(slug).name);
+      expect(squeeze(page)).toContain(`<span class="mono dim">${slug}</span>`);
+      expect(squeeze(page)).toContain(written(copy!.short_line));
+      expect(squeeze(page)).toContain(written(copy!.what));
+      expect(squeeze(page)).toContain(written(copy!.who_validates));
+    }
+  });
+
+  it("badges every category the domain admits", () => {
+    for (const slug of DOMAIN_SLUGS) {
+      for (const category of domainPolicy(slug).categories) {
+        expect(page, `${slug} does not badge ${category}`).toContain(
+          `<span class="badge ">${category}</span>`,
+        );
+      }
+    }
+  });
+
+  it("carries the attestation sentence and its version verbatim", () => {
+    for (const slug of DOMAIN_SLUGS) {
+      const attestation = attestationFor(slug);
+      expect(squeeze(page)).toContain(written(attestation.text));
+      expect(page).toContain(attestation.version);
+    }
+  });
+
+  it("computes the freshness line from the windows, and names the rest", () => {
+    for (const slug of DOMAIN_SLUGS) {
+      const never: string[] = [];
+      for (const category of domainPolicy(slug).categories) {
+        const window = stalenessWindowDays(slug, category);
+        if (window === null) never.push(category);
+        else
+          expect(
+            squeeze(page),
+            `${slug}/${category} is not shown with its window`,
+          ).toContain(`${category} ${days(window)}`);
+      }
+      if (never.length > 0) {
+        expect(squeeze(page)).toContain(
+          `The rest never go stale: ${never.join(", ")}.`,
+        );
+      }
+    }
+  });
+
+  it("says which categories carry a transcript, and what the others carry", () => {
+    for (const slug of DOMAIN_SLUGS) {
+      const transcripts = domainPolicy(slug).transcript_categories;
+      expect(squeeze(page)).toContain(
+        transcripts.length === 0 ? "none —" : `${transcripts.join(", ")} —`,
+      );
+      expect(squeeze(page)).toContain(
+        written(DOMAIN_COPY[slug]!.transcript_note),
+      );
+    }
+  });
+
+  it("counts the excluded parties and names the first of them", () => {
+    for (const slug of DOMAIN_SLUGS) {
+      const hosts = excludedPartyDomains(slug);
+      expect(squeeze(page)).toContain(`${hosts.length} parties`);
+      for (const host of hosts.slice(0, 7)) {
+        expect(page, `${host} is not named`).toContain(host);
+      }
+      expect(squeeze(page)).toContain(
+        `<a href="/policy">the rest on the policy page</a>`,
+      );
+    }
+  });
+
+  it("names the categories that must cite an official source", () => {
+    for (const slug of DOMAIN_SLUGS) {
+      for (const category of domainPolicy(slug).sources.official_required) {
+        expect(page, `${category} is not named as official-required`).toContain(
+          `<span class="badge ">${category}</span>`,
+        );
+      }
+      expect(squeeze(page)).toContain(
+        "Every other category may cite any host, and the citation is labeled" +
+          " official, recognized, or other.",
+      );
+    }
+  });
+
+  it("shows how a subject is named, and the read call that follows from it", () => {
+    for (const slug of DOMAIN_SLUGS) {
+      const policy = domainPolicy(slug);
+      const copy = DOMAIN_COPY[slug]!;
+      expect(squeeze(page)).toContain(escapeHtml(policy.subject_convention));
+      expect(page).toContain(
+        `GET /read?domain=${slug}&amp;subject=${copy.subject_example}` +
+          `&amp;category=${policy.categories[0]}`,
+      );
+    }
+  });
+
+  it("shows this log's own two counters, and the three ways in", () => {
+    for (const slug of DOMAIN_SLUGS) {
+      expect(squeeze(page)).toContain(`>4 entries</a`);
+      expect(squeeze(page)).toContain(`>3 trusted operators</a`);
+      expect(squeeze(page)).toContain(
+        `<a class="btn btn-accent" href="/entries?domain=${slug}"` +
+          ` >Browse entries</a`,
+      );
+      expect(page).toContain(`<a class="btn" href="/policy">Policy tables</a>`);
+      expect(page).toContain(
+        `<a class="btn" href="/genesis">Join this domain</a>`,
+      );
+    }
+    // One entry and one operator, said as one and not as "1 entrys".
+    const one = renderDomains(domainsCtx, reading(1, 1));
+    expect(squeeze(one)).toContain(">1 entry</a");
+    expect(squeeze(one)).toContain(">1 trusted operator</a");
+  });
+
+  it("reads registered with no trusted operator, and recruited with one", () => {
+    const empty = renderDomains(domainsCtx, reading(0, 0));
+    expect(empty).toContain(`<span class="badge s-draft">registered</span>`);
+    expect(empty).not.toContain("recruited");
+    expect(empty).toContain("0 entries");
+
+    const recruited = renderDomains(domainsCtx, reading(0, 1));
+    expect(recruited).toContain(
+      `<span class="badge s-verified">recruited</span>`,
+    );
+    expect(recruited).not.toContain(">registered<");
+  });
+
+  it("says how a domain is added, without making it a code change", () => {
+    expect(page).toContain(`<h2 class="panel-title">Adding a domain</h2>`);
+    expect(squeeze(page)).toContain(
+      "A new domain is a published decision, not a code change: its tables are" +
+        " written into the registry first, its slug is added to the schema, and" +
+        " the policy module is extended to match, pinned by a test so the two" +
+        " never drift.",
+    );
+    expect(squeeze(page)).toContain(
+      "Operators join a later domain by signing that domain's attestation, a" +
+        " public event in the log.",
+    );
+  });
+
+  it("carries copy for exactly the registered domains, and no others", () => {
+    expect([...Object.keys(DOMAIN_COPY)].sort()).toEqual(
+      [...DOMAIN_SLUGS].sort(),
+    );
+  });
+
+  it("carries no script and no inline style", () => {
+    expect(page).not.toContain("<script");
+    expect(page).not.toContain(` style="`);
+  });
+});
+
 describe("renderLanding", () => {
   /**
    * A hand-made reading, not a fixture off the store: the page's job is to print
@@ -1816,6 +2051,12 @@ describe("renderLanding", () => {
     expect(nav).toContain(`<a href="/how-it-works">How it works</a>`);
     expect(nav.indexOf("/how-it-works")).toBeLessThan(nav.indexOf("Whitepaper"));
     expect(nav).not.toMatch(/<a href="\/how-it-works"[^>]*rel=/);
+    // The registry is the second of the two same-origin links, right after it,
+    // and it carries no rel for the same reason: it is this site's own page.
+    expect(nav).toContain(`<a href="/domains">Domains</a>`);
+    expect(nav.indexOf("/how-it-works")).toBeLessThan(nav.indexOf("/domains"));
+    expect(nav.indexOf("/domains")).toBeLessThan(nav.indexOf("Whitepaper"));
+    expect(nav).not.toMatch(/<a href="\/domains"[^>]*rel=/);
     // And it is a link out of the page, not a script or a style that the
     // content-security-policy would drop on the floor.
     expect(page).not.toContain("<script");

@@ -37,6 +37,7 @@ import {
   TXT_RECORD_PREFIX,
 } from "../registry.js";
 import {
+  DOMAIN_SLUGS,
   HOME_LATEST_ENTRIES,
   LANDING_BAND_SEALS,
   LIST_PAGE_LIMIT,
@@ -87,6 +88,7 @@ import {
 } from "../storage/repository.js";
 import { htmlResponse, cssResponse } from "../ui/html.js";
 import { renderApi } from "../ui/pages/api.js";
+import { renderDomains } from "../ui/pages/domains.js";
 import { renderDryRun } from "../ui/pages/dry-run.js";
 import { renderEntries } from "../ui/pages/entries.js";
 import { renderEntry } from "../ui/pages/entry.js";
@@ -108,6 +110,8 @@ import { ENTRY_DOMAINS, parseEntriesQuery } from "../ui/query.js";
 import { APP_CSS } from "../ui/styles.js";
 import type {
   ApproverRow,
+  DomainCounts,
+  DomainsData,
   EntriesFilter,
   EntryRow,
   GenesisRow,
@@ -962,6 +966,29 @@ async function howItWorks(
 }
 
 /**
+ * Domains: the registry's published tables, with this log's own numbers on them.
+ *
+ * Two counts per registered domain and nothing else. Everything the page shows
+ * about a domain — its categories, its windows, its transcripts, its excluded
+ * parties, its attestation and its sources — is read from src/policy.ts where
+ * the page is rendered, because those are the rules the kernel runs and a copy
+ * gathered here could disagree with them. What policy cannot know is what this
+ * environment holds, so that is all this gatherer reads: how many entries name
+ * the domain, and how many trusted operators are attested in it.
+ */
+async function domains(db: D1Like, ctx: PageContext): Promise<Response> {
+  const counts: Record<string, DomainCounts> = {};
+  for (const slug of DOMAIN_SLUGS) {
+    counts[slug] = {
+      entries: await countEntries(db, { domain: slug }),
+      trustedOperators: await countTrustedOperators(db, slug),
+    };
+  }
+  const data: DomainsData = { counts };
+  return htmlResponse(renderDomains(ctx, data));
+}
+
+/**
  * Status (D-076): the page form of `GET /status`.
  *
  * One gatherer and one set of rules for both doors — `statusInput` reads the
@@ -1084,6 +1111,12 @@ async function route(
   if (path === "/dry-run") return htmlResponse(renderDryRun(ctx));
   if (path === "/genesis") return genesis(db, ctx, env);
   if (path === "/how-it-works") return howItWorks(db, ctx, env);
+
+  // A documentation page like /api and /dry-run — it answers HTML to any GET,
+  // because there is no JSON twin of the registry for a request to have meant
+  // instead. The tables it shows are `GET /policy`'s own, which already answers
+  // an agent in the record's own shape.
+  if (path === "/domains") return domains(db, ctx);
 
   // The status page and `GET /status` are one reading served two ways, exactly
   // as /policy is: a browser gets the page, and everything else falls through to

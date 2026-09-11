@@ -258,6 +258,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
         <a class="wordmark mono" href="${APEX_URL}">NOMANKIND</a>
         <nav class="topnav">
           <a href="/how-it-works">How it works</a>
+          <a href="/domains">Domains</a>
           <a href="${PAPER_URL}" rel="noopener">Whitepaper</a>
           <a href="${CODE_URL}" rel="noopener">Code</a>
           <a href="${LOG_URL}" rel="noopener">Log mirror</a>
