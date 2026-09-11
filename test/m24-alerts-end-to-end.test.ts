@@ -23,7 +23,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { signAlert } from "../src/alerts.js";
+import { signAlert, staleDeliveryId } from "../src/alerts.js";
 import type { Core } from "../src/core.js";
 import type { ApproverRecord } from "../src/events.js";
 import { mintKey } from "../src/keys.js";
@@ -35,9 +35,9 @@ import {
 import { signRecord } from "../src/records.js";
 import { txtRecordName } from "../src/registry.js";
 import type { SubmissionProposal } from "../src/submit.js";
-import { alertCursor } from "../src/storage/alerts.js";
+import { alertCursor, setStaleAlertCursor } from "../src/storage/alerts.js";
 import { putKey } from "../src/storage/keys.js";
-import { latestSeal } from "../src/storage/repository.js";
+import { getEntry, latestSeal } from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
 import { runAlertStep } from "../src/worker/alerts.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
@@ -68,6 +68,8 @@ import {
 const NOW = SUBMIT_NOW;
 const AT = NOW.toISOString();
 const MINUTE_MS = 60_000;
+/** How many minutes a day is, for the two runs that are days apart. */
+const DAY_MINUTES = 24 * 60;
 
 /** The instant `minutes` minutes after day 0. */
 function at(minutes: number): Date {
@@ -826,6 +828,144 @@ async function onlyDelivery(endpointId: string): Promise<{
   expect(body.deliveries).toHaveLength(1);
   return body.deliveries[0]!;
 }
+
+// ---------------------------------------------------------------------------
+// The window that closed
+// ---------------------------------------------------------------------------
+
+/**
+ * The seventh kind, and the only one no event carries.
+ *
+ * Whitepaper Section 7: "Past its window an entry stays verified but shows as
+ * stale." Nobody appends anything when that happens, so the sweep's staleness
+ * step marks the row and the alert step tells whoever subscribed — in the same
+ * run, which is what these three cases hold it to. The clock is the injected
+ * one throughout: the first run is inside the entry's window, the second is
+ * past it, and the third is the same day again.
+ */
+describe("stale alerts", () => {
+  const STALE_URL = "https://hooks.example.com/stale";
+  let staleHook = "";
+
+  /** The deliveries of one endpoint that carry one kind. */
+  async function ofKind(
+    endpointId: string,
+    kind: string,
+  ): Promise<{ kind: string; entry_id: string; body: Record<string, unknown> }[]> {
+    const response = await send(read(`/keys/me/webhooks/${endpointId}/deliveries`));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      deliveries: {
+        kind: string;
+        entry_id: string;
+        body: Record<string, unknown>;
+      }[];
+    };
+    return body.deliveries.filter((row) => row.kind === kind);
+  }
+
+  it("registers an endpoint that asked for the stale kind only", async () => {
+    const response = await send(
+      hook({ url: STALE_URL, kinds: ["stale"], subject: SUBJECT_ONE }),
+    );
+    expect(response.status).toBe(201);
+    staleHook = ((await response.json()) as Record<string, string>)["id"]!;
+  }, 600_000);
+
+  it("creates nothing while the entry is still inside its window", async () => {
+    // Thirty days in: the pricing window is ninety, so nothing has run out and
+    // the pass has nothing to say however many endpoints are listening.
+    const log: Sent[] = [];
+    await seal(at(DAY_MINUTES * 30), fakeFetch(200, log));
+    expect(await ofKind(staleHook, "stale")).toEqual([]);
+    expect(await ofKind(matchHook.id, "stale")).toEqual([]);
+  }, 600_000);
+
+  it("creates one delivery per matching endpoint once the window has closed", async () => {
+    const log: Sent[] = [];
+    await seal(at(DAY_MINUTES * 95), fakeFetch(200, log));
+
+    // Two endpoints match this entry's stale alert: the one that asked for the
+    // kind, and the one that asked about this subject whatever happens to it.
+    // The other two filter it away by subject and by kind.
+    expect(log.map((sent) => sent.url).sort()).toEqual(
+      [MATCH_URL, STALE_URL].sort(),
+    );
+    expect(await ofKind(staleHook, "stale")).toHaveLength(1);
+    expect(await ofKind(matchHook.id, "stale")).toHaveLength(1);
+    expect(await ofKind(otherHook, "stale")).toEqual([]);
+    expect(await ofKind(kindsHook, "stale")).toEqual([]);
+  }, 600_000);
+
+  it("carries the kind, the day the window ran out, and the entry's own position", async () => {
+    const entryId = entryOne["id"] as string;
+    const stored = await getEntry(store.db, entryId);
+    const expiresAt = (stored!.entry as unknown as Record<string, unknown>)[
+      "expires_at"
+    ];
+
+    const [delivery] = await ofKind(staleHook, "stale");
+    expect(delivery!.entry_id).toBe(entryId);
+    const alert = delivery!.body;
+    expect(alert["kind"]).toBe("stale");
+    // `at` is the day the window ran out and not the instant of the run: the
+    // moment being reported is a date on the calendar.
+    expect(alert["at"]).toBe(expiresAt);
+    // No event carries this, so the position is the entry's own submission, and
+    // the proof link and the seal are about that position.
+    expect(alert["seq"]).toBe(stored!.submittedSeq);
+    expect(alert["links"]).toEqual({
+      entry: `/entries/${entryId}`,
+      proof: `/events/${stored!.submittedSeq}/proof`,
+    });
+    expect((alert["seal"] as Record<string, unknown>)["root"]).toMatch(
+      /^sha256:[0-9a-f]{64}$/,
+    );
+    // The entry is still verified: staleness is a fact beside the status and
+    // never a status of its own.
+    expect(alert["status"]).toBe("verified");
+    expect(alert["id"]).toMatch(/^alert_[0-9a-f]{16}$/);
+  }, 600_000);
+
+  it("creates nothing on a second run of the same day", async () => {
+    const log: Sent[] = [];
+    const report = await step(at(DAY_MINUTES * 95 + 1), fakeFetch(200, log));
+    expect(report.created).toBe(0);
+    expect(log).toEqual([]);
+    expect(await ofKind(staleHook, "stale")).toHaveLength(1);
+    expect(await ofKind(matchHook.id, "stale")).toHaveLength(1);
+  }, 600_000);
+
+  it("creates nothing twice when the day cursor is moved back", async () => {
+    // The case above is stopped by the cursor alone, so it says nothing about
+    // the dedupe underneath. This one moves the cursor back to the day before
+    // the window closed, which puts the same row in front of the pass again,
+    // and only the derived id and the store's INSERT OR IGNORE keep the second
+    // pass from writing a second delivery for the same entry and endpoint.
+    const entryId = entryOne["id"] as string;
+    const stored = await getEntry(store.db, entryId);
+    const expiresAt = String(
+      (stored!.entry as unknown as Record<string, unknown>)["expires_at"],
+    );
+    const dayBefore =
+      Math.floor(Date.parse(`${expiresAt.slice(0, 10)}T00:00:00.000Z`) / 86_400_000) -
+      1;
+    await setStaleAlertCursor(store.db, dayBefore);
+
+    const log: Sent[] = [];
+    await step(at(DAY_MINUTES * 95 + 2), fakeFetch(200, log));
+
+    // One delivery each, still, and it is the one the first run made: the id is
+    // the entry, the day its window ran out and the endpoint, and nothing else.
+    for (const endpointId of [staleHook, matchHook.id]) {
+      const deliveries = await ofKind(endpointId, "stale");
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]!.body["id"]).toBe(
+        await staleDeliveryId(entryId, expiresAt, endpointId),
+      );
+    }
+  }, 600_000);
+});
 
 // ---------------------------------------------------------------------------
 // A deployment nobody subscribed to

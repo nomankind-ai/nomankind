@@ -26,7 +26,11 @@
  */
 
 import { base64urlDecode, base64urlEncode } from "./encoding.js";
-import type { EventPayloads, ReadCountRow } from "./events.js";
+import type {
+  EventPayloads,
+  ReadCountDuplicate,
+  ReadCountRow,
+} from "./events.js";
 import { canonicalize } from "./hash.js";
 import { publicKeyFromAgentId, signBytes, verifyBytes } from "./identity.js";
 import type { SyncReceiptEntry } from "./sync.js";
@@ -457,12 +461,53 @@ function buildPaid(paid: PaidReadCounts): NonNullable<
   };
 }
 
+/**
+ * The `duplicates` block of a day's payload, sorted into its canonical order.
+ *
+ * Decision D-085 inside the published count: a verified entry that is not the
+ * newest of its duplicate group was delivered as a second copy of a fact the
+ * trainer already holds, so its sync reads are dropped. Naming the drop is what
+ * lets a reader holding a receipt for one of those reads tell the rule from an
+ * under-count.
+ *
+ * Refuses rather than repairs, exactly as the rows above do: one entry cannot
+ * be dropped twice on one day, and a drop of no reads is not a drop. Sorted by
+ * entry_id, because the payload's canonical form is what the event hash is over.
+ */
+function buildDuplicates(
+  duplicates: readonly ReadCountDuplicate[],
+): readonly ReadCountDuplicate[] {
+  const seen = new Set<string>();
+  for (const row of duplicates) {
+    if (seen.has(row.entry_id)) {
+      throw new RangeError(
+        `buildReadCountPayload: duplicate_entry_id: ${row.entry_id}`,
+      );
+    }
+    seen.add(row.entry_id);
+    if (!Number.isSafeInteger(row.sync_reads) || row.sync_reads < 1) {
+      throw new RangeError(
+        `buildReadCountPayload: bad_count: ${row.entry_id} has ${String(row.sync_reads)}`,
+      );
+    }
+  }
+
+  return duplicates
+    .map((row) => ({
+      entry_id: row.entry_id,
+      newest: row.newest,
+      sync_reads: row.sync_reads,
+    }))
+    .sort((left, right) => (left.entry_id < right.entry_id ? -1 : 1));
+}
+
 export function buildReadCountPayload(
   date: string,
   rows: readonly ReadCountRow[],
   counterFirst: number | null,
   counterLast: number | null,
   paid?: PaidReadCounts,
+  duplicates?: readonly ReadCountDuplicate[],
 ): EventPayloads["read_count"] {
   if (!isCalendarDate(date)) {
     throw new RangeError(
@@ -498,5 +543,8 @@ export function buildReadCountPayload(
     counter_first: total === 0 ? null : counterFirst,
     counter_last: total === 0 ? null : counterLast,
     ...(paid === undefined ? {} : { paid: buildPaid(paid) }),
+    ...(duplicates === undefined
+      ? {}
+      : { duplicates: buildDuplicates(duplicates) }),
   };
 }

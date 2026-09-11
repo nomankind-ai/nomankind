@@ -571,25 +571,46 @@ function stakeLedgerRow(record: StakeRecord): LedgerRow {
  * Two smaller consequences of the same fact are worth saying out loud. A
  * clawback is computed against every read share this fold has already emitted
  * for the entry, because "already paid out" is a fact about a payout and not
- * about the log; and the entry state a day is priced against is the entry as the
- * sealed head derives it, because the row the sweep read was derived at whatever
- * position its last writer reached.
+ * about the log.
+ *
+ * A day is priced at its own position in the log, and not at the head. The
+ * sweep prices a day in the run that published it, so the entry it read is the
+ * entry the events up to that `read_count` derive, at that event's own instant
+ * — and a slot rotation, a supersession or an expiry that lands afterwards
+ * belongs to the days after it. Rederiving every day at `asOf` would hand a
+ * verifier holders the entry did not have on the day it was paid for, and the
+ * mirror's rows would disagree with the ledger's on the same events, which is
+ * exactly the arithmetic Section 9 asks readers to check.
+ *
+ * `asOf` is the export's own sealed head, kept in the signature because every
+ * caller names it beside the seal it exported; no row is derived at it, because
+ * no row of this fold belongs to now rather than to the event that produced it.
  */
 export function mirrorLedgerRows(
   events: readonly Event[],
   asOf: string,
 ): LedgerRow[] {
+  // Deliberately unread: see the note above. Named rather than dropped so the
+  // signature every caller writes stays what it was.
+  void asOf;
   const ordered = inSeqOrder(events);
   const rows: LedgerRow[] = [];
+  /** Keyed by the position priced at, then the entry: one derivation per day. */
   const states = new Map<string, PricingState | null>();
   const bySeq = new Map<number, Event>(ordered.map((event) => [event.seq, event]));
 
-  const stateOf = (entryId: string): PricingState | null => {
-    const held = states.get(entryId);
+  const stateOf = (
+    entryId: string,
+    through: readonly Event[],
+    position: number,
+    now: string,
+  ): PricingState | null => {
+    const key = `${position}:${entryId}`;
+    const held = states.get(key);
     if (held !== undefined) return held;
     let state: PricingState | null = null;
     try {
-      const derived = deriveEntry(ordered, entryId, { now: asOf });
+      const derived = deriveEntry(through, entryId, { now });
       const entry = derived.entry as unknown as Record<string, unknown>;
       const author = entry["author_operator"];
       const expires = entry["expires_at"];
@@ -613,15 +634,20 @@ export function mirrorLedgerRows(
       // sealed record, and the sweep's own pricing skips it for the same reason.
       state = null;
     }
-    states.set(entryId, state);
+    states.set(key, state);
     return state;
   };
 
-  for (const event of ordered) {
+  for (let index = 0; index < ordered.length; index += 1) {
+    const event = ordered[index]!;
     if (isType(event, "read_count")) {
       const { date } = event.payload;
+      // The log as it stood when this day was published, which is the log the
+      // sweep priced it against: every event of the same run up to this one,
+      // and nothing after it.
+      const through = ordered.slice(0, index + 1);
       const priced = readShareRows(event, (entryId): EntryShareState | null => {
-        const state = stateOf(entryId);
+        const state = stateOf(entryId, through, event.seq, event.at);
         if (state === null) return null;
         return {
           author_operator: state.author_operator,

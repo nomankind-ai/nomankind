@@ -4,7 +4,7 @@
  *
  * The page a reader is sent to when they ask what nomankind actually does, and
  * the reason it is not a diagram is in its own lede: every stage links to the
- * record rather than to a description of the record. So each of the nine panels
+ * record rather than to a description of the record. So each of the ten panels
  * carries the paper's sentences, the policy numbers that stage runs under, and
  * one or two live values read out of this environment — the newest entry, the
  * trusted pool, the newest seal, yesterday's read count — every one of them a
@@ -21,9 +21,11 @@
  */
 
 import {
+  ALERT_KINDS,
   APPROVALS_TO_VERIFY_SMALL_POOL,
   ATTESTATION_SCORERS,
   ATTESTATION_WINDOW_HOURS,
+  CONTRIBUTOR_SHARE_PERCENT,
   DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
   FAILURE_REPORT_THRESHOLD,
@@ -31,6 +33,8 @@ import {
   HOLDBACK_DAYS,
   NORM_VERSION,
   PROBE_SET_SIZE,
+  RATE_TIERS,
+  READ_PRICE_MICROS_PER_READ,
   READ_SHARE_SPLIT,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
@@ -58,7 +62,7 @@ import type { HowItWorksData, PageContext } from "../types.js";
  * The version of the paper this page describes.
  *
  * Not a policy number and not in POLICY: policy is what the record runs on, and
- * this is the version of the document the eight panels are a reading of. It
+ * this is the version of the document the ten panels are a reading of. It
  * lives beside the two links to that document (src/ui/html.ts) in spirit, and it
  * is named once here rather than written into the head line, so the page and the
  * paper move together.
@@ -483,10 +487,48 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
       )}
     </dl>`;
 
+  // The tiers as one line: every slug there is with its own daily cap, so the
+  // ladder is readable here and priced on the page it links to.
+  const tierLine = Object.entries(RATE_TIERS)
+    .map(([slug, tier]) => `${slug} ${tier.reads_per_day} a day`)
+    .join(" · ");
+
+  const paid = html`<p class="prose">
+      The log is free to read at low volume, forever, and the data itself is
+      CC0: the paid product is never the data, it is being the fastest true copy
+      with sub-day freshness, signed receipts, and alerts. Revenue comes from
+      high-rate API access, structured feeds and webhooks, and change alerts. No
+      ads, no token. A tier is a daily cap and nothing else, so it buys
+      throughput and never a discount; every paid read is metered, priced the
+      same whichever tier bought it, and published to the log with the day's
+      counts, so a reader can check what they were billed against what the seal
+      commits to. An endpoint hears about a sealed change in the run that sealed
+      it, and each alert carries the covering seal rather than this Worker's
+      word for what happened.
+    </p>
+    <dl class="kv">
+      ${row(
+        "what is on sale",
+        html`<a href="/keys/tiers">GET /keys/tiers</a>${aside(tierLine)}`,
+      )}
+      ${row(
+        "the sweep that meters and alerts",
+        html`<a href="/status">GET /status</a>${aside(
+          "the metering and alert lights, beside the ten the rest of this page walks",
+        )}`,
+      )}
+      ${row(
+        "the rule",
+        rule(
+          `RATE_TIERS ${Object.keys(RATE_TIERS).join("/")} · READ_PRICE_MICROS_PER_READ ${READ_PRICE_MICROS_PER_READ} · CONTRIBUTOR_SHARE_PERCENT ${CONTRIBUTOR_SHARE_PERCENT.stated}/${CONTRIBUTOR_SHARE_PERCENT.observed} · ALERT_KINDS ${ALERT_KINDS.length}`,
+        ),
+      )}
+    </dl>`;
+
   return layout(ctx, {
     title: "How it works",
     description:
-      "Every stage of the pipeline, with this environment's own log under it: submit, validate, seal, read, keep true, standing, attest, verify, mirror.",
+      "Every stage of the pipeline, with this environment's own log under it: submit, validate, seal, read, keep true, standing, attest, verify, mirror, paid access.",
     body: html`
       <div class="page-head">
         <h1>How it works</h1>
@@ -520,7 +562,11 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
           "08",
           "Verify offline",
         )}
-        ${step("s9", "09", "Mirror and fork")}
+        ${step("s9", "09", "Mirror and fork")}${step(
+          "s10",
+          "10",
+          "Paid access, metering, and alerts",
+        )}
       </div>
 
       <div class="stack">
@@ -568,6 +614,13 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
           "Mirror and fork",
           "SECTION 11 · EXIT AS A PROTOCOL RIGHT",
           mirror,
+        )}
+        ${panel(
+          "s10",
+          "10",
+          "Paid access, metering, and alerts",
+          "SECTION 9 · MONEY",
+          paid,
         )}
       </div>
     `,

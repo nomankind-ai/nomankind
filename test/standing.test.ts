@@ -21,6 +21,7 @@ import {
   REPRODUCTION_RUNS,
   REVALIDATION_REQUEST_STAKE_STANDING,
   STANDING_ASSIGNMENT_MISSED,
+  STANDING_ATTESTATION_SCORED,
   STANDING_DISPUTE_UPHELD,
   STANDING_OVERTURNED_SIGNER,
   STANDING_SUBMISSION_VERIFIED,
@@ -391,6 +392,101 @@ describe("standingAt", () => {
   });
 });
 
+describe("drift attestations", () => {
+  const ATTESTATION = "att_01M22STANDING";
+
+  /** One drawn scorer's signed verdict, in the payload's own shape. */
+  function score(operator: string): {
+    attestation: string;
+    record: {
+      agent: string;
+      operator: string;
+      agreed: number;
+      probe_hash: string;
+      answers_hash: string;
+      signed_at: string;
+    };
+    signature: string;
+  } {
+    return {
+      attestation: ATTESTATION,
+      record: {
+        agent: `1F916:agent-${operator}`,
+        operator,
+        agreed: 9,
+        probe_hash: `sha256:${"a1".repeat(32)}`,
+        answers_hash: `sha256:${"b2".repeat(32)}`,
+        signed_at: EPOCH,
+      },
+      signature: "c2ln",
+    };
+  }
+
+  it("pays each scorer's operator for a score it signed", async () => {
+    // Section 8: three trusted operators "score its answers against the log and
+    // sign the result", which is completed work Section 9 pays for. All three
+    // move by the same amount, because all three did the same work.
+    let events = await verified();
+    const before = VALIDATORS.map(
+      (operator) => standingOf(events, operator, HEAD).earned,
+    );
+    for (const operator of VALIDATORS) {
+      events = await seal(events, {
+        type: "attestation_scored",
+        entry_id: null,
+        payload: score(operator),
+      });
+    }
+    VALIDATORS.forEach((operator, index) => {
+      const standing = standingOf(events, operator, HEAD);
+      expect([operator, standing.earned]).toEqual([
+        operator,
+        before[index]! + STANDING_ATTESTATION_SCORED,
+      ]);
+      expect(standing.counts.attestations_scored).toBe(1);
+      // A score is not a validation: the validation counters stand still.
+      expect(standing.counts.validations_reproduced).toBe(0);
+    });
+  });
+
+  it("burns every scorer an expiry names, and none of the ones that scored", async () => {
+    // "An attestation that expires is not a failing score: it is no score at
+    // all", and what the expiry says is who never answered. A drawn scorer that
+    // let the window run out missed an assignment, at the rate a missed
+    // assignment already carries.
+    let events = await verified();
+    events = await seal(events, {
+      type: "attestation_scored",
+      entry_id: null,
+      payload: score(VALIDATORS[0]),
+    });
+    const scored = standingOf(events, VALIDATORS[0], HEAD);
+
+    events = await seal(events, {
+      type: "attestation_expired",
+      entry_id: null,
+      payload: {
+        attestation: ATTESTATION,
+        missing: [VALIDATORS[1], VALIDATORS[2]],
+      },
+    });
+
+    // The scorer is untouched by the expiry: it answered.
+    expect(standingOf(events, VALIDATORS[0], HEAD)).toEqual(scored);
+    expect(standingOf(events, VALIDATORS[0], HEAD).counts.missed).toBe(0);
+
+    for (const operator of [VALIDATORS[1], VALIDATORS[2]]) {
+      const standing = standingOf(events, operator, HEAD);
+      expect([operator, standing.burned]).toEqual([
+        operator,
+        STANDING_ASSIGNMENT_MISSED,
+      ]);
+      expect(standing.counts.missed).toBe(1);
+      expect(standing.counts.attestations_scored).toBe(0);
+    }
+  });
+});
+
 describe("disputes", () => {
   /** A verified entry, challenged by CHALLENGER as an operator or as a bare key. */
   async function filed(operator: string | null): Promise<Event[]> {
@@ -725,6 +821,7 @@ describe("STANDING_FORMULA", () => {
     for (const name of [
       "STANDING_VALIDATION_VOLUNTEERED",
       "STANDING_VALIDATION_ASSIGNED",
+      "STANDING_ATTESTATION_SCORED",
       "STANDING_SUBMISSION_VERIFIED",
       "STANDING_DISPUTE_UPHELD",
       "STANDING_OVERTURNED_SIGNER",

@@ -33,6 +33,7 @@ import {
   alertsFromEvent,
   isAlertUrl,
   signAlert,
+  staleDeliveryId,
   type AlertBody,
   type AlertFilter,
 } from "../alerts.js";
@@ -61,13 +62,17 @@ import {
   enabledAlertEndpoints,
   markDelivery,
   putAlertDeliveries,
+  putAlertDeliveriesIfNew,
   putAlertEndpoint,
   setAlertCursor,
+  setStaleAlertCursor,
+  staleAlertCursor,
+  staleAlertsDue,
   type AlertDeliveryInput,
   type AlertEndpointRecord,
 } from "../storage/alerts.js";
 import type { D1Like } from "../storage/d1.js";
-import { eventsAfter, sealCovering } from "../storage/repository.js";
+import { eventsAfter, getEntry, sealCovering } from "../storage/repository.js";
 import { keyHash, looksLikeKey, type KeyRecord } from "../keys.js";
 import { keyByHash } from "../storage/keys.js";
 import type { Env } from "./env.js";
@@ -88,6 +93,26 @@ const SECRET_BYTES = 32;
 
 /** How many milliseconds a minute is. Not a policy number: it is what a minute is. */
 const MILLISECONDS_PER_MINUTE = 60_000;
+
+/** And what a day is. The stale cursor counts these from 1970-01-01. */
+const MILLISECONDS_PER_DAY = 86_400_000;
+
+/** How many characters of an ISO 8601 timestamp are its calendar date. */
+const DATE_LENGTH = 10;
+
+/** A UTC calendar date, "YYYY-MM-DD", as days since 1970-01-01. */
+function dayNumber(date: string): number {
+  return Math.floor(
+    Date.parse(`${date}T00:00:00.000Z`) / MILLISECONDS_PER_DAY,
+  );
+}
+
+/** The date a day number names. Day -1 is the day before the epoch. */
+function dayDate(day: number): string {
+  return new Date(day * MILLISECONDS_PER_DAY)
+    .toISOString()
+    .slice(0, DATE_LENGTH);
+}
 
 /** Random bytes, from the platform. */
 function randomHex(count: number): string {
@@ -530,11 +555,19 @@ async function alertsFor(
   return out;
 }
 
-/** The body one endpoint is sent, as the object that is stored and signed. */
+/**
+ * The body one endpoint is sent, as the object that is stored and signed.
+ *
+ * `position` is the moment the alert is about: an event's own seq and `at` for
+ * the six kinds derived from the log, and the entry's submission seq with the
+ * day its window closed for a `stale` one, which no event carries. Either way
+ * the seal is the one covering that seq, so the proof link and the root a
+ * subscriber checks against are about the same position.
+ */
 function bodyFor(
   id: string,
   alert: DerivedAlert,
-  event: Event,
+  position: { seq: number; at: string },
   seal: Seal,
   origin: string,
 ): AlertBody {
@@ -548,12 +581,12 @@ function bodyFor(
     category: String(alert.core["category"]),
     status: String(alert.entry["status"]),
     entry_hash: alert.entry_hash,
-    seq: event.seq,
+    seq: position.seq,
     seal: { seq: seal.seq, root: seal.root, sealed_at: seal.sealed_at },
-    at: event.at,
+    at: position.at,
     links: {
       entry: `${origin}/entries/${entryId}`,
-      proof: `${origin}/events/${event.seq}/proof`,
+      proof: `${origin}/events/${position.seq}/proof`,
     },
   };
 }
@@ -605,10 +638,13 @@ async function createDeliveries(
           eventSeq: event.seq,
           kind: alert.kind,
           entryId: String(alert.core["id"]),
-          body: bodyFor(id, alert, event, seal, input.origin) as unknown as Record<
-            string,
-            unknown
-          >,
+          body: bodyFor(
+            id,
+            alert,
+            { seq: event.seq, at: event.at },
+            seal,
+            input.origin,
+          ) as unknown as Record<string, unknown>,
           nextAt: at,
           createdAt: at,
         });
@@ -618,6 +654,109 @@ async function createDeliveries(
 
   await putAlertDeliveries(db, batch);
   await setAlertCursor(db, events[events.length - 1]!.seq);
+  return batch.length;
+}
+
+/**
+ * Tell the subscribers about the windows that closed, and move the day cursor.
+ *
+ * The seventh kind, and the only one no event carries: Section 7, "Past its
+ * window an entry stays verified but shows as stale", which is a fact about the
+ * calendar rather than something anybody signs. So the pass is keyed by a day
+ * instead of a position — the entries whose `expires_at` falls after the day
+ * the last pass covered and on or before today — and the sweep runs its
+ * staleness step before this one, so a window that closed overnight is told
+ * about in the run that noticed it.
+ *
+ * The body is about the entry's own submission: that seq is what the seal in it
+ * covers and what the proof link recomputes against, and `at` is the day the
+ * window ran out. The id is derived from the entry, that day and the endpoint
+ * (`staleDeliveryId`), and the write is `INSERT OR IGNORE`, so a pass rerun
+ * against a cursor somebody moved back creates nothing twice.
+ */
+async function createStaleDeliveries(
+  db: D1Like,
+  input: { now: Date; origin: string },
+  endpoints: readonly AlertEndpointRecord[],
+): Promise<number> {
+  const runDay = dayNumber(input.now.toISOString().slice(0, DATE_LENGTH));
+  const cursor = await staleAlertCursor(db);
+  if (cursor >= runDay) return 0;
+
+  const after = dayDate(cursor);
+  const through = dayDate(runDay);
+  const at = input.now.toISOString();
+  const batch: AlertDeliveryInput[] = [];
+
+  let afterExpiresAt: string | undefined;
+  let afterId: string | undefined;
+  for (;;) {
+    const page = await staleAlertsDue(
+      db,
+      afterExpiresAt === undefined || afterId === undefined
+        ? { after, through, limit: LIST_PAGE_LIMIT }
+        : { after, through, limit: LIST_PAGE_LIMIT, afterExpiresAt, afterId },
+    );
+    if (page.length === 0) break;
+
+    for (const due of page) {
+      const stored = await getEntry(db, due.id);
+      // A row in the index with no entry behind it is not this step's to
+      // explain; there is nothing to say about an entry it cannot read.
+      if (stored === null) continue;
+      const core = extractCore(stored.entry);
+      const view = {
+        domain: domainOf(core),
+        subject: String(core["subject"]),
+        category: String(core["category"]),
+        kind: "stale" as const,
+      };
+      const matching = endpoints.filter((endpoint) =>
+        alertMatches(filterOf(endpoint), view),
+      );
+      // Nothing matched, so nothing is derived: the hash and the seal below are
+      // work nobody asked for.
+      if (matching.length === 0) continue;
+
+      // The same rule the sealed pass keeps: an alert whose position is not
+      // sealed yet carries no proof, so it waits for the run that seals it.
+      const seal = await sealCovering(db, stored.submittedSeq);
+      if (seal === null) continue;
+
+      const alert: DerivedAlert = {
+        kind: "stale",
+        entry: stored.entry,
+        core,
+        entry_hash: await entryHash(core),
+      };
+      for (const endpoint of matching) {
+        const id = await staleDeliveryId(due.id, due.expires_at, endpoint.id);
+        batch.push({
+          id,
+          endpointId: endpoint.id,
+          eventSeq: stored.submittedSeq,
+          kind: "stale",
+          entryId: due.id,
+          body: bodyFor(
+            id,
+            alert,
+            { seq: stored.submittedSeq, at: due.expires_at },
+            seal,
+            input.origin,
+          ) as unknown as Record<string, unknown>,
+          nextAt: at,
+          createdAt: at,
+        });
+      }
+    }
+
+    afterExpiresAt = page[page.length - 1]!.expires_at;
+    afterId = page[page.length - 1]!.id;
+    if (page.length < LIST_PAGE_LIMIT) break;
+  }
+
+  await putAlertDeliveriesIfNew(db, batch);
+  await setStaleAlertCursor(db, runDay);
   return batch.length;
 }
 
@@ -734,12 +873,14 @@ async function retry(
 }
 
 /**
- * Derive the alerts the newly sealed events call for, and deliver what is due.
+ * Derive the alerts the newly sealed events call for, add the windows that
+ * closed, and deliver what is due.
  *
- * A deployment nobody subscribed to does no derivation at all: the cursor jumps
- * to the sealed head and the step skips `alerts_no_endpoint`, so the first
- * endpoint ever registered hears about what happens next rather than about
- * everything that ever happened. Deliveries are still attempted in that case,
+ * A deployment nobody subscribed to does no derivation at all: both cursors
+ * jump forward — the position one to the sealed head, the day one to today —
+ * and the step skips `alerts_no_endpoint`, so the first endpoint ever
+ * registered hears about what happens next rather than about everything that
+ * ever happened. Deliveries are still attempted in that case,
  * because an endpoint turned off between the two halves of a run left rows
  * behind that have to be closed.
  *
@@ -761,9 +902,14 @@ export async function runAlertStep(
   const endpoints = await enabledAlertEndpoints(db, null, LIST_PAGE_LIMIT);
   if (endpoints.length === 0) {
     await setAlertCursor(db, input.sealedHead);
+    await setStaleAlertCursor(
+      db,
+      dayNumber(input.now.toISOString().slice(0, DATE_LENGTH)),
+    );
     skip("alerts_no_endpoint");
   } else {
     created = await createDeliveries(db, input, endpoints);
+    created += await createStaleDeliveries(db, input, endpoints);
   }
 
   let delivered = 0;

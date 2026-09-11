@@ -585,3 +585,79 @@ describe("buildReadCountPayload's paid block", () => {
     ).toThrow(/bad_count/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// M24b: the reads the day dropped, and why
+// ---------------------------------------------------------------------------
+
+describe("buildReadCountPayload's duplicates block", () => {
+  it("sorts the drops by entry_id and copies nothing else", () => {
+    const payload = buildReadCountPayload(
+      "2026-09-09",
+      [{ entry_id: "nmk_new", count: 1 }],
+      1,
+      3,
+      { reads: [], keys: {} },
+      [
+        { entry_id: "nmk_old2", newest: "nmk_new", sync_reads: 1 },
+        { entry_id: "nmk_old1", newest: "nmk_new", sync_reads: 2 },
+      ],
+    );
+    expect(payload.duplicates).toEqual([
+      { entry_id: "nmk_old1", newest: "nmk_new", sync_reads: 2 },
+      { entry_id: "nmk_old2", newest: "nmk_new", sync_reads: 1 },
+    ]);
+    // The dropped reads are not in the day's totals: they were not owed.
+    expect(payload.total).toBe(1);
+    expect(payload.paid).toEqual({ reads: [], total: 0, keys: {} });
+  });
+
+  it("publishes an empty block for a day that dropped nothing", () => {
+    // Present and empty, because a reader must be able to tell "no duplicate"
+    // from "not said".
+    const payload = buildReadCountPayload(
+      "2026-09-09",
+      [{ entry_id: "nmk_a", count: 1 }],
+      1,
+      1,
+      { reads: [], keys: {} },
+      [],
+    );
+    expect(payload.duplicates).toEqual([]);
+  });
+
+  it("writes no block at all when none is given, as every day before M24b", () => {
+    const payload = buildReadCountPayload("2026-09-09", [], null, null, {
+      reads: [],
+      keys: {},
+    });
+    expect("duplicates" in payload).toBe(false);
+  });
+
+  it("refuses a drop that repeats an entry or drops below one read", () => {
+    // The same two refusals the rows carry, for the same reason: a day that
+    // named one entry's drop twice would not add up for the reader checking it.
+    expect(() =>
+      buildReadCountPayload("2026-09-09", [], null, null, undefined, [
+        { entry_id: "nmk_a", newest: "nmk_b", sync_reads: 1 },
+        { entry_id: "nmk_a", newest: "nmk_b", sync_reads: 1 },
+      ]),
+    ).toThrow(/duplicate_entry_id/);
+    for (const sync_reads of [0, -1, 1.5, Number.NaN]) {
+      expect(() =>
+        buildReadCountPayload("2026-09-09", [], null, null, undefined, [
+          { entry_id: "nmk_a", newest: "nmk_b", sync_reads },
+        ]),
+      ).toThrow(/bad_count/);
+    }
+  });
+
+  it("does not mutate the drops it was handed", () => {
+    const duplicates = [
+      { entry_id: "nmk_c", newest: "nmk_a", sync_reads: 1 },
+      { entry_id: "nmk_a", newest: "nmk_a", sync_reads: 1 },
+    ];
+    buildReadCountPayload("2026-09-09", [], null, null, undefined, duplicates);
+    expect(duplicates.map((row) => row.entry_id)).toEqual(["nmk_c", "nmk_a"]);
+  });
+});

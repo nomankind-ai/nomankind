@@ -121,6 +121,7 @@ import {
   type Event,
   type EventPayloads,
   type EventType,
+  type ReadCountDuplicate,
   type ReadCountRow,
 } from "../events.js";
 import {
@@ -611,7 +612,8 @@ function dayAfter(date: string): string {
 }
 
 /**
- * Is this entry the one its duplicate group is paid for?
+ * Which entry of this one's duplicate group the log stands behind, or null when
+ * the store answered no group at all.
  *
  * Whitepaper Section 9, Money: a read is "one verified entry delivered in a
  * paid sync". A sync hands the trainer everything the delta holds, and when two
@@ -630,10 +632,18 @@ function dayAfter(date: string): string {
  *
  * An entry with no candidate group at all — nothing verified shares its key,
  * not even itself, which is what an entry that has since moved looks like — is
- * left alone. Dropping a payment on a question the store could not answer would
- * be a silent under-count, and Section 9 asks readers to check for exactly that.
+ * left alone, which is what the null says. Dropping a payment on a question the
+ * store could not answer would be a silent under-count, and Section 9 asks
+ * readers to check for exactly that.
+ *
+ * The answer is the id rather than a yes or no because the published payload
+ * names it (M24b): a reader told that a read was dropped is told where the
+ * group's reads went instead.
  */
-async function paidForGroup(db: D1Like, stored: StoredEntry): Promise<boolean> {
+async function newestOfGroup(
+  db: D1Like,
+  stored: StoredEntry,
+): Promise<string | null> {
   const core = extractCore(stored.entry);
   const key = duplicateKey(core);
   const candidates = await readCandidates(db, {
@@ -642,14 +652,13 @@ async function paidForGroup(db: D1Like, stored: StoredEntry): Promise<boolean> {
     category: key.category,
     limit: LIST_PAGE_LIMIT,
   });
-  const id = stored.entry["id"];
   for (const candidate of candidates) {
     if (!sameDuplicateKey(duplicateKey(extractCore(candidate.entry)), key)) {
       continue;
     }
-    return candidate.entry["id"] === id;
+    return candidate.entry["id"] as string;
   }
-  return true;
+  return null;
 }
 
 /**
@@ -672,11 +681,21 @@ async function paidForGroup(db: D1Like, stored: StoredEntry): Promise<boolean> {
  * agree — a paid block computed from a second read of the day could disagree
  * with the rows it is published beside, and Section 9 asks readers to check
  * exactly that arithmetic.
+ *
+ * Every drop is named rather than silent (M24b). A reader holding a sync
+ * receipt for an entry that is not in `reads` cannot tell the duplicate rule
+ * from an under-count, so the third half of the fold says which entry lost its
+ * sync reads, which entry of its group the log stands behind instead, and how
+ * many reads there were.
  */
 async function readsOn(
   db: D1Like,
   date: string,
-): Promise<{ rows: ReadCountRow[]; paid: PaidReadCounts }> {
+): Promise<{
+  rows: ReadCountRow[];
+  paid: PaidReadCounts;
+  duplicates: ReadCountDuplicate[];
+}> {
   const split: ReadCountKeyRow[] = [];
   let after: ReadCountKeyCursor | undefined;
   for (;;) {
@@ -702,16 +721,20 @@ async function readsOn(
   const rows: ReadCountRow[] = [];
   const paidRows: ReadCountRow[] = [];
   const keys: Record<string, number> = {};
+  const duplicates: ReadCountDuplicate[] = [];
 
   for (const [entryId, entryRows] of byEntry) {
     const syncReads = entryRows.reduce((sum, row) => sum + row.sync_reads, 0);
     let dropSync = false;
     if (syncReads > 0) {
       const stored = await getEntry(db, entryId);
-      dropSync =
-        stored !== null &&
-        stored.entry["status"] === "verified" &&
-        !(await paidForGroup(db, stored));
+      if (stored !== null && stored.entry["status"] === "verified") {
+        const newest = await newestOfGroup(db, stored);
+        if (newest !== null && newest !== entryId) {
+          dropSync = true;
+          duplicates.push({ entry_id: entryId, newest, sync_reads: syncReads });
+        }
+      }
     }
 
     let count = 0;
@@ -729,7 +752,7 @@ async function readsOn(
     if (paidCount > 0) paidRows.push({ entry_id: entryId, count: paidCount });
   }
 
-  return { rows, paid: { reads: paidRows, keys } };
+  return { rows, paid: { reads: paidRows, keys }, duplicates };
 }
 
 /**
@@ -814,6 +837,9 @@ async function publishStep(
       range.counter_first,
       range.counter_last,
       counted.paid,
+      // Present on every day this step publishes, empty on a day that dropped
+      // nothing: a reader must be able to tell "no duplicate" from "not said".
+      counted.duplicates,
     );
 
     // The chain rule, through the one door that enforces it: the event is built

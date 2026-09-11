@@ -236,7 +236,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/how-it-works",
     parameters: "—",
     answers:
-      "The pipeline explained in eight panels, each carrying this environment's own newest record for that stage — the newest entry and its capture, the trusted pool, the newest decision, seal and anchor, yesterday's read count, standing and the ledger, the newest attestation — and the policy names that stage runs under. HTML only: it is a page about the log and not a view of it, so it has no JSON twin.",
+      "The pipeline explained in ten panels, each carrying this environment's own newest record for that stage — the newest entry and its capture, the trusted pool, the newest decision, seal and anchor, yesterday's read count, standing and the ledger, the newest attestation, the daily export, and the paid tiers — and the policy names that stage runs under. HTML only: it is a page about the log and not a view of it, so it has no JSON twin.",
     refusals: "—",
   },
   {
@@ -308,6 +308,16 @@ const WRITE_PATH: readonly Endpoint[] = [
       "201 with the operator record, its domains now including this one. The event operator_joined_domain is appended atomically with the row. The attestation is per domain and never per operator: an operator signs the sentence of the domain it is joining, so joining a second domain is signing a second attestation and nothing about the first changes.",
     refusals:
       "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 agent_mismatch; then 422 unregistered_operator, unregistered_domain, 403 excluded_party, 409 already_joined, 422 missing_attestation, bad_attestation, attestation_domain_mismatch.",
+  },
+  {
+    method: "POST",
+    path: "/operators/{id}/agents",
+    parameters:
+      "agent, attestation { version, domain, signed_at, signature }; the request is signed by an agent already bound to this operator, and the attestation is signed by the new agent's own key",
+    answers:
+      "201 with the operator record, its agents now including this one. The event agent_bound is appended atomically with the row. The DNS TXT record is not checked again: it bound the operator's first agent, and the operator vouches for every later one by signing the request that binds it.",
+    refusals:
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; then 404 unregistered_operator, 403 not_operator_agent when the signing key answers for another operator, 409 agent_bound for an agent already bound anywhere, and 422 bad_agent, missing_attestation, bad_attestation, attestation_domain_mismatch.",
   },
   {
     method: "GET",
@@ -821,8 +831,18 @@ npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt;
           attestation and posts it to
           <span class="mono">POST /operators/{id}/domains</span>.
         </p>
+        <p class="note">
+          A registered operator puts a second key to work with
+          <span class="mono">--bind</span>, which signs the operator's
+          registration domain's attestation with the new key, signs the request
+          with the existing one, and posts both to
+          <span class="mono">POST /operators/{id}/agents</span>. The new agent
+          validates, reconfirms and scores for the operator exactly as the first
+          does, and every exclusion that counts an operator counts it.
+        </p>
         <pre class="block mono">npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; [--domain &lt;slug&gt;] [--genesis &lt;key.json&gt;]
-npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; --join &lt;slug&gt;</pre>
+npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; --join &lt;slug&gt;
+npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; --bind &lt;new-key.json&gt;</pre>
       </section>
 
       <section class="panel">
@@ -975,6 +995,20 @@ npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; --join &l
           entry, a reconfirmation, the verifying entry that superseded an earlier
           one, and an upheld dispute. An alert is a notification of something
           public and never a fact of its own.
+        </p>
+        <p class="note">
+          <span class="mono">stale</span> is the seventh and the only one no
+          event carries: a freshness window closing is a fact about the calendar
+          rather than something anybody signs, so the sweep marks the entry and
+          this step tells whoever subscribed, in the same run. Its
+          <span class="mono">seq</span> is the entry's own submission and its
+          <span class="mono">seal</span> the one covering that position, which is
+          what the proof link recomputes against;
+          <span class="mono">at</span> is the entry's
+          <span class="mono">expires_at</span>, the day the window ran out,
+          rather than an instant. The delivery id is derived from the entry, that
+          day and the endpoint rather than drawn at random, so a rerun of the
+          step tells nobody twice.
         </p>
         <pre class="block mono">POST &lt;your endpoint&gt;
 content-type: application/json

@@ -15,7 +15,10 @@
  * weighted highest), rejections that hold, and upheld challenges. It is burned
  * by overturned entries you signed, failed challenges, wrong reconfirmations,
  * and missed assignments." Each of those is one case of the fold below, and
- * nothing else in the log moves standing.
+ * nothing else in the log moves standing. A drift attestation's score is a
+ * completed validation of that list and a scorer that let the window run out
+ * missed an assignment of it, which is why Section 8's two events are in the
+ * fold beside Section 6's.
  *
  * "It decays when the work it came from stops being read or was never used ...
  * Decay is paused until the paid loop starts." So there is no decay term here at
@@ -43,6 +46,7 @@ import {
   DISPUTE_STAKE_STANDING,
   REVALIDATION_REQUEST_STAKE_STANDING,
   STANDING_ASSIGNMENT_MISSED,
+  STANDING_ATTESTATION_SCORED,
   STANDING_DISPUTE_UPHELD,
   STANDING_OVERTURNED_SIGNER,
   STANDING_SUBMISSION_VERIFIED,
@@ -68,6 +72,13 @@ export interface StandingCounts {
    * validation AND measured, and both facts are paid.
    */
   readonly validations_reproduced: number;
+  /**
+   * Drift attestations this operator's drawn scorer signed a score for
+   * (Section 8). Counted apart from the validations because it is a different
+   * piece of work: the probes were drawn for the scorer and the answers were
+   * already there.
+   */
+  readonly attestations_scored: number;
   readonly submissions_verified: number;
   readonly disputes_upheld: number;
   readonly overturned: number;
@@ -107,6 +118,7 @@ interface Accumulator {
   validations_volunteered: number;
   validations_assigned: number;
   validations_reproduced: number;
+  attestations_scored: number;
   submissions_verified: number;
   disputes_upheld: number;
   overturned: number;
@@ -127,6 +139,7 @@ export const STANDING_FORMULA: readonly string[] = Object.freeze([
   "STANDING_VALIDATION_VOLUNTEERED",
   "STANDING_VALIDATION_ASSIGNED",
   "STANDING_VALIDATION_REPRODUCED",
+  "STANDING_ATTESTATION_SCORED",
   "STANDING_SUBMISSION_VERIFIED",
   "STANDING_DISPUTE_UPHELD",
   "STANDING_OVERTURNED_SIGNER",
@@ -156,6 +169,7 @@ function empty(operator: string): Accumulator {
     validations_volunteered: 0,
     validations_assigned: 0,
     validations_reproduced: 0,
+    attestations_scored: 0,
     submissions_verified: 0,
     disputes_upheld: 0,
     overturned: 0,
@@ -177,6 +191,7 @@ function freeze(accumulator: Accumulator, position: number): Standing {
       validations_volunteered: accumulator.validations_volunteered,
       validations_assigned: accumulator.validations_assigned,
       validations_reproduced: accumulator.validations_reproduced,
+      attestations_scored: accumulator.attestations_scored,
       submissions_verified: accumulator.submissions_verified,
       disputes_upheld: accumulator.disputes_upheld,
       overturned: accumulator.overturned,
@@ -358,6 +373,31 @@ export function standingAt(
       const missed = of(event.payload.operator);
       missed.burned += STANDING_ASSIGNMENT_MISSED;
       missed.missed += 1;
+      continue;
+    }
+
+    if (isType(event, "attestation_scored")) {
+      // Section 8: "three operators from the trusted pool ... score its answers
+      // against the log and sign the result." Completed work the beacon drew,
+      // so Section 9's "completed validations" pays it — to the operator behind
+      // the scoring agent, which the signed record names itself, exactly as a
+      // validation's record names the operator behind its validator.
+      const scorer = of(event.payload.record.operator);
+      scorer.earned += STANDING_ATTESTATION_SCORED;
+      scorer.attestations_scored += 1;
+      continue;
+    }
+
+    if (isType(event, "attestation_expired")) {
+      // "Missed assignments" burn, and a drawn scorer that let the window run
+      // out missed one: the expiry names every scorer that never answered, and
+      // each is burned once, at the rate an unanswered assignment carries. The
+      // scorers that did answer are not in `missing` and are untouched.
+      for (const operator of event.payload.missing) {
+        const missed = of(operator);
+        missed.burned += STANDING_ASSIGNMENT_MISSED;
+        missed.missed += 1;
+      }
       continue;
     }
 

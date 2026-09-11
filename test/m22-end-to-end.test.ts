@@ -55,7 +55,10 @@ import {
   LIST_PAGE_LIMIT,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
+  STANDING_ASSIGNMENT_MISSED,
+  STANDING_ATTESTATION_SCORED,
 } from "../src/policy.js";
+import { standingOf } from "../src/standing.js";
 import { signRecord } from "../src/records.js";
 import { txtRecordName } from "../src/registry.js";
 import type { SubmissionProposal } from "../src/submit.js";
@@ -677,6 +680,75 @@ describe("an attestation nobody scored", () => {
     expect(
       [...(expired[0]!.payload as { missing: readonly string[] }).missing].sort(),
     ).toEqual(second.scorers.map((scorer) => scorer.operator).sort());
+  }, 600_000);
+
+  it("pays the scorers that answered and burns the ones that did not", async () => {
+    // Section 9's "completed validations" and "missed assignments", over the
+    // real log this file built: each score moves its own scorer's operator by
+    // STANDING_ATTESTATION_SCORED at the position it landed at, and the expiry
+    // moves every operator it names by STANDING_ASSIGNMENT_MISSED at its own.
+    // Asked one event at a time, because the two attestations drew from one
+    // trusted pool and an operator may well be in both lists.
+    const events = await wholeLog(hour(10 + ATTESTATION_WINDOW_HOURS + 1));
+
+    const scores = events.filter(
+      (event) =>
+        event.type === "attestation_scored" &&
+        (event.payload as { attestation: string }).attestation === first.id,
+    );
+    expect(scores).toHaveLength(ATTESTATION_SCORERS);
+    for (const event of scores) {
+      const operator = (
+        event.payload as { record: AttestationScoreRecord }
+      ).record.operator;
+      const before = standingOf(events, operator, event.seq - 1);
+      const after = standingOf(events, operator, event.seq);
+      expect([operator, after.earned - before.earned]).toEqual([
+        operator,
+        STANDING_ATTESTATION_SCORED,
+      ]);
+      expect(
+        after.counts.attestations_scored - before.counts.attestations_scored,
+      ).toBe(1);
+      // Scoring is not validating: the validation counters do not move.
+      expect(after.counts.validations_assigned).toBe(
+        before.counts.validations_assigned,
+      );
+      expect(after.burned).toBe(before.burned);
+    }
+
+    const expiry = events.find(
+      (event) =>
+        event.type === "attestation_expired" &&
+        (event.payload as { attestation: string }).attestation === second.id,
+    )!;
+    const missing = (expiry.payload as { missing: readonly string[] }).missing;
+    expect([...missing].sort()).toEqual(
+      second.scorers.map((scorer) => scorer.operator).sort(),
+    );
+    for (const operator of missing) {
+      const before = standingOf(events, operator, expiry.seq - 1);
+      const after = standingOf(events, operator, expiry.seq);
+      expect([operator, after.burned - before.burned]).toEqual([
+        operator,
+        STANDING_ASSIGNMENT_MISSED,
+      ]);
+      expect(after.counts.missed - before.counts.missed).toBe(1);
+      expect(after.earned).toBe(before.earned);
+    }
+
+    // And the expiry touches nobody it does not name: the operators that scored
+    // the first attestation and are not in this one are exactly where they were.
+    for (const scorer of first.scorers) {
+      if (missing.includes(scorer.operator)) continue;
+      const before = standingOf(events, scorer.operator, expiry.seq - 1);
+      const after = standingOf(events, scorer.operator, expiry.seq);
+      expect([after.earned, after.burned, after.counts]).toEqual([
+        before.earned,
+        before.burned,
+        before.counts,
+      ]);
+    }
   }, 600_000);
 
   it("refuses a late score", async () => {

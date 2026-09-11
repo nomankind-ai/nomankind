@@ -332,6 +332,25 @@ export type EventPayloads = {
       total: number;
       keys: Readonly<Record<string, number>>;
     };
+    /**
+     * The reads this day was not paid for, and why (decision D-085).
+     *
+     * A sync hands a trainer the whole delta, so when two verified entries
+     * assert the same fact the trainer was delivered one fact twice; the log is
+     * owed one read for it, and the one it is owed is the newest of the group.
+     * The publish step drops the older entry's sync reads, and this is the drop
+     * said out loud: which entry lost them, which live entry the group's reads
+     * went to instead, and how many there were.
+     *
+     * Section 9 asks readers to check the published counts against the receipts
+     * they hold, and a reader holding a sync receipt for an entry that is not in
+     * `reads` could not tell an under-count from the rule working. Sorted by
+     * entry_id, and empty on a day that dropped nothing.
+     *
+     * The ledger never reads it: the money follows `paid`, and nothing here was
+     * paid for. Optional, and absent on every event published before M24b.
+     */
+    duplicates?: readonly ReadCountDuplicate[];
   };
   /**
    * An attestation opened: the probes drawn, the scorers drawn, and everything
@@ -415,6 +434,17 @@ export type EventPayloads = {
 export interface ReadCountRow {
   entry_id: string;
   count: number;
+}
+
+/**
+ * One duplicate drop on a published day: the entry whose sync reads were not
+ * counted, the live entry of its group the reads were counted for instead, and
+ * how many reads were dropped.
+ */
+export interface ReadCountDuplicate {
+  entry_id: string;
+  newest: string;
+  sync_reads: number;
 }
 
 export type EventType = keyof EventPayloads;

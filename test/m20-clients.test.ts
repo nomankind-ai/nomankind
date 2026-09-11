@@ -647,9 +647,11 @@ describe("register: arguments", () => {
       baseUrl: BASE,
       domain: OPERATOR,
       // Decision D-071: `--domain` defaults to the one domain there was, and
-      // `--join` is absent on an ordinary registration.
+      // `--join` is absent on an ordinary registration. `--bind` is absent
+      // too: an ordinary registration binds no second agent.
       recordDomain: DEFAULT_DOMAIN,
       join: null,
+      bindKeyPath: null,
       genesisKeyPath: null,
     });
   });
@@ -660,6 +662,12 @@ describe("register: arguments", () => {
     );
   });
 
+  it("reads the key file --bind names", () => {
+    expect(registerPlan([...good, "--bind", "path.json"])?.bindKeyPath).toBe(
+      "path.json",
+    );
+  });
+
   for (const args of [
     [],
     ["key.json", BASE],
@@ -667,6 +675,7 @@ describe("register: arguments", () => {
     [...good, "--genesis"],
     [...good, "--genesis", "--other"],
     [...good, "--genesis", "a.json", "--genesis", "b.json"],
+    [...good, "--bind"],
     [...good, "--trusted"],
   ]) {
     it(`refuses before any I/O: ${JSON.stringify(args)}`, () => {

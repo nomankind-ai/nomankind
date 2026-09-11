@@ -5,11 +5,13 @@
  * structured feeds and webhooks, change alerts" — and the paid product is
  * "being the fastest true copy, with sub-day freshness, signed receipts, and
  * alerts". An alert is a notification of a moment that is already in the sealed
- * log: six kinds, each one an event anybody can read at `/events`, delivered to
- * an endpoint a key subscribed. Nothing here is a fact of its own, and an alert
- * that was never delivered changes nothing about the record.
+ * log: seven kinds, six of them an event anybody can read at `/events` and the
+ * seventh the day a freshness window closed, delivered to an endpoint a key
+ * subscribed. Nothing here is a fact of its own, and an alert that was never
+ * delivered changes nothing about the record.
  *
- * Pure, except for the one HMAC, which goes through WebCrypto and never
+ * Pure, except for the two WebCrypto calls — the HMAC and the digest a stale
+ * alert's id is made of — which never go through
  * `node:crypto` so this file runs unchanged on Workers. No storage, no clock,
  * no network: `src/storage/alerts.ts` holds the endpoints and the deliveries,
  * and `src/worker/alerts.ts` decides what is derived, matched and posted.
@@ -19,6 +21,7 @@
  * tag and nothing else.
  */
 
+import { sha256Hex } from "./hash.js";
 import type { Entry } from "./schema.js";
 import type { Event } from "./events.js";
 import type { AlertKind } from "./policy.js";
@@ -81,11 +84,19 @@ export interface AlertBody {
   status: string;
   /** The hash of the entry's signed core, exactly as the sync stream carries it. */
   entry_hash: string;
-  /** The event's position in the log. */
+  /**
+   * The event's position in the log — and, on a `stale` alert, the entry's own
+   * submission, because no event is appended when a window closes.
+   */
   seq: number;
   /** The seal covering that position: the proof this alert is about sealed history. */
   seal: { seq: number; root: string; sealed_at: string };
-  /** The event's own `at`: when the log recorded the change, not when it was sent. */
+  /**
+   * The event's own `at`: when the log recorded the change, not when it was
+   * sent. On a `stale` alert it is the entry's `expires_at`, a calendar date
+   * rather than an instant, because the day the window ran out is the whole
+   * moment being reported.
+   */
   at: string;
   links: { entry: string; proof: string };
 }
@@ -94,7 +105,11 @@ export interface AlertBody {
  * Which alerts one sealed event calls for, given the entry derived at the
  * event's position and at the position before it.
  *
- * The rules are the six kinds and nothing else:
+ * Six of the seven kinds; `stale` is the one no event carries, and the alert
+ * step derives it from the rows the sweep's staleness step rewrote rather than
+ * from the log's own sequence (`staleDeliveryId` below).
+ *
+ * The rules are those six kinds and nothing else:
  *
  * - `entry_submitted` is `submitted`: a new claim entered the log as a draft.
  * - `validation` is `verified` or `rejected`, by the status the entry derives
@@ -156,6 +171,34 @@ export function alertsFromEvent(
     default:
       return [];
   }
+}
+
+/**
+ * How many hex characters a delivery id carries after `alert_`. A format fact
+ * and not a policy number: it is the width the random ids already show, so a
+ * derived id is indistinguishable from one at a glance.
+ */
+const DELIVERY_ID_HEX = 16;
+
+/**
+ * The id one stale alert always has: `alert_` and the first sixteen hex of the
+ * SHA-256 over `stale:<entry_id>:<expires_at>:<endpoint_id>`.
+ *
+ * Derived rather than random, because a stale alert has no event behind it. The
+ * other six kinds are keyed by a position in the log, so a rerun of the step
+ * over the same events is stopped by the cursor; this one is keyed by a
+ * calendar day that does not move, and the id is what makes a second pass over
+ * the same row insert nothing (the store writes it `INSERT OR IGNORE`). The
+ * three parts are exactly the three things that make one such alert one alert:
+ * which entry, which window of it ran out, and who was told.
+ */
+export async function staleDeliveryId(
+  entryId: string,
+  expiresAt: string,
+  endpointId: string,
+): Promise<string> {
+  const digest = await sha256Hex(`stale:${entryId}:${expiresAt}:${endpointId}`);
+  return `alert_${digest.slice(0, DELIVERY_ID_HEX)}`;
 }
 
 /**

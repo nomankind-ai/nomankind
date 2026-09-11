@@ -23,6 +23,7 @@ import {
   readNullableInteger,
   readNullableText,
   readText,
+  writeBoolean,
   writeJson,
   type D1Like,
   type D1LikeStatement,
@@ -38,6 +39,15 @@ const ONE_ROW = "LIMIT 1";
 
 /** The alert step's cursor row in `ledger_state`, seeded by migration 0015. */
 const ALERT_CURSOR = "alerts";
+
+/**
+ * The stale pass's own cursor row in `ledger_state`, holding a UTC day rather
+ * than a position: nothing is appended when a freshness window closes, so there
+ * is no seq to remember. No migration seeds it — `ledgerCursor` answers null
+ * for a row that is not there and `setLedgerCursor` upserts — which is what
+ * `STALE_ALERT_CURSOR_UNSET` below is for.
+ */
+const STALE_ALERT_CURSOR = "alerts_stale";
 
 const ENDPOINT_COLUMNS = `id, key_id, url, secret, domain, subject, category, kinds_json, created_at, disabled_at`;
 
@@ -293,11 +303,35 @@ export async function putAlertDeliveries(
   db: D1Like,
   batch: readonly AlertDeliveryInput[],
 ): Promise<void> {
+  await insertDeliveries(db, batch, "INSERT");
+}
+
+/**
+ * The same batch, written `INSERT OR IGNORE`.
+ *
+ * What the stale pass uses, because its ids are derived from the entry, the day
+ * its window closed and the endpoint rather than drawn at random: a pass that
+ * saw the same row twice would otherwise tell a subscriber twice about one day.
+ * The clash is on the primary key, so an id that is already there is left
+ * exactly as it is — attempts, status and all — and never reset to pending.
+ */
+export async function putAlertDeliveriesIfNew(
+  db: D1Like,
+  batch: readonly AlertDeliveryInput[],
+): Promise<void> {
+  await insertDeliveries(db, batch, "INSERT OR IGNORE");
+}
+
+async function insertDeliveries(
+  db: D1Like,
+  batch: readonly AlertDeliveryInput[],
+  verb: "INSERT" | "INSERT OR IGNORE",
+): Promise<void> {
   if (batch.length === 0) return;
   const statements: D1LikeStatement[] = batch.map((delivery) =>
     db
       .prepare(
-        `INSERT INTO alert_deliveries (${DELIVERY_COLUMNS})
+        `${verb} INTO alert_deliveries (${DELIVERY_COLUMNS})
          VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, ?)`,
       )
       .bind(
@@ -464,4 +498,83 @@ export async function alertCursor(db: D1Like): Promise<number> {
 /** Move it. The same row every other step's cursor lives in. */
 export async function setAlertCursor(db: D1Like, seq: number): Promise<void> {
   await setLedgerCursor(db, ALERT_CURSOR, seq);
+}
+
+/**
+ * The day the stale pass last ran, as days since 1970-01-01, or -1 when no row
+ * exists yet.
+ *
+ * -1 rather than 0, for the reason the position cursor above uses it: day 0 is
+ * a real day, and a missing row has to read as "before every day there is".
+ */
+export async function staleAlertCursor(db: D1Like): Promise<number> {
+  return (await ledgerCursor(db, STALE_ALERT_CURSOR)) ?? -1;
+}
+
+/** Move it, to the day the run happened on. */
+export async function setStaleAlertCursor(
+  db: D1Like,
+  day: number,
+): Promise<void> {
+  await setLedgerCursor(db, STALE_ALERT_CURSOR, day);
+}
+
+// ---------------------------------------------------------------------------
+// The entries whose window closed
+// ---------------------------------------------------------------------------
+
+/** Which stale rows one pass is about, and where it resumes. */
+export interface StaleAlertsQuery {
+  /** Strictly after this date, "YYYY-MM-DD": the day the last pass covered. */
+  readonly after: string;
+  /** Up to and including this date: the day this run is happening on. */
+  readonly through: string;
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+  /** Resume strictly after this (expires_at, id); omit both for the first page. */
+  readonly afterExpiresAt?: string;
+  readonly afterId?: string;
+}
+
+/**
+ * The entries the staleness step has marked stale whose window ran out inside
+ * one span of days.
+ *
+ * The mirror image of `staleDue` in src/storage/repository.ts, which finds the
+ * rows a window has closed on and leaves them marked; this finds the rows that
+ * are already marked, so it runs after that step in the same sweep and sees the
+ * day's work. The span is half-open on the left because the cursor names a day
+ * that was already covered, and closed on the right because today's expiries
+ * are this run's to tell somebody about.
+ *
+ * Keyset by (expires_at, id) like every other page here, with the caller's own
+ * limit: a deployment where a thousand windows closed at once is walked rather
+ * than truncated. `expires_at IS NOT NULL` leaves out the categories that carry
+ * no window, which can never be stale and whose column would compare as null
+ * anyway.
+ */
+export async function staleAlertsDue(
+  db: D1Like,
+  query: StaleAlertsQuery,
+): Promise<Array<{ id: string; expires_at: string }>> {
+  const bindings: unknown[] = [writeBoolean(true), query.after, query.through];
+  let cursor = "";
+  if (query.afterExpiresAt !== undefined && query.afterId !== undefined) {
+    cursor = "AND (expires_at > ? OR (expires_at = ? AND id > ?)) ";
+    bindings.push(query.afterExpiresAt, query.afterExpiresAt, query.afterId);
+  }
+  bindings.push(query.limit);
+
+  const rows = await db
+    .prepare(
+      `SELECT id, expires_at FROM entries
+       WHERE stale = ? AND expires_at IS NOT NULL
+         AND expires_at > ? AND expires_at <= ? ${cursor}ORDER BY expires_at, id LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    id: readText(row, "id"),
+    expires_at: readText(row, "expires_at"),
+  }));
 }

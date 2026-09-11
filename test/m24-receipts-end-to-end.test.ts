@@ -534,6 +534,13 @@ describe("the day's published count", () => {
     expect(payload.paid!.total).toBe(5);
   }, 600_000);
 
+  it("says out loud that it dropped nothing", () => {
+    // M24b: the block is there on every day this step publishes, so a reader
+    // can tell a day with no duplicate in it from a day that said nothing.
+    // Nothing on this day was a duplicate of anything.
+    expect(payload.duplicates).toEqual([]);
+  });
+
   it("names the key's own day, and it is what the key's usage says", async () => {
     expect(payload.paid!.keys).toEqual({ [keyId]: 5 });
     expect(payload.paid!.total).toBe(
@@ -714,6 +721,19 @@ describe("a duplicate group delivered in one paid sync", () => {
     );
     expect(payload.paid!.reads).toEqual([
       { entry_id: dupNew["id"] as string, count: 1 },
+    ]);
+  });
+
+  it("names the drop, the entry the reads went to, and how many (M24b)", () => {
+    // The older entry is in neither `reads` nor `paid`, and without this block
+    // a key holder adding up the sync receipt they hold against the published
+    // day would find a read missing and no rule to account for it.
+    expect(payload.duplicates).toEqual([
+      {
+        entry_id: dupOld["id"] as string,
+        newest: dupNew["id"] as string,
+        sync_reads: 1,
+      },
     ]);
   });
 

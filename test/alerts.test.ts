@@ -24,8 +24,10 @@ import {
   alertsFromEvent,
   isAlertUrl,
   signAlert,
+  staleDeliveryId,
   type AlertFilter,
 } from "../src/alerts.js";
+import { sha256Hex } from "../src/hash.js";
 import type { Event } from "../src/events.js";
 import { ALERT_KINDS, type AlertKind } from "../src/policy.js";
 import type { Entry } from "../src/schema.js";
@@ -128,7 +130,7 @@ describe("alertMatches", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The six kinds
+// The six kinds an event carries
 // ---------------------------------------------------------------------------
 
 describe("alertsFromEvent", () => {
@@ -275,6 +277,46 @@ describe("alertsFromEvent", () => {
     for (const alert of produced) {
       expect(ALERT_KINDS).toContain(alert.kind);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The seventh kind's id
+// ---------------------------------------------------------------------------
+
+describe("staleDeliveryId", () => {
+  const ENTRY = "nmk_target";
+  const EXPIRES = "2026-12-07";
+  const ENDPOINT = "hook_0123456789abcdef";
+
+  it("is the published recipe: alert_ and sixteen hex of the sha256", async () => {
+    const digest = await sha256Hex(`stale:${ENTRY}:${EXPIRES}:${ENDPOINT}`);
+    expect(await staleDeliveryId(ENTRY, EXPIRES, ENDPOINT)).toBe(
+      `alert_${digest.slice(0, 16)}`,
+    );
+  });
+
+  it("wears the shape a random delivery id wears", async () => {
+    expect(await staleDeliveryId(ENTRY, EXPIRES, ENDPOINT)).toMatch(
+      /^alert_[0-9a-f]{16}$/,
+    );
+  });
+
+  it("is the same id every time, which is what stops a second telling", async () => {
+    expect(await staleDeliveryId(ENTRY, EXPIRES, ENDPOINT)).toBe(
+      await staleDeliveryId(ENTRY, EXPIRES, ENDPOINT),
+    );
+  });
+
+  it("moves with each of the three things that make one alert one alert", async () => {
+    const base = await staleDeliveryId(ENTRY, EXPIRES, ENDPOINT);
+    // A different entry, a reopened window, another subscriber: three different
+    // alerts, and a recipe that collapsed any of them would silence one.
+    expect(await staleDeliveryId("nmk_other", EXPIRES, ENDPOINT)).not.toBe(base);
+    expect(await staleDeliveryId(ENTRY, "2027-03-07", ENDPOINT)).not.toBe(base);
+    expect(await staleDeliveryId(ENTRY, EXPIRES, "hook_ffffffffffffffff")).not.toBe(
+      base,
+    );
   });
 });
 

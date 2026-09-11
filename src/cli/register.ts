@@ -18,6 +18,11 @@
  * key can do it, so it is a second key file and a second signed request, made
  * after the registration and only when the registration held.
  *
+ * `--bind` is Section 5's: "an operator runs agents." A registered operator adds
+ * a key by naming its file — the new key signs the attestation, the existing key
+ * signs the request, and no TXT record is asked for again, because the one that
+ * proved the domain proved it when the first key was bound.
+ *
  * Nothing is decided here. The Worker resolves the TXT record itself, asks the
  * payment provider itself and verifies the attestation itself; this command
  * prints what it said.
@@ -46,7 +51,8 @@ import {
 
 const USAGE =
   "usage: register <key.json> <base-url> <operator-domain> [--domain <slug>] [--genesis <maintainer-key.json>]\n" +
-  "       register <key.json> <base-url> <operator-domain> --join <slug>";
+  "       register <key.json> <base-url> <operator-domain> --join <slug>\n" +
+  "       register <existing-key.json> <base-url> <operator-domain> --bind <new-key.json> [--domain <slug>]";
 
 /** Exit codes, named where they are decided rather than spelt at each return. */
 const OK = 0;
@@ -84,6 +90,12 @@ export interface RegisterPlan {
    * registering. Null on an ordinary registration.
    */
   readonly join: string | null;
+  /**
+   * `--bind <new-key.json>`: this run binds a second agent to the operator
+   * instead of registering. The key file of the agent being bound; null on an
+   * ordinary registration.
+   */
+  readonly bindKeyPath: string | null;
   /** The maintainer's key file, or null when this run only registers. */
   readonly genesisKeyPath: string | null;
 }
@@ -103,7 +115,12 @@ export function registerPlan(args: readonly string[]): RegisterPlan | null {
       index += 1;
       continue;
     }
-    if (argument !== "--genesis" && argument !== "--domain" && argument !== "--join") {
+    if (
+      argument !== "--genesis" &&
+      argument !== "--domain" &&
+      argument !== "--join" &&
+      argument !== "--bind"
+    ) {
       return null;
     }
     if (flags.has(argument)) return null;
@@ -131,12 +148,23 @@ export function registerPlan(args: readonly string[]): RegisterPlan | null {
     return null;
   }
 
+  // A bind is the whole run too, for the same reason: the operator is
+  // registered already, so there is no registration for `--genesis` to follow
+  // and no join to make in the same breath. `--domain` stays allowed, because a
+  // bind's attestation is for the domain the operator registered under and this
+  // is how the run is told which one that is.
+  const bindKeyPath = flags.get("--bind") ?? null;
+  if (bindKeyPath !== null && (join !== null || flags.has("--genesis"))) {
+    return null;
+  }
+
   return {
     keyPath,
     baseUrl,
     domain,
     recordDomain: flags.get("--domain") ?? DEFAULT_DOMAIN,
     join,
+    bindKeyPath,
     genesisKeyPath: flags.get("--genesis") ?? null,
   };
 }
@@ -170,6 +198,15 @@ export interface JoinRun {
   readonly status: number;
   readonly error: string | null;
   /** Whether the operator was already in that domain, which is not a failure. */
+  readonly already: boolean;
+}
+
+/** What one bind run did: the route's status, and the refusal it named. */
+export interface BindRun {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly error: string | null;
+  /** Whether that key was already bound, which is not a failure. */
   readonly already: boolean;
 }
 
@@ -345,6 +382,58 @@ export async function runJoin(input: {
   return { ok, status: joined.status, error, already };
 }
 
+/**
+ * Bind a second agent to an operator that is already registered.
+ *
+ * Whitepaper Section 5: an operator runs agents, and every one of them counts as
+ * one for validation. Two keys sign here and each signs its own half: the new
+ * key signs the independence attestation, because Section 10's statement is the
+ * new key's to make, and the existing key signs the request, because asking is
+ * the operator's act and only a key the operator already has may ask.
+ *
+ * The private keys are never printed and never sent; what goes over the wire is
+ * the new agent's id and the signature it made.
+ *
+ * A key already bound is not a failure, for the reason a repeat registration is
+ * not: the command is idempotent so an operator can rerun it.
+ */
+export async function runBind(input: {
+  /** The key that signs the request: an agent the operator already has. */
+  readonly key: ValidatorKey;
+  /** The key being bound, which signs the attestation. */
+  readonly newKey: ValidatorKey;
+  readonly baseUrl: string;
+  readonly domain: string;
+  /** The domain the operator registered under, whose sentence the new key signs. */
+  readonly recordDomain?: string;
+  readonly deps: RegisterDeps;
+}): Promise<BindRun> {
+  const { deps } = input;
+  const recordDomain = input.recordDomain ?? DEFAULT_DOMAIN;
+
+  const attestation = await signAttestation(input.newKey.privateKey, {
+    operator: input.domain,
+    agent: input.newKey.agentId,
+    domain: recordDomain,
+    signed_at: deps.now.toISOString(),
+  });
+  const bound = await post(
+    deps,
+    input.baseUrl,
+    `/operators/${encodeURIComponent(input.domain)}/agents`,
+    { agent: input.newKey.agentId, attestation },
+    input.key,
+  );
+  const error = errorOf(bound.body);
+  const already = bound.status === 409 && error === "agent_bound";
+  deps.io.stdout(
+    `bind ${input.domain} ${input.newKey.agentId} ${bound.status}${error === null ? "" : ` ${error}`}`,
+  );
+  const ok = bound.status === 201 || already;
+  if (!ok) deps.io.stderr(`bind: ${error ?? "unknown error"}`);
+  return { ok, status: bound.status, error, already };
+}
+
 /* c8 ignore start -- the process entry point, exercised by running the CLI. */
 if (
   process.argv[1] !== undefined &&
@@ -364,7 +453,16 @@ if (
   try {
     const deps = { http: new WebHttpClient(), now: new Date(), io };
     const run =
-      plan.join === null
+      plan.bindKeyPath !== null
+        ? await runBind({
+            key: await readKeyFile(plan.keyPath),
+            newKey: await readKeyFile(plan.bindKeyPath),
+            baseUrl: plan.baseUrl,
+            domain: plan.domain,
+            recordDomain: plan.recordDomain,
+            deps,
+          })
+        : plan.join === null
         ? await runRegister({
             key: await readKeyFile(plan.keyPath),
             baseUrl: plan.baseUrl,
