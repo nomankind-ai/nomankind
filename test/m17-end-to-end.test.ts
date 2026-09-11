@@ -283,7 +283,12 @@ function pricing(claim: string): Omit<SubmissionProposal, "author"> {
     domain: DEFAULT_DOMAIN,
     claim,
     before: "$35 per seat per month",
-    after: "$40 per seat per month",
+    // The value is the duplicate key (decision D-085): two live entries on
+    // one subject and category may not both assert it. Every entry this
+    // helper builds shares a subject and a category, and none of these tests
+    // is about duplicates, so each one's value names its own case, which the
+    // claim already does.
+    after: `$40 per seat per month, per: ${claim}`,
     effective_at: "2026-09-01",
     citation: PRICING_URL,
     snapshot_hash: PRICING_HASH,

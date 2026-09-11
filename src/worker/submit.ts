@@ -43,10 +43,12 @@ import {
 } from "../artifact.js";
 import { CORE_KEYS, domainOf, extractCore, type Core } from "../core.js";
 import { deriveEntry, type DerivedEntry } from "../derive.js";
+import { checkDuplicate, type DuplicateCandidate } from "../duplicate.js";
 import { appendEvent, type Event } from "../events.js";
 import { isTranscriptCategory } from "../evidence.js";
 import { canonicalize } from "../hash.js";
 import { archiveAddress, mediaType, snapshotHash } from "../normalize.js";
+import { LIST_PAGE_LIMIT } from "../policy.js";
 import { validateEntry } from "../schema.js";
 import { verifyEntrySignature } from "../sign.js";
 import type { D1Like } from "../storage/d1.js";
@@ -55,11 +57,13 @@ import {
   captureForHash,
   eventBySeq,
   eventsForEntry,
+  entriesNewestFirst,
   getEntry,
   headSeq,
   operatorForAgent,
   submitEntry,
   type CaptureRecord,
+  type StoredEntry,
 } from "../storage/repository.js";
 import {
   archiveCapture,
@@ -491,6 +495,60 @@ export type SubmissionAttempt =
   | { ok: true; prepared: PreparedSubmission }
   | { ok: false; response: Response };
 
+/** One stored row in the shape `checkDuplicate` reads. */
+function asCandidate(stored: StoredEntry): DuplicateCandidate {
+  return {
+    id: stored.entry["id"] as string,
+    core: extractCore(stored.entry),
+    status: String(stored.entry["status"]),
+  };
+}
+
+/**
+ * Every entry this core could be a duplicate of, newest submission first.
+ *
+ * The read is `entriesNewestFirst` rather than `readCandidates`: that one
+ * answers reads and so returns `status = 'verified'` only, by design
+ * (Section 8), while this door must also see the drafts, which hold their
+ * claim just as much as a verified entry does.
+ *
+ * One page is not enough. A subject and category may hold more entries than a
+ * page, and a truncated page would let the hundred-and-first duplicate through,
+ * so this pages down by submitted_seq until the pages run out. It stops early
+ * on the first page that yields a verdict: the candidates arrive newest first
+ * and every page before this one was checked in the same order, so the match
+ * found here is the newest live one holding the key, which is the entry the
+ * submitter is told to look at. What is returned is everything read so far,
+ * still in order, so the caller's own `checkDuplicate` reaches exactly that
+ * entry and names it.
+ *
+ * Exported because the dispute door runs the same check at its own place in
+ * its own order.
+ */
+export async function duplicateCandidates(
+  db: D1Like,
+  core: Core,
+): Promise<DuplicateCandidate[]> {
+  const seen: DuplicateCandidate[] = [];
+  let beforeSubmittedSeq: number | undefined = undefined;
+
+  for (;;) {
+    const page = await entriesNewestFirst(db, {
+      domain: domainOf(core),
+      subject: core["subject"] as string,
+      category: core["category"] as string,
+      limit: LIST_PAGE_LIMIT,
+      ...(beforeSubmittedSeq === undefined ? {} : { beforeSubmittedSeq }),
+    });
+    const candidates = page.map(asCandidate);
+    seen.push(...candidates);
+
+    if (page.length < LIST_PAGE_LIMIT) return seen;
+    if (!checkDuplicate(core, candidates).ok) return seen;
+    beforeSubmittedSeq = page[page.length - 1]!.submittedSeq;
+  }
+}
+
 /**
  * The whole POST /entries pipeline, from the parsed body to a submission ready
  * to write.
@@ -501,10 +559,22 @@ export type SubmissionAttempt =
  * its own: it hands its correction entry to this function and gets back exactly
  * what POST /entries would have got, refusals included, in the same order.
  *
- * The author's signature, the kernel's submission and supersession checks, the
- * duplicate lookup, the capture of the cited page under the norm rule, and the
+ * The order of the refusals, which is the order of what each one costs: the
+ * author's signature, the kernel's submission checks (the source policy among
+ * them, see below), the supersession checks, `duplicate_entry`,
+ * `fetcher_not_configured`, the duplicate lookup (D-085), the capture of the
+ * cited page under the norm rule, the receipt's shape, and the event and the
  * schema over the derived entry. Nothing is written and nothing is archived: a
  * refusal here leaves the log and the archive exactly where they were.
+ *
+ * `duplicate_entry` is one keyed read of this entry's own id and needs nothing
+ * of the environment, so it keeps its place ahead of both: an entry the log
+ * already holds is told so whatever else is true.
+ *
+ * `fetcher_not_configured` comes before the duplicate lookup because it is a
+ * fact about the environment rather than about this claim: an environment
+ * shaped like production, which can archive nothing, says so first and reads
+ * no candidates.
  *
  * The source policy (decision D-080) needs nothing of its own here, which is the
  * point of putting it in `checkSubmission`: `unknown_authority` and
@@ -519,12 +589,18 @@ export type SubmissionAttempt =
  * a challenge to an official-required claim cites an official source is the
  * dispute door's, run against the challenged entry's own domain and category
  * after the filing rules (src/worker/dispute.ts).
+ *
+ * `skipDuplicateCheck` is that same door's other exception: D-066 put
+ * `dispute_open` ahead of everything a second challenge could be wrong about,
+ * so the dispute door turns the duplicate lookup off here and runs it itself,
+ * after its filing refusals, with `duplicateCandidates` over the same query.
  */
 export async function prepareSubmission(
   env: Env,
   deps: SubmitDeps,
   requestAgent: string,
   raw: unknown,
+  options: { readonly skipDuplicateCheck?: boolean } = {},
 ): Promise<SubmissionAttempt> {
   const refused = (response: Response): SubmissionAttempt => ({
     ok: false,
@@ -573,6 +649,9 @@ export async function prepareSubmission(
   );
   if (!link.ok) return refused(refuse(422, link.reason));
 
+  // An id the log already holds. One keyed read about this request alone, so
+  // it comes before the environment's own answer and before any candidate is
+  // read: a resubmission of a sealed entry is told so whatever else is true.
   if ((await getEntry(env.DB, id)) !== null) {
     return refused(refuse(409, "duplicate_entry"));
   }
@@ -581,8 +660,41 @@ export async function prepareSubmission(
   // maintainer's own key (D-016). An unconfigured maintainer cannot sign the
   // provenance of a capture, so it does not take one: production says so and
   // refuses rather than archiving evidence nobody stands behind.
+  //
+  // Before the duplicate lookup, because a log that cannot take a capture at
+  // all has nothing to say about this particular claim: an environment shaped
+  // like production answers 503 first, whatever the claim is.
   const fetcher = env.MAINTAINER_AGENT_ID;
   if (fetcher === "") return refused(refuse(503, "fetcher_not_configured"));
+
+  // The same fact filed twice (decision D-085). After the refusals that need
+  // no read and before anything is fetched or archived, because a duplicate
+  // that costs the log a capture has already cost it something.
+  //
+  // The entries checked against are this core's own domain, subject and
+  // category — the rest of the key is the normalized value, compared in
+  // src/duplicate.ts — read newest first and paged to the end by
+  // `duplicateCandidates` above, so a subject with more live entries than one
+  // page cannot hide one.
+  //
+  // The dispute door hands its correction entry to this same function, but
+  // with `skipDuplicateCheck`: its own filing refusals are older than this one
+  // (D-066 put `dispute_open` ahead of everything a second challenge could be
+  // wrong about), so it runs the same check itself, after them.
+  if (!options.skipDuplicateCheck) {
+    const duplicate = checkDuplicate(
+      core,
+      await duplicateCandidates(env.DB, core),
+    );
+    if (!duplicate.ok) {
+      return refused(
+        json(
+          { error: duplicate.reason, duplicate_of: duplicate.duplicate_of },
+          422,
+        ),
+      );
+    }
+  }
 
   // Which categories carry a transcript is the entry's own domain's table
   // (decision D-071), read off the signed core rather than off a global.

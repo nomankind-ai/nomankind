@@ -29,6 +29,7 @@
 
 import type { EvidenceTier, TestVerdict } from "./evidence.js";
 import type { Sidecar } from "./derive.js";
+import { duplicateOf, duplicateRejections } from "./duplicate-reason.js";
 import type { Entry } from "./schema.js";
 import { isSourceClass, type SourceClass } from "./sources.js";
 
@@ -125,6 +126,19 @@ export interface ConfidenceInputs {
   readonly stale: boolean;
   readonly dispute_count: DisputeCounts;
   readonly report_count: ReportCounts;
+  /**
+   * The entry a validator rejected this one as a duplicate of (decision D-085),
+   * read out of the published reason form `duplicate_claim:<entry id>`, and how
+   * many of the entry's rejections carry it.
+   *
+   * An input and never a weight. The mechanical duplicate never reaches a row at
+   * all — the submit door refuses it — so every duplicate a reader can see here
+   * is one validators judged, and what the two fields publish is that judgment
+   * and its size: which entry was named, and whether one validator said it or
+   * three. Null and zero for the ordinary entry, which is most of them.
+   */
+  readonly duplicate_of: string | null;
+  readonly duplicate_rejections: number;
   readonly superseded: boolean;
   readonly overturned: boolean;
   readonly status: string;
@@ -302,6 +316,8 @@ export function confidenceInputs(input: {
       total: reports.length,
       distinct_operators: reportOperators.size,
     },
+    duplicate_of: duplicateOf(input.entry),
+    duplicate_rejections: duplicateRejections(input.entry),
     superseded: entry["superseded_by"] !== null && entry["superseded_by"] !== undefined,
     overturned: entry["overturned_by"] !== null && entry["overturned_by"] !== undefined,
     status,

@@ -181,6 +181,43 @@ validators make, and no host list can make it for them.
 Both lists are the maintainer's published policy, not whitepaper lists, and both
 move only by a later decision.
 
+## Duplicate claims
+
+The same fact filed twice is worth nothing twice, and the rule that says so is
+the same in every domain, so it is written here once rather than per domain.
+
+A duplicate is a claim with the same **domain, subject, category and normalized
+value** as one already in the log — the value being the entry's `after` put
+through the norm-v1.2 text normalization, so the same number written with a
+different amount of whitespace is the same value. Nothing else in the core is
+part of the key: two entries with the same value at a different `effective_at`
+are not duplicates by this rule.
+
+The rule reads against the **live** statuses only, `draft` and `verified`. A
+`rejected`, `superseded` or `overturned` entry is not live, and a fact may
+always be refiled after any of those — that is how the log corrects itself.
+
+The exception is **supersession**. An entry naming the live one in its own
+`supersedes` is the sanctioned way to refile a fact, so it is accepted: the
+target's `superseded_by` is written when the superseder verifies, and exactly
+one of the two is live at the end.
+
+So the log refuses the mechanical case and leaves the judgment to validators.
+A submission whose key matches a live entry it does not supersede is refused at
+the door with 422 `duplicate_claim`, naming the existing entry in `duplicate_of`,
+before the citation is fetched and before anything is written. Everything the
+key cannot decide — two entries saying the same thing in different words, or at
+a different `effective_at` — is a validator's judgment, and a validator making
+it rejects in a published form: the reason `duplicate_claim:<entry id>`, naming
+the verified entry the one under judgment duplicates. Nothing new is signed; the
+reason is the schema's own `approvers[].reason` string, and readers parse the id
+back out of it.
+
+And a duplicate is not paid. A verified entry delivered in a paid sync counts as
+a read only when it is the newest live verified entry of its duplicate group at
+the moment the day is published, so two verified entries that are the same fact
+earn one entry's read between them and not two.
+
 ## Adding a domain
 
 A new domain is a decision, not a pull request: the block above is filled in

@@ -23,6 +23,13 @@
  * clock and a key — so the checkpoint drives it in process against handleRequest
  * and a test drives it without a network. `main` is thin.
  *
+ * Decision D-085 adds the one judgment this fixture can make without looking at
+ * a page: `--duplicate-of <entry-id>` says the operator has decided this entry
+ * restates a verified entry it does not supersede. That is a judgment about
+ * meaning, not about bytes, so the run skips its own fetch entirely and signs a
+ * rejection in the published form, `duplicate_claim:<entry-id>`. The mechanical
+ * duplicate never reaches a validator: the submit door refuses it.
+ *
  * A private key is never printed. node:fs and node:path are allowed in this CLI
  * file only; everything it imports stays Workers-safe.
  */
@@ -37,6 +44,10 @@ import {
 } from "../adapters/fetch.js";
 import { receiptArtifactHash } from "../artifact.js";
 import { domainOf, extractCore, type Core } from "../core.js";
+import {
+  DUPLICATE_REASON_PREFIX,
+  parseDuplicateReason,
+} from "../duplicate-reason.js";
 import { base64urlDecode } from "../encoding.js";
 import type { ApproverRecord } from "../events.js";
 import { isTranscriptCategory, proposedTest } from "../evidence.js";
@@ -51,11 +62,32 @@ export interface ValidatorIo {
   stderr: (line: string) => void;
 }
 
-const USAGE =
-  "usage: validator <key.json> <base-url> <entry-id> [--assigned]";
+export const USAGE =
+  "usage: validator <key.json> <base-url> <entry-id> [--assigned]" +
+  " [--duplicate-of <entry-id>]";
 
 /** The reason a validator signs when the page no longer hashes to the entry's. */
 export const SNAPSHOT_MISMATCH = "snapshot_mismatch";
+
+/**
+ * The reason a validator signs when it judges an entry a duplicate: the
+ * published form of decision D-085, built from the one place it is defined.
+ */
+export function duplicateReason(entryId: string): string {
+  return `${DUPLICATE_REASON_PREFIX}${entryId}`;
+}
+
+/**
+ * Is this an id a duplicate rejection can name?
+ *
+ * Asked by building the reason and reading it back, rather than by a second
+ * copy of the id pattern. The form is `parseDuplicateReason`'s to define, so an
+ * id this command would sign into a reason that module cannot read is an id
+ * this command refuses.
+ */
+function namesAnEntry(entryId: string): boolean {
+  return parseDuplicateReason(duplicateReason(entryId)) === entryId;
+}
 
 /** The one observation method whose receipt must carry a billing line. */
 const METERED_CALL = "metered_call";
@@ -404,6 +436,13 @@ async function operatorFor(
  * Validate one entry: read it, fetch its citation, judge the test, decide on the
  * snapshot rule, sign the record and post it.
  *
+ * `duplicateOf` is the one run that never fetches. The operator has already
+ * judged that this entry restates the entry it names (D-085), and no capture of
+ * the citation could settle that question one way or the other, so taking one
+ * would be a fetch whose answer is discarded. The record carries the published
+ * reason and no snapshot hash: a rejection may carry one but nothing forces it
+ * to, and this validator took none.
+ *
  * The exit code the CLI reports is the caller's to compute from `ok`: a 201 and
  * a 409 entry_closed are both a run that did its job, because the third of three
  * validators in a small pool finds the entry already decided.
@@ -412,6 +451,8 @@ export async function runValidator(input: {
   readonly baseUrl: string;
   readonly entryId: string;
   readonly assigned?: boolean;
+  /** The entry this one duplicates, when the operator judged it one. */
+  readonly duplicateOf?: string | null;
   readonly deps: ValidatorDeps;
   readonly io: ValidatorIo;
 }): Promise<ValidatorRun> {
@@ -444,15 +485,30 @@ export async function runValidator(input: {
   const citation = core["citation"];
   if (typeof citation !== "string") return stopped("unsupported_citation");
 
-  const own = await fetchAndHash(deps.fetcher, citation);
-  if (!own.ok) return stopped(own.reason);
+  const duplicateOf = input.duplicateOf ?? null;
+  if (duplicateOf !== null && !namesAnEntry(duplicateOf)) {
+    return stopped("bad_duplicate_of");
+  }
 
+  // The test judgment is a reading of the entry's own prose and costs no
+  // request, so a duplicate rejection still states it: the schema requires one
+  // on every approver record of an observed entry, whatever the decision was.
   const judged = judgeTest(core);
-  const decided = decideSnapshot(core, own.snapshot.hash);
+
+  let own: Snapshot | null = null;
+  let decided: { decision: "approve" | "reject"; reason: string | null };
+  if (duplicateOf === null) {
+    const attempt = await fetchAndHash(deps.fetcher, citation);
+    if (!attempt.ok) return stopped(attempt.reason);
+    own = attempt.snapshot;
+    decided = decideSnapshot(core, own.hash);
+  } else {
+    decided = { decision: "reject", reason: duplicateReason(duplicateOf) };
+  }
 
   // The validator's own measurement, when it accepted the test and could run it.
   let observation: Record<string, unknown> | null = null;
-  if (judged.predicate !== null && judged.test_accepted === true) {
+  if (own !== null && judged.predicate !== null && judged.test_accepted === true) {
     const entryObservation = core["observation"];
     const method =
       typeof entryObservation === "object" && entryObservation !== null
@@ -467,7 +523,7 @@ export async function runValidator(input: {
       subject: core["subject"],
       test: `${judged.predicate.form}:${judged.predicate.value}`,
       citation,
-      snapshot: own.snapshot,
+      snapshot: own,
       observedAt,
       observer: deps.key.agentId,
     });
@@ -488,7 +544,7 @@ export async function runValidator(input: {
     operator,
     decision: decided.decision,
     reason: decided.reason,
-    snapshot_hash: own.snapshot.hash,
+    snapshot_hash: own === null ? null : own.hash,
     assigned_random: input.assigned === true,
     test_accepted: judged.test_accepted,
     reproduction: null,
@@ -520,7 +576,8 @@ export async function runValidator(input: {
   const error = response.status === 201 ? null : errorOf(body);
 
   io.stdout(
-    `decision ${record.decision}${record.reason === null ? "" : ` ${record.reason}`} hash ${own.snapshot.hash}`,
+    `decision ${record.decision}${record.reason === null ? "" : ` ${record.reason}`}` +
+      `${own === null ? "" : ` hash ${own.hash}`}`,
   );
   io.stdout(
     `response ${response.status}${error === null ? "" : ` ${error}`}`,
@@ -574,14 +631,51 @@ export function reasonOf(error: unknown): string {
   return "unknown error";
 }
 
-/* c8 ignore start -- the process entry point, exercised by running the CLI. */
-if (
-  process.argv[1] !== undefined &&
-  import.meta.filename === resolve(process.argv[1])
-) {
-  const args = process.argv.slice(2);
-  const assigned = args.includes("--assigned");
-  const positional = args.filter((argument) => !argument.startsWith("--"));
+// ---------------------------------------------------------------------------
+// The command line
+// ---------------------------------------------------------------------------
+
+/** One command line, read. */
+export interface ValidatorArgs {
+  readonly keyPath: string;
+  readonly baseUrl: string;
+  readonly entryId: string;
+  readonly assigned: boolean;
+  readonly duplicateOf: string | null;
+}
+
+/**
+ * Read the arguments, or answer null for the usage line and exit 2.
+ *
+ * `--duplicate-of` takes the id of the entry this one duplicates, and the id is
+ * checked here rather than at the door: a malformed id would be signed into a
+ * reason nobody can parse, and a rejection whose published form does not parse
+ * is a rejection the entry page and the confidence inputs cannot read. Better
+ * the usage line than a signed record that says nothing.
+ */
+export function parseValidatorArgs(
+  args: readonly string[],
+): ValidatorArgs | null {
+  const positional: string[] = [];
+  let assigned = false;
+  let duplicateOf: string | null = null;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (argument === "--assigned") {
+      assigned = true;
+    } else if (argument === "--duplicate-of") {
+      const value = args[index + 1];
+      if (value === undefined || !namesAnEntry(value)) return null;
+      duplicateOf = value;
+      index += 1;
+    } else if (argument.startsWith("--")) {
+      return null;
+    } else {
+      positional.push(argument);
+    }
+  }
+
   const [keyPath, baseUrl, entryId] = positional;
   if (
     keyPath === undefined ||
@@ -589,9 +683,22 @@ if (
     entryId === undefined ||
     positional.length > 3
   ) {
+    return null;
+  }
+  return { keyPath, baseUrl, entryId, assigned, duplicateOf };
+}
+
+/* c8 ignore start -- the process entry point, exercised by running the CLI. */
+if (
+  process.argv[1] !== undefined &&
+  import.meta.filename === resolve(process.argv[1])
+) {
+  const parsed = parseValidatorArgs(process.argv.slice(2));
+  if (parsed === null) {
     console.error(USAGE);
     process.exit(2);
   }
+  const { keyPath, baseUrl, entryId, assigned, duplicateOf } = parsed;
 
   const io: ValidatorIo = {
     stdout: (line: string) => console.log(line),
@@ -603,6 +710,7 @@ if (
       baseUrl,
       entryId,
       assigned,
+      duplicateOf,
       io,
       deps: {
         http: new WebHttpClient(),

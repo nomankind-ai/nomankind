@@ -92,6 +92,7 @@ import {
   headSeq,
   latestAnchor,
   latestEventOfType,
+  entriesNewestFirst,
   latestSeal,
   listEntries,
   listOperators,
@@ -147,6 +148,7 @@ import {
   nextReadCounter,
   readCandidates,
   readCountsOn,
+  readCountsSplitOn,
   readCounterRangeOn,
   readReceiptByCounter,
   readReceiptsForEntry,
@@ -3241,6 +3243,57 @@ describe("sync receipts", () => {
     ).toEqual([{ entry_id: "nmk_sync2", count: 2 }]);
   });
 
+  /**
+   * Section 9 pays for "one verified entry returned by the paid API, or one
+   * verified entry delivered in a paid sync", and decision D-085 owes only one
+   * of the two for a duplicate group's sync delivery. The publisher can only
+   * drop the sync half of an entry's day if the store hands it the two halves
+   * apart, so this is the query behind that rule.
+   */
+  it("splits a day into read reads and sync reads, and pages the split", async () => {
+    // The same two days the sum above asserted, told apart. nmk_sync1 and
+    // nmk_sync2 each have one read row and one verified sync delivery.
+    expect(
+      await readCountsSplitOn(syncing.db, "2026-09-09", undefined, 10),
+    ).toEqual([
+      { entry_id: "nmk_sync1", read_reads: 1, sync_reads: 1 },
+      { entry_id: "nmk_sync2", read_reads: 1, sync_reads: 1 },
+    ]);
+
+    // The earlier day's only receipt is a sync, so every read on it is a sync
+    // read and the read column is a real zero rather than a missing row.
+    expect(
+      await readCountsSplitOn(syncing.db, "2026-09-08", undefined, 10),
+    ).toEqual([{ entry_id: "nmk_sync1", read_reads: 0, sync_reads: 1 }]);
+    expect(
+      await readCountsSplitOn(syncing.db, "2026-09-07", undefined, 10),
+    ).toEqual([]);
+
+    // Keyset paging by entry_id, on the same boundaries the summed query uses:
+    // the publisher pages both the same way, so they must agree about where a
+    // page ends.
+    const page = await readCountsSplitOn(syncing.db, "2026-09-09", undefined, 1);
+    expect(page).toEqual([
+      { entry_id: "nmk_sync1", read_reads: 1, sync_reads: 1 },
+    ]);
+    expect(
+      await readCountsSplitOn(syncing.db, "2026-09-09", "nmk_sync1", 10),
+    ).toEqual([{ entry_id: "nmk_sync2", read_reads: 1, sync_reads: 1 }]);
+    expect(
+      await readCountsSplitOn(syncing.db, "2026-09-09", "nmk_sync2", 10),
+    ).toEqual([]);
+
+    // And the summed query is the split, added: one answer, not two.
+    for (const day of ["2026-09-07", "2026-09-08", "2026-09-09"]) {
+      expect(await readCountsOn(syncing.db, day, undefined, 10)).toEqual(
+        (await readCountsSplitOn(syncing.db, day, undefined, 10)).map((row) => ({
+          entry_id: row.entry_id,
+          count: row.read_reads + row.sync_reads,
+        })),
+      );
+    }
+  });
+
   it("bounds and totals a day over both kinds", async () => {
     // Two read rows and two verified sync entries, bounded by counters 1 and 3.
     expect(await readCounterRangeOn(syncing.db, "2026-09-09")).toEqual({
@@ -4663,5 +4716,191 @@ describe("domains in the store", () => {
     expect(await operatorsInDomain(store.db, DEFAULT_DOMAIN, 10)).toContain(
       signed,
     );
+  });
+});
+
+describe("the duplicate door's backward read", () => {
+  // Decision D-085. The door asks for every entry on one domain, subject and
+  // category — drafts included, because a draft holds its claim — newest
+  // submission first, and pages down rather than truncating at the first page.
+  const SUBJECT = "openai/gpt-5";
+  const OTHER_SUBJECT = "anthropic/claude-4";
+  const CATEGORY = "pricing";
+  const OTHER_DOMAIN = "elsewhere";
+
+  /** The rows, in the order they were submitted: oldest first. */
+  const ROWS = [
+    { id: "nmk_back1", subject: SUBJECT, domain: DEFAULT_DOMAIN, draft: false },
+    {
+      id: "nmk_back2",
+      subject: OTHER_SUBJECT,
+      domain: DEFAULT_DOMAIN,
+      draft: false,
+    },
+    { id: "nmk_back3", subject: SUBJECT, domain: OTHER_DOMAIN, draft: false },
+    { id: "nmk_back4", subject: SUBJECT, domain: DEFAULT_DOMAIN, draft: true },
+    { id: "nmk_back5", subject: SUBJECT, domain: DEFAULT_DOMAIN, draft: false },
+  ] as const;
+
+  let backward: TestDatabase;
+
+  /** The world's own core, re-keyed and re-subjected. Nothing is invented. */
+  function coreFor(
+    source: Entry,
+    row: (typeof ROWS)[number],
+  ): Core {
+    const record = source as unknown as Record<string, unknown>;
+    const core: Record<string, unknown> = {};
+    for (const key of CORE_KEYS) core[key] = record[key];
+    core["id"] = row.id;
+    core["subject"] = row.subject;
+    core["domain"] = row.domain;
+    return core as Core;
+  }
+
+  /** The world's own derived entry, moved to this row's id and subject. */
+  function entryFor(source: Entry, row: (typeof ROWS)[number]): Entry {
+    return {
+      ...(source as unknown as Record<string, unknown>),
+      id: row.id,
+      subject: row.subject,
+      domain: row.domain,
+    } as Entry;
+  }
+
+  function idsOf(page: readonly { entry: Entry }[]): string[] {
+    return page.map(
+      (stored) => (stored.entry as unknown as Record<string, string>)["id"]!,
+    );
+  }
+
+  beforeAll(async () => {
+    backward = await openTestDatabase();
+
+    // A real log, one entry_submitted per row in submission order, so
+    // submitted_seq is the log position and not a number a test chose.
+    let log: Event[] = [];
+    for (const row of ROWS) {
+      log = await appendEvent(log, {
+        at: "2026-09-08T00:00:00.000Z",
+        type: "entry_submitted",
+        entry_id: row.id,
+        payload: {
+          core: coreFor(row.draft ? world.draftEntry : world.entry, row),
+          signature: (world.entry as unknown as Record<string, string>)[
+            "signature"
+          ]!,
+        },
+      });
+    }
+    await appendEvents(backward.db, log);
+
+    for (const row of ROWS) {
+      const source = row.draft ? world.draftEntry : world.entry;
+      const sidecar = (await getEntry(
+        test.db,
+        row.draft ? DRAFT_ENTRY_ID : VERIFIED_ENTRY_ID,
+      ))!.sidecar;
+      await putEntry(
+        backward.db,
+        entryFor(source, row),
+        sidecar,
+        log[log.length - 1]!.seq,
+      );
+    }
+  });
+
+  afterAll(async () => {
+    await backward?.dispose();
+  });
+
+  it("answers newest submission first, drafts among them", async () => {
+    const page = await entriesNewestFirst(backward.db, {
+      subject: SUBJECT,
+      category: CATEGORY,
+      domain: DEFAULT_DOMAIN,
+      limit: 10,
+    });
+    expect(idsOf(page)).toEqual(["nmk_back5", "nmk_back4", "nmk_back1"]);
+    // No status filter at all: the draft is in the middle of the answer, and
+    // which statuses are live is src/duplicate.ts's rule, not this query's.
+    expect(
+      page.map(
+        (stored) =>
+          (stored.entry as unknown as Record<string, string>)["status"],
+      ),
+    ).toEqual(["verified", "draft", "verified"]);
+  });
+
+  it("narrows by subject, by category and by domain", async () => {
+    expect(
+      idsOf(
+        await entriesNewestFirst(backward.db, {
+          subject: OTHER_SUBJECT,
+          category: CATEGORY,
+          domain: DEFAULT_DOMAIN,
+          limit: 10,
+        }),
+      ),
+    ).toEqual(["nmk_back2"]);
+
+    expect(
+      idsOf(
+        await entriesNewestFirst(backward.db, {
+          subject: SUBJECT,
+          category: CATEGORY,
+          domain: OTHER_DOMAIN,
+          limit: 10,
+        }),
+      ),
+    ).toEqual(["nmk_back3"]);
+
+    // Omitted, the domain narrows nothing: the same subject in a second domain
+    // is in the answer, which is what makes the filter above a filter.
+    expect(
+      idsOf(
+        await entriesNewestFirst(backward.db, {
+          subject: SUBJECT,
+          category: CATEGORY,
+          limit: 10,
+        }),
+      ),
+    ).toEqual(["nmk_back5", "nmk_back4", "nmk_back3", "nmk_back1"]);
+
+    expect(
+      await entriesNewestFirst(backward.db, {
+        subject: SUBJECT,
+        category: "outage",
+        domain: DEFAULT_DOMAIN,
+        limit: 10,
+      }),
+    ).toEqual([]);
+  });
+
+  it("stops at the caller's own limit and resumes below it", async () => {
+    const query = {
+      subject: SUBJECT,
+      category: CATEGORY,
+      domain: DEFAULT_DOMAIN,
+    };
+    const first = await entriesNewestFirst(backward.db, { ...query, limit: 2 });
+    expect(idsOf(first)).toEqual(["nmk_back5", "nmk_back4"]);
+
+    // Keyset, not offset: the caller passes back the lowest position it saw,
+    // and the row at that position is not served twice.
+    const next = await entriesNewestFirst(backward.db, {
+      ...query,
+      limit: 10,
+      beforeSubmittedSeq: first[first.length - 1]!.submittedSeq,
+    });
+    expect(idsOf(next)).toEqual(["nmk_back1"]);
+
+    expect(
+      await entriesNewestFirst(backward.db, {
+        ...query,
+        limit: 10,
+        beforeSubmittedSeq: next[next.length - 1]!.submittedSeq,
+      }),
+    ).toEqual([]);
   });
 });

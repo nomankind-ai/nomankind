@@ -38,8 +38,11 @@ import {
 import { CANNOT_REPRODUCE, runReconfirm } from "../src/cli/reconfirm.js";
 import { BAD_FIELDS, checkFields, runSubmit } from "../src/cli/submit.js";
 import {
+  duplicateReason,
+  parseValidatorArgs,
   runValidator,
   SNAPSHOT_MISMATCH,
+  USAGE,
   type HttpClient,
   type ValidatorIo,
 } from "../src/cli/validator.js";
@@ -368,8 +371,12 @@ describe("submit, from the author's own fields", () => {
   it("submits a superseding draft when the fields name a target", async () => {
     const run = await submitAt(
       maintainer,
+      // Its own value, not the previous draft's: two entries asserting the same
+      // value about the same subject are one claim filed twice, and the door
+      // refuses that outright (decision D-085).
       fieldsFor("m15 clients: a first superseding claim on the checkpoint entry", {
         supersedes: checkpointId,
+        after: "m15 clients: the cited page is the documented request limit, as filed first",
       }),
     );
 
@@ -491,6 +498,7 @@ describe("supersession, through submit and validate", () => {
       maintainer,
       fieldsFor("m15 clients: the request limit is now what the cited page says", {
         supersedes: checkpointId,
+        after: "m15 clients: the cited page is the documented request limit, as filed second",
       }),
       at,
     );
@@ -524,5 +532,115 @@ describe("supersession, through submit and validate", () => {
     expect(target["superseded_by"]).toBe(superseder);
     expect(target["status"]).toBe("superseded");
     expect(validateEntry(target).errors).toEqual([]);
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// (e) validate --duplicate-of
+// ---------------------------------------------------------------------------
+
+/**
+ * Decision D-085: the mechanical duplicate is refused at the submit door, and
+ * the judgment case — two differently worded claims that mean the same thing —
+ * is the validators'. A validator who makes that judgment rejects in the
+ * published form, `duplicate_claim:<entry id>`, and `npm run validate` carries
+ * it under `--duplicate-of`.
+ *
+ * A judgment about meaning is not settled by a capture, so the run takes none.
+ */
+describe("validate --duplicate-of", () => {
+  it("rejects in the published form, and fetches nothing", async () => {
+    const at = day(WINDOW_DAYS + 1);
+    clock = at;
+
+    const submitted = await submitAt(
+      maintainer,
+      fieldsFor("m15 clients: the request limit, said again in other words", {
+        after: "m15 clients: the same limit, restated for a validator to judge",
+      }),
+      at,
+    );
+    expect([submitted.code, submitted.entryStatus]).toEqual([0, "draft"]);
+    const duplicate = submitted.entryId!;
+
+    const fetcher = new FixtureFetcher(PAGES);
+    const run = await runValidator({
+      baseUrl: TEST_ORIGIN,
+      entryId: duplicate,
+      duplicateOf: checkpointId,
+      deps: { http, fetcher, now: at, key: fixtures[0]! },
+      io,
+    });
+
+    expect([run.ok, run.decision, run.reason]).toEqual([
+      true,
+      "reject",
+      duplicateReason(checkpointId),
+    ]);
+    expect(run.reason).toBe(`duplicate_claim:${checkpointId}`);
+
+    // The whole point: no capture was taken. The judgment is about meaning, and
+    // the page could not have settled it either way.
+    expect(fetcher.requests).toEqual([]);
+
+    // The record on the log says exactly what the validator signed: the
+    // published reason, and no snapshot hash, because it took no snapshot.
+    const stored = await fetched(duplicate);
+    const approvers = stored["approvers"] as Record<string, unknown>[];
+    expect(approvers.length).toBe(1);
+    expect(approvers[0]!["decision"]).toBe("reject");
+    expect(approvers[0]!["reason"]).toBe(duplicateReason(checkpointId));
+    expect(approvers[0]!["snapshot_hash"]).toBeNull();
+    expect(validateEntry(stored).errors).toEqual([]);
+  }, 60_000);
+
+  it("reads the flag off the command line, and refuses a malformed id", () => {
+    const id = checkpointId;
+    const base = ["key.json", TEST_ORIGIN, id];
+
+    expect(parseValidatorArgs(base)).toEqual({
+      keyPath: "key.json",
+      baseUrl: TEST_ORIGIN,
+      entryId: id,
+      assigned: false,
+      duplicateOf: null,
+    });
+
+    // The flag's value is the flag's, never a fourth positional argument.
+    expect(parseValidatorArgs([...base, "--assigned", "--duplicate-of", id])).toEqual(
+      {
+        keyPath: "key.json",
+        baseUrl: TEST_ORIGIN,
+        entryId: id,
+        assigned: true,
+        duplicateOf: id,
+      },
+    );
+
+    // An id nobody could have minted, and a flag with nothing after it: the
+    // usage line, exit 2, rather than a signed reason that parses to nothing.
+    expect(parseValidatorArgs([...base, "--duplicate-of", "nmk_nope"])).toBeNull();
+    expect(parseValidatorArgs([...base, "--duplicate-of", id.toUpperCase()])).toBeNull();
+    expect(parseValidatorArgs([...base, "--duplicate-of"])).toBeNull();
+    expect(parseValidatorArgs([...base, "extra", "--duplicate-of", id])).toBeNull();
+    expect(USAGE).toContain("--duplicate-of <entry-id>");
+  });
+
+  it("refuses a malformed id inside the run too, before any request", async () => {
+    const fetcher = new FixtureFetcher(PAGES);
+    const run = await runValidator({
+      baseUrl: TEST_ORIGIN,
+      entryId: checkpointId,
+      duplicateOf: "not-an-entry-id",
+      deps: { http, fetcher, now: day(WINDOW_DAYS + 1), key: fixtures[2]! },
+      io,
+    });
+
+    expect([run.ok, run.error, run.decision]).toEqual([
+      false,
+      "bad_duplicate_of",
+      null,
+    ]);
+    expect(fetcher.requests).toEqual([]);
   }, 60_000);
 });

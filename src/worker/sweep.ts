@@ -113,6 +113,7 @@ import {
   type EntryStatus,
 } from "../derive.js";
 import { openRevalidation, revalidationDrawExclusions } from "../dispute.js";
+import { duplicateKey, sameDuplicateKey } from "../duplicate.js";
 import {
   appendEvent,
   type Event,
@@ -194,8 +195,9 @@ import {
   putLedgerRows,
   putMirror,
   putSweepSteps,
+  readCandidates,
   readCounterRangeOn,
-  readCountsOn,
+  readCountsSplitOn,
   recordAssignment,
   recordAssignmentMissed,
   recordAttestationExpired,
@@ -216,6 +218,7 @@ import {
   staleDue,
   unwitnessedSeals,
   type OperatorRecord,
+  type ReadCountSplitRow,
   type StoredBountyRow,
   type SweepStepRow,
   type StoredEntry,
@@ -574,20 +577,86 @@ function dayAfter(date: string): string {
 }
 
 /**
+ * Is this entry the one its duplicate group is paid for?
+ *
+ * Whitepaper Section 9, Money: a read is "one verified entry delivered in a
+ * paid sync". A sync hands the trainer everything the delta holds, and when two
+ * verified entries assert the same fact about the same subject — the mechanical
+ * duplicate of decision D-085, same domain, subject, category and normalized
+ * `after` — the trainer was delivered one fact twice. One of the two is paid
+ * for, and the paper has already said which: the newest is what the log stands
+ * behind, which is the one GET /read serves.
+ *
+ * The candidates are the reader's own query, so "verified", "same subject and
+ * category" and "newest submission first" are the store's answer rather than
+ * this step's, and the first candidate whose key matches is by construction the
+ * newest of the group. One page of it: the newest of a group is at the front of
+ * a newest-first list, and the entry being asked about is in that page whenever
+ * anything ahead of it is.
+ *
+ * An entry with no candidate group at all — nothing verified shares its key,
+ * not even itself, which is what an entry that has since moved looks like — is
+ * left alone. Dropping a payment on a question the store could not answer would
+ * be a silent under-count, and Section 9 asks readers to check for exactly that.
+ */
+async function paidForGroup(db: D1Like, stored: StoredEntry): Promise<boolean> {
+  const core = extractCore(stored.entry);
+  const key = duplicateKey(core);
+  const candidates = await readCandidates(db, {
+    domain: key.domain,
+    subject: key.subject,
+    category: key.category,
+    limit: LIST_PAGE_LIMIT,
+  });
+  const id = stored.entry["id"];
+  for (const candidate of candidates) {
+    if (!sameDuplicateKey(duplicateKey(extractCore(candidate.entry)), key)) {
+      continue;
+    }
+    return candidate.entry["id"] === id;
+  }
+  return true;
+}
+
+/**
  * Every row of one day's reads, grouped by entry, however many pages that takes.
  * A day with more entries than one page still publishes in full: a total that
  * left a page out would be exactly the under-count Section 9 asks readers to
  * check for.
+ *
+ * The two kinds of read are counted apart and then added, because only one of
+ * them can be owed for a duplicate. A read through GET /read is a read of what
+ * the log chose to serve and is always owed. A sync delivers the whole delta,
+ * so a verified entry that is not the newest of its duplicate group was
+ * delivered as a second copy of a fact the trainer already has, and its sync
+ * reads are dropped (decision D-085). An entry left with nothing is left out of
+ * the payload entirely, exactly as an entry nobody read is.
  */
 async function readsOn(db: D1Like, date: string): Promise<ReadCountRow[]> {
-  const rows: ReadCountRow[] = [];
+  const split: ReadCountSplitRow[] = [];
   let afterEntryId: string | undefined;
   for (;;) {
-    const page = await readCountsOn(db, date, afterEntryId, LIST_PAGE_LIMIT);
+    const page = await readCountsSplitOn(db, date, afterEntryId, LIST_PAGE_LIMIT);
     if (page.length === 0) break;
-    rows.push(...page);
+    split.push(...page);
     if (page.length < LIST_PAGE_LIMIT) break;
     afterEntryId = page[page.length - 1]!.entry_id;
+  }
+
+  const rows: ReadCountRow[] = [];
+  for (const row of split) {
+    let count = row.read_reads + row.sync_reads;
+    if (row.sync_reads > 0) {
+      const stored = await getEntry(db, row.entry_id);
+      if (
+        stored !== null &&
+        stored.entry["status"] === "verified" &&
+        !(await paidForGroup(db, stored))
+      ) {
+        count -= row.sync_reads;
+      }
+    }
+    if (count > 0) rows.push({ entry_id: row.entry_id, count });
   }
   return rows;
 }
