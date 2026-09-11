@@ -49,6 +49,7 @@ import {
   openDispute,
   openRevalidation,
 } from "../dispute.js";
+import { checkDuplicate } from "../duplicate.js";
 import type { Event, EventInput } from "../events.js";
 import { DISPUTE_STAKE_STANDING, LIST_PAGE_LIMIT } from "../policy.js";
 import { validateEntry, type ValidationError } from "../schema.js";
@@ -74,6 +75,7 @@ import {
 import {
   ArchiveUnreachable,
   archivePrepared,
+  duplicateCandidates,
   prepareSubmission,
   type SubmitDeps,
 } from "./submit.js";
@@ -279,11 +281,22 @@ async function file(
 
   // "It passes through the same validation process." The same pipeline, then,
   // and not a second one that could drift from it.
-  const attempt = await prepareSubmission(env, deps, auth.agent, {
-    ...(body.receipt === undefined
-      ? { entry: body.entry }
-      : { entry: body.entry, receipt: body.receipt }),
-  });
+  //
+  // With one refusal held back: the duplicate lookup (D-085). A second
+  // challenge repeating what an open one already says is first of all a second
+  // challenge, and D-066 settled that `dispute_open` is the answer to that —
+  // so the lookup runs below, after the filing refusals, in the same words.
+  const attempt = await prepareSubmission(
+    env,
+    deps,
+    auth.agent,
+    {
+      ...(body.receipt === undefined
+        ? { entry: body.entry }
+        : { entry: body.entry, receipt: body.receipt }),
+    },
+    { skipDuplicateCheck: true },
+  );
   if (!attempt.ok) return attempt.response;
   const { prepared } = attempt;
 
@@ -313,6 +326,26 @@ async function file(
     // request: 409, as every other "already in flight" refusal is.
     const status = filing.reason === "dispute_open" ? 409 : 422;
     return refuse(status, filing.reason);
+  }
+
+  // The same fact filed twice (decision D-085), held back from the pipeline
+  // above and asked here instead: after the filing refusals, so a second
+  // challenge while one is open is still `dispute_open` (D-066), and before
+  // anything is written, exactly like the source gate below.
+  //
+  // The candidates are the correction's own domain, subject and category, read
+  // with the submit door's own query and put in the submit door's own order, so
+  // a correction that repeats a live correction of the same subject is refused
+  // in the same words the submit door would have used.
+  const duplicate = checkDuplicate(
+    prepared.core,
+    await duplicateCandidates(env.DB, prepared.core),
+  );
+  if (!duplicate.ok) {
+    return json(
+      { error: duplicate.reason, duplicate_of: duplicate.duplicate_of },
+      422,
+    );
   }
 
   // Section 4 and decision D-080: a category with an authoritative source by

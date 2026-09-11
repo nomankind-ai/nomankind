@@ -23,6 +23,12 @@
  * not among the signed ones because nothing new was signed: the citation was
  * always in the core, and the class is a reading of it.
  *
+ * Section 6, the duplicate (decision D-085): a validator who judges the entry a
+ * duplicate of one it does not supersede rejects with the reason
+ * `duplicate_claim:<entry id>`, and the page reads the id back out of it — as a
+ * link in the decision's own row, and once in the derived block. Nothing new was
+ * signed here either: the reason is the string the validator put its key to.
+ *
  * Section 7, freshness: a stale entry is still verified, so its status badge does
  * not change and the freshness line says how old the confirmation is instead.
  *
@@ -47,6 +53,7 @@
  */
 
 import { CORE_KEYS, type CoreKey } from "../../core.js";
+import { duplicateOf, parseDuplicateReason } from "../../duplicate-reason.js";
 import { DEFAULT_DOMAIN } from "../../policy.js";
 import {
   badge,
@@ -242,6 +249,11 @@ function sourceValue(source: EntryData["sidecar"]["source"]): Safe {
 
 /** The derived block: recomputed from the events, never written. */
 function derived(data: EntryData): Safe {
+  // Decision D-085. Read off the entry's own decisions rather than stored:
+  // nothing new was signed, and the row is the first rejection in the published
+  // duplicate form saying which entry it named. Absent when there is none — a
+  // dash here would read as a duplicate nobody has found yet.
+  const duplicatedEntry = duplicateOf(data.entry);
   return html`<section class="panel">
     <div class="panel-head">
       <h2>Derived</h2>
@@ -260,6 +272,10 @@ function derived(data: EntryData): Safe {
           ? raw("")
           : html`<dt>dispute of</dt>
               <dd>${entryLink(data.disputeOf)}</dd>`}
+        ${duplicatedEntry === null
+          ? raw("")
+          : html`<dt>duplicate of</dt>
+              <dd>${entryLink(duplicatedEntry)}</dd>`}
       </dl>
       <p class="note">
         confidence is null for every entry until conf-v1 is published; its inputs
@@ -442,6 +458,25 @@ function operatorCell(operator: string, trusted: boolean | null): Safe {
   return html`<a href="/operators/${operator}">${operator}</a>${mark}`;
 }
 
+/**
+ * A decision's reason, as the record holds it — except the published duplicate
+ * form (decision D-085), whose entry id becomes a link.
+ *
+ * `duplicate_claim:<entry id>` is a reason and nothing more: the validator
+ * signed that string and the schema has no field for it, so the page is reading
+ * rather than adding. What the reading buys a reader is the one thing the raw
+ * string does not give them — somewhere to go. A reason that does not hold the
+ * form, and the same form on an approval, render as the text that was signed.
+ */
+function reasonCell(approver: ApproverRow): Safe {
+  const duplicated =
+    approver.decision === "reject"
+      ? parseDuplicateReason(approver.reason)
+      : null;
+  if (duplicated === null) return html`${approver.reason ?? EM_DASH}`;
+  return html`duplicate of ${entryLink(duplicated)}`;
+}
+
 function approverRow(approver: ApproverRow): Safe {
   const decisionClass = approver.decision === "approve" ? "accent" : "danger";
   const hash = approver.snapshot_hash;
@@ -449,7 +484,7 @@ function approverRow(approver: ApproverRow): Safe {
     <td class="break">${approver.agent}</td>
     <td>${operatorCell(approver.operator, approver.operatorTrusted)}</td>
     <td class="${decisionClass}">${approver.decision}</td>
-    <td class="prose">${approver.reason ?? EM_DASH}</td>
+    <td class="prose">${reasonCell(approver)}</td>
     <td class="muted" title="${hash ?? ""}">
       ${hash === null ? EM_DASH : shortHash(hash)}
     </td>

@@ -195,13 +195,21 @@ async function send(
 function pricing(
   overrides: Partial<Omit<SubmissionProposal, "author">> = {},
 ): Omit<SubmissionProposal, "author"> {
+  const claim =
+    overrides.claim ?? "Kestrel-2 seat pricing rose to $25 per seat per month";
   return {
     subject: "example/kestrel-2",
     category: "pricing",
     domain: DEFAULT_DOMAIN,
-    claim: "Kestrel-2 seat pricing rose to $25 per seat per month",
+    claim,
     before: "$20 per seat per month",
-    after: "$25 per seat per month",
+    // The value is the duplicate key (decision D-085): two live entries on one
+    // subject and category may not both assert it. Every entry this helper
+    // builds is about the same subject and category and none of these tests is
+    // about duplicates, so each one's value names its own case, which the claim
+    // already does. The entry resubmitted to reach `duplicate_entry` hands the
+    // same core back, so it keeps its value along with its id.
+    after: `$25 per seat per month, per: ${claim}`,
     effective_at: "2026-09-01",
     citation: HTML_URL,
     snapshot_hash: htmlHash,
@@ -775,7 +783,9 @@ describe("a behavior entry whose provider statement is a page", () => {
       category: "behavior",
       claim,
       before: "answered the question",
-      after: "refuses the question",
+      // Each of these lives beside the behavior entry above and beside the
+      // others here, so each names its own case in its value (D-085).
+      after: `refuses the question, per: ${claim}`,
       effective_at: "2026-09-01",
       evidence: withStatement,
       citation: statement,
@@ -870,7 +880,10 @@ describe("an observed entry, whose measurement is receipted", () => {
       category: "limit",
       claim: "Kestrel-2 allows 60 requests per minute, measured by probing",
       before: "30 requests per minute",
-      after: "60 requests per minute",
+      // The stated limit entry in "supersession" above is still live on this
+      // subject and category, so this measured one asserts its own value
+      // (D-085) rather than repeating that one's.
+      after: "60 requests per minute, measured by probing",
       effective_at: "2026-09-01",
       evidence_tier: "observed",
       observation: {

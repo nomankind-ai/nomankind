@@ -3874,6 +3874,49 @@ export async function readCountsOn(
   afterEntryId: string | undefined,
   limit: number,
 ): Promise<ReadCountRow[]> {
+  const rows = await readCountsSplitOn(db, date, afterEntryId, limit);
+  return rows.map((row) => ({
+    entry_id: row.entry_id,
+    count: row.read_reads + row.sync_reads,
+  }));
+}
+
+/**
+ * One entry's day, with the two kinds of read kept apart.
+ *
+ * `count` is the sum and is what the day publishes; the split exists because
+ * the two kinds are not owed under the same condition. A read through
+ * GET /read is a read of whatever the log served, and the log serves the newest
+ * verified entry of a subject, so that read is always owed. A sync delivers
+ * every verified entry in the delta, duplicates and all, and Section 9 pays for
+ * "one verified entry delivered in a paid sync" — one, not one per copy of the
+ * same fact (decision D-085).
+ */
+export interface ReadCountSplitRow {
+  /** Reads through GET /read on that day. */
+  readonly read_reads: number;
+  /** Verified deliveries inside that day's sync receipts. */
+  readonly sync_reads: number;
+  readonly entry_id: string;
+}
+
+/**
+ * The same day's reads as `readCountsOn`, with the read rows and the sync
+ * deliveries returned as two columns rather than one sum.
+ *
+ * One query, not two: the UNION already visits both kinds once, so carrying a
+ * second column through it costs nothing and keeps the two counts on the same
+ * page boundary — two separately paged queries could disagree about where a
+ * page ends, and the caller would have to reconcile them before it could
+ * publish. Keyset-paged by entry_id with the caller's own limit, exactly as
+ * `readCountsOn` is, because the publisher pages it the same way.
+ */
+export async function readCountsSplitOn(
+  db: D1Like,
+  date: string,
+  afterEntryId: string | undefined,
+  limit: number,
+): Promise<ReadCountSplitRow[]> {
   const [dayFrom, dayTo] = dayRange(date);
   const bindings: unknown[] = [
     READ_RECEIPT_KIND,
@@ -3892,12 +3935,15 @@ export async function readCountsOn(
 
   const rows = await db
     .prepare(
-      `SELECT entry_id, SUM(reads) AS reads FROM (
-         SELECT entry_id, COUNT(*) AS reads FROM receipts
+      `SELECT entry_id,
+              SUM(read_reads) AS read_reads,
+              SUM(sync_reads) AS sync_reads FROM (
+         SELECT entry_id, COUNT(*) AS read_reads, 0 AS sync_reads FROM receipts
            WHERE kind = ? AND created_at >= ? AND created_at < ?
            GROUP BY entry_id
          UNION ALL
-         SELECT entry_id, 1 AS reads FROM (${SYNC_VERIFIED_ENTRIES})
+         SELECT entry_id, 0 AS read_reads, 1 AS sync_reads
+           FROM (${SYNC_VERIFIED_ENTRIES})
        ) ${after}
        GROUP BY entry_id ORDER BY entry_id LIMIT ?`,
     )
@@ -3905,7 +3951,8 @@ export async function readCountsOn(
     .all<Row>();
   return rows.results.map((row) => ({
     entry_id: readText(row, "entry_id"),
-    count: readInteger(row, "reads"),
+    read_reads: readInteger(row, "read_reads"),
+    sync_reads: readInteger(row, "sync_reads"),
   }));
 }
 
@@ -4035,6 +4082,61 @@ export async function readCandidates(
     .prepare(
       `SELECT ${ENTRY_COLUMNS} FROM entries
        WHERE subject = ? AND category = ? ${domain}${before}AND status = 'verified'
+       ORDER BY submitted_seq DESC LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map(toStoredEntry);
+}
+
+/** What the duplicate door's backward read narrows by, and where it resumes. */
+export interface EntriesNewestFirstQuery {
+  readonly subject: string;
+  readonly category: string;
+  /** The registered domain (decision D-071); omit for every domain. */
+  readonly domain?: string;
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+  /** Resume strictly before this submitted_seq; omit for the first page. */
+  readonly beforeSubmittedSeq?: number;
+}
+
+/**
+ * Every entry on one domain, subject and category, newest submission first.
+ *
+ * `readCandidates` above answers reads and so returns `status = 'verified'`
+ * only, by design (Section 8). The duplicate door (decision D-085) asks a
+ * different question and needs a different query: a draft holds its claim just
+ * as much as a verified entry does, so there is no status filter here at all
+ * and the live-status rule is src/duplicate.ts's, where it belongs.
+ *
+ * Newest first because the entry a submitter is told to look at is the newest
+ * live one holding the key, and keyset-paged downward by submitted_seq — the
+ * caller passes back the lowest position it saw — so a subject with more
+ * entries than one page is read to the end rather than truncated at the first
+ * hundred. Served by the `entries_subject_category_seq` index from 0001.
+ */
+export async function entriesNewestFirst(
+  db: D1Like,
+  query: EntriesNewestFirstQuery,
+): Promise<StoredEntry[]> {
+  const bindings: unknown[] = [query.subject, query.category];
+  let domain = "";
+  if (query.domain !== undefined) {
+    domain = "AND domain = ? ";
+    bindings.push(query.domain);
+  }
+  let before = "";
+  if (query.beforeSubmittedSeq !== undefined) {
+    before = "AND submitted_seq < ? ";
+    bindings.push(query.beforeSubmittedSeq);
+  }
+  bindings.push(query.limit);
+
+  const rows = await db
+    .prepare(
+      `SELECT ${ENTRY_COLUMNS} FROM entries
+       WHERE subject = ? AND category = ? ${domain}${before}
        ORDER BY submitted_seq DESC LIMIT ?`,
     )
     .bind(...bindings)

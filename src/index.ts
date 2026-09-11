@@ -10,6 +10,7 @@ export * from "./confidence.js";
 export * from "./core.js";
 export * from "./derive.js";
 export * from "./dispute.js";
+export * from "./duplicate.js";
 export * from "./encoding.js";
 export * from "./events.js";
 export * from "./evidence.js";

@@ -133,6 +133,8 @@ const FIELDS = [
   "stale",
   "dispute_count",
   "report_count",
+  "duplicate_of",
+  "duplicate_rejections",
   "superseded",
   "overturned",
   "status",
@@ -176,6 +178,41 @@ describe("the confidence inputs", () => {
 
     expect(inputs.source_class).toBeNull();
     expect(inputs.source_matched_host).toBeNull();
+  });
+
+  it("says nothing about duplication for an entry nobody claimed was one", () => {
+    // Null and zero, not absent: the fields are published for every entry, and
+    // most entries are nobody's duplicate.
+    const inputs = confidenceInputs({
+      entry: entryOf({ approvers: [approver("op_d", "reject")] }),
+      sidecar: SIDECAR,
+      now: NOW,
+    });
+
+    expect(inputs.duplicate_of).toBeNull();
+    expect(inputs.duplicate_rejections).toBe(0);
+  });
+
+  it("publishes the entry a validator rejected this one as a duplicate of (D-085)", () => {
+    // The mechanical duplicate never reaches a row — the submit door refuses it
+    // — so what a reader sees here is a judgment, published raw with its size
+    // beside it and weighted by nobody.
+    const duplicated = "nmk_00112233445566778899aabbccddeeff";
+    const inputs = confidenceInputs({
+      entry: entryOf({
+        approvers: [
+          approver("op_b", "approve"),
+          approver("op_c", "reject", {
+            reason: `duplicate_claim:${duplicated}`,
+          }),
+        ],
+      }),
+      sidecar: SIDECAR,
+      now: NOW,
+    });
+
+    expect(inputs.duplicate_of).toBe(duplicated);
+    expect(inputs.duplicate_rejections).toBe(1);
   });
 
   it("reads a verified observed entry's tiers, counts and age", () => {

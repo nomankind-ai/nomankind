@@ -1391,6 +1391,77 @@ function inputNames(value: unknown, prefix = ""): string[] {
  * endpoint's own name, and the endpoint itself spelled out so a reader can go
  * and get the same object as JSON.
  */
+/**
+ * The published duplicate form on the page (decision D-085).
+ *
+ * A validator who judges that an entry duplicates one it does not supersede
+ * rejects with the reason `duplicate_claim:<entry id>`. Nothing new is signed,
+ * so the page's whole job is reading: turn the id into somewhere the reader can
+ * go, and say once in the derived block that the claim was made.
+ */
+const DUPLICATED_ID = "nmk_0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
+/** The fixture with one decision's reason rewritten, in both places it is read. */
+function withReason(decision: string, reason: string): EntryData {
+  const rewrite = (record: Record<string, unknown>): Record<string, unknown> =>
+    record["decision"] === "reject" ? { ...record, decision, reason } : record;
+  const recorded = entryData.entry["approvers"];
+  return {
+    ...entryData,
+    entry: {
+      ...entryData.entry,
+      approvers: Array.isArray(recorded) ? recorded.map((each) => rewrite(each as Record<string, unknown>)) : [],
+    },
+    approvers: entryData.approvers.map((each) =>
+      each.decision === "reject" ? { ...each, decision, reason } : each,
+    ),
+  };
+}
+
+describe("the entry page's duplicate claims", () => {
+  const claimed = withReason("reject", `duplicate_claim:${DUPLICATED_ID}`);
+  const document = renderEntry(ctx, claimed);
+
+  it("renders a parseable rejection as a link to the entry it names", () => {
+    expect(document).toContain(
+      `duplicate of <a href="/entries/${DUPLICATED_ID}">${DUPLICATED_ID}</a>`,
+    );
+  });
+
+  it("says in the derived block which entry the claim named", () => {
+    expect(document).toContain("<dt>duplicate of</dt>");
+    const at = document.indexOf("<dt>duplicate of</dt>");
+    expect(document.slice(at, at + 200)).toContain(
+      `<a href="/entries/${DUPLICATED_ID}">${DUPLICATED_ID}</a>`,
+    );
+  });
+
+  it("says nothing at all about duplication when no decision claims it", () => {
+    // Absent rather than a dash: a dash in the derived block would read as a
+    // duplicate nobody has found yet, which is a claim the log has not made.
+    const plain = renderEntry(ctx, entryData);
+    expect(plain).not.toContain("<dt>duplicate of</dt>");
+    expect(plain).not.toContain("duplicate of <a href=");
+  });
+
+  it("leaves the form as the text it was signed as when it sits on an approval", () => {
+    // An approval says the entry stands. Reading a duplicate claim out of it
+    // would turn a vote for the entry into a mark against it.
+    const approved = renderEntry(
+      ctx,
+      withReason("approve", `duplicate_claim:${DUPLICATED_ID}`),
+    );
+    expect(approved).toContain(`duplicate_claim:${DUPLICATED_ID}`);
+    expect(approved).not.toContain("<dt>duplicate of</dt>");
+    expect(approved).not.toContain(`<a href="/entries/${DUPLICATED_ID}">`);
+  });
+
+  it("carries no script and no inline style, like every other page", () => {
+    expect(document).not.toContain("<script");
+    expect(document).not.toContain(' style="');
+  });
+});
+
 describe("the entry page's confidence panel", () => {
   const document = renderEntry(ctx, entryData);
 

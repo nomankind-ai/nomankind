@@ -868,6 +868,10 @@ describe("the confidence field", () => {
         "formula",
         "overturned",
         "report_count",
+        // The duplicate rule's two inputs (decision D-085): which entry a
+        // validator named this one a duplicate of, and how many said so.
+        "duplicate_of",
+        "duplicate_rejections",
         // The source policy's two inputs (decision D-080): where the claim came
         // from is an input a learner may weight, exposed raw like every other.
         "source_class",

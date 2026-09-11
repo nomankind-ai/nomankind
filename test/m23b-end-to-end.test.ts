@@ -290,7 +290,10 @@ async function behavior(
     domain: DEFAULT_DOMAIN,
     claim: `gpt-5 ${output}`,
     before: "answered the question",
-    after: "refuses the question",
+    // The value is the duplicate key (D-085), and these two entries are meant
+    // to coexist as live answers about the same subject and category, so each
+    // one's value names its own case.
+    after: `${output} the question`,
     effective_at: "2026-09-01",
     evidence,
     citation,
@@ -634,15 +637,25 @@ describe("everywhere else the class is a label and never a gate", () => {
 // ---------------------------------------------------------------------------
 
 describe("a dispute's correction is gated on the entry it challenges", () => {
-  /** One correction of the pricing entry, citing whatever it is given. */
-  async function correction(claim: string, citation: string): Promise<Core> {
+  /**
+   * One correction of the pricing entry, citing whatever it is given.
+   *
+   * The value is the duplicate key (D-085), and corrections are entries like
+   * any other, so a correction meant to live beside an accepted one carries its
+   * own value rather than repeating it.
+   */
+  async function correction(
+    claim: string,
+    citation: string,
+    after: string = "$44 per million tokens",
+  ): Promise<Core> {
     return submittedCore(challenger, {
       subject: SUBJECT,
       category: "correction",
       domain: DEFAULT_DOMAIN,
       claim,
       before: "$40 per million tokens",
-      after: "$44 per million tokens",
+      after,
       effective_at: "2026-09-02",
       citation,
       snapshot_hash: pricingHash,
@@ -721,6 +734,7 @@ describe("a dispute's correction is gated on the entry it challenges", () => {
     const core = await correction(
       "gpt-5 answers the question after all",
       OTHER_URL,
+      "answers the question",
     );
     const answer = await fileAgainst(otherId, core);
     expect([answer.status, answer.body["error"] ?? null]).toEqual([201, null]);

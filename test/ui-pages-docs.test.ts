@@ -556,6 +556,28 @@ describe("renderApi", () => {
     }
   });
 
+  it("documents the duplicate claim at all three doors it shows up in", () => {
+    // Decision D-085. The mechanical duplicate is refused at submit, the
+    // judgment is a validator's rejection in a published form, and both reach
+    // the confidence inputs. A caller reading this page has to be told all
+    // three, or the 422 looks like a refusal with no way to answer it.
+    const submit = page.indexOf("/entries<");
+    const refusals = page.indexOf("duplicate_claim (", submit);
+    expect(refusals).toBeGreaterThan(-1);
+    expect(page).toContain("the answer carries duplicate_of");
+    // Refused where the kernel refuses it: after the supersession refusals and
+    // before anything is fetched.
+    expect(refusals).toBeGreaterThan(page.indexOf("category_mismatch", submit));
+    expect(refusals).toBeLessThan(page.indexOf("snapshot_mismatch", submit));
+
+    // The published form, verbatim, on the validate row.
+    expect(page).toContain("duplicate_claim:&lt;entry id&gt;");
+    expect(page).toContain("nothing new is signed");
+
+    // And the two fields the confidence inputs publish for it.
+    expect(page).toContain("duplicate_of and duplicate_rejections");
+  });
+
   it("lists the answer and score refusals in the kernel's own order", () => {
     let at = page.indexOf("/attestations/{id}/answers");
     for (const reason of ANSWER_REFUSALS) {
