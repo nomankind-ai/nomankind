@@ -19,10 +19,12 @@ import { describe, expect, it } from "vitest";
 import { ANSWER_REFUSALS, SCORE_REFUSALS } from "../src/attest.js";
 import { CORE_KEYS } from "../src/core.js";
 import {
+  ASSIGNMENT_WINDOW_HOURS,
   DEFAULT_DOMAIN,
   DOMAINS,
   LIST_PAGE_LIMIT,
   POLICY,
+  SEAL_INTERVAL_MINUTES,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
 } from "../src/policy.js";
 import {
@@ -35,6 +37,7 @@ import { READ_QUERY_REFUSALS } from "../src/read.js";
 import { SUBMISSION_REFUSALS } from "../src/submit.js";
 import { SYNC_QUERY_REFUSALS } from "../src/sync.js";
 import { renderApi } from "../src/ui/pages/api.js";
+import { renderDryRun } from "../src/ui/pages/dry-run.js";
 import { VALIDATION_REFUSALS } from "../src/validate.js";
 import { renderGenesis } from "../src/ui/pages/genesis.js";
 import { APEX_URL, CONTACT_EMAIL, shortHash } from "../src/ui/html.js";
@@ -1064,6 +1067,11 @@ describe("renderGenesis", () => {
     expect(page).toContain(`href="/api"`);
   });
 
+  it("points a candidate at the demo dry run before the one that counts", () => {
+    expect(page).toContain("Practice on demo first");
+    expect(page).toContain(`href="/dry-run"`);
+  });
+
   it("shows every row the log holds", () => {
     for (const row of rows) {
       expect(page).toContain(row.operator);
@@ -1105,6 +1113,182 @@ describe("renderGenesis", () => {
 
   it("carries no script", () => {
     expect(page).not.toContain("<script");
+  });
+});
+
+/**
+ * The dry-run page (Section 11: "each candidate validates one seeded entry in a
+ * public dry run before being named").
+ *
+ * The page is a set of commands, so the tests hold it to the two things a set of
+ * commands can be wrong about: which log they point at, and whether a number in
+ * them is the policy module's or the page's own. The dry run is practiced on
+ * demo from every environment, so a production reader has to be handed demo's
+ * host and told why — a page that pointed its commands at the host it happened
+ * to be fetched from would be two different rehearsals.
+ */
+describe("renderDryRun", () => {
+  const DEMO_ORIGIN = "https://demo.nomankind.ai";
+  const PRODUCTION_ORIGIN = "https://app.nomankind.ai";
+  // A demo context whose origin is not the constant, because a demo run served
+  // from the local host has to be handed its own host and not the page's
+  // built-in one: with the two equal, the demo branch could ignore ctx.origin
+  // and every assertion here would still pass.
+  const LOCAL_DEMO_ORIGIN = "http://127.0.0.1:8787";
+
+  const demoCtx: PageContext = {
+    environment: "demo",
+    path: "/dry-run",
+    origin: LOCAL_DEMO_ORIGIN,
+  };
+  const productionCtx: PageContext = {
+    environment: "production",
+    path: "/dry-run",
+    origin: PRODUCTION_ORIGIN,
+  };
+
+  const page = renderDryRun(demoCtx);
+
+  /** One line of prose, however the template wrapped it. */
+  function squeeze(rendered: string): string {
+    return rendered.replace(/\s+/g, " ");
+  }
+
+  /** Every command block that names a log at all, with its origin in it. */
+  function commandsNamingALog(rendered: string): string[] {
+    return [...rendered.matchAll(/<pre class="block mono">([\s\S]*?)<\/pre>/g)]
+      .map((match) => match[1] ?? "")
+      .filter((block) => block.includes("npm run") && block.includes("://"));
+  }
+
+  it("walks the six steps in order", () => {
+    const headings = [
+      "What you need",
+      "Step 1. Make a key",
+      "Step 2. Publish the TXT record",
+      "Step 3. Register",
+      "Step 4. Judge one entry",
+      "Step 5. See it in the log",
+      "Step 6. Verify it yourself",
+      "What demo does not do",
+      "How it counts",
+    ];
+    let at = -1;
+    for (const heading of headings) {
+      const next = page.indexOf(`<h2 class="panel-title">${heading}</h2>`);
+      expect(next, `${heading} is not a panel title`).toBeGreaterThan(at);
+      at = next;
+    }
+  });
+
+  it("gives each command its real argument form", () => {
+    expect(page).toContain("npm run keygen -- ./demo-key.json");
+    expect(page).toContain(
+      `npm run register -- ./demo-key.json ${LOCAL_DEMO_ORIGIN} &lt;your domain&gt;`,
+    );
+    expect(page).toContain(
+      `npm run validate -- ./demo-key.json ${LOCAL_DEMO_ORIGIN} &lt;entry-id&gt;`,
+    );
+    expect(page).toContain("--duplicate-of &lt;entry-id&gt;");
+    expect(page).toContain(
+      `npm run export -- ${LOCAL_DEMO_ORIGIN} &lt;entry-id&gt; ./bundle`,
+    );
+    expect(page).toContain(
+      "npm run verify -- ./bundle/entry.json ./bundle/log.json",
+    );
+    // The register command carries no --genesis: only the maintainer key names
+    // anyone, which the page says in prose right under it.
+    const register = commandsNamingALog(page).find((block) =>
+      block.includes("npm run register"),
+    );
+    expect(register).toBeDefined();
+    expect(register).not.toContain("--genesis");
+    expect(squeeze(page)).toContain(
+      `No <span class="mono">--genesis</span>. That flag posts the`,
+    );
+    expect(page).toContain("&lt;your domain&gt;");
+    expect(page).toContain(`${TXT_RECORD_PREFIX}.&lt;your domain&gt;`);
+    expect(page).toContain("status=draft");
+  });
+
+  it("points every command at this demo host, and says nothing about it, on demo", () => {
+    const blocks = commandsNamingALog(page);
+    expect(blocks.length).toBeGreaterThan(0);
+    for (const block of blocks) {
+      expect(block, `a command does not name ${LOCAL_DEMO_ORIGIN}`).toContain(
+        LOCAL_DEMO_ORIGIN,
+      );
+      // The demo branch reads ctx.origin, so the built-in demo host is nowhere
+      // in a command a demo reader is handed.
+      expect(block, `a command names ${DEMO_ORIGIN}`).not.toContain(
+        DEMO_ORIGIN,
+      );
+    }
+    expect(squeeze(page)).not.toContain(
+      "The dry run is practiced on demo, so the commands below point there.",
+    );
+  });
+
+  it("points every command at demo from another environment, and says why", () => {
+    const elsewhere = renderDryRun(productionCtx);
+    const blocks = commandsNamingALog(elsewhere);
+    expect(blocks.length).toBeGreaterThan(0);
+    for (const block of blocks) {
+      expect(block, `a command does not name ${DEMO_ORIGIN}`).toContain(
+        DEMO_ORIGIN,
+      );
+    }
+    expect(elsewhere).not.toContain(PRODUCTION_ORIGIN);
+    expect(squeeze(elsewhere)).toContain(
+      "This is the production log. The dry run is practiced on demo, so the" +
+        " commands below point there.",
+    );
+  });
+
+  it("takes its numbers from the policy module", () => {
+    expect(page).toContain(`${ASSIGNMENT_WINDOW_HOURS} hours to answer`);
+    expect(page).toContain(`${SEAL_INTERVAL_MINUTES} minutes`);
+  });
+
+  it("says what demo is not, and what the dry run that counts is", () => {
+    expect(page).toContain("payout_unavailable");
+    expect(page).toContain("mock");
+    expect(page).toContain("nothing on demo is money");
+    expect(squeeze(page)).toContain(
+      "Nothing here is money, and nothing here is the record",
+    );
+    expect(page).toContain("counts toward nothing");
+  });
+
+  it("links the genesis page and a way to reach a person", () => {
+    // This environment's own genesis page, named as such, is the one relative
+    // link the page keeps.
+    expect(page).toContain(`href="/genesis"`);
+    expect(page).toContain(`href="${LOCAL_DEMO_ORIGIN}/genesis"`);
+    expect(page).toContain(`mailto:${CONTACT_EMAIL}`);
+    expect(page).toContain("mailto:hello@nomankind.ai");
+  });
+
+  it("qualifies every link to where the dry run shows up, off demo", () => {
+    // Read from production, a relative link would lead to a log holding none of
+    // the run the commands just made on demo.
+    const elsewhere = renderDryRun(productionCtx);
+    expect(elsewhere).toContain(`href="${DEMO_ORIGIN}/genesis"`);
+    // The mirror link in the body, not the footer's own relative one.
+    expect(elsewhere).toContain(
+      `<a href="${DEMO_ORIGIN}/mirror/latest">the mirror page</a>`,
+    );
+    expect(elsewhere).toContain(`${DEMO_ORIGIN}/operators/`);
+    expect(elsewhere).toContain(`${DEMO_ORIGIN}/entries`);
+    expect(elsewhere).toContain(`${DEMO_ORIGIN}/status`);
+  });
+
+  it("carries no script and no inline style", () => {
+    expect(page).not.toContain("<script");
+    expect(page).not.toContain(` style="`);
+    const elsewhere = renderDryRun(productionCtx);
+    expect(elsewhere).not.toContain("<script");
+    expect(elsewhere).not.toContain(` style="`);
   });
 });
 
