@@ -426,6 +426,31 @@ async function entry(
   // The other direction of overturned_by: what this entry was filed against,
   // when it is itself a correction. Null for every entry that is not one.
   const disputeTarget = await disputeOf(db, id);
+
+  // The provider statement's capture (Section 4, D-059). A transcript entry
+  // whose evidence names a provider statement is archived twice — the
+  // transcript under the role `snapshot`, the statement page under `statement`
+  // — and the page has to link the second or a verifier is missing an input it
+  // is told to check. `capturesForEntry` returns every role; this is the one,
+  // and null when the entry never carried a statement.
+  const captures = await capturesForEntry(db, id, LIST_PAGE_LIMIT);
+  const statementCapture =
+    captures.find((each) => each.role === "statement") ?? null;
+  // The host of the source the entry cites, for the line beside the capture,
+  // parsed the same way the How it works reading parses one: a URL the store
+  // already accepted, so a parse failure is "no host to name" rather than a
+  // refusal. The page is not the place a bad citation is caught.
+  let statementHost: string | null = null;
+  if (statementCapture !== null) {
+    const citation = textField(record, "citation");
+    if (citation !== null) {
+      try {
+        statementHost = new URL(citation).hostname;
+      } catch {
+        statementHost = null;
+      }
+    }
+  }
   const trust = new TrustedOperators(db);
 
   const validations = events.filter(
@@ -517,6 +542,13 @@ async function entry(
         sidecar: stored.sidecar,
         now: now.toISOString(),
       }),
+      statement:
+        statementCapture === null
+          ? null
+          : {
+              hash: statementCapture.contentHash,
+              host: statementHost ?? "the cited source",
+            },
     }),
   );
 }

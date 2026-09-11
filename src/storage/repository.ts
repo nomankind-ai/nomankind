@@ -687,16 +687,22 @@ export interface CaptureRecord {
   readonly entryId: string;
   /**
    * "snapshot" for the entry's snapshot_hash, "receipt" for its receipt_hash,
-   * and `report:<seq>` for the frozen artifact a failure report carries
-   * (Section 8: "with its transcript frozen and hashed like any artifact").
+   * "statement" for the provider statement page a transcript entry cites, and
+   * `report:<seq>` for the frozen artifact a failure report carries (Section 8:
+   * "with its transcript frozen and hashed like any artifact").
    *
-   * The table's key is (entry_id, role), and an entry has at most one snapshot
-   * and one receipt — but any number of readers may report it, so a report's
-   * role carries the position of its own `failure_report` event. That makes each
-   * report's artifact its own row and keeps it from overwriting the entry's own
-   * captures, which is what a plain "receipt" role would have done.
+   * "statement" is the one role no signed hash stands behind: Section 4 makes a
+   * provider's own statement the verification basis of a behavior claim, so the
+   * page is captured at submit and this row is the record of what it said then.
+   * Nothing compares it to anything; it is evidence, served like the rest.
+   *
+   * The table's key is (entry_id, role), and an entry has at most one snapshot,
+   * one receipt and one statement — but any number of readers may report it, so
+   * a report's role carries the position of its own `failure_report` event. That
+   * makes each report's artifact its own row and keeps it from overwriting the
+   * entry's own captures, which is what a plain "receipt" role would have done.
    */
-  readonly role: "snapshot" | "receipt" | `report:${number}`;
+  readonly role: "snapshot" | "receipt" | "statement" | `report:${number}`;
   readonly contentHash: string;
   readonly archiveHash: string;
   readonly normVersion: string;

@@ -137,6 +137,34 @@ function coreValue(entry: Record_, key: CoreKey): Safe {
   return html`<span class="break">${value}</span>`;
 }
 
+/**
+ * The provider statement's capture, as a note beside the evidence block
+ * (Section 4, Behavior and misbehavior; decision D-059).
+ *
+ * A transcript entry whose evidence names a provider statement rests on two
+ * frozen sources, and the page shows both: the transcript through the
+ * `snapshot_hash` row above, and the statement here, through the same two
+ * archive routes and built with the same helpers — so a verifier reading this
+ * page has every input it is told to check without going to look for one.
+ *
+ * Beside the evidence and not under the citation on purpose: the statement is
+ * `evidence.provider_statement`'s frozen copy, and the citation row names the
+ * transcript's URL, which is a different source. Nothing at all when the entry
+ * has no statement capture: an empty note would claim a capture went missing.
+ */
+function statementNote(statement: EntryData["statement"]): Safe {
+  if (statement === null) return raw("");
+  return html`<span class="note">
+    provider statement ·
+    <a href="/captures/${statement.hash}">capture</a> ·
+    <a href="/captures/${statement.hash}/sidecar">sidecar</a> ·
+    <span class="break" title="${statement.hash}"
+      >${shortHash(statement.hash)}</span
+    >
+    · ${statement.host}
+  </span>`;
+}
+
 /** The frozen core: every CORE_KEYS name, in the schema's order, with its value. */
 function core(data: EntryData): Safe {
   const author = text(data.entry, "author") ?? EM_DASH;
@@ -150,7 +178,11 @@ function core(data: EntryData): Safe {
         ${CORE_KEYS.map(
           (key) =>
             html`<dt>${key}</dt>
-              <dd>${coreValue(data.entry, key)}</dd>`,
+              <dd>
+                ${coreValue(data.entry, key)}${key === "evidence"
+                  ? statementNote(data.statement)
+                  : raw("")}
+              </dd>`,
         )}
       </dl>
       <div class="field">

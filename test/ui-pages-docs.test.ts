@@ -408,6 +408,23 @@ describe("renderApi", () => {
     }
   });
 
+  it("names every role the two capture routes serve", () => {
+    // Section 4 and decision D-059 put a provider statement's page in the
+    // archive beside the transcript, under the role `statement`. A caller
+    // reading this page has to be told the archive answers for it, or the
+    // third role looks like an address that is not served.
+    const roles = "snapshot, receipt, statement, or report:&lt;seq&gt;";
+    expect(page).toContain(roles);
+    expect(page).toContain(
+      "snapshot, receipt, statement, report:&lt;seq&gt;",
+    );
+    // The bytes route still says what it serves and how it serves them.
+    expect(page).toContain("x-nomankind-archive-hash");
+    expect(page).toContain(
+      "final_url, status, headers, fetched_at, fetcher",
+    );
+  });
+
   it("documents the status endpoint's shape, and that it refuses nothing", () => {
     // A stage that is failing is an answer and not a refusal, which is the one
     // thing about this endpoint a caller has to be told: the only 503 is storage

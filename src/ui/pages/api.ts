@@ -89,7 +89,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/captures/{hash}",
     parameters: "sha256: plus 64 hex",
     answers:
-      "The raw archived bytes behind a snapshot_hash or a receipt_hash, with their stored media type and the archive address in x-nomankind-archive-hash. Served inert: attachment, nosniff, and a sandboxing CSP, because the bytes are a stranger's.",
+      "The raw archived bytes behind a snapshot_hash or a receipt_hash, whichever role froze them — snapshot, receipt, statement, or report:<seq> — with their stored media type and the archive address in x-nomankind-archive-hash. Served inert: attachment, nosniff, and a sandboxing CSP, because the bytes are a stranger's.",
     refusals: "400 bad_hash, 404 not_found.",
   },
   {
@@ -97,7 +97,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/captures/{hash}/sidecar",
     parameters: "—",
     answers:
-      "The norm rule's record of the fetch: final_url, status, headers, fetched_at, fetcher.",
+      "The norm rule's record of the fetch: final_url, status, headers, fetched_at, fetcher. The same four roles — snapshot, receipt, statement, report:<seq> — answer here.",
     refusals: "400 bad_hash, 404 not_found.",
   },
   {

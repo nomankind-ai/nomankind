@@ -190,6 +190,24 @@ export interface EntryData {
    * computes it and this page never does.
    */
   confidenceInputs: ConfidenceInputs;
+  /**
+   * The capture of the provider statement this entry's evidence cites, null
+   * when there is none (Section 4, Behavior and misbehavior; decision D-059).
+   *
+   * A transcript entry whose `evidence.provider_statement` is not null rests on
+   * two frozen sources, not one: the transcript the `snapshot_hash` names, and
+   * the provider's own statement about the behavior. The second is archived
+   * under the captures role `"statement"` beside the entry's `"snapshot"` row,
+   * and this field is what the page needs to link it — the capture's content
+   * hash, which addresses the bytes at `/captures/{hash}` and their fetch
+   * record at `/captures/{hash}/sidecar`, and the host of the source the entry
+   * cites, parsed where the reading was done and never on the page.
+   *
+   * Null is "no statement capture for this entry" and is rendered as nothing at
+   * all: an entry that never claimed a provider statement has no empty row to
+   * show, and a dash here would look like a capture that went missing.
+   */
+  statement: { hash: string; host: string } | null;
 }
 
 /**

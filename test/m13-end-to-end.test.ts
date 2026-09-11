@@ -35,7 +35,12 @@ import { archiveAddress } from "../src/normalize.js";
 import { txtRecordName } from "../src/registry.js";
 import { validateEntry } from "../src/schema.js";
 import type { SubmissionProposal } from "../src/submit.js";
-import { captureForHash, getEntry, headSeq } from "../src/storage/repository.js";
+import {
+  captureForHash,
+  capturesForEntry,
+  getEntry,
+  headSeq,
+} from "../src/storage/repository.js";
 import type { R2Like } from "../src/storage/r2.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
@@ -92,6 +97,13 @@ const LIMITS: FixturePage = {
   body: "<!doctype html><html><body><main><p>Kestrel-2 allows 60 requests per minute</p></main></body></html>",
   contentType: "text/html",
 };
+/** The provider's own page about the behavior: Section 4's verification basis. */
+const STATEMENT: FixturePage = {
+  body: "<!doctype html><html><body><main><p>Kestrel-2 declines geography questions under the safety policy.</p></main></body></html>",
+  contentType: "text/html",
+};
+/** The same page, on a day the provider's site is down. */
+const STATEMENT_DOWN: FixturePage = { body: "", status: 500 };
 
 const HTML_URL = "https://kestrel.example/pricing";
 const JSON_URL = "https://kestrel.example/pricing.json";
@@ -99,6 +111,8 @@ const MOVED_URL = "https://kestrel.example/moved";
 const FINAL_URL = "https://kestrel.example/pricing-final";
 const SCRIPT_URL = "https://kestrel.example/spa";
 const LIMITS_URL = "https://kestrel.example/limits";
+const STATEMENT_URL = "https://kestrel.example/policy/refusals";
+const STATEMENT_DOWN_URL = "https://kestrel.example/policy/down";
 
 const PAGES: Record<string, FixturePage> = {
   [HTML_URL]: HTML,
@@ -107,6 +121,8 @@ const PAGES: Record<string, FixturePage> = {
   [FINAL_URL]: FINAL,
   [SCRIPT_URL]: SCRIPT_ONLY,
   [LIMITS_URL]: LIMITS,
+  [STATEMENT_URL]: STATEMENT,
+  [STATEMENT_DOWN_URL]: STATEMENT_DOWN,
 };
 
 let store: TestDatabase;
@@ -122,6 +138,7 @@ let htmlHash: string;
 let jsonHash: string;
 let finalHash: string;
 let limitsHash: string;
+let statementHash: string;
 
 beforeAll(async () => {
   store = await openTestDatabase();
@@ -150,6 +167,7 @@ beforeAll(async () => {
   jsonHash = await pageHash(JSON_PAGE);
   finalHash = await pageHash(FINAL);
   limitsHash = await pageHash(LIMITS);
+  statementHash = await pageHash(STATEMENT);
 }, 60_000);
 
 // getPlatformProxy runs a child process; vitest would hold the run open
@@ -693,6 +711,11 @@ describe("a behavior entry, whose snapshot is its frozen transcript", () => {
     const body = (await response.json()) as Record<string, unknown>;
     expect(validateEntry(body).ok).toBe(true);
     expect(body["evidence_tier"]).toBe("observed");
+
+    // A null provider_statement is nothing to capture: the transcript is the
+    // whole snapshot, and the entry rests on exactly one row.
+    const rows = await capturesForEntry(store.db, core["id"] as string);
+    expect(rows.map((row) => row.role)).toEqual(["snapshot"]);
   });
 
   it("archives the canonical artifact at the entry's snapshot hash", async () => {
@@ -715,6 +738,110 @@ describe("a behavior entry, whose snapshot is its frozen transcript", () => {
       fetched_at: AT,
       fetcher: maintainer.agentId,
     });
+  });
+});
+
+/**
+ * Whitepaper Section 4: a provider's own statement about a behavior is what a
+ * validator checks the transcript against. That page is fetched here, at
+ * submit, under the same norm rule as any citation — because by the time an
+ * operator gets to it, a changed page and a wrong claim look the same.
+ *
+ * No hash of it is signed, so there is no mismatch refusal: the capture is the
+ * record of what the statement said, and a fetch that fails refuses the entry.
+ */
+describe("a behavior entry whose provider statement is a page", () => {
+  const evidence = {
+    model: "example/kestrel-2",
+    prompt: "What is the capital of France?",
+    parameters: { temperature: 0 },
+    output: "I cannot help with that.",
+    predicate: "the model refuses this prompt",
+    observed_at: "2026-09-01",
+  };
+
+  /** A behavior core citing `statement`, which is also its provider statement. */
+  async function stating(claim: string, statement: string): Promise<Core> {
+    const withStatement = { ...evidence, provider_statement: statement };
+    const artifact = buildTranscriptArtifact(
+      withStatement,
+      withStatement.output,
+      withStatement.observed_at,
+    );
+    const hashed = await transcriptArtifactHash(artifact);
+    if (!hashed.ok) throw new Error("m13: the fixture transcript is refused");
+    return submittedCore(alice, {
+      subject: "example/kestrel-2",
+      category: "behavior",
+      claim,
+      before: "answered the question",
+      after: "refuses the question",
+      effective_at: "2026-09-01",
+      evidence: withStatement,
+      citation: statement,
+      snapshot_hash: hashed.hash,
+    });
+  }
+
+  let core: Core;
+
+  beforeAll(async () => {
+    core = await stating(
+      "Kestrel-2 refuses a plain factual question, as its policy page says",
+      STATEMENT_URL,
+    );
+    const response = await send(await submission(alice, { core }));
+    expect(response.status).toBe(201);
+    expect(validateEntry((await response.json()) as Record<string, unknown>).ok).toBe(
+      true,
+    );
+  });
+
+  it("rests on two captures: the frozen transcript and the statement page", async () => {
+    const rows = await capturesForEntry(store.db, core["id"] as string);
+    expect(rows.map((row) => row.role)).toEqual(["snapshot", "statement"]);
+    expect(rows[0]!.contentHash).toBe(core["snapshot_hash"]);
+    expect(rows[1]!.contentHash).toBe(statementHash);
+    expect(rows[1]!.kind).toBe("html");
+  });
+
+  it("serves the statement's raw bytes at its own hash", async () => {
+    const response = await send(get(`/captures/${statementHash}`));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-nomankind-archive-hash")).toBe(
+      await archiveAddress(bytesOf(STATEMENT)),
+    );
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(
+      bytesOf(STATEMENT),
+    );
+  });
+
+  it("says who fetched the statement, and when, and from where", async () => {
+    const response = await send(get(`/captures/${statementHash}/sidecar`));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      final_url: STATEMENT_URL,
+      status: 200,
+      headers: { "content-type": STATEMENT.contentType },
+      fetched_at: AT,
+      fetcher: maintainer.agentId,
+    });
+  });
+
+  it("refuses the entry when the statement page does not answer", async () => {
+    const refusedCore = await stating(
+      "Kestrel-2 refuses a plain factual question, per a page that is down",
+      STATEMENT_DOWN_URL,
+    );
+    await refused({ core: refusedCore, page: STATEMENT_DOWN }, 422, "bad_status");
+  });
+
+  it("refuses a statement page only a browser could read", async () => {
+    const refusedCore = await stating(
+      "Kestrel-2 refuses a plain factual question, per a page that is a script",
+      SCRIPT_URL,
+    );
+    await refused({ core: refusedCore, page: SCRIPT_ONLY }, 422, "needs_javascript");
   });
 });
 
