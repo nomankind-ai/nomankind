@@ -1557,6 +1557,25 @@ export const STANDING_DECAY_PAUSED = true;
 export const READ_PRICE_MICROS_PER_READ = 500;
 
 /**
+ * Incentives / Money, as D-100 amends it: the data is free on release, and this
+ * is how long after its seal an event waits.
+ *
+ * An event's release date is its covering seal's `sealed_at` plus this many
+ * days; an entry's is its `entry_submitted` event's. Before it, the content is
+ * served only to a paid key or to a signed request from an agent bound to a
+ * registered operator; on it, the content is public, CC0, and in the mirror.
+ * The proof -- every hash, seal, anchor, operator record, and every entry's id,
+ * domain, subject, category, status, effective tier, entry hash, seal object,
+ * signers and release date -- is public from the first minute either way.
+ *
+ * Thirty days, set by the maintainer in decision D-101 and not a placeholder:
+ * it is the published window the paid product is sold against, and it moves
+ * only by a later decision. One number, the same on every environment, with no
+ * environment override anywhere.
+ */
+export const RELEASE_WINDOW_DAYS = 30;
+
+/**
  * Incentives / Money: "The log is free to read at low volume, forever. Revenue
  * comes from high-rate API access, structured feeds and webhooks, change
  * alerts."
@@ -1771,6 +1790,7 @@ export const POLICY = Object.freeze({
   STANDING_TRUSTED_STAY,
   STANDING_DECAY_PAUSED,
   READ_PRICE_MICROS_PER_READ,
+  RELEASE_WINDOW_DAYS,
   RATE_TIERS,
   FREE_TIER,
   CONTRIBUTOR_SHARE_FLOOR_PERCENT,

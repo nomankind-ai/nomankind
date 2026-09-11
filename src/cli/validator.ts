@@ -158,6 +158,63 @@ export async function getJson(
 }
 
 /**
+ * The same client, with one agent's M2 signature on every read it makes.
+ *
+ * The release window (decision D-100) serves an unreleased event's content only
+ * to a paid key or to a signed request from an agent bound to a registered
+ * operator, and this is how a command carries the second: exactly the form
+ * `readerAccess` verifies — method GET, the URL's pathname with no query
+ * string, a null body, and a fresh nonce per request, which is why the headers
+ * are built inside `fetch` rather than once.
+ *
+ * Reads only. A write carries its own signature over its own body, made by the
+ * key that is entitled to make it, and a wrapper that replaced those headers
+ * with a GET-shaped signature would refuse every write door there is.
+ */
+export function signingHttp(
+  http: HttpClient,
+  key: ValidatorKey,
+  now: Date,
+): HttpClient {
+  return {
+    async fetch(request: Request): Promise<Response> {
+      if (request.method !== "GET") return http.fetch(request);
+      const url = new URL(request.url);
+      const signed = await signRequest({
+        method: "GET",
+        path: url.pathname,
+        body: null,
+        agentId: key.agentId,
+        privateKey: key.privateKey,
+        timestamp: now.toISOString(),
+      });
+      const headers = new Headers(request.headers);
+      for (const [name, value] of Object.entries(signed)) {
+        headers.set(name, value);
+      }
+      return http.fetch(new Request(request, { headers }));
+    },
+  };
+}
+
+/**
+ * The same client, with a bearer key on every request it makes.
+ *
+ * The other half of the window's entitlement, and the plainer one: a paid key
+ * reads inside the window at every door, and the header is added in one place
+ * so nothing else in a command has to know the reader holds one.
+ */
+export function keyedHttp(http: HttpClient, key: string): HttpClient {
+  return {
+    fetch(request: Request): Promise<Response> {
+      const headers = new Headers(request.headers);
+      headers.set("authorization", `Bearer ${key}`);
+      return http.fetch(new Request(request, { headers }));
+    },
+  };
+}
+
+/**
  * One signed write request, carrying the four M2 headers over the method, the
  * path and the canonical body. Exported because the checkpoint signs registry
  * and submit requests the same way, and there must be one place that does it.
@@ -464,8 +521,12 @@ export async function runValidator(input: {
 }): Promise<ValidatorRun> {
   const { deps, io } = input;
 
+  // Signed with the operator key this run already holds (decision D-100): an
+  // entry inside the release window is served to a signed request from an agent
+  // bound to a registered operator, and a validator is exactly that reader —
+  // the people who have to judge an entry are the ones the window is not for.
   const read = await getJson(
-    deps.http,
+    signingHttp(deps.http, deps.key, deps.now),
     input.baseUrl,
     `/entries/${encodeURIComponent(input.entryId)}`,
   );

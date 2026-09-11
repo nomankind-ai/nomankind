@@ -64,6 +64,7 @@ import {
   FixtureResolver,
   TEST_ORIGIN,
   makeAgent,
+  signingHttp,
   type TestAgent,
 } from "./helpers/registry.js";
 import {
@@ -145,9 +146,22 @@ let deps: RequestDeps;
 /** The instant the router serves at. Moved by the tests, never by the router. */
 let clock: Date = NOW;
 
-/** The one way into the Worker: a call into the real router, on the fake clock. */
+/**
+ * The one way into the Worker: a call into the real router, on the fake clock,
+ * with a fixture operator's M2 signature on every read.
+ *
+ * What `--sign <key.json>` gives a command (decision D-100). The checkpoint
+ * reads the entry it seeded and the captures behind it, and every one of them
+ * is minutes old: a free reader inside the release window is handed the proof
+ * and a release date, which is not what a checkpoint is checking.
+ */
 const http: HttpClient = {
-  fetch: (request: Request) => handleRequest(request, env, { ...deps, now: clock }),
+  fetch: (request: Request) =>
+    signingHttp(
+      (inner) => handleRequest(inner, env, { ...deps, now: clock }),
+      fixtures[0]!,
+      clock,
+    ).fetch(request),
 };
 
 /** The checkpoint entry: a bare key's stated fact, verified by the first two. */

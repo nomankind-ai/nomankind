@@ -77,6 +77,7 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
   type TestAgent,
 } from "./helpers/registry.js";
@@ -163,19 +164,26 @@ function send(request: Request, now: Date = NOW): Promise<Response> {
 /** One GET, on the key's tier or on the free one, with the headers it answered. */
 async function get(
   path: string,
-  options: { key?: boolean; now?: Date } = {},
+  options: { key?: boolean; sign?: boolean; now?: Date } = {},
 ): Promise<{
   status: number;
   body: Record<string, unknown>;
   headers: Headers;
 }> {
-  const response = await send(
-    new Request(`${TEST_ORIGIN}${path}`, {
-      headers:
-        options.key === true ? { authorization: `Bearer ${secret}` } : {},
-    }),
-    options.now ?? NOW,
-  );
+  const now = options.now ?? NOW;
+  // `sign` is a read carrying no key at all, made by an agent bound to a
+  // registered operator (decision D-100): inside the release window that is
+  // what an unkeyed reader carries to be served content, and it is metered on
+  // the free tier and issues a receipt whose key fields are null, exactly as a
+  // free read of a released entry does.
+  const request =
+    options.sign === true
+      ? await signedGet(k1.agent, { path, timestamp: now.toISOString() })
+      : new Request(`${TEST_ORIGIN}${path}`, {
+          headers:
+            options.key === true ? { authorization: `Bearer ${secret}` } : {},
+        });
+  const response = await send(request, now);
   return {
     status: response.status,
     body: (await response.json()) as Record<string, unknown>,
@@ -308,7 +316,7 @@ async function verify(core: Core): Promise<void> {
   const id = core["id"] as string;
   await approve(id, k1);
   await approve(id, k2);
-  const answer = await get(`/entries/${id}`);
+  const answer = await get(`/entries/${id}`, { sign: true });
   expect([answer.status, answer.body["status"]]).toEqual([200, "verified"]);
 }
 
@@ -400,7 +408,7 @@ beforeAll(async () => {
     expect([answer.status, core["id"]]).toEqual([200, core["id"]]);
     keyedReads.push(answer.body["receipt"] as ReadReceipt);
   }
-  const free = await get(`/read/${first["id"] as string}`);
+  const free = await get(`/read/${first["id"] as string}`, { sign: true });
   expect(free.status).toBe(200);
   freeRead = free.body["receipt"] as ReadReceipt;
 

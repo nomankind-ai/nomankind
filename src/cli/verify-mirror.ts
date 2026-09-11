@@ -24,14 +24,29 @@
  * named diff on that entry, never a crash: an archive that has withdrawn a page
  * is a fact about the archive, and the reader is told which entry it touched.
  *
- * Two layouts are accepted, and each directory is checked as the one it claims.
- * `nomankind-mirror-v2` is what the export writes now and is checked whole. A
- * `nomankind-mirror-v1` directory — a copy somebody pulled before the
- * attestations, the standing, the ledger and the sidecar's source class joined
- * the export — is checked as what v1 was: the seven files it has, and its entry
- * sidecars on the keys a v1 sidecar carried. A copy already in a stranger's
- * hands is their exit, and a verifier that refused it for being old would be
- * taking that exit back. Any other format string is `unsupported_format`.
+ * Three layouts are accepted, and each directory is checked as the one it
+ * claims. `nomankind-mirror-v3` is what the export writes now: the same files,
+ * with the release window applied (D-100). `nomankind-mirror-v2` is the layout
+ * before the window, checked whole. A `nomankind-mirror-v1` directory — a copy
+ * somebody pulled before the attestations, the standing, the ledger and the
+ * sidecar's source class joined the export — is checked as what v1 was: the
+ * seven files it has, and its entry sidecars on the keys a v1 sidecar carried. A
+ * copy already in a stranger's hands is their exit, and a verifier that refused
+ * it for being old would be taking that exit back. Any other format string is
+ * `unsupported_format`.
+ *
+ * What a withheld line changes. A seal whose window has not run out is exported
+ * as hash lines — the payload null, `withheld: true` beside it — and the chain
+ * is checked over them exactly as over full events, minus the one check nobody
+ * can make: an event whose payload nobody was given cannot have its hash
+ * recomputed, so the links and the seal roots are what carry it. Everything
+ * derived from a payload is then out of reach as well — the entries, the
+ * attestations, the standing and the ledger are functions of what happened, not
+ * of the hashes — so a clone that carries a withheld line has those checks
+ * counted as `withheld` rather than passed, and the day the last window runs out
+ * the same clone checks whole. That is not a hole a forged mirror fits through:
+ * the chain, every seal, every anchor and every index row are checked either
+ * way, and those are what an edited export breaks first.
  *
  * A legacy v0.6 record is never passed off as ok, and it is never waved
  * through either. It was sealed before the domain key existed and v0.7's rules
@@ -74,7 +89,7 @@ import { verifyAnchor, type Anchor } from "../anchor.js";
 import { coreVersion, domainOf, extractCore, type Core } from "../core.js";
 import { deriveEntry, type DerivedEntry } from "../derive.js";
 import { base64Encode } from "../encoding.js";
-import { verifyChain, type Event } from "../events.js";
+import { eventHash, type Event } from "../events.js";
 import { canonicalize, entryHash } from "../hash.js";
 import type { LedgerRow } from "../ledger.js";
 import {
@@ -88,6 +103,7 @@ import {
   type MirrorFormat,
   type MirrorStanding,
 } from "../mirror.js";
+import { isReleased, isWithheld, releaseDateOf } from "../release.js";
 import {
   sealsForEntries,
   verifySeal,
@@ -364,9 +380,25 @@ interface Mirror {
   readonly seals: Seal[];
   readonly anchors: Anchor[];
   readonly events: Event[];
+  /**
+   * The events the directory carries in full: the log it made public.
+   *
+   * What every derivation reads. The hash lines are in `events` and stay there,
+   * because the chain, the seal roots and the inclusion proofs are over every
+   * event's hash — a withheld line is a leaf like any other — while a fold over
+   * payloads can only be over the payloads there are.
+   */
+  readonly full: Event[];
   readonly registry: Registry;
   readonly operatorCount: number;
   readonly index: Record<string, unknown>[];
+  /**
+   * The seqs the directory carries as hash lines (D-100).
+   *
+   * Empty for every v1 and v2 clone and for a v3 one whose windows have all run
+   * out, which is why a released mirror is checked exactly as it always was.
+   */
+  readonly withheld: ReadonlySet<number>;
 }
 
 /** The registry the verifier needs, out of the mirror's own operators file. */
@@ -430,15 +462,23 @@ async function readMirror(dir: string): Promise<Mirror> {
     throw new MirrorUnreadable(`${join(dir, "index.json")}: not an array`);
   }
 
+  const withheld = new Set<number>();
+  for (const event of events) {
+    if (isWithheld(event)) withheld.add(event.seq);
+  }
+  const full = events.filter((event) => !withheld.has(event.seq));
+
   return {
     manifest,
     format: mirrorFormatOf(manifest["format"]),
     seals: ordered,
     anchors,
     events,
+    full,
     registry,
     operatorCount: count,
     index: index.filter(isRecord),
+    withheld,
   };
 }
 
@@ -450,6 +490,8 @@ async function readMirror(dir: string): Promise<Mirror> {
 interface Tally {
   ok: number;
   legacy: number;
+  /** Checks the window put out of reach, which the next export puts back. */
+  withheld: number;
   failed: number;
 }
 
@@ -464,6 +506,12 @@ function fail(
 ): void {
   tally.failed += 1;
   io.stdout(`FAIL ${id} ${check} ${field} ${reason}`);
+}
+
+/** One check the window put out of reach, in the shape every such line takes. */
+function withhold(io: ValidatorIo, tally: Tally, id: string, note: string): void {
+  tally.withheld += 1;
+  io.stdout(`withheld ${id} ${note}`);
 }
 
 /**
@@ -512,6 +560,9 @@ function checkManifest(
     wrong("/operators", "count");
   }
   if (manifest["entries"] !== mirror.index.length) wrong("/entries", "count");
+  // The three counts a v1 manifest does not carry. All three are recomputed from
+  // the clone's own public events, withheld lines or not, so all three are asked
+  // of every layout that has them.
   if (!isV1(mirror)) {
     if (manifest["attestations"] !== recomputed.attestations.length) {
       wrong("/attestations", "count");
@@ -521,6 +572,19 @@ function checkManifest(
     }
     if (manifest["standing_position"] !== recomputed.standing.position) {
       wrong("/standing_position", "mismatch");
+    }
+  }
+
+  // The window's own two fields, on the layout that has them. `released_head`
+  // is checked against the seal files themselves, so a manifest edited to claim
+  // more of the log is public than the directory carries fails here.
+  if (mirror.format === "v3") {
+    const window = manifest["release_window_days"];
+    if (typeof window !== "number" || !Number.isInteger(window) || window < 0) {
+      wrong("/release_window_days", "missing");
+    }
+    if (manifest["released_head"] !== releasedHeadOf(mirror)) {
+      wrong("/released_head", "mismatch");
     }
   }
 
@@ -536,18 +600,102 @@ function checkManifest(
   if (failures === 0) io.stdout("ok mirror.json");
 }
 
-/** The event chain over every events file, in seq order. */
+/**
+ * The event chain over every events file, in seq order, hash lines included.
+ *
+ * `verifyChain`'s three rules, with the one exception the window makes: seq runs
+ * from 0 without a gap, every prev_hash is the hash before it, and every hash
+ * recomputes — except a withheld line's, which nobody was given the payload to
+ * recompute. Its hash is still the leaf the seal's Merkle root is over
+ * (`checkSeals`), so an edited hash line is caught one check later; and the day
+ * that seal releases, the same file is checked whole.
+ */
 async function checkChain(
   io: ValidatorIo,
   tally: Tally,
   mirror: Mirror,
 ): Promise<void> {
-  const result = await verifyChain(mirror.events);
-  if (result.ok) {
-    io.stdout("ok events");
-    return;
+  for (let index = 0; index < mirror.events.length; index += 1) {
+    const event = mirror.events[index]!;
+    const at = `/events/${index}`;
+    if (event.seq !== index) {
+      fail(io, tally, "events", "chain", at, "bad_seq");
+      return;
+    }
+    const expectedPrev = index === 0 ? null : mirror.events[index - 1]!.hash;
+    if (event.prev_hash !== expectedPrev) {
+      fail(io, tally, "events", "chain", at, "bad_prev_hash");
+      return;
+    }
+    if (mirror.withheld.has(event.seq)) continue;
+    const { hash, ...fields } = event;
+    if ((await eventHash(fields)) !== hash) {
+      fail(io, tally, "events", "chain", at, "bad_hash");
+      return;
+    }
   }
-  fail(io, tally, "events", "chain", `/events/${result.seq}`, result.reason);
+  io.stdout("ok events");
+}
+
+/**
+ * The largest position the directory carries in full, or null when it carries
+ * none: what `mirror.json`'s `released_head` has to say.
+ *
+ * Read off the files rather than off a clock, which is the only honest reading
+ * of somebody else's directory: a manifest that claims more released than the
+ * seal files actually hold is a manifest somebody edited.
+ */
+function releasedHeadOf(mirror: Mirror): number | null {
+  let head: number | null = null;
+  for (const seal of releasedSeals(mirror)) {
+    if (head === null || seal.last_seq > head) head = seal.last_seq;
+  }
+  return head;
+}
+
+/**
+ * The seals whose every event the directory carries in full.
+ *
+ * What the offline verifier is handed beside the public events: a seal whose
+ * batch is hash lines has a root over leaves this clone still has, but a
+ * verifier asked to recompute it from payloads it was not given would call the
+ * seal broken. `checkSeals` checks all of them over all the lines, which is
+ * where that check belongs.
+ */
+function releasedSeals(mirror: Mirror): Seal[] {
+  return mirror.seals.filter((seal) => {
+    for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
+      if (mirror.withheld.has(seq)) return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * A withheld event whose release date has already passed: a stale export, which
+ * the next run heals on its own.
+ *
+ * A warning and never a failure. The directory is a snapshot of a day, the
+ * window ran out after it was written, and the next export writes that seal in
+ * full — a verifier that failed the clone for it would be failing it for the
+ * passage of time.
+ */
+function warnStale(io: ValidatorIo, mirror: Mirror, now: Date): void {
+  let stale = 0;
+  let earliest: string | null = null;
+  for (const seal of mirror.seals) {
+    if (!isReleased(seal.sealed_at, now)) continue;
+    for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
+      if (!mirror.withheld.has(seq)) continue;
+      stale += 1;
+      const date = releaseDateOf(seal.sealed_at);
+      if (earliest === null || date < earliest) earliest = date;
+    }
+  }
+  if (stale === 0) return;
+  io.stdout(
+    `warn mirror stale ${stale} withheld events released on ${String(earliest)}; the next export writes them in full`,
+  );
 }
 
 /** Every seal, against the events it covers and the seal before it. */
@@ -597,6 +745,16 @@ function isLegacy(entry: unknown): boolean {
     return false;
   }
 }
+
+/** What a `withheld` line says about an entry the window has not opened. */
+const UNRELEASED_NOTE =
+  "(not released yet; the export carries its proof and its index row, and " +
+  "writes the entry file on its release date)";
+
+/** What a `withheld` line says about a record the clone cannot re-derive. */
+const UNDERIVABLE_NOTE =
+  "(the clone carries a withheld event of its own, so nothing derived from a " +
+  "payload is checked; the chain, the seals, the anchors and the index are)";
 
 /** What the `legacy` line says, so the wording lives in one place. */
 const LEGACY_NOTE =
@@ -697,6 +855,7 @@ function expectedIndexRow(
   entry: Record<string, unknown>,
   position: number,
   sealSeq: number | null,
+  releaseDate: string | null | undefined,
 ): Record<string, unknown> {
   const sidecar = file["sidecar"];
   return {
@@ -715,6 +874,10 @@ function expectedIndexRow(
     stale: entry["stale"],
     superseded_by: entry["superseded_by"],
     entry_hash: file["entry_hash"],
+    // The column the window added (D-100), computed from the covering seal
+    // rather than read off the row. `undefined` on the older layouts, which is
+    // how `firstDifference` says a key must not be there at all.
+    release_date: releaseDate,
   };
 }
 
@@ -746,7 +909,7 @@ async function checkRecord(
   let derived: DerivedEntry | null = null;
   try {
     derived = deriveEntry(
-      mirror.events,
+      mirror.full,
       id,
       { now: typeof asOf === "string" ? asOf : "" },
       entrySeals,
@@ -794,7 +957,7 @@ async function checkRecord(
   }
 
   // core and index, both against the submission event's own position.
-  const submitted = submissionOf(mirror.events, id);
+  const submitted = submissionOf(mirror.full, id);
   if (submitted === null) {
     fail(io, tally, id, "core", "/entry", "unsubmitted");
   } else {
@@ -805,6 +968,13 @@ async function checkRecord(
         entry,
         submitted.seq,
         covering === null ? null : covering.seq,
+        // `undefined` on the layouts that had no such column, which is how
+        // `firstDifference` says a key must not be there at all.
+        mirror.format !== "v3"
+          ? undefined
+          : covering === null
+            ? null
+            : releaseDateOf(covering.sealed_at),
       ),
       row,
       "/index",
@@ -832,6 +1002,26 @@ async function checkRecord(
   if (!(await verifyEntrySignature(entry))) {
     fail(io, tally, id, "signature", "/entry/signature", "bad_signature");
   }
+}
+
+/**
+ * The lines the inclusion proofs are folded over.
+ *
+ * Every event stays in the list, hash lines included, because a proof is over
+ * the hashes of a seal's whole batch and a sibling nobody may read yet is still
+ * a sibling. The one thing that is stood in for is a withheld submission's own
+ * payload: the fold reads a submission's `core.id` to know which entry the proof
+ * it just built belongs to, and null has no `core`. The proof built under that
+ * empty core belongs to no entry and is never asked for, which is right — an
+ * entry whose submission is still withheld has no file in this directory.
+ */
+function proofLines(mirror: Mirror): Event[] {
+  if (mirror.withheld.size === 0) return mirror.events;
+  return mirror.events.map((event) =>
+    mirror.withheld.has(event.seq) && event.type === "entry_submitted"
+      ? ({ ...event, payload: { core: {} } } as unknown as Event)
+      : event,
+  );
 }
 
 /** Every entry the directory holds, or the one `--entry` named. */
@@ -868,9 +1058,31 @@ async function checkEntries(
   const held = new Map<string, Capture>();
   // One pass over the whole sealed log, shared by every entry: the inclusion
   // proofs are a fact about the seals rather than about which entry is asked.
-  const entrySeals = await sealsForEntries(mirror.events, mirror.seals);
+  const entrySeals = await sealsForEntries(proofLines(mirror), mirror.seals);
+  // The entries some event of whose own the clone carries only as a hash line.
+  const withheldEntries = new Set<string>();
+  for (const event of mirror.events) {
+    if (!mirror.withheld.has(event.seq)) continue;
+    if (typeof event.entry_id === "string") withheldEntries.add(event.entry_id);
+  }
 
   for (const id of wanted) {
+    // An entry whose own submission is still a hash line has no file yet, and
+    // one whose own later events are hash lines cannot be re-derived from the
+    // clone: both are `withheld` rather than a pass or a failure, and both heal
+    // on their own. An entry every one of whose events is here is checked
+    // exactly as it is in a mirror with nothing withheld at all -- a lifecycle
+    // is the sub-sequence of the log bearing the entry's id, and this clone
+    // holds all of it.
+    const position = rows.get(id)?.["position"];
+    if (typeof position === "number" && mirror.withheld.has(position)) {
+      withhold(io, tally, id, UNRELEASED_NOTE);
+      continue;
+    }
+    if (withheldEntries.has(id)) {
+      withhold(io, tally, id, UNDERIVABLE_NOTE);
+      continue;
+    }
     const file = await readJson(join(dir, "entries", `${id}.json`));
     if (!isRecord(file) || !isRecord(file["entry"])) {
       fail(io, tally, id, "entry", "/entry", "malformed");
@@ -891,9 +1103,9 @@ async function checkEntries(
 
     const bundle: LogBundle = {
       as_of: typeof asOf === "string" ? asOf : "",
-      events: mirror.events,
+      events: mirror.full,
       registry: mirror.registry,
-      seals: mirror.seals,
+      seals: releasedSeals(mirror),
       captures: await capturesFor(entry, source, http, held),
     };
 
@@ -941,15 +1153,28 @@ function headOf(mirror: Mirror): { head: number; asOf: string } {
     : { head: newest.last_seq, asOf: newest.sealed_at };
 }
 
-/** Everything the three families come to for one clone. */
+/**
+ * Everything the three families come to for one clone.
+ *
+ * Over the events the directory carries in full and at the released head, which
+ * is how the export folds them (src/mirror.ts): all three are folds over
+ * payloads, so they are folds over the payloads that are public, and that is
+ * what makes them checkable at all. A clone with nothing withheld in it is a
+ * clone whose released head is its sealed head, and this is then exactly the
+ * fold it always was.
+ */
 function recompute(mirror: Mirror): Recomputed {
-  const { head, asOf } = headOf(mirror);
+  const head = releasedHeadOf(mirror) ?? -1;
+  const public_ = releasedSeals(mirror);
+  const newest = public_[public_.length - 1];
+  const asOf = newest === undefined ? "" : newest.sealed_at;
+  const events = mirror.full.filter((event) => event.seq <= head);
   return {
     // No answers: the model's answers are not in the log, so what is recomputed
     // is the derived attestation and never the answers beside it.
-    attestations: mirrorAttestations(mirror.events, [], asOf),
-    standing: mirrorStanding(mirror.events, head),
-    ledger: mirrorLedgerRows(mirror.events, asOf),
+    attestations: mirrorAttestations(events, [], asOf),
+    standing: mirrorStanding(events, head),
+    ledger: mirrorLedgerRows(events, asOf),
   };
 }
 
@@ -1000,9 +1225,9 @@ async function checkAttestations(
   const { asOf } = headOf(mirror);
   const report = await verifyAttestations({
     as_of: asOf,
-    events: mirror.events,
+    events: mirror.full,
     registry: mirror.registry,
-    seals: mirror.seals,
+    seals: releasedSeals(mirror),
     // The attestation checks are about signatures, scorers and hashes; no
     // capture is named by any of them.
     captures: {},
@@ -1108,6 +1333,7 @@ export async function verifyMirror(
   args: readonly string[],
   io: ValidatorIo,
   http: HttpClient = new WebHttpClient(),
+  now: Date = new Date(),
 ): Promise<number> {
   const plan = mirrorVerifyPlan(args);
   if (plan === null) {
@@ -1128,7 +1354,7 @@ export async function verifyMirror(
     return FAILED;
   }
 
-  const tally: Tally = { ok: 0, legacy: 0, failed: 0 };
+  const tally: Tally = { ok: 0, legacy: 0, withheld: 0, failed: 0 };
   try {
     const recomputed = recompute(mirror);
     checkManifest(io, tally, mirror, recomputed);
@@ -1143,6 +1369,7 @@ export async function verifyMirror(
       await checkStanding(io, tally, dir, recomputed);
       await checkLedger(io, tally, dir, recomputed);
     }
+    warnStale(io, mirror, now);
   } catch (error) {
     io.stderr(
       error instanceof MirrorUnreadable
@@ -1163,6 +1390,7 @@ export async function verifyMirror(
       `entries ${mirror.index.length}`,
       `ok ${tally.ok}`,
       `legacy ${tally.legacy}`,
+      `withheld ${tally.withheld}`,
       `failed ${tally.failed}`,
     ].join(" "),
   );

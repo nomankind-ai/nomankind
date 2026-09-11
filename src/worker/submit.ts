@@ -55,12 +55,10 @@ import {
   isDisclosureCategory,
   LIST_PAGE_LIMIT,
 } from "../policy.js";
+import { withholdEntry } from "../release.js";
 import { validateEntry } from "../schema.js";
 import { verifyEntrySignature } from "../sign.js";
 import type { D1Like } from "../storage/d1.js";
-import { HEADER_AGENT, verifyRequest } from "../request.js";
-import { publicKeyFromAgentId } from "../identity.js";
-import { D1NonceStore } from "../storage/nonces.js";
 import {
   EventAppendError,
   capturesForHash,
@@ -83,7 +81,9 @@ import {
 } from "../storage/r2.js";
 import { checkSubmission, entryIdFor } from "../submit.js";
 import { checkSupersedes } from "../supersede.js";
+import { readerAccess, type ReaderAccess } from "./access.js";
 import type { Env } from "./env.js";
+import { entryRelease, refusalResponse } from "./read.js";
 import {
   StorageUnreachable,
   authenticate,
@@ -982,11 +982,48 @@ async function submit(
 // Reads
 // ---------------------------------------------------------------------------
 
-async function entryById(env: Env, id: string): Promise<Response> {
+async function entryById(
+  env: Env,
+  deps: SubmitDeps,
+  reader: ReaderAccess,
+  id: string,
+): Promise<Response> {
   if (!ENTRY_ID_PATTERN.test(id)) return refuse(400, "bad_id");
   const stored = await getEntry(env.DB, id);
   if (stored === null) return refuse(404, "not_found");
-  return json(stored.entry, 200);
+
+  // A key and a signed operator are served the entry itself, and so is anybody
+  // once it has released: the body is the entry object exactly as this route
+  // has always answered it, so nothing that parses this door has to change.
+  if (reader.kind !== "free") return json(stored.entry, 200);
+  const release = await entryRelease(env.DB, stored.submittedSeq, deps.now);
+  if (release.released) return json(stored.entry, 200);
+
+  // Withheld (decision D-100): the proof under its own key, never under
+  // `entry`, so a reader cannot mistake a nulled claim for the claim, and the
+  // date beside it at the top level rather than inside the entry, so the
+  // schema's shape is the one thing the window never bends. `release_date` is
+  // null while nothing has sealed the submission: there is no date to name yet.
+  //
+  // `entry_hash` is the whole point of calling this proof at all: it is taken
+  // over the core before anything is nulled, so a keyless reader is handed the
+  // one number that identifies the entry the log sealed, and can hold whatever
+  // they are served later against it. Without it the proof names a record
+  // nobody outside the door could pin down.
+  const withheld = await withholdEntry(
+    stored.entry,
+    stored.sidecar,
+    release.release_date ?? "",
+  );
+  return json(
+    {
+      proof: withheld.proof,
+      sidecar: withheld.sidecar,
+      entry_hash: withheld.entry_hash,
+      release_date: release.release_date,
+    },
+    200,
+  );
 }
 
 /**
@@ -998,50 +1035,6 @@ function instantPlusDays(at: string, days: number): string {
   return new Date(
     Date.parse(at) + days * 24 * 60 * 60 * 1000,
   ).toISOString();
-}
-
-/**
- * The operator behind a signed read, or null when the request carries no valid
- * signature or the key belongs to nobody registered.
- *
- * The same M2 request signature the write doors verify (D-014), over a null
- * body because a GET has none. Answering null rather than a refusal is
- * deliberate: an unsigned read of an ordinary capture is served, and only the
- * one gate below cares whether a reader proved who they are.
- */
-async function signedOperator(
-  request: Request,
-  env: Env,
-  deps: SubmitDeps,
-  path: string,
-): Promise<string | null> {
-  const headers: Record<string, string> = {};
-  request.headers.forEach((value, key) => {
-    headers[key.toLowerCase()] = value;
-  });
-  const agentHeader = headers[HEADER_AGENT];
-  if (agentHeader === undefined || agentHeader === "") return null;
-
-  let publicKey: Uint8Array;
-  try {
-    publicKey = publicKeyFromAgentId(agentHeader);
-  } catch {
-    return null;
-  }
-
-  const nonces = new D1NonceStore(env.DB);
-  await nonces.prune(deps.now);
-  const verdict = await verifyRequest({
-    method: request.method,
-    path,
-    body: null,
-    headers,
-    publicKey,
-    now: deps.now,
-    nonces,
-  });
-  if (!verdict.ok) return null;
-  return operatorForAgent(env.DB, verdict.agentId);
 }
 
 /**
@@ -1061,10 +1054,9 @@ async function signedOperator(
  * evidence as well, and is served as it always was.
  */
 async function undisclosed(
-  request: Request,
   env: Env,
   deps: SubmitDeps,
-  path: string,
+  reader: ReaderAccess,
   rows: readonly CaptureRecord[],
 ): Promise<Response | null> {
   if (rows.length === 0) return null;
@@ -1083,8 +1075,47 @@ async function undisclosed(
   const discloseAfter = instantPlusDays(submittedAt, window);
   if (deps.now.getTime() >= Date.parse(discloseAfter)) return null;
 
-  if ((await signedOperator(request, env, deps, path)) !== null) return null;
+  // The same rule as before, asked of the one reader this request resolved: a
+  // signed request from an agent bound to a registered operator opens the
+  // payload, and nothing else does. One signature check per request, because a
+  // nonce is single use and a second verification of the same headers would be
+  // a replay of the reader's own request.
+  if (reader.kind === "operator") return null;
   return json({ error: "undisclosed", disclose_after: discloseAfter }, 403);
+}
+
+/**
+ * The release window on a capture (decision D-100), or null when this reader
+ * may have the bytes.
+ *
+ * A capture is evidence, and evidence is the content of the entry that rests on
+ * it: a capture whose every index row belongs to an entry that has not released
+ * is served only to a key or a signed operator, and refused to a free reader
+ * with the earliest date any of those entries opens. One row belonging to a
+ * released entry is enough to serve it — the bytes are that entry's public
+ * evidence, and no other entry citing the same hash can take that back.
+ */
+async function unreleasedCapture(
+  env: Env,
+  deps: SubmitDeps,
+  reader: ReaderAccess,
+  rows: readonly CaptureRecord[],
+): Promise<Response | null> {
+  if (reader.kind !== "free") return null;
+  if (rows.length === 0) return null;
+
+  let earliest: string | null = null;
+  for (const row of rows) {
+    const stored = await getEntry(env.DB, row.entryId);
+    // A capture row whose entry is not there points at nothing this door can
+    // date; it cannot release the bytes, and it cannot put a date on them.
+    if (stored === null) continue;
+    const release = await entryRelease(env.DB, stored.submittedSeq, deps.now);
+    if (release.released) return null;
+    const date = release.release_date;
+    if (date !== null && (earliest === null || date < earliest)) earliest = date;
+  }
+  return json({ error: "unreleased", release_date: earliest }, 403);
 }
 
 /**
@@ -1096,18 +1127,19 @@ async function undisclosed(
  * these bytes hash to the address they were stored at.
  */
 async function captureByHash(
-  request: Request,
   env: Env,
   deps: SubmitDeps,
-  path: string,
+  reader: ReaderAccess,
   hash: string,
 ): Promise<Response> {
   if (!HASH_PATTERN.test(hash)) return refuse(400, "bad_hash");
   const rows = await capturesForHash(env.DB, hash);
   const record = rows[0] ?? null;
   if (record === null) return refuse(404, "not_found");
-  const gate = await undisclosed(request, env, deps, path, rows);
+  const gate = await undisclosed(env, deps, reader, rows);
   if (gate !== null) return gate;
+  const window = await unreleasedCapture(env, deps, reader, rows);
+  if (window !== null) return window;
 
   const stored = await throughArchive(() =>
     readCapture(env.CAPTURES, record.archiveHash),
@@ -1127,10 +1159,9 @@ async function captureByHash(
 }
 
 async function sidecarByHash(
-  request: Request,
   env: Env,
   deps: SubmitDeps,
-  path: string,
+  reader: ReaderAccess,
   hash: string,
 ): Promise<Response> {
   if (!HASH_PATTERN.test(hash)) return refuse(400, "bad_hash");
@@ -1139,8 +1170,10 @@ async function sidecarByHash(
   if (record === null) return refuse(404, "not_found");
   // The sidecar says when and how the payload was archived, which is a fact
   // about the payload: it waits for the same date the bytes do.
-  const gate = await undisclosed(request, env, deps, path, rows);
+  const gate = await undisclosed(env, deps, reader, rows);
   if (gate !== null) return gate;
+  const window = await unreleasedCapture(env, deps, reader, rows);
+  if (window !== null) return window;
 
   const sidecar = await throughArchive(() =>
     readSidecar(env.CAPTURES, record.archiveHash),
@@ -1215,7 +1248,9 @@ async function route(
   const entryId = segmentAfter(path, "/entries/");
   if (entryId !== null) {
     if (request.method !== "GET") return methodNotAllowed("GET");
-    return entryById(env, entryId);
+    const granted = await reading(request, env, deps);
+    if (!granted.ok) return granted.response;
+    return entryById(env, deps, granted.reader, entryId);
   }
 
   if (path.startsWith("/captures/")) {
@@ -1225,11 +1260,34 @@ async function route(
     const hash = segmentAfter(`/${raw}`, "/");
     if (hash !== null) {
       if (request.method !== "GET") return methodNotAllowed("GET");
+      const granted = await reading(request, env, deps);
+      if (!granted.ok) return granted.response;
       return sidecar
-        ? sidecarByHash(request, env, deps, path, hash)
-        : captureByHash(request, env, deps, path, hash);
+        ? sidecarByHash(env, deps, granted.reader, hash)
+        : captureByHash(env, deps, granted.reader, hash);
     }
   }
 
   return null;
+}
+
+/**
+ * Who is reading, resolved once for the request and passed to every gate under
+ * it (decision D-100).
+ *
+ * Only the reads below it: a submission carries an M2 signature over its own
+ * body and is authenticated by `authenticate`, so putting it through a gate
+ * that verifies a GET over a null body would refuse every write door there is.
+ */
+async function reading(
+  request: Request,
+  env: Env,
+  deps: SubmitDeps,
+): Promise<
+  { ok: true; reader: ReaderAccess } | { ok: false; response: Response }
+> {
+  const granted = await readerAccess(request, env, env.DB, deps.now);
+  return granted.ok
+    ? { ok: true, reader: granted.reader }
+    : { ok: false, response: refusalResponse(granted.refusal) };
 }

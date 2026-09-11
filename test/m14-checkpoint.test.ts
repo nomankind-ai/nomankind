@@ -60,6 +60,7 @@ import {
   FixtureResolver,
   TEST_ORIGIN,
   makeAgent,
+  signingHttp,
   type TestAgent,
 } from "./helpers/registry.js";
 import {
@@ -323,7 +324,17 @@ describe("the demo checkpoint, end to end", () => {
       payout: new MockPayoutAdapter(),
       fetcher: new FixtureFetcher(PAGES),
     };
-    http = { fetch: (request: Request) => handleRequest(request, env, deps) };
+    // Signed with a fixture operator's key, which is what `--sign <key.json>`
+    // gives a command: everything this checkpoint reads and exports is minutes
+    // old and inside the release window (decision D-100).
+    http = {
+      fetch: (request: Request) =>
+        signingHttp(
+          (inner) => handleRequest(inner, env, deps),
+          fixtures[0]!,
+          NOW,
+        ).fetch(request),
+    };
 
     result = await runCheckpoint({
       baseUrl: TEST_ORIGIN,

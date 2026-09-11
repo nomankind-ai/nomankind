@@ -27,6 +27,16 @@
  * an event the log has not committed to has no business in an archive somebody
  * may still be reading in ten years.
  *
+ * Nothing unreleased is exported in full either (decision D-100). A seal's
+ * events are written whole once that seal's `sealed_at` is a window old, and
+ * until then they are hash lines: the seq, the instant, the type, the entry id,
+ * the chain link and the hash, with `payload: null` and `withheld: true`. An
+ * entry gets its `entries/<id>.json` when its own submission event releases, and
+ * `index.json` carries a row for it from the first day either way -- every index
+ * column is proof, and the row names the date the file will appear on. So a seal
+ * file changes exactly once in its life, on the day its events release, and the
+ * push's changed-blob diff turns that into one commit rather than a rewrite.
+ *
  * Three of the families are not read from anywhere at all — they are recomputed
  * here, out of the sealed events, at the sealed head: the attestations
  * (`deriveAttestation`, exactly as `GET /attestations/{id}` folds one), standing
@@ -53,6 +63,14 @@
  */
 
 import { DOMAIN_SLUGS, MIRROR, NORM_VERSION, SCHEMA_VERSION } from "./policy.js";
+import {
+  isReleased,
+  isWithheld,
+  releaseDateOf,
+  releasedHead,
+  withholdEvent,
+  type WithheldEvent,
+} from "./release.js";
 import { deriveAttestation, type DerivedAttestation } from "./attest.js";
 import { bountyAccrual } from "./bounty.js";
 import { deriveEntry, type Sidecar } from "./derive.js";
@@ -86,7 +104,7 @@ import type { Entry } from "./schema.js";
 import type { Seal } from "./seal.js";
 
 /** What a reader finds in `mirror.json` and checks the directory against. */
-export const MIRROR_FORMAT = "nomankind-mirror-v2";
+export const MIRROR_FORMAT = "nomankind-mirror-v3";
 
 /**
  * Every layout a reader may be handed, oldest first.
@@ -94,22 +112,27 @@ export const MIRROR_FORMAT = "nomankind-mirror-v2";
  * A mirror is CC0 and already cloned: the copies pushed before the attestations,
  * the standing, the ledger (#58) and the sidecar's source class (#59) joined the
  * export are still somebody's exit, and a verifier that refused them would be
- * taking the exit back. So there are two formats rather than one moving one —
- * `v1` is the seven-item layout as it was, `v2` is what `buildMirror` writes now
- * — and each directory is checked as what it claims to be.
+ * taking the exit back. So there are three formats rather than one moving one —
+ * `v1` is the seven-item layout as it was, `v2` is the whole sealed log in full,
+ * `v3` is what `buildMirror` writes now: the same layout with the release window
+ * applied (D-100), which is the first layout in which a seal file can hold a
+ * hash line and an entry can have no file yet. Each directory is checked as what
+ * it claims to be, and a v2 copy in somebody's hands is still their exit.
  */
 export const MIRROR_FORMATS: readonly string[] = Object.freeze([
   "nomankind-mirror-v1",
+  "nomankind-mirror-v2",
   MIRROR_FORMAT,
 ]);
 
 /** Which layout a directory claims, in the word this code reasons in. */
-export type MirrorFormat = "v1" | "v2";
+export type MirrorFormat = "v1" | "v2" | "v3";
 
 /** The layout one manifest's `format` names, or null when it names none. */
 export function mirrorFormatOf(format: unknown): MirrorFormat | null {
   if (format === MIRROR_FORMATS[0]) return "v1";
-  if (format === MIRROR_FORMAT) return "v2";
+  if (format === MIRROR_FORMATS[1]) return "v2";
+  if (format === MIRROR_FORMAT) return "v3";
   return null;
 }
 
@@ -168,12 +191,18 @@ export const SEAL_SEQ_DIGITS = 8;
  * the caller read the log and the seals at two different moments — an export
  * built from that would be missing events a seal commits to, and a verifier
  * would call the mirror broken rather than the read.
+ * `withheld`: a seal whose window has run out by this export's own clock was
+ * handed over as hash lines, which means the caller read the log at a different
+ * instant from the one it is exporting at, or with less access than the export
+ * claims (decision D-100). Refused rather than written: an export that quietly
+ * left out the content of a released seal would be a mirror that disagrees with
+ * every other copy of the same head.
  */
 export class MirrorError extends Error {
   override readonly name = "MirrorError";
-  readonly reason: "no_seal" | "gap";
+  readonly reason: "no_seal" | "gap" | "withheld";
 
-  constructor(reason: "no_seal" | "gap", detail: string) {
+  constructor(reason: "no_seal" | "gap" | "withheld", detail: string) {
     super(`buildMirror: ${reason}: ${detail}`);
     this.reason = reason;
   }
@@ -234,6 +263,37 @@ export interface MirrorInput {
   readonly environment: string;
   /** The instant of the run that made it, which is the injected clock's. */
   readonly exported_at: string;
+  /**
+   * The instant the release window is judged at, from the same injected clock.
+   *
+   * Beside `exported_at` rather than read off it, because the two answer
+   * different questions -- when this directory was written, and which of the log
+   * it was old enough to write in full -- and a caller that meant one of them
+   * should have to say which.
+   */
+  readonly now: string;
+  /**
+   * The published window, from src/policy.ts, as the manifest records it.
+   *
+   * The rule itself is src/release.ts's and reads the same number; this is what
+   * a reader of the directory is told it was built under, so a clone carries the
+   * window it was made with rather than whatever the code says today.
+   */
+  readonly release_window_days: number;
+  /**
+   * Which of the two directories this is (decision D-100), `released` by
+   * default and by omission.
+   *
+   * `released` is the published export: a seal inside its window is written as
+   * hash lines and an entry whose submission has not opened has no file. `full`
+   * is the copy a fork entitled to the content takes with a key or a signature
+   * — the same directory with every seal and every entry written whole. It is a
+   * superset and never a different reading of the clock: `released_head`,
+   * `standing_position` and the three recomputed families are judged at `now` in
+   * both, so an entitled fork's manifest says exactly what the public export's
+   * says for the same instant, and the extra files are the extra it paid for.
+   */
+  readonly view?: "released" | "full";
   /** Every seal, in seq order. */
   readonly seals: readonly Seal[];
   /** Every anchor, in date order. */
@@ -275,6 +335,24 @@ function text(source: unknown, key: string): string | null {
   if (typeof source !== "object" || source === null) return null;
   const value = (source as Record<string, unknown>)[key];
   return typeof value === "string" ? value : null;
+}
+
+/**
+ * The `sealed_at` of the newest released seal, or the empty string when no seal
+ * has released: the instant the three recomputed families are folded at.
+ *
+ * Their own head's instant rather than the sealed head's, for the reason they
+ * are folded over the released events at all: a clone has to be able to reach
+ * the same three files from the same events, and the instant is one of the
+ * inputs.
+ */
+function newestReleased(seals: readonly Seal[], now: Date): string {
+  let newest: Seal | null = null;
+  for (const seal of seals) {
+    if (!isReleased(seal.sealed_at, now)) continue;
+    if (newest === null || seal.seq > newest.seq) newest = seal;
+  }
+  return newest === null ? "" : newest.sealed_at;
 }
 
 /**
@@ -340,6 +418,7 @@ function indexRow(
   record: MirrorEntryRecord,
   position: number,
   sealSeq: number | null,
+  releaseDate: string | null,
 ): Record<string, unknown> {
   const entry = record.entry as unknown as Record<string, unknown>;
   return {
@@ -358,6 +437,10 @@ function indexRow(
     stale: entry["stale"],
     superseded_by: entry["superseded_by"],
     entry_hash: record.entry_hash,
+    // Every column above is proof and is written for a released entry and a
+    // withheld one alike -- there is no content column in the index to null --
+    // and this is the one the window adds: the day the file appears.
+    release_date: releaseDate,
   };
 }
 
@@ -799,10 +882,18 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
   // Immutable once written: a seal's range never moves, so a seal's file never
   // changes and a mirror's history shows one commit per seal rather than one
   // rewrite of the whole log per day.
+  const now = new Date(input.now);
+  const released = releasedHead(seals, now);
+  // A fork holding a key or an operator signature was served the payloads and
+  // writes them; it does not get a different clock for it. Every number below
+  // that says how much of the log is public is still `released`'s.
+  const whole = input.view === "full";
   for (const seal of seals) {
-    const batch: Event[] = [];
+    const open = whole || isReleased(seal.sealed_at, now);
+    const batch: (Event | WithheldEvent)[] = [];
     for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
-      batch.push(bySeq.get(seq)!);
+      const event = bySeq.get(seq)!;
+      batch.push(open ? event : withholdEvent(event));
     }
     files.push({ path: sealFileName(seal.seq), content: lines(batch) });
   }
@@ -854,16 +945,31 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
     const position = positions.get(id);
     if (position === undefined) continue;
     const covering = coveringSeal(seals, position);
-    files.push({
-      path: `entries/${id}.json`,
-      content: document({
-        entry: record.entry,
-        sidecar: record.sidecar,
-        entry_hash: record.entry_hash,
-      }),
-    });
+    // The entry's release date is its submission event's, which is the date the
+    // seal covering that event opens. A position nothing covers is not part of
+    // the sealed record at all, and the row says so with a null date.
+    const releaseDate =
+      covering === null ? null : releaseDateOf(covering.sealed_at);
+    if (
+      releaseDate !== null &&
+      (whole || (released !== null && position <= released))
+    ) {
+      files.push({
+        path: `entries/${id}.json`,
+        content: document({
+          entry: record.entry,
+          sidecar: record.sidecar,
+          entry_hash: record.entry_hash,
+        }),
+      });
+    }
     indexed.push({
-      row: indexRow(record, position, covering === null ? null : covering.seq),
+      row: indexRow(
+        record,
+        position,
+        covering === null ? null : covering.seq,
+        releaseDate,
+      ),
       position,
     });
   }
@@ -873,19 +979,40 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
     content: document(indexed.map((one) => one.row)),
   });
 
-  // The three families nothing is read for: recomputed here, at the sealed
-  // head, out of the events the seals cover.
-  const sealedEvents: Event[] = [];
+  // The three families nothing is read for: recomputed here, out of the events
+  // the seals cover -- and out of the released ones only.
+  //
+  // All three are folds over payloads, and a payload that has not released is
+  // not in this directory: a file folded over one would be both a leak of it and
+  // a file no reader of this clone could recompute. So they are folded at the
+  // released head, which is the head of the log this export made public, and a
+  // fork that holds the directory gets the same three files out of the same
+  // events. They catch up with the sealed head as the windows run out, one seal
+  // at a time, exactly as the seal files do.
+  const releasedEvents: Event[] = [];
   for (const seal of seals) {
+    if (!isReleased(seal.sealed_at, now)) continue;
     for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
-      sealedEvents.push(bySeq.get(seq)!);
+      const event = bySeq.get(seq)!;
+      if (isWithheld(event)) {
+        throw new MirrorError(
+          "withheld",
+          `seal ${seal.seq} released on ${releaseDateOf(seal.sealed_at)}, and ` +
+            `event ${seq} was handed over as a hash line`,
+        );
+      }
+      releasedEvents.push(event);
     }
   }
+  // The position the three families stand at: the released head, or the
+  // position before the first event when nothing of the log is public yet.
+  const releasedPosition = released ?? -1;
+  const releasedAsOf = newestReleased(seals, now);
 
   const attestations = mirrorAttestations(
-    sealedEvents,
+    releasedEvents,
     input.attestations,
-    newest.sealed_at,
+    releasedAsOf,
   );
   for (const record of attestations) {
     files.push({
@@ -899,10 +1026,10 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
 
   files.push({
     path: "standing.json",
-    content: document(mirrorStanding(sealedEvents, newest.last_seq)),
+    content: document(mirrorStanding(releasedEvents, releasedPosition)),
   });
 
-  const ledger = mirrorLedgerRows(sealedEvents, newest.sealed_at);
+  const ledger = mirrorLedgerRows(releasedEvents, releasedAsOf);
   files.push({ path: "ledger.jsonl", content: lines(ledger) });
 
   let eventCount = 0;
@@ -917,12 +1044,17 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
       as_of: newest.sealed_at,
       head: newest.last_seq,
       seal_seq: newest.seq,
+      // The window this directory was built under, and how much of it is in
+      // full: null when nothing has released yet, which is every log younger
+      // than the window and is a directory of hash lines and proof.
+      release_window_days: input.release_window_days,
+      released_head: released,
       seals: seals.length,
       events: eventCount,
       entries: indexed.length,
       operators: operators.length,
       attestations: attestations.length,
-      standing_position: newest.last_seq,
+      standing_position: releasedPosition,
       ledger_rows: ledger.length,
       schema_version: SCHEMA_VERSION,
       norm_version: NORM_VERSION,

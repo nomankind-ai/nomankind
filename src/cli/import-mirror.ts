@@ -33,6 +33,14 @@
  *    fork catches up from a newer export instead of starting again.
  * 6. Exit 0 with one summary line, 1 with the named refusal, 2 on usage. Never
  *    a stack trace: a mirror is a stranger's directory.
+ * 7. Only released events are replayed (decision D-100). A v3 mirror carries the
+ *    seals inside the window as hash lines, and a hash line cannot be appended —
+ *    it has no payload to chain, to derive from or to seal over — so the import
+ *    stops at the released head, says how many lines it stopped in front of, and
+ *    the fork seals on from there. A mirror with nothing released yet is refused
+ *    with `nothing_released` rather than replayed into an empty log, and a fork
+ *    that wants more imports a newer export or reads the content it is entitled
+ *    to with a key.
  *
  * What is rebuilt here and what the first sweep rebuilds. Here: the events, the
  * registry rows, the entries, the seals, the anchors, the attestations with
@@ -81,6 +89,7 @@ import {
   type MirrorFormat,
 } from "../mirror.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
+import { isWithheld } from "../release.js";
 import type { Entry } from "../schema.js";
 import { sealsForEntries } from "../seal.js";
 import type { D1Like } from "../storage/d1.js";
@@ -185,8 +194,58 @@ export interface ImportSummary {
   readonly entries: number;
   readonly attestations: number;
   readonly ledgerRows: number;
+  /**
+   * The hash lines the import stopped in front of (D-100).
+   *
+   * Zero for every v1 and v2 mirror and for a v3 one whose windows have all run
+   * out. Above zero, `head` is the released head rather than the mirror's own
+   * sealed head, and the events past it were not replayed at all.
+   */
+  readonly withheld: number;
+  /** The position imported to: the released head. */
   readonly head: number;
+  /** The seal the import stopped at: the newest one whose window has run out. */
   readonly sealSeq: number;
+}
+
+/**
+ * The layout trimmed to what is public, and how many lines were left behind.
+ *
+ * A withheld line has no payload, so it can be neither appended under the chain
+ * rule nor derived from nor folded into the standing and the ledger: the import
+ * is of the released prefix or it is of nothing. The head is the newest released
+ * seal's rather than the last released event's, because an import has to stop on
+ * a seal boundary for the fork to seal on from it — and a seal is released whole
+ * or not at all, since every event under it shares its `sealed_at`.
+ */
+function releasedLayout(layout: MirrorLayout): {
+  readonly layout: MirrorLayout;
+  readonly withheld: number;
+} {
+  const first = layout.events.findIndex((event) => isWithheld(event));
+  if (first === -1) return { layout, withheld: 0 };
+
+  const withheld = layout.events.length - first;
+  const through = layout.events[first]!.seq - 1;
+  const seals = layout.seals.filter((seal) => seal.last_seq <= through);
+  const newest = seals[seals.length - 1];
+  if (newest === undefined) {
+    throw new ImportRefusal(
+      "nothing_released",
+      `the mirror's oldest seal is still inside its window: ${withheld} withheld events`,
+    );
+  }
+  return {
+    layout: {
+      ...layout,
+      head: newest.last_seq,
+      sealSeq: newest.seq,
+      asOf: newest.sealed_at,
+      seals,
+      events: layout.events.slice(0, first),
+    },
+    withheld,
+  };
 }
 
 /** How one import is driven. Everything has a default a command would use. */
@@ -467,7 +526,9 @@ export async function importMirror(
   } catch (error) {
     throw new ImportRefusal("unreadable", `${target}: ${reasonOf(error)}`);
   }
-  const layout = readLayout(files);
+  // (7) The released prefix, before anything is compared against the database:
+  // what is replayed is the log the mirror made public, and nothing past it.
+  const { layout, withheld } = releasedLayout(readLayout(files));
 
   // (5) A database with any event in it, and where its head sits.
   const stored = await headSeq(db);
@@ -507,6 +568,7 @@ export async function importMirror(
     entries: plan.entries.length,
     attestations: recomputed.attestations,
     ledgerRows: recomputed.ledgerRows,
+    withheld,
     head: plan.head,
     sealSeq: layout.sealSeq,
   };
@@ -519,6 +581,11 @@ export async function importMirror(
  * and their fold is the log's own, but what the model actually said is the one
  * thing that older layout never carried, and a reader who is told the
  * attestations were imported deserves to be told that much about them.
+ *
+ * `withheld N` is the same kind of fact about a v3 mirror: N events at the end
+ * of the export are hash lines, the import stopped in front of them, and `head`
+ * is where it stopped. A reader who was not told would think the fork holds the
+ * whole log.
  */
 export function summaryLine(summary: ImportSummary): string {
   return [
@@ -533,6 +600,7 @@ export function summaryLine(summary: ImportSummary): string {
     `attestations ${summary.attestations}`,
     `answers ${summary.answers ? "carried" : "none"}`,
     `ledger ${summary.ledgerRows}`,
+    `withheld ${summary.withheld}`,
     `head ${summary.head}`,
     `seal ${summary.sealSeq}`,
   ].join(" ");

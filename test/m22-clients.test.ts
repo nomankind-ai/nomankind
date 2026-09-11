@@ -70,7 +70,9 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
+  signingHttp,
   type TestAgent,
 } from "./helpers/registry.js";
 import { FixtureFetcher, SUBMIT_NOW, pageHash, type FixturePage } from "./helpers/submit.js";
@@ -151,6 +153,15 @@ class InProcessHttp implements HttpClient {
   }
 }
 
+/**
+ * One GET signed by a trusted operator's agent (decision D-100): an entry read
+ * at the instant it was written is inside the release window, where a free
+ * reader is handed the proof rather than the entry.
+ */
+function signedRead(path: string): Promise<Request> {
+  return signedGet(k1.agent, { path, timestamp: clock.toISOString() });
+}
+
 /** What one run printed. */
 function recorder(): { io: ValidatorIo; out: string[] } {
   const out: string[] = [];
@@ -163,9 +174,20 @@ function recorder(): { io: ValidatorIo; out: string[] } {
   };
 }
 
-/** The CLI's injected world, at whatever the clock now says. */
+/**
+ * The CLI's injected world, at whatever the clock now says.
+ *
+ * The client signs its reads with a trusted operator's agent, which is what
+ * `--sign <key.json>` gives a command: every entry here is read at the instant
+ * it was written, inside the release window (decision D-100), where a free
+ * reader is handed the proof and a release date rather than the content.
+ */
 function cliDeps(io: ValidatorIo): AttestDeps {
-  return { http: new InProcessHttp(), now: clock, io };
+  return {
+    http: signingHttp((request) => send(request), k1.agent, clock),
+    now: clock,
+    io,
+  };
 }
 
 /** A TestAgent is exactly what a key file gives a command: an id and a key. */
@@ -413,7 +435,7 @@ describe("the submit command's receipt", () => {
       null,
     ]);
 
-    const response = await send(new Request(`${TEST_ORIGIN}/entries/${entryId}`));
+    const response = await send(await signedRead(`/entries/${entryId}`));
     const entry = (await response.json()) as Record<string, unknown>;
     expect([response.status, entry["status"]]).toEqual([200, "verified"]);
     // The tier the whole milestone rests on: an entry with an observation is
@@ -426,7 +448,7 @@ describe("the submit command's receipt", () => {
 
     // And the artifact itself is archived at exactly that hash.
     const archived = await send(
-      new Request(`${TEST_ORIGIN}/captures/${encodeURIComponent(receiptHash)}`),
+      await signedRead(`/captures/${encodeURIComponent(receiptHash)}`),
     );
     expect(archived.status).toBe(200);
   }, 600_000);

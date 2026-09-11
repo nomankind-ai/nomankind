@@ -61,7 +61,12 @@ import { exportPrivateKeyPkcs8, generateKeypair } from "../src/identity.js";
 import { runMirror } from "../src/cli/mirror.js";
 import { mirrorVerifyPlan, verifyMirror } from "../src/cli/verify-mirror.js";
 import type { HttpClient, ValidatorIo } from "../src/cli/validator.js";
-import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT, NORM_VERSION } from "../src/policy.js";
+import {
+  DEFAULT_DOMAIN,
+  LIST_PAGE_LIMIT,
+  NORM_VERSION,
+  RELEASE_WINDOW_DAYS,
+} from "../src/policy.js";
 import { signRecord } from "../src/records.js";
 import type { Entry } from "../src/schema.js";
 import { signCore } from "../src/sign.js";
@@ -106,8 +111,35 @@ const NOW = SUBMIT_NOW;
 const AT = NOW.toISOString();
 const HOUR_MS = 3_600_000;
 
-/** The instant the sweep exports at, and the instant the command runs at. */
+/** The instant the sweep seals at. */
 const EXPORT_AT = new Date(NOW.getTime() + HOUR_MS);
+
+/**
+ * A window and a day on: the instant the sweep exports at, and the instant the
+ * command runs at (decision D-100).
+ *
+ * The run that seals also exports, and everything it sealed is inside its
+ * window that minute — a real export, all hash lines and no entry file, and not
+ * the one this file is about. By this run the first seal has opened and the
+ * record is exported in full. This run's own new seal is a month of read counts
+ * sealed at this instant, and it is exported as hash lines, which is what every
+ * live export looks like.
+ */
+const EXPORT_AT_RELEASED = new Date(
+  EXPORT_AT.getTime() + (RELEASE_WINDOW_DAYS + 1) * 86_400_000,
+);
+
+/**
+ * An hour before that run: when the entry this file's export cannot show is
+ * submitted (decision D-100).
+ *
+ * A mirror built on a day when everything has released is not the mirror the
+ * window exists for. This instant puts one entry inside the seal this run makes
+ * -- sealed at EXPORT_AT_RELEASED, so a month short of opening -- and that is
+ * the entry a keyless command has to write an index row for out of a hash line
+ * and the free entry door, with no file beside it and no claim in it.
+ */
+const UNRELEASED_AT = new Date(EXPORT_AT_RELEASED.getTime() - HOUR_MS);
 
 /**
  * The environment the mirror lands under. Not `local`: the directory name is
@@ -143,6 +175,8 @@ let k3: Party;
 let pageHashValue = "";
 let entryId = "";
 let legacyId = "";
+/** The entry sealed inside its window by the run this file exports at. */
+let unreleasedId = "";
 /** The v0.7 core the door took, which the seeded probe set asks about. */
 let entryCore: Core;
 
@@ -170,7 +204,18 @@ function send(request: Request, now: Date = NOW): Promise<Response> {
  */
 class InProcessHttp implements HttpClient {
   calls = 0;
-  constructor(private readonly now: Date = NOW) {}
+  /**
+   * The instant the doors answer at, and the default is the export's own
+   * (decision D-100).
+   *
+   * The release window is judged by the instance, so a command that read the
+   * doors at one clock and built its directory at another would be comparing
+   * two moments of the same log: an event released by the builder's clock and
+   * withheld by the reader's is a hash line the builder would write in full.
+   * The verification reads the captures through the same door and the same
+   * window, so it answers at the same instant too.
+   */
+  constructor(private readonly now: Date = EXPORT_AT_RELEASED) {}
   async fetch(request: Request): Promise<Response> {
     this.calls += 1;
     const url = new URL(request.url);
@@ -260,14 +305,22 @@ async function approve(party: Party, id: string): Promise<void> {
  * `domain` key at all rather than a null one. Its id is the hash of the
  * seventeen keys it actually carried, so no door could have made it.
  */
-async function legacyCore(agent: TestAgent): Promise<Core> {
+async function legacyCore(
+  agent: TestAgent,
+  over: { claim: string; before: string; after: string; submitted_at: string } = {
+    claim: "example/kestrel-1 seat pricing was $38 per seat per month",
+    before: "$35 per seat per month",
+    after: "$38 per seat per month",
+    submitted_at: AT,
+  },
+): Promise<Core> {
   const core = {
     id: null,
     subject: SUBJECT,
     category: CATEGORY,
-    claim: "example/kestrel-1 seat pricing was $38 per seat per month",
-    before: "$35 per seat per month",
-    after: "$38 per seat per month",
+    claim: over.claim,
+    before: over.before,
+    after: over.after,
     effective_at: "2026-08-01",
     evidence_tier: "stated",
     evidence: null,
@@ -278,7 +331,7 @@ async function legacyCore(agent: TestAgent): Promise<Core> {
     supersedes: null,
     author: agent.agentId,
     author_operator: null,
-    submitted_at: AT,
+    submitted_at: over.submitted_at,
   } as unknown as Core;
   return { ...core, id: await entryIdFor(core) };
 }
@@ -356,6 +409,17 @@ async function v1CopyOfMirror(
     delete manifest["attestations"];
     delete manifest["standing_position"];
     delete manifest["ledger_rows"];
+    // The release window's own two fields, and its index column, were not v1's
+    // either: a copy pulled before the window carries no release date at all.
+    delete manifest["release_window_days"];
+    delete manifest["released_head"];
+    const indexPath = join(dir, "index.json");
+    const index = JSON.parse(await readFile(indexPath, "utf8")) as Record<
+      string,
+      unknown
+    >[];
+    for (const row of index) delete row["release_date"];
+    await writeFile(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
   }
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   return dir;
@@ -588,8 +652,53 @@ beforeAll(async () => {
   // the command below has to reproduce byte for byte.
   mirror = new MockMirrorAdapter();
   await beacon.advance(EXPORT_AT.toISOString());
-  const report = await runSweep(env, {
+  const sealing = await runSweep(env, {
     now: EXPORT_AT,
+    beacon,
+    payout,
+    mirror,
+    trigger: "alarm",
+    witness: new FakeWitnessAdapter({ signers: [witness] }),
+    pinned: pinnedSet([witness]),
+    ineligibleAgents: new Set<string>(),
+    anchor: new FakeAnchorAdapter(null),
+  });
+  expect(sealing.mirror).not.toBeNull();
+
+  // One more record, submitted after that seal and before the next: the entry
+  // whose window has not run out when this file's export is taken. Seeded the
+  // way the legacy one is, because what is under test is the export of a log
+  // that holds an unreleased entry rather than the door that takes one.
+  const later = await legacyCore(k1.agent, {
+    claim: "example/kestrel-1 seat pricing is $44 per seat per month",
+    before: "$40 per seat per month",
+    after: "$44 per seat per month",
+    submitted_at: UNRELEASED_AT.toISOString(),
+  });
+  unreleasedId = later["id"] as string;
+  const laterAppended = await appendEvent(await allEvents(), {
+    at: UNRELEASED_AT.toISOString(),
+    type: "entry_submitted",
+    entry_id: unreleasedId,
+    payload: { core: later, signature: await signCore(later, k1.agent.privateKey) },
+  });
+  const laterEvent = laterAppended[laterAppended.length - 1] as Event;
+  await appendEvents(store.db, [laterEvent]);
+  const laterDerived = deriveEntry([laterEvent], unreleasedId, {
+    now: UNRELEASED_AT.toISOString(),
+  });
+  await putEntry(
+    store.db,
+    laterDerived.entry as Entry,
+    laterDerived.sidecar,
+    laterEvent.seq,
+  );
+
+  // And the run a window on, whose export carries that seal in full: the bytes
+  // the command below has to reproduce.
+  await beacon.advance(EXPORT_AT_RELEASED.toISOString());
+  const report = await runSweep(env, {
+    now: EXPORT_AT_RELEASED,
     beacon,
     payout,
     mirror,
@@ -621,11 +730,13 @@ describe("the mirror command rebuilds the export from the public doors", () => {
       [TEST_ORIGIN, pristine],
       io.io,
       new InProcessHttp(),
-      EXPORT_AT,
+      EXPORT_AT_RELEASED,
     );
     expect([code, io.out.join("\n")]).toEqual([0, io.out.join("\n")]);
     expect(code).toBe(0);
-    expect(io.out[0]).toMatch(/^mirror demo head \d+ seal \d+ files \d+$/);
+    expect(io.out[0]).toMatch(
+      /^mirror demo head \d+ seal \d+ files \d+ view released$/,
+    );
     expect(io.out[1]).toBe(join(pristine, ENVIRONMENT));
   }, 600_000);
 
@@ -637,12 +748,41 @@ describe("the mirror command rebuilds the export from the public doors", () => {
     }
 
     expect([...written.keys()].sort()).toEqual([...pushed.keys()].sort());
-    // Both records are in it: the entry the door took and the legacy one.
+    // Both released records are in it: the entry the door took and the legacy
+    // one. The third was sealed an hour ago and is a month from opening, so it
+    // has no file here -- in either directory.
     expect([...written.keys()]).toContain(`entries/${entryId}.json`);
     expect([...written.keys()]).toContain(`entries/${legacyId}.json`);
+    expect([...written.keys()]).not.toContain(`entries/${unreleasedId}.json`);
     for (const [path, content] of pushed) {
       expect([path, written.get(path)]).toEqual([path, content]);
     }
+  }, 600_000);
+
+  // The reason the test above is worth running at this clock at all (decision
+  // D-100). A keyless reader is served `/sync` only to the released head, so the
+  // unreleased entry never reaches the command that way: it is found in the
+  // hash lines `GET /events` serves and read off the free entry door, and the
+  // row it becomes is the row the Worker wrote, proof columns and all.
+  it("writes the index row of an entry it was never served the content of", async () => {
+    const written = await filesUnder(join(pristine, ENVIRONMENT));
+    const index = JSON.parse(written.get("index.json")!) as Record<
+      string,
+      unknown
+    >[];
+    expect(index.map((row) => row["id"])).toContain(unreleasedId);
+    const row = index.find((one) => one["id"] === unreleasedId)!;
+    expect(row["subject"]).toBe(SUBJECT);
+    expect(row["category"]).toBe(CATEGORY);
+    expect(typeof row["entry_hash"]).toBe("string");
+    expect(typeof row["release_date"]).toBe("string");
+    expect(row["position"]).toEqual(expect.any(Number));
+    // And the manifest counts it: three entries, two of them released.
+    const manifest = JSON.parse(written.get("mirror.json")!) as Record<
+      string,
+      unknown
+    >;
+    expect(manifest["entries"]).toBe(3);
   }, 600_000);
 
   it("carries the three families the layout recomputes, with their counts", async () => {
@@ -701,10 +841,139 @@ describe("the mirror command rebuilds the export from the public doors", () => {
     expect(manifest["standing_position"]).toBe(standing.position);
   }, 600_000);
 
+  it("builds the released view keyless and the whole log with --sign", async () => {
+    // Inside the window (decision D-100). A stranger reading the doors sees the
+    // proof and not the content, and the command writes exactly that: the seal
+    // as hash lines, and no entry file for an entry nobody may read yet. An
+    // operator signing its own reads sees the log, and the same command writes
+    // the same directory in full.
+    const stranger = join(workspace, "keyless");
+    expect(
+      await runMirror([TEST_ORIGIN, stranger], recorder().io, new InProcessHttp(NOW), NOW),
+    ).toBe(0);
+    const withheld = await filesUnder(join(stranger, ENVIRONMENT));
+    expect([...withheld.keys()].filter((path) => path.startsWith("entries/"))).toEqual(
+      [],
+    );
+    for (const line of withheld
+      .get("events/00000000.jsonl")!
+      .split("\n")
+      .filter((one) => one.length > 0)
+      .map((one) => JSON.parse(one) as Record<string, unknown>)) {
+      expect(line["payload"]).toBeNull();
+      expect(line["withheld"]).toBe(true);
+    }
+
+    // The same reads, signed by an agent bound to a registered operator: the
+    // M2 signature every write door already verifies, over the method, the
+    // path, a timestamp, a nonce and an empty body.
+    const keyPath = join(workspace, "k1.json");
+    await writeFile(
+      keyPath,
+      JSON.stringify({
+        agent_id: k1.agent.agentId,
+        private_key_pkcs8: base64urlEncode(
+          await exportPrivateKeyPkcs8(k1.agent.privateKey),
+        ),
+      }),
+      "utf8",
+    );
+    const signed = join(workspace, "signed");
+    const io = recorder();
+    expect(
+      await runMirror(
+        [TEST_ORIGIN, signed, "--sign", keyPath],
+        io.io,
+        new InProcessHttp(NOW),
+        NOW,
+      ),
+    ).toBe(0);
+    expect(io.out[0]).toMatch(/ view full$/);
+
+    const whole = await filesUnder(join(signed, ENVIRONMENT));
+    expect([...whole.keys()]).toContain(`entries/${entryId}.json`);
+    for (const line of whole
+      .get("events/00000000.jsonl")!
+      .split("\n")
+      .filter((one) => one.length > 0)
+      .map((one) => JSON.parse(one) as Record<string, unknown>)) {
+      expect(line["payload"]).not.toBeNull();
+      expect(line["withheld"]).toBeUndefined();
+    }
+  }, 600_000);
+
+  // Decision D-100, the full view's clock. A fork that paid for the content
+  // writes the content; it does not get to say that more of the log is public
+  // than is. So the two numbers that say how much is public -- the released head
+  // and the position the standing was folded to -- are the Worker's own for the
+  // same instant, and what the directory holds on top of them is the extra the
+  // fork is entitled to rather than a different reading of the window.
+  it("says the same released head as the Worker, with the content on top", async () => {
+    const keyPath = join(workspace, "k1-full.json");
+    await writeFile(
+      keyPath,
+      JSON.stringify({
+        agent_id: k1.agent.agentId,
+        private_key_pkcs8: base64urlEncode(
+          await exportPrivateKeyPkcs8(k1.agent.privateKey),
+        ),
+      }),
+      "utf8",
+    );
+    const full = join(workspace, "full-at-released");
+    expect(
+      await runMirror(
+        [TEST_ORIGIN, full, "--sign", keyPath],
+        recorder().io,
+        new InProcessHttp(),
+        EXPORT_AT_RELEASED,
+      ),
+    ).toBe(0);
+
+    const whole = await filesUnder(join(full, ENVIRONMENT));
+    const pushed = new Map<string, string>();
+    for (const [path, content] of mirror.files) {
+      pushed.set(path.slice(`${ENVIRONMENT}/`.length), content);
+    }
+    const manifest = JSON.parse(whole.get("mirror.json")!) as Record<
+      string,
+      unknown
+    >;
+    const worker = JSON.parse(pushed.get("mirror.json")!) as Record<
+      string,
+      unknown
+    >;
+    expect([manifest["released_head"], manifest["standing_position"]]).toEqual([
+      worker["released_head"],
+      worker["standing_position"],
+    ]);
+    expect(manifest["head"]).toBe(worker["head"]);
+    // The three families are folds over released events and are the same bytes
+    // in both directories; the seals and the entries are the superset.
+    expect(whole.get("standing.json")).toBe(pushed.get("standing.json"));
+    expect(whole.get("ledger.jsonl")).toBe(pushed.get("ledger.jsonl"));
+
+    expect([...whole.keys()]).toContain(`entries/${unreleasedId}.json`);
+    const record = JSON.parse(whole.get(`entries/${unreleasedId}.json`)!) as {
+      entry: Record<string, unknown>;
+    };
+    expect(record.entry["claim"]).toBe(
+      "example/kestrel-1 seat pricing is $44 per seat per month",
+    );
+    for (const line of whole
+      .get("events/00000001.jsonl")!
+      .split("\n")
+      .filter((one) => one.length > 0)
+      .map((one) => JSON.parse(one) as Record<string, unknown>)) {
+      expect(line["payload"]).not.toBeNull();
+      expect(line["withheld"]).toBeUndefined();
+    }
+  }, 600_000);
+
   it("refuses a call that is not one, before any read", async () => {
     const io = recorder();
     const http = new InProcessHttp();
-    expect(await runMirror([TEST_ORIGIN], io.io, http, EXPORT_AT)).toBe(2);
+    expect(await runMirror([TEST_ORIGIN], io.io, http, EXPORT_AT_RELEASED)).toBe(2);
     expect(http.calls).toBe(0);
   });
 });
@@ -728,7 +997,7 @@ describe("verify-mirror checks a fresh clone end to end", () => {
     expect(io.out).toContain("ok seal/0");
     expect(io.out).toContain(`ok ${entryId}`);
     expect(io.out[io.out.length - 1]).toMatch(
-      /^summary demo head \d+ seals 1 anchors \d+ entries 2 ok 1 legacy 1 failed 0$/,
+      /^summary demo head \d+ seals 2 anchors \d+ entries 3 ok 1 legacy 1 withheld \d+ failed 0$/,
     );
   }, 600_000);
 

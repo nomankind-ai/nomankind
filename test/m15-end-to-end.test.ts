@@ -71,6 +71,7 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
   type TestAgent,
 } from "./helpers/registry.js";
@@ -426,7 +427,15 @@ async function fetched(
   entryId: string,
   now: Date = NOW,
 ): Promise<Record<string, unknown>> {
-  const response = await send(get(`/entries/${entryId}`), now);
+  const response = await send(
+    // Signed by a registered operator's agent (decision D-100): every entry
+    // here is read at the instant it was written, inside the window.
+    await signedGet(a1.agent, {
+      path: `/entries/${entryId}`,
+      timestamp: now.toISOString(),
+    }),
+    now,
+  );
   expect(response.status).toBe(200);
   return (await response.json()) as Record<string, unknown>;
 }

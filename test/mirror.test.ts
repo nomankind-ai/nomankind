@@ -57,8 +57,11 @@ import {
   DOMAIN_SLUGS,
   MIRROR,
   NORM_VERSION,
+  RELEASE_WINDOW_DAYS,
   SCHEMA_VERSION,
 } from "../src/policy.js";
+import { releaseDateOf } from "../src/release.js";
+import { mirrorPlan } from "../src/cli/mirror.js";
 import {
   entryIdsThrough,
   latestMirror,
@@ -80,6 +83,25 @@ import {
 /** The instant every export in this file is made at. */
 const EXPORTED_AT = "2026-09-11T00:04:00.000Z";
 const ENVIRONMENT = "demo";
+
+/** How many milliseconds a day is, for the clocks this file stands at. */
+const DAY_MS = 86_400_000;
+
+/**
+ * An instant past every one of these seals' release windows (D-100).
+ *
+ * The default clock of this file, so that everything pinned below is the export
+ * as a reader sees it once the log is public — which is what every one of these
+ * tests was written about. The window's own two views are pinned in the
+ * "the release window" block at the end, which stands on both sides of it.
+ */
+function afterRelease(seals: readonly Seal[]): string {
+  let newest = 0;
+  for (const seal of seals) {
+    newest = Math.max(newest, Date.parse(seal.sealed_at));
+  }
+  return new Date(newest + (RELEASE_WINDOW_DAYS + 1) * DAY_MS).toISOString();
+}
 
 let world: VerifyWorld;
 /** The single seal the world makes, and the events it covers. */
@@ -128,6 +150,8 @@ function input(over: Partial<MirrorInput> = {}): MirrorInput {
   return {
     environment: ENVIRONMENT,
     exported_at: EXPORTED_AT,
+    now: afterRelease([firstSeal]),
+    release_window_days: RELEASE_WINDOW_DAYS,
     seals: [firstSeal],
     anchors: [],
     events: sealedEvents,
@@ -220,6 +244,8 @@ describe("the layout", () => {
       as_of: firstSeal.sealed_at,
       head: firstSeal.last_seq,
       seal_seq: firstSeal.seq,
+      release_window_days: RELEASE_WINDOW_DAYS,
+      released_head: firstSeal.last_seq,
       seals: 1,
       events: firstSeal.size,
       entries: 1,
@@ -244,17 +270,19 @@ describe("the layout", () => {
     // cloned: the copies pulled before the three families and the sidecar's
     // source class joined the export are somebody's exit, and the reader that
     // refused them for being old would be taking that exit back.
-    expect(MIRROR_FORMAT).toBe("nomankind-mirror-v2");
+    expect(MIRROR_FORMAT).toBe("nomankind-mirror-v3");
     expect(MIRROR_FORMATS).toEqual([
       "nomankind-mirror-v1",
       "nomankind-mirror-v2",
+      "nomankind-mirror-v3",
     ]);
     expect(jsonOf(buildMirror(input()), "mirror.json")).toMatchObject({
-      format: "nomankind-mirror-v2",
+      format: "nomankind-mirror-v3",
     });
     expect(mirrorFormatOf("nomankind-mirror-v1")).toBe("v1");
     expect(mirrorFormatOf("nomankind-mirror-v2")).toBe("v2");
-    expect(mirrorFormatOf("nomankind-mirror-v3")).toBeNull();
+    expect(mirrorFormatOf("nomankind-mirror-v3")).toBe("v3");
+    expect(mirrorFormatOf("nomankind-mirror-v4")).toBeNull();
     expect(mirrorFormatOf(null)).toBeNull();
   });
 
@@ -478,6 +506,186 @@ describe("git blob names", () => {
   });
 });
 
+/**
+ * The release window in the layout (decision D-100, D-101).
+ *
+ * One rule and two views of one sealed head: inside the window a seal's file is
+ * hash lines and its entries have no file at all, and on the far side of it the
+ * very same input writes everything. What is pinned here is that nothing but the
+ * content moves — every hash, every seal, every index row and every proof column
+ * is in both — and that the boundary is exactly the window rather than a day
+ * either side of it.
+ */
+describe("the release window", () => {
+  /** An instant inside the window: the day the events were sealed. */
+  function inside(): string {
+    return firstSeal.sealed_at;
+  }
+
+  it("writes an unreleased seal as hash lines and nothing else", () => {
+    const files = buildMirror(input({ now: inside() }));
+    const written = linesOf(
+      files,
+      `events/${String(firstSeal.seq).padStart(8, "0")}.jsonl`,
+    ) as Record<string, unknown>[];
+    const full = linesOf(
+      buildMirror(input()),
+      `events/${String(firstSeal.seq).padStart(8, "0")}.jsonl`,
+    ) as Record<string, unknown>[];
+
+    expect(written).toHaveLength(full.length);
+    for (let index = 0; index < written.length; index += 1) {
+      const line = written[index]!;
+      const event = full[index]!;
+      expect(line["payload"]).toBeNull();
+      expect(line["withheld"]).toBe(true);
+      // Everything the proof is made of is in the hash line, unchanged.
+      expect(line["seq"]).toBe(event["seq"]);
+      expect(line["at"]).toBe(event["at"]);
+      expect(line["type"]).toBe(event["type"]);
+      expect(line["entry_id"]).toBe(event["entry_id"]);
+      expect(line["prev_hash"]).toBe(event["prev_hash"]);
+      expect(line["hash"]).toBe(event["hash"]);
+      expect(event["payload"]).not.toBeNull();
+    }
+  });
+
+  it("writes no entry file for an entry whose submission is unreleased", () => {
+    const files = buildMirror(input({ now: inside() }));
+    expect(files.map((file) => file.path)).not.toContain(
+      `entries/${VERIFIED_ENTRY_ID}.json`,
+    );
+    // And the same input on the far side of the window writes it.
+    expect(buildMirror(input()).map((file) => file.path)).toContain(
+      `entries/${VERIFIED_ENTRY_ID}.json`,
+    );
+  });
+
+  it("keeps the index row, its proof columns and the date it opens", () => {
+    const withheld = jsonOf(
+      buildMirror(input({ now: inside() })),
+      "index.json",
+    ) as Record<string, unknown>[];
+    const released = jsonOf(buildMirror(input()), "index.json") as Record<
+      string,
+      unknown
+    >[];
+    // The same rows, to the byte: every index column is proof, so the window
+    // takes nothing out of it at all.
+    expect(withheld).toEqual(released);
+    expect(withheld[0]!["release_date"]).toBe(
+      releaseDateOf(firstSeal.sealed_at),
+    );
+    expect(withheld[0]!["entry_hash"]).toBe(entries[0]!.entry_hash);
+    expect(withheld[0]!["subject"]).toBe(
+      (entries[0]!.entry as Record<string, unknown>)["subject"],
+    );
+  });
+
+  it("says which window it was built under and how much is public", () => {
+    const early = jsonOf(
+      buildMirror(input({ now: inside() })),
+      "mirror.json",
+    ) as Record<string, unknown>;
+    expect(early["format"]).toBe(MIRROR_FORMAT);
+    expect(early["release_window_days"]).toBe(RELEASE_WINDOW_DAYS);
+    expect(early["released_head"]).toBeNull();
+    // The head and the counts are the sealed record's either way: the window
+    // moves content, never proof.
+    expect(early["head"]).toBe(firstSeal.last_seq);
+    expect(early["events"]).toBe(firstSeal.size);
+    expect(early["entries"]).toBe(1);
+
+    const late = jsonOf(buildMirror(input()), "mirror.json") as Record<
+      string,
+      unknown
+    >;
+    expect(late["released_head"]).toBe(firstSeal.last_seq);
+  });
+
+  it("releases exactly at the window and not a millisecond before", () => {
+    const date = releaseDateOf(firstSeal.sealed_at);
+    expect(Date.parse(date) - Date.parse(firstSeal.sealed_at)).toBe(
+      RELEASE_WINDOW_DAYS * DAY_MS,
+    );
+
+    const at = buildMirror(input({ now: date }));
+    expect(at.map((file) => file.path)).toContain(
+      `entries/${VERIFIED_ENTRY_ID}.json`,
+    );
+    const before = buildMirror(
+      input({ now: new Date(Date.parse(date) - 1).toISOString() }),
+    );
+    expect(before.map((file) => file.path)).not.toContain(
+      `entries/${VERIFIED_ENTRY_ID}.json`,
+    );
+  });
+
+  it("builds the same bytes twice inside the window too", () => {
+    expect(buildMirror(input({ now: inside() }))).toEqual(
+      buildMirror(input({ now: inside() })),
+    );
+  });
+
+  // The entitled fork's copy (decision D-100). Same clock, same window, more
+  // files: the content it paid for is written, and the two numbers that say how
+  // much of the log is public are the published export's own. A full view that
+  // moved `released_head` would be a directory claiming a public head its own
+  // reader could not have been served.
+  it("writes the full view at the same clock, over the same released head", () => {
+    const held = buildMirror(input({ now: inside() }));
+    const whole = buildMirror(input({ now: inside(), view: "full" }));
+
+    const sealFile = `events/${String(firstSeal.seq).padStart(8, "0")}.jsonl`;
+    for (const line of linesOf(whole, sealFile) as Record<string, unknown>[]) {
+      expect(line["payload"]).not.toBeNull();
+      expect(line["withheld"]).toBeUndefined();
+    }
+    expect(whole.map((file) => file.path)).toContain(
+      `entries/${VERIFIED_ENTRY_ID}.json`,
+    );
+
+    const manifest = jsonOf(whole, "mirror.json") as Record<string, unknown>;
+    const published = jsonOf(held, "mirror.json") as Record<string, unknown>;
+    expect(manifest["released_head"]).toBeNull();
+    expect([manifest["released_head"], manifest["standing_position"]]).toEqual([
+      published["released_head"],
+      published["standing_position"],
+    ]);
+    // Every file that is a fold over released events is the same bytes, and the
+    // index is proof and was the same bytes already: the full view is a
+    // superset of the published one and never a rival reading of the window.
+    expect(contentOf(whole, "standing.json")).toBe(
+      contentOf(held, "standing.json"),
+    );
+    expect(contentOf(whole, "ledger.jsonl")).toBe(
+      contentOf(held, "ledger.jsonl"),
+    );
+    expect(contentOf(whole, "index.json")).toBe(contentOf(held, "index.json"));
+  });
+
+  it("changes a seal's file exactly once, on the day it releases", async () => {
+    const early = buildMirror(input({ now: inside() }));
+    const late = buildMirror(input());
+    const existing = new Map<string, string>();
+    for (const file of early) existing.set(file.path, await gitBlobSha(file.content));
+    const changed = await mirrorDiff(late, existing);
+    // The seal file, the entry file that appeared, the manifest that now names a
+    // released head, and `standing.json` — which is folded over the released
+    // events, so it moves when they do. Nothing else in the directory moves:
+    // the index, the seals, the anchors and the operators are proof and were
+    // written in full on the first day.
+    expect(changed.map((file) => file.path).sort()).toEqual(
+      [
+        `entries/${VERIFIED_ENTRY_ID}.json`,
+        `events/${String(firstSeal.seq).padStart(8, "0")}.jsonl`,
+        "mirror.json",
+        "standing.json",
+      ].sort(),
+    );
+  });
+});
+
 describe("the diff", () => {
   it("answers nothing when every path is already exactly these bytes", async () => {
     const files = buildMirror(input());
@@ -502,6 +710,55 @@ describe("the diff", () => {
   it("answers everything against an empty repository", async () => {
     const files = buildMirror(input());
     expect(await mirrorDiff(files, new Map())).toEqual(files);
+  });
+});
+
+/**
+ * The two views `npm run mirror` can build (decision D-100).
+ *
+ * The command reads the public doors, so what it can see is what the reader it
+ * presents is entitled to: nothing, and it builds the released view the Worker
+ * builds; a paid key or an operator's own agent key, and it reaches the content
+ * inside the window. Both go to the same `buildMirror`, which is why the bytes
+ * are the same for the same head and the same instant.
+ */
+describe("the mirror command's arguments", () => {
+  it("reads the base URL, the directory, and one credential", () => {
+    expect(mirrorPlan(["https://app.nomankind.ai", "./out"])).toEqual({
+      baseUrl: "https://app.nomankind.ai",
+      outDir: "./out",
+      key: null,
+      signPath: null,
+    });
+    expect(
+      mirrorPlan(["https://app.nomankind.ai", "./out", "--key", "key_1"]),
+    ).toMatchObject({ key: "key_1", signPath: null });
+    expect(
+      mirrorPlan(["https://app.nomankind.ai", "./out", "--sign", "k.json"]),
+    ).toMatchObject({ key: null, signPath: "k.json" });
+  });
+
+  it("refuses a call that is not one, and both credentials at once", () => {
+    for (const args of [
+      [],
+      ["https://app.nomankind.ai"],
+      ["--key", "key_1"],
+      ["https://app.nomankind.ai", "./out", "--key"],
+      ["https://app.nomankind.ai", "./out", "--key", "key_1", "--key", "key_2"],
+      ["https://app.nomankind.ai", "./out", "--captures", "./x"],
+      // A run that presented a key and a signature would leave a reader
+      // guessing which one reached the content.
+      [
+        "https://app.nomankind.ai",
+        "./out",
+        "--key",
+        "key_1",
+        "--sign",
+        "k.json",
+      ],
+    ]) {
+      expect([args, mirrorPlan(args)]).toEqual([args, null]);
+    }
   });
 });
 
@@ -620,6 +877,8 @@ describe("attestations, standing and the ledger", () => {
     return {
       environment: ENVIRONMENT,
       exported_at: EXPORTED_AT,
+      now: afterRelease(richSeals),
+      release_window_days: RELEASE_WINDOW_DAYS,
       seals: richSeals,
       anchors: [],
       events: richEvents,

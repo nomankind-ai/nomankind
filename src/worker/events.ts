@@ -20,9 +20,14 @@
  * page size is LIST_PAGE_LIMIT from src/policy.ts.
  */
 
+import type { Event } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
-import { eventsAfter, headSeq } from "../storage/repository.js";
+import { isReleased, withholdEvent, type WithheldEvent } from "../release.js";
+import type { Seal } from "../seal.js";
+import { eventsAfter, headSeq, sealsBetween } from "../storage/repository.js";
+import { readerAccess } from "./access.js";
 import type { Env } from "./env.js";
+import { refusalResponse } from "./read.js";
 import {
   StorageUnreachable,
   guardDatabase,
@@ -43,7 +48,38 @@ const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
  */
 const BEFORE_THE_LOG = -1;
 
-async function page(url: URL, env: Env): Promise<Response> {
+/**
+ * The page as a free reader sees it: every event whose covering seal has not
+ * released yet as a hash line (decision D-100).
+ *
+ * Per event and by its own seal rather than by a single boundary, because the
+ * question the window asks is about the seal that covers the event: an event
+ * nothing has sealed is not released either, and it is a hash line too. The
+ * hash, the links, the type, the instant and the entry id all stay, so a reader
+ * who cannot yet see what happened can still prove that it happened, in that
+ * order, at that instant — which is the whole of what `GET /events` is for.
+ */
+function withhold(
+  events: readonly Event[],
+  seals: readonly Seal[],
+  now: Date,
+): (Event | WithheldEvent)[] {
+  return events.map((event) => {
+    const seal = seals.find(
+      (candidate) =>
+        event.seq >= candidate.first_seq && event.seq <= candidate.last_seq,
+    );
+    const sealedAt = seal === undefined ? null : seal.sealed_at;
+    return isReleased(sealedAt, now) ? event : withholdEvent(event);
+  });
+}
+
+async function page(
+  url: URL,
+  env: Env,
+  free: boolean,
+  now: Date,
+): Promise<Response> {
   const rawAfter = url.searchParams.get("after");
   let after = BEFORE_THE_LOG;
   if (rawAfter !== null) {
@@ -61,9 +97,27 @@ async function page(url: URL, env: Env): Promise<Response> {
   }
 
   const events = await eventsAfter(env.DB, after, limit);
+  // The seals covering exactly the events on this page, read once: a page is a
+  // contiguous run, so one range read answers the window for every event in it.
+  const seals =
+    free && events.length > 0
+      ? await sealsBetween(
+          env.DB,
+          events[0]!.seq,
+          events[events.length - 1]!.seq,
+        )
+      : [];
   // The head is read after the page, so a caller that sees head === the last
   // event's seq is caught up on a log that had not moved on underneath them.
-  return json({ events, head: await headSeq(env.DB) }, 200);
+  // It is the true head whoever is asking: a position is proof, and proof is
+  // public from the first minute.
+  return json(
+    {
+      events: free ? withhold(events, seals, now) : events,
+      head: await headSeq(env.DB),
+    },
+    200,
+  );
 }
 
 /**
@@ -74,13 +128,20 @@ async function page(url: URL, env: Env): Promise<Response> {
 export async function handleEvents(
   request: Request,
   env: Env,
+  deps: { now: Date },
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.pathname !== "/events") return null;
   if (request.method !== "GET") return methodNotAllowed("GET");
 
   try {
-    return await page(url, { ...env, DB: guardDatabase(env.DB) });
+    const guarded: Env = { ...env, DB: guardDatabase(env.DB) };
+    // Once for the request (decision D-100), and its refusals are the gate's
+    // own: a mistyped key is 401 `bad_key` and a signature that does not verify
+    // is 401 `bad_signature`, never a quiet free read of the hash lines.
+    const granted = await readerAccess(request, guarded, guarded.DB, deps.now);
+    if (!granted.ok) return refusalResponse(granted.refusal);
+    return await page(url, guarded, granted.reader.kind === "free", deps.now);
   } catch (error) {
     if (error instanceof StorageUnreachable) {
       // The message only: no binding contents, no request data.

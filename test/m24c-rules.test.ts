@@ -40,6 +40,7 @@ import {
   isVersionStalenessCategory,
   versionedSubjectOf,
 } from "../src/policy.js";
+import { mintKey } from "../src/keys.js";
 import { checkReconfirmation } from "../src/reconfirm.js";
 import { signRecord } from "../src/records.js";
 import { txtRecordName } from "../src/registry.js";
@@ -60,6 +61,7 @@ import { verifyOffline } from "../src/verify.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
 import { entryWorld, rederive } from "../src/worker/world.js";
+import { putKey } from "../src/storage/keys.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
   FixtureResolver,
@@ -487,10 +489,35 @@ function send(request: Request, override: Partial<RequestDeps> = {}): Promise<Re
   return handleRequest(request, env, { ...deps, ...override });
 }
 
+/**
+ * A paid key, for the reads that are about who a capture opens to.
+ *
+ * Nothing in this file is ever sealed, so nothing in it ever releases
+ * (decision D-100: an unsealed event is not released), and a free reader is
+ * refused the bytes whatever the disclosure rule says. A key is the reader
+ * these tests mean by "anybody": not an operator, so the disclosure gate still
+ * applies to them in full, and entitled to content inside the window, so what
+ * the test then sees is the disclosure rule alone.
+ */
+let readerSecret = "";
+
 beforeAll(async () => {
   store = await openTestDatabase();
   maintainer = await makeAgent();
   alice = await makeAgent();
+
+  const minted = mintKey();
+  readerSecret = minted.secret;
+  await putKey(store.db, {
+    id: minted.id,
+    keyHash: await minted.hash,
+    tier: "standard",
+    status: "active",
+    customer: "cus_m24c",
+    subscription: "sub_m24c",
+    checkoutSession: "cs_m24c",
+    createdAt: AT,
+  });
 
   parties = [];
   for (const operator of OPERATORS) {
@@ -803,14 +830,18 @@ describe("the submit door and a redacted payload", () => {
   it("serves it to anybody from the day it opens", async () => {
     const opened = new Date("2026-12-07T12:00:00.000Z");
     const response = await send(
-      new Request(`${TEST_ORIGIN}/captures/${PAYLOAD_ADDRESS}`),
+      new Request(`${TEST_ORIGIN}/captures/${PAYLOAD_ADDRESS}`, {
+        headers: { authorization: `Bearer ${readerSecret}` },
+      }),
       { now: opened },
     );
     expect(response.status).toBe(200);
     expect(JSON.parse(await response.text())).toEqual(disclosure);
 
     const sidecar = await send(
-      new Request(`${TEST_ORIGIN}/captures/${PAYLOAD_ADDRESS}/sidecar`),
+      new Request(`${TEST_ORIGIN}/captures/${PAYLOAD_ADDRESS}/sidecar`, {
+        headers: { authorization: `Bearer ${readerSecret}` },
+      }),
       { now: opened },
     );
     expect(sidecar.status).toBe(200);
@@ -820,6 +851,7 @@ describe("the submit door and a redacted payload", () => {
     const response = await send(
       new Request(
         `${TEST_ORIGIN}/captures/${redactedCore["snapshot_hash"] as string}`,
+        { headers: { authorization: `Bearer ${readerSecret}` } },
       ),
     );
     expect(response.status).toBe(200);

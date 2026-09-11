@@ -246,7 +246,7 @@ export async function handleRequest(
   const alerts = await handleAlerts(request, env, { now });
   if (alerts !== null) return alerts;
 
-  const events = await handleEvents(request, env);
+  const events = await handleEvents(request, env, { now });
   if (events !== null) return events;
 
   const seals = await handleSeals(request, env);

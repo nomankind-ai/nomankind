@@ -45,6 +45,35 @@ export interface PageContext {
  * One row of a dense entry table. Every value is already derived and already
  * formatted-agnostic: the row carries the field, the page decides how it looks.
  */
+/**
+ * What a page says instead of the content, before the release window is up
+ * (decision D-100).
+ *
+ * Present exactly when this reader is served the withheld view: a free reader
+ * looking at an entry whose covering seal is younger than RELEASE_WINDOW_DAYS.
+ * A keyed or operator reader never carries one, and neither does a released
+ * entry, so a page that holds this object holds no content to leak — the route
+ * nulled the content fields before it built the shape (src/release.ts).
+ *
+ * `releaseDate` is the covering seal's `sealed_at` through the window, and null
+ * when nothing seals the entry yet: an unsealed entry is not released and has no
+ * date to have reached, so the page says what it is waiting for instead.
+ */
+export interface WithheldView {
+  readonly releaseDate: string | null;
+  /**
+   * The entry hash, over the whole core, as `withholdEntry` took it before it
+   * nulled a field — the entry page's view only, and absent on a list row.
+   *
+   * The proof a reader cannot take for themselves. On a released entry the core
+   * is on the page and the hash is a digest away; on a withheld one it is the
+   * only thing that names which record this is, so the entry page prints it
+   * where the content would have stood. A list row shows no core either way and
+   * carries none: the page it links to is where the proof lives.
+   */
+  readonly entryHash?: string;
+}
+
 export interface EntryRow {
   id: string;
   /** The entry's sealed position in the log: its `entry_submitted` seq. */
@@ -54,7 +83,14 @@ export interface EntryRow {
   status: string;
   subject: string;
   category: string;
+  /** The claim, or the empty string on a withheld row: the route nulls it. */
   claim: string;
+  /**
+   * The release window's answer for this reader (D-100), null when the content
+   * is theirs to read. A withheld row shows "released <date>" where the claim
+   * would be, and carries no claim at all.
+   */
+  withheld: WithheldView | null;
   /** The sidecar's `effective_tier`, null while the entry is draft or rejected. */
   tier: string | null;
   last_confirmed: string;
@@ -141,9 +177,21 @@ export interface ApproverRow {
 }
 
 export interface EntryData {
-  /** The entry exactly as derivation left it; the schema's field names. */
+  /**
+   * The entry exactly as derivation left it; the schema's field names. On a
+   * withheld view (see `withheld`) it is `withholdEntry`'s proof: every content
+   * field null and every proof field untouched, so the page cannot print what
+   * the reader has not been served.
+   */
   entry: Record<string, unknown>;
   sidecar: Sidecar;
+  /**
+   * The release window's answer for this reader (D-100), null when the content
+   * is theirs. Non-null turns the page's content rows into one release line and
+   * every decision's reason into "withheld until release"; every hash, the
+   * seal, the proof, the events and the offline commands stay either way.
+   */
+  withheld: WithheldView | null;
   /** The entry's sealed position: its `entry_submitted` seq. */
   position: number;
   events: Event[];

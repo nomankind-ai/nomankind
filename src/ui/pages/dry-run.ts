@@ -21,6 +21,7 @@
 import {
   ASSIGNMENT_WINDOW_HOURS,
   DEFAULT_DOMAIN,
+  RELEASE_WINDOW_DAYS,
   SEAL_INTERVAL_MINUTES,
 } from "../../policy.js";
 import { TXT_RECORD_PREFIX } from "../../registry.js";
@@ -274,8 +275,16 @@ export function renderDryRun(ctx: PageContext): string {
             captures the snapshot hashes point at; the verifier runs its checks
             in order and exits 0 clean, or 1 with one named difference per line.
           </p>
-          <pre class="block mono">npm run export -- ${origin} &lt;entry-id&gt; ./bundle
+          <pre class="block mono">npm run export -- ${origin} &lt;entry-id&gt; ./bundle --sign ./demo-key.json
 npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
+          <p class="note">
+            <span class="mono">--sign</span> signs the export's reads with the
+            key you generated in step 1: an entry's content is released to
+            everybody ${RELEASE_WINDOW_DAYS} days after the seal that covers it
+            (decision D-100), and an entry you submitted minutes ago is inside
+            that window. Without the flag the export writes the released view —
+            every hash, every seal, the proof of the rest — and says so.
+          </p>
           <p class="note">
             Exit 0 means the entry you were handed is the entry that was signed
             and sealed. If you would rather not pull a bundle at all, the same

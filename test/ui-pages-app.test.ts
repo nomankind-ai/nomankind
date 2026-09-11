@@ -15,10 +15,12 @@
  * shows them.
  */
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import { confidenceInputs } from "../src/confidence.js";
 import { CORE_KEYS } from "../src/core.js";
+import { entryHash } from "../src/hash.js";
+import { CONTENT_CORE_KEYS, releaseDateOf, withholdEntry } from "../src/release.js";
 import type { Sidecar } from "../src/derive.js";
 import type { Entry } from "../src/schema.js";
 import type { Event } from "../src/events.js";
@@ -28,6 +30,7 @@ import {
   DEFAULT_DOMAIN,
   DOMAIN_SLUGS,
   LIST_PAGE_LIMIT,
+  RELEASE_WINDOW_DAYS,
   TRUSTED_POOL_SWITCH,
 } from "../src/policy.js";
 import type { Seal } from "../src/seal.js";
@@ -46,6 +49,8 @@ import { ENTRIES_QUERY_PARAMETERS, ENTRY_DOMAINS } from "../src/ui/query.js";
 import {
   APP_CSS_HREF,
   assetVersion,
+  escapeHtml,
+  fmtDate,
   html,
   layout,
   shortHash,
@@ -103,6 +108,9 @@ const row: EntryRow = {
   subject: `kestrel/kestrel-1 ${HOSTILE}`,
   category: "behavior",
   claim: `The model refuses this prompt ${HOSTILE}`,
+  // Released: the ordinary row, whose content this reader may read. The
+  // withheld shape is exercised on its own below (decision D-100).
+  withheld: null,
   tier: "stated",
   last_confirmed: "2026-09-08",
   expires_at: "2026-10-08",
@@ -445,6 +453,10 @@ const confidence = confidenceInputs({
 const entryData: EntryData = {
   entry: entryRecord,
   sidecar,
+  // Released, like the row above: the whole page, for a reader the window is
+  // done with or who paid not to wait. The withheld view is built from this one
+  // below, so the two shapes can never drift apart (decision D-100).
+  withheld: null,
   confidenceInputs: confidence,
   position: 12,
   events,
@@ -2209,5 +2221,208 @@ describe("the Domains route and its place in the nav", () => {
     );
     expect(response!.status).toBe(200);
     expect(await response!.text()).toContain("<h1>Domains</h1>");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The release window on the app pages (decision D-100)
+// ---------------------------------------------------------------------------
+
+/**
+ * The withheld view, as the route builds it: the record is `withholdEntry`'s
+ * proof and the page carries the date the rest of it opens. Built from the same
+ * fixtures the released page above is built from, so what the window takes away
+ * is exactly the difference between the two documents and nothing else.
+ */
+describe("an entry whose content has not been released", () => {
+  const SEALED_AT = "2026-09-08T12:05:00.000Z";
+  const RELEASE_DATE = releaseDateOf(SEALED_AT);
+  const RELEASE_DAY = fmtDate(RELEASE_DATE);
+
+  // Built the way the route builds it: `withholdEntry` over the whole entry,
+  // the proof it returns as the page's record, and the hash it took before it
+  // nulled anything carried on the withheld view beside the date.
+  let withheldData: EntryData;
+  let page = "";
+  let hash = "";
+
+  beforeAll(async () => {
+    const held = await withholdEntry(
+      entryRecord as unknown as Entry,
+      sidecar,
+      RELEASE_DATE,
+    );
+    hash = held.entry_hash;
+    withheldData = {
+      ...entryData,
+      entry: held.proof as unknown as Record<string, unknown>,
+      withheld: { releaseDate: RELEASE_DATE, entryHash: held.entry_hash },
+    };
+    page = renderEntry(ctx, withheldData);
+  });
+
+  it("keeps every proof field of the core, and the signature", () => {
+    for (const key of CORE_KEYS) {
+      if (CONTENT_CORE_KEYS.includes(key)) continue;
+      expect([key, page.includes(`<dt>${key}</dt>`)]).toEqual([key, true]);
+    }
+    expect(page).toContain(ENTRY_ID);
+    expect(page).toContain(escapeHtml(row.subject));
+    expect(page).toContain(HASH);
+    expect(page).toContain("1F916:author");
+    expect(page).toContain("c2lnbmF0dXJl");
+  });
+
+  it("shows no content field at all, not even as a dash", () => {
+    for (const key of CONTENT_CORE_KEYS) {
+      expect([key, page.includes(`<dt>${key}</dt>`)]).toEqual([key, false]);
+    }
+    expect(page).not.toContain(escapeHtml(row.claim));
+    expect(page).not.toContain("https://kestrel.example/transcript");
+    expect(page).not.toContain("I cannot help with that.");
+    // What a dispute or a failure report says is not the core's content and is
+    // not withheld with it: `withholdEntry` nulls the seven content keys and
+    // the approvers' and reconfirmers' reasons, and this page shows exactly what
+    // the door serves under `proof`.
+  });
+
+  // The one piece of proof a keyless reader cannot take for themselves: they
+  // are handed a nulled core, so the hash of the whole core has to be printed
+  // or the proof around it names a record they cannot pin down. It is the
+  // released entry's own hash, which is what makes it worth printing.
+  it("shows the entry hash the log sealed, in full", async () => {
+    expect(hash).toBe(await entryHash(entryRecord));
+    expect(page).toContain("entry_hash");
+    expect(page).toContain(hash);
+  });
+
+  it("says when it opens, and where a key is bought", () => {
+    expect(page).toContain(`Released on ${RELEASE_DAY}.`);
+    expect(page).toContain(`href="/api#keys"`);
+    expect(page).toContain("Read it now with");
+  });
+
+  it("reads every decision's reason as withheld until release", () => {
+    expect(page).toContain("withheld until release");
+    expect(page).not.toContain(escapeHtml("the source says otherwise"));
+    // The decision itself is proof and is shown: who signed, for whom, and what
+    // they decided, with the snapshot hash they fetched.
+    expect(page).toContain("1F916:k2");
+    expect(page).toContain(OTHER_HASH);
+  });
+
+  it("keeps every hash, the seal, the proof and the offline commands", () => {
+    for (const event of events) {
+      expect([event.seq, page.includes(event.hash)]).toEqual([event.seq, true]);
+      expect([
+        event.seq,
+        page.includes(`href="/events/${event.seq}/proof"`),
+      ]).toEqual([event.seq, true]);
+    }
+    expect(page).toContain(seal.root);
+    expect(page).toContain(`npm run export -- ${ctx.origin} ${ENTRY_ID} ./out`);
+    expect(page).toContain("npm run verify -- ./out/entry.json ./out/log.json");
+  });
+
+  it("names the rule rather than a date when nothing seals it yet", () => {
+    const unsealed = renderEntry(ctx, {
+      ...withheldData,
+      withheld: { releaseDate: null },
+    });
+    expect(unsealed).toContain(
+      `Released ${RELEASE_WINDOW_DAYS} days after the seal that covers`,
+    );
+    expect(unsealed).not.toContain("Released on");
+  });
+
+  it("is the whole entry again for a reader the window is done with", () => {
+    // The same function and the same data with `withheld` null: what an
+    // operator or a keyed reader is served today, and what everybody is served
+    // once the window is up.
+    const whole = renderEntry(ctx, entryData);
+    expect(whole).toContain(escapeHtml(row.claim));
+    expect(whole).toContain("https://kestrel.example/transcript");
+    expect(whole).toContain(escapeHtml("the source says otherwise"));
+    expect(whole).not.toContain("withheld until release");
+    expect(whole).not.toContain("Released on");
+    for (const key of CORE_KEYS) {
+      expect([key, whole.includes(`<dt>${key}</dt>`)]).toEqual([key, true]);
+    }
+  });
+
+  it("carries no script and no style attribute either way", () => {
+    for (const document of [page, renderEntry(ctx, entryData)]) {
+      expect(document).not.toContain("<script");
+      expect(document).not.toContain(" style=");
+    }
+  });
+
+  /** The same entry as a row of the listing and of the home page. */
+  const withheldRow: EntryRow = {
+    ...row,
+    claim: "",
+    withheld: { releaseDate: RELEASE_DATE },
+  };
+
+  it("shows released <date> where the listing's claim would be", () => {
+    const listing = renderEntries(ctx, {
+      filter: {
+        category: null,
+        status: null,
+        domain: null,
+        source: null,
+        tier: null,
+        fresh: null,
+      },
+      rows: [withheldRow],
+      total: 1,
+      nextBefore: null,
+    });
+    expect(listing).toContain(`released ${RELEASE_DAY}`);
+    expect(listing).not.toContain(escapeHtml(row.claim));
+    // Subject, category, status, tier and position are proof and stay.
+    expect(listing).toContain(escapeHtml(row.subject));
+    expect(listing).toContain("behavior");
+    expect(listing).toContain("stated");
+    expect(listing).toContain(`<a href="/entries/${ENTRY_ID}">12</a>`);
+  });
+
+  it("shows released <date> on the home page's latest rows too", () => {
+    const home = renderHome(ctx, {
+      domain: null,
+      counters: {
+        verified: 1,
+        stale: 0,
+        trusted: 3,
+        sealedHead: 12,
+        sealedAt: SEALED_AT,
+        witnesses: 2,
+        seals: 4,
+      },
+      latest: [withheldRow],
+    });
+    expect(home).toContain(`released ${RELEASE_DAY}`);
+    expect(home).not.toContain(escapeHtml(row.claim));
+    expect(home).toContain(escapeHtml(row.subject));
+    // The counters are untouched: the window holds back content, never a count.
+    expect(home).toContain(`<div class="counter-value">1</div>`);
+  });
+
+  it("says released after sealing on a row nothing covers yet", () => {
+    const listing = renderEntries(ctx, {
+      filter: {
+        category: null,
+        status: null,
+        domain: null,
+        source: null,
+        tier: null,
+        fresh: null,
+      },
+      rows: [{ ...unsealedRow, claim: "", withheld: { releaseDate: null } }],
+      total: 1,
+      nextBefore: null,
+    });
+    expect(listing).toContain("released after sealing");
+    expect(listing).toContain("unsealed");
   });
 });

@@ -8,12 +8,21 @@
  * Worker does not serve would be the first thing a reader tried and the first
  * thing that failed.
  *
+ * Decision D-100, the release window: a latest row whose content this reader has
+ * not been served shows "released <date>" where the claim would be, exactly as
+ * the entries listing does. The counters are untouched — they count entries, and
+ * the window holds back content and never a count.
+ *
  * Pure: every value comes off `HomeData`, which the route gathered. Nothing here
  * counts anything, and the one number named is TRUSTED_POOL_SWITCH, read from
  * src/policy.ts rather than typed out.
  */
 
 import { TRUSTED_POOL_SWITCH } from "../../policy.js";
+// The claim cell is the entries listing's own (decision D-100): the two tables
+// show the same rows, and a release line written twice would be two lines to
+// keep in step.
+import { claimCell } from "./entries.js";
 import {
   badge,
   fmtDate,
@@ -107,7 +116,7 @@ function latestRow(row: EntryRow): Safe {
     </td>
     <td>${badge(statusClass(row.status), row.status)}</td>
     <td>${row.subject}</td>
-    <td class="prose"><a href="/entries/${row.id}">${row.claim}</a></td>
+    <td class="prose">${claimCell(row)}</td>
     <td class="muted">${row.tier ?? "—"}</td>
     <td class="dim">${fmtDate(row.last_confirmed)}</td>
   </tr>`;

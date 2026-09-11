@@ -141,6 +141,7 @@ import {
   authorityHostsFor,
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
+  RELEASE_WINDOW_DAYS,
   SEAL_MAX_EVENTS,
   WITNESSES_REQUIRED,
 } from "../policy.js";
@@ -1585,6 +1586,11 @@ async function mirrorStep(
     files = buildMirror({
       environment,
       exported_at: at,
+      // The release window is judged at the run's own instant, from the same
+      // injected clock the rest of the sweep runs on (D-100), and the window is
+      // policy's one number.
+      now: at,
+      release_window_days: RELEASE_WINDOW_DAYS,
       seals: await allSeals(db),
       anchors: await allAnchors(db),
       events: await sealedLog(db, head),

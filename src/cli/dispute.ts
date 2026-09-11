@@ -43,6 +43,7 @@ import {
   errorOf,
   getJson,
   readKeyFile,
+  signingHttp,
   reasonOf,
   signedPost,
   WebHttpClient,
@@ -253,8 +254,12 @@ export async function runDispute(input: {
 
   // The target, for its subject: a challenge is about the same fact, so the
   // correction carries the subject the entry it challenges carries.
+  // Signed with the operator key this run already holds (decision D-100): an
+  // entry inside the release window is served to a signed request from an agent
+  // bound to a registered operator, and a validator is exactly that reader —
+  // the people who have to judge an entry are the ones the window is not for.
   const read = await getJson(
-    deps.http,
+    signingHttp(deps.http, input.key, deps.now),
     input.baseUrl,
     `/entries/${encodeURIComponent(input.targetId)}`,
   );

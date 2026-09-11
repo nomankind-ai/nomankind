@@ -75,7 +75,12 @@ import { entryHash } from "../src/hash.js";
 import { exportPrivateKeyPkcs8, generateKeypair } from "../src/identity.js";
 import { importMirror, type ImportSummary } from "../src/cli/import-mirror.js";
 import type { HttpClient } from "../src/cli/validator.js";
-import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "../src/policy.js";
+import type { Seal } from "../src/seal.js";
+import {
+  DEFAULT_DOMAIN,
+  LIST_PAGE_LIMIT,
+  RELEASE_WINDOW_DAYS,
+} from "../src/policy.js";
 import { answersHash, probeSetHash, type ProbeAnswer } from "../src/probe.js";
 import { signRecord } from "../src/records.js";
 import { txtRecordName } from "../src/registry.js";
@@ -138,14 +143,39 @@ const EXPORT_AT = new Date(NOW.getTime() + HOUR_MS);
  */
 const ANCHOR_AT = new Date(EXPORT_AT.getTime() + DAY_MS);
 
+/**
+ * A window and a day on: the run whose export is the copy this fork is started
+ * from (decision D-100).
+ *
+ * The two runs before it export a log every seal of which is still inside its
+ * window — every event a hash line, no entry file at all — which is a real
+ * export and one a fork can replay nothing of. By this one the first seal has
+ * opened and the record is in the directory in full.
+ *
+ * This run makes a seal of its own, and that seal is inside its window on the
+ * day it is made: a sweep publishes a day of read counts for every unpublished
+ * day and seals what it appended in the same run. That is what every live export
+ * looks like — the record in full behind the window, the newest seal as hash
+ * lines — and the fork stops in front of it and seals on from there.
+ */
+const RELEASE_AT = new Date(
+  ANCHOR_AT.getTime() + (RELEASE_WINDOW_DAYS + 1) * DAY_MS,
+);
+
 /** The instant both databases are asked the same questions at. */
-const ASK_AT = ANCHOR_AT;
+const ASK_AT = RELEASE_AT;
 
 /** The fork's own run, an hour after the operator that joined it. */
-const FORK_AT = new Date(ANCHOR_AT.getTime() + HOUR_MS);
+const FORK_AT = new Date(RELEASE_AT.getTime() + HOUR_MS);
 
 /** Not `local`: the directory name and the captures base are part of the copy. */
 const ENVIRONMENT = "demo";
+
+/**
+ * The origin's first seal: the one whose window has run out by the export, and
+ * so the head the fork is started at (D-100).
+ */
+let released: Seal;
 
 const VERIFIED_REFERENCE = "mock-verified-import-e2e";
 
@@ -236,10 +266,22 @@ function send(
  * path rather than by host.
  */
 class InProcessHttp implements HttpClient {
+  /**
+   * The instant the doors answer at: the release run's own, which is when the
+   * directory under test was exported (decision D-100).
+   *
+   * A capture of an entry nobody may read yet is refused to a keyless reader,
+   * so a verification run at some other clock would be reading answers about a
+   * different moment of the same log.
+   */
+  constructor(private readonly at: Date = RELEASE_AT) {}
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     return send(
       new Request(`${TEST_ORIGIN}${url.pathname}${url.search}`, request),
+      originEnv,
+      this.at,
     );
   }
 }
@@ -666,9 +708,14 @@ beforeAll(async () => {
   pushed = new MockMirrorAdapter();
   const sealed = await sweepOn(originEnv, EXPORT_AT, pushed);
   expect(sealed.sealed).not.toBeNull();
+  released = (await latestSeal(origin.db))!;
   const anchored = await sweepOn(originEnv, ANCHOR_AT, pushed);
   expect(anchored.anchored).not.toBeNull();
   expect(anchored.mirror).not.toBeNull();
+  // And the run a window on, whose export carries that seal in full: the copy
+  // the fork is started from.
+  const opened = await sweepOn(originEnv, RELEASE_AT, pushed);
+  expect(opened.mirror).not.toBeNull();
 
   workspace = await mkdtemp(join(tmpdir(), "nomankind-import-e2e-"));
   mirrorDir = join(workspace, "log", ENVIRONMENT);
@@ -688,18 +735,21 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe("the fork answers what nomankind answered", () => {
-  it("imported the whole sealed record", async () => {
-    const newest = (await latestSeal(origin.db))!;
+  it("imported the released record, and stopped in front of the rest", async () => {
     expect([summary.environment, summary.head, summary.sealSeq]).toEqual([
       ENVIRONMENT,
-      newest.last_seq,
-      newest.seq,
+      released.last_seq,
+      released.seq,
     ]);
     // Two entries — the entry and the correction it is disputed by — one seal,
     // one anchor, five operators and the scored attestation.
     expect([summary.entries, summary.seals, summary.anchors]).toEqual([2, 1, 1]);
     expect([summary.operators, summary.attestations]).toEqual([5, 1]);
-    expect(await headSeq(fork.db)).toBe(newest.last_seq);
+    expect(await headSeq(fork.db)).toBe(released.last_seq);
+    // And the export's own newest seal, which is still inside its window, was
+    // not replayed: a hash line has no payload to chain.
+    expect(summary.withheld).toBeGreaterThan(0);
+    expect((await latestSeal(origin.db))!.seq).toBe(released.seq + 1);
   }, 600_000);
 
   it("serves the disputed entry and its correction the same way", async () => {
@@ -738,15 +788,20 @@ describe("the fork answers what nomankind answered", () => {
   }, 600_000);
 
   it("serves the seal, the anchor and the attestation the same way", async () => {
-    const newest = (await latestSeal(origin.db))!;
+    // The released seal: the origin's newer one is inside its window and the
+    // fork has not been given it.
     const anchor = (await latestAnchor(origin.db))!;
-    await sameAnswer(`/seals/${newest.seq}`);
+    await sameAnswer(`/seals/${released.seq}`);
     await sameAnswer(`/anchors/${anchor.date}`);
     await sameAnswer(`/attestations/${attestation}`);
   }, 600_000);
 
-  it("recomputes the same standing at the same position", async () => {
-    await sameAnswer("/standing");
+  it("recomputes the same standing over the record it has", async () => {
+    // Every operator's number is the same number; the position is not, and is
+    // the one field named here: the fork stands at the released head and the
+    // origin at its own, a month of read counts ahead of it. Nothing in those
+    // events earns standing, which is why the rows agree.
+    await sameAnswer("/standing", ["/position", "/operators/*/position"]);
   }, 600_000);
 
   it("serves the frozen reader the same entry, seal and receipt", async () => {
@@ -767,15 +822,19 @@ describe("the fork's first sweep", () => {
 
   beforeAll(async () => {
     rebuilt = new MockMirrorAdapter();
-    report = await sweepOn(forkEnv, ANCHOR_AT, rebuilt);
+    report = await sweepOn(forkEnv, RELEASE_AT, rebuilt);
   }, 600_000);
 
-  it("seals nothing, because the imported head is already sealed", async () => {
-    expect(report.sealed).toBeNull();
-    expect(report.skipped["nothing_to_seal"]).toBe(1);
+  it("seals on from the imported head, exactly as nomankind did", async () => {
+    // The imported head was already sealed, so what this run seals is what it
+    // appended itself: the same month of read counts nomankind's own run
+    // published at this instant, onto the same log — so the same events, the
+    // same hashes, and a seal that chains onto the imported one.
+    expect(report.sealed).not.toBeNull();
+    expect(report.sealed!.first_seq).toBe(released.last_seq + 1);
     const newest = (await latestSeal(fork.db))!;
-    expect(newest.seq).toBe(summary.sealSeq);
-    expect(newest.last_seq).toBe(summary.head);
+    expect(newest.seq).toBe(summary.sealSeq + 1);
+    expect(newest.prev_hash).toBe(released.hash);
   }, 600_000);
 
   it("reports every step of the sweep", async () => {
@@ -784,7 +843,7 @@ describe("the fork's first sweep", () => {
     for (const row of rows) {
       expect([row.step, row.last_run_at, row.trigger]).toEqual([
         row.step,
-        ANCHOR_AT.toISOString(),
+        RELEASE_AT.toISOString(),
         "alarm",
       ]);
     }
@@ -792,7 +851,7 @@ describe("the fork's first sweep", () => {
 
   it("exports the same bytes for the same sealed head", async () => {
     expect(report.mirror).not.toBeNull();
-    expect(report.mirror!.head).toBe(summary.head);
+    expect(report.mirror!.head).toBe((await latestSeal(fork.db))!.last_seq);
 
     const source = filesOf(pushed);
     const again = filesOf(rebuilt);
@@ -825,12 +884,11 @@ describe("the fork's first sweep", () => {
 describe("the fork's own next seal", () => {
   it("chains onto the last seal nomankind made", async () => {
     const imported = (await latestSeal(fork.db))!;
-    expect(imported.seq).toBe(summary.sealSeq);
 
     // One new operator joins the fork through the real door. Nothing about it
     // is in the mirror: it is the first thing that ever happened to this log.
-    await register(newcomer, { env: forkEnv, at: ANCHOR_AT });
-    expect(await headSeq(fork.db)).toBeGreaterThan(summary.head);
+    await register(newcomer, { env: forkEnv, at: RELEASE_AT });
+    expect(await headSeq(fork.db)).toBeGreaterThan(imported.last_seq);
 
     const report = await sweepOn(forkEnv, FORK_AT, new MockMirrorAdapter());
     expect(report.sealed).not.toBeNull();
