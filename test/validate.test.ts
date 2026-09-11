@@ -147,6 +147,13 @@ const REFUSAL_CASES: readonly {
     context: context(),
   },
   {
+    // Decision D-096: the operator's own domain is an official host of the
+    // authority this entry's subject names, so it is the party being checked.
+    reason: "subject_authority",
+    record: approval(V1_AGENT, "op_v1"),
+    context: context({ authority_hosts: ["op_v1"] }),
+  },
+  {
     // Decision D-071: attested in some domain, but not in this entry's.
     reason: "operator_not_in_domain",
     record: approval(V1_AGENT, "op_v1"),
@@ -202,6 +209,7 @@ describe("checkValidation refusals", () => {
       "original_signer",
       "maintainer_operator",
       "provider_operator",
+      "subject_authority",
       "operator_not_in_domain",
       "missing_snapshot_hash",
       "missing_reason",

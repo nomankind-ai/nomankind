@@ -134,6 +134,12 @@ function domainPanel(slug: string, domain: DomainPolicy): Safe {
         "The categories of this domain whose evidence is a transcript rather than a document, which is what decides the shape a validator's reproduction has to take.",
     },
     {
+      name: `${path}.excluded_parties.subject_authority`,
+      value: String(domain.excluded_parties.subject_authority),
+      means:
+        "Whether the entry's own subject excludes an operator as well as the list below does: when true, an operator whose domain is, or is under, an official host of the subject's authority row may not validate, reconfirm or be drawn for that entry. The list is about the domain; this is about the single entry, and it is false where the two already coincide.",
+    },
+    {
       name: `${path}.excluded_parties.rule`,
       value: domain.excluded_parties.rule,
       means:
@@ -151,6 +157,35 @@ function domainPanel(slug: string, domain: DomainPolicy): Safe {
       means:
         "How a subject is named in this domain, so two entries about the same thing are about the same subject.",
     },
+    // The two rules a domain may publish and most do not. A row per field only
+    // where the field is there: printing "none" for a domain that has no such
+    // rule would publish a decision nobody took.
+    ...(domain.disclosure === undefined
+      ? []
+      : [
+          {
+            name: `${path}.disclosure.categories`,
+            value: domain.disclosure.categories.join(", "),
+            means:
+              "The categories of this domain whose transcript may be submitted with its request payload replaced by the hash of the original. The transcript's hash is taken over the artifact as submitted, placeholders and all, so the signature covers exactly what was archived.",
+          },
+          {
+            name: `${path}.disclosure.window_days`,
+            value: `${domain.disclosure.window_days} days`,
+            means:
+              "How long after an entry's submitted_at the redacted payload stays private. The payload is archived at submission and served to a signed operator throughout, because a validator has to reproduce the measurement; an unsigned read before the window is refused 403 undisclosed and carries the date it opens.",
+          },
+        ]),
+    ...(domain.version_staleness === undefined
+      ? []
+      : [
+          {
+            name: `${path}.version_staleness.categories`,
+            value: domain.version_staleness.categories.join(", "),
+            means:
+              "The categories of this domain whose subject carries a version as its third segment. An entry in one of them goes stale when an entry about another version of the same model verifies, and stays stale: a reconfirmation is refused version_stale, because the version it observed is gone.",
+          },
+        ]),
   ];
   return html`<section class="panel">
         <h2 class="panel-title">Domains · ${slug}</h2>

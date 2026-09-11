@@ -40,6 +40,7 @@ import {
   type EvidenceTier,
 } from "./evidence.js";
 import { DEFAULT_DOMAIN } from "./policy.js";
+import { underHost } from "./validate.js";
 
 /**
  * Everything the check needs, gathered by the caller at the record's position
@@ -58,6 +59,21 @@ export interface ReconfirmationContext {
    * registration sealed before v0.7 meant.
    */
   readonly operatorDomains?: readonly string[];
+  /**
+   * The official hosts of the authority this entry's subject names
+   * (`authorityHostsFor` in src/policy.ts), exactly as the validation check
+   * takes them. Empty by default, so every caller that had no such exclusion is
+   * unchanged.
+   */
+  readonly authority_hosts?: readonly string[];
+  /**
+   * Whether this entry is version-stale at the record's position (D-096):
+   * another entry of the same domain, in a version-staleness category, about a
+   * later version of the same model, has verified. Computed by the caller from
+   * the log (src/derive.ts, `isVersionStale`); absent reads as false, which is
+   * what every entry outside those categories is.
+   */
+  readonly versionStale?: boolean;
   /** The entry's derived status at that position. */
   readonly status: EntryStatus;
   /** The entry's sidecar effective_tier at that position (null only while unverified). */
@@ -67,11 +83,13 @@ export interface ReconfirmationContext {
 /** Every reason a reconfirmation can be refused. One string per rule, in check order. */
 export type ReconfirmationRefusal =
   | "entry_not_verified"
+  | "version_stale"
   | "unregistered_agent"
   | "operator_mismatch"
   | "submitter_agent"
   | "submitter_operator"
   | "untrusted_operator"
+  | "subject_authority"
   | "operator_not_in_domain"
   | "missing_snapshot_hash"
   | "unexpected_reproduction"
@@ -86,11 +104,13 @@ export type ReconfirmationRefusal =
 /** Every refusal, in check order. */
 export const RECONFIRMATION_REFUSALS: readonly ReconfirmationRefusal[] = Object.freeze([
   "entry_not_verified",
+  "version_stale",
   "unregistered_agent",
   "operator_mismatch",
   "submitter_agent",
   "submitter_operator",
   "untrusted_operator",
+  "subject_authority",
   "operator_not_in_domain",
   "missing_snapshot_hash",
   "unexpected_reproduction",
@@ -142,6 +162,13 @@ export function checkReconfirmation(
   // window an entry stays verified but shows as stale) and may be reconfirmed.
   if (context.status !== "verified") return refuse("entry_not_verified");
 
+  // 1a. Decision D-096: an observation is about the version it was made
+  // against, and a version-stale entry stays stale -- the version it observed
+  // is gone, so there is nothing left to reconfirm. Reproducing the prompt
+  // against whatever the party ships today would be a different fact, and it
+  // belongs in an entry of its own.
+  if (context.versionStale === true) return refuse("version_stale");
+
   // 2-3. The signer must be a registered agent claiming the operator the
   // registry has for it. A record may not name an operator the agent does not
   // belong to.
@@ -171,7 +198,18 @@ export function checkReconfirmation(
     return refuse("untrusted_operator");
   }
 
-  // 6a. Decision D-071: eligibility is per domain, because the independence
+  // 6a. Decision D-096: the authority the entry's subject names is the party
+  // the entry is about, so an operator under one of its official hosts may not
+  // refresh it either. The same hosts the validation check is given, applied
+  // the same way and in the same place in the order: after the standing rules
+  // about who this operator is, before the per-domain one.
+  if (context.authority_hosts !== undefined) {
+    for (const host of context.authority_hosts) {
+      if (underHost(record.operator, host)) return refuse("subject_authority");
+    }
+  }
+
+  // 6b. Decision D-071: eligibility is per domain, because the independence
   // attestation is. A trusted operator refreshes an entry only in a domain it
   // has attested in; being trusted is not being attested everywhere.
   const entryDomain = domainOf(core);

@@ -138,11 +138,13 @@ describe("the refusal list", () => {
   it("names every refusal exactly once, in check order", () => {
     const expected: readonly ReconfirmationRefusal[] = [
       "entry_not_verified",
+      "version_stale",
       "unregistered_agent",
       "operator_mismatch",
       "submitter_agent",
       "submitter_operator",
       "untrusted_operator",
+      "subject_authority",
       "operator_not_in_domain",
       "missing_snapshot_hash",
       "unexpected_reproduction",

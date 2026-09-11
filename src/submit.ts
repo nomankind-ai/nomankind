@@ -37,6 +37,8 @@ import { canonicalize, taggedSha256Hex } from "./hash.js";
 import {
   isDomainCategory,
   isRegisteredDomain,
+  isVersionStalenessCategory,
+  versionedSubjectOf,
   NORM_VERSION,
   REQUEST_CLOCK_SKEW_SECONDS,
 } from "./policy.js";
@@ -181,6 +183,7 @@ export type SubmissionRefusal =
   | "missing_domain"
   | "unregistered_domain"
   | "category_not_in_domain"
+  | "bad_subject_version"
   | SourceRefusal
   | "bad_submitted_at"
   | "author_mismatch"
@@ -194,6 +197,7 @@ export const SUBMISSION_REFUSALS: readonly SubmissionRefusal[] = Object.freeze([
   "missing_domain",
   "unregistered_domain",
   "category_not_in_domain",
+  "bad_subject_version",
   "unknown_authority",
   "source_not_official",
   "bad_submitted_at",
@@ -260,6 +264,12 @@ function instant(value: unknown): number {
  * domain does not admit. The schema cannot express a per-domain enum, so this is
  * where that rule is actually enforced.
  *
+ * bad_subject_version: a category whose observation is about one version of one
+ * model (decision D-096), submitted under a subject that names no version. The
+ * convention is `<party>/<model>/<version>` and the staleness rule is written
+ * against the third segment, so a subject without one is a claim the log cannot
+ * retire when the version moves.
+ *
  * unknown_authority and source_not_official: the source policy (decision D-080,
  * src/sources.ts). A category with an authoritative source by nature -- pricing,
  * limit, deprecation, release, outage -- must cite the subject's own official
@@ -315,6 +325,12 @@ export function checkSubmission(
   }
   if (!isDomainCategory(core.domain, core.category)) {
     return { ok: false, reason: "category_not_in_domain" };
+  }
+  if (
+    isVersionStalenessCategory(core.domain, core.category) &&
+    versionedSubjectOf(core.subject) === null
+  ) {
+    return { ok: false, reason: "bad_subject_version" };
   }
 
   const source = checkSource(

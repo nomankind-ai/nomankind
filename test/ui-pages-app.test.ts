@@ -498,11 +498,19 @@ const entryData: EntryData = {
   // below turns on explicitly. Null and never absent — the field is on every
   // EntryData the route builds, so it is on every one the suite builds too.
   statement: null,
+  // And no redacted payload, for the same reason and read the same way: the
+  // ordinary entry carries its evidence whole, and the disclosure line is the
+  // exception a test below turns on (D-096).
+  disclosure: null,
 };
 
 /** The statement capture a transcript entry with a provider statement carries. */
 const STATEMENT_HASH =
   "sha256:5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d";
+
+/** The capture holding the payload a redacted transcript stands in for. */
+const DISCLOSURE_HASH =
+  "sha256:6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e";
 
 const operatorRow: OperatorRow = {
   id: "k1.example",
@@ -1140,6 +1148,40 @@ describe("the entry page", () => {
     expect(entryData.statement).toBeNull();
     expect(document).not.toContain("provider statement");
     expect(document).not.toContain(`/captures/${STATEMENT_HASH}`);
+  });
+
+  it("says when a payload was redacted, and when it is disclosed", () => {
+    // Decision D-096. A transcript in a domain that publishes a disclosure rule
+    // may be submitted with its payload replaced by a hash; the payload is
+    // archived at submission and served from a published date. The page owes a
+    // reader that date and the link, beside the evidence the placeholder is in.
+    const withDisclosure = renderEntry(ctx, {
+      ...entryData,
+      disclosure: {
+        hash: DISCLOSURE_HASH,
+        disclose_after: "2026-12-07T12:00:00.000Z",
+      },
+    });
+    expect(withDisclosure).toContain("payload redacted, disclosed after");
+    expect(withDisclosure).toContain("2026-12-07");
+    expect(withDisclosure).toContain(`<a href="/captures/${DISCLOSURE_HASH}">`);
+
+    const evidenceAt = withDisclosure.indexOf("<dt>evidence</dt>");
+    const citationAt = withDisclosure.indexOf("<dt>citation</dt>");
+    const noteAt = withDisclosure.indexOf("payload redacted");
+    expect(noteAt).toBeGreaterThan(evidenceAt);
+    expect(noteAt).toBeLessThan(citationAt);
+
+    expect(withDisclosure).not.toContain("<script");
+    expect(withDisclosure).not.toContain(' style="');
+  });
+
+  it("shows no disclosure line when the payload was never redacted", () => {
+    // Which is almost every entry: a line saying so would read as a payload
+    // that had gone missing rather than one that was never held back.
+    expect(entryData.disclosure).toBeNull();
+    expect(document).not.toContain("payload redacted");
+    expect(document).not.toContain(`/captures/${DISCLOSURE_HASH}`);
   });
 
   it("shows every derived field name and never a confidence number", () => {

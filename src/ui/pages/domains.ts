@@ -34,8 +34,9 @@ import {
   domainPolicy,
   excludedPartyDomains,
   stalenessWindowDays,
+  type DomainPolicy,
 } from "../../policy.js";
-import { badge, html, layout, type Safe } from "../html.js";
+import { badge, html, layout, raw, type Safe } from "../html.js";
 import type { DomainCounts, DomainsData, PageContext } from "../types.js";
 
 /**
@@ -91,6 +92,32 @@ export const DOMAIN_COPY: Readonly<Record<string, DomainCopy>> = Object.freeze({
     subject_example: "openai/gpt-5",
     transcript_note:
       "every other category carries its measurement in the observation.",
+  }),
+  "ai-governance": Object.freeze({
+    short_line: "What states and intergovernmental bodies require.",
+    what: "Instruments issued by states and intergovernmental bodies, binding or soft law: the EU AI Act, the Council of Europe Framework Convention on AI, state laws, executive orders, ISO 42001, the NIST AI Risk Management Framework, the OECD Principles, UNESCO's Recommendation. What is in force, what was amended or repealed, what guidance was issued, what was enforced.",
+    use_case:
+      "A system that must act under the rules of a jurisdiction needs to know which instrument is in force today and what changed since it last looked, cited to the issuing body's own gazette rather than to commentary about it. The record answers what the law says with the text the state published, dated and sealed.",
+    who_reads:
+      "Compliance and legal tooling; policy researchers and trackers; agents deployed across jurisdictions; the bodies that issue the instruments, reading how their own text is being cited.",
+    who_validates:
+      "Operators attested in this domain. The issuing body of an instrument may not validate an entry about it, and model providers are excluded here as everywhere.",
+    subject_example: "eu/ai-act",
+    transcript_note:
+      "no category carries a transcript; every entry is confirmed against the cited instrument.",
+  }),
+  "ai-safety": Object.freeze({
+    short_line: "What non-state parties committed to, and what their systems do.",
+    what: "What non-state parties committed to about harm to people, and what their deployed systems and guardrail products actually do. Lab constitutions, scaling and preparedness policies, usage policies, industry safety commitments, civil-society principles, guardrail products; and the measured conduct beside them: refusals, filters, safety evaluations, incidents.",
+    use_case:
+      "Hold a commitment against conduct. A published policy is a stated fact; a refusal or a filter behavior is an observed one with a transcript; both sit on the same subject, so the gap between what a party said and what its system did is a query over the log rather than an argument.",
+    who_reads:
+      "Safety researchers and red teams; civil-society monitors; buyers comparing guardrail products; journalists; the parties themselves, whose commitments are on the record they cannot edit.",
+    who_validates:
+      "Operators attested in this domain. Model providers, guardrail vendors, and any party they fund are excluded from validating here.",
+    subject_example: "anthropic/usage-policy",
+    transcript_note:
+      "a transcript holding a working jailbreak is archived with its payload redacted and published after the disclosure window, its hash intact.",
   }),
 });
 
@@ -156,6 +183,51 @@ function excluded(slug: string): Safe {
         on <a href="/policy">the policy page</a>.`;
 }
 
+/**
+ * The delayed-disclosure rule, when the domain publishes one (decision D-096).
+ *
+ * Nothing at all when it does not, which is most domains: a row reading "none"
+ * would look like a rule that had been considered and set to nothing, and what
+ * is true is that the domain has no such rule to publish. The categories and
+ * the window are the policy object's own — the page names neither list nor
+ * number of its own — so a window the maintainer moves moves here with it.
+ */
+function disclosureRow(policy: DomainPolicy): Safe {
+  const rule = policy.disclosure;
+  if (rule === undefined) return raw("");
+  return row(
+    "Delayed disclosure",
+    html`<span class="badges"
+        >${rule.categories.map((each) => badge("", each))}</span
+      >
+      A transcript in one of those may be submitted with its payload replaced by
+      a hash. The payload itself is archived at submission and published
+      ${plural(rule.window_days, "day")} after it, so the evidence becomes
+      public on a stated clock and the transcript's own hash never changes.`,
+  );
+}
+
+/**
+ * The categories whose subject carries a version, when the domain has them.
+ *
+ * The same discipline as above: absent means the domain publishes no such rule,
+ * and the categories are read from the table rather than named here.
+ */
+function versionStalenessRow(policy: DomainPolicy): Safe {
+  const rule = policy.version_staleness;
+  if (rule === undefined) return raw("");
+  return row(
+    "Staleness on a version change",
+    html`<span class="badges"
+        >${rule.categories.map((each) => badge("", each))}</span
+      >
+      A subject in one of those names the version it was observed against, and
+      the entry goes stale the moment an entry about another version of the same
+      model verifies: what was measured was measured on a version that is gone,
+      and a reconfirmation cannot bring it back.`,
+  );
+}
+
 /** One domain's panel: its tables, its live counters, and the way in. */
 function domainPanel(
   slug: string,
@@ -214,6 +286,7 @@ function domainPanel(
               Every other category may cite any host, and the citation is
               labeled official, recognized, or other.`,
           )}
+          ${disclosureRow(policy)}${versionStalenessRow(policy)}
           ${row(
             "In this log",
             html`<a href="/entries?domain=${slug}"

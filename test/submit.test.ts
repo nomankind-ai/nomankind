@@ -291,6 +291,7 @@ describe("checkSubmission", () => {
       "missing_domain",
       "unregistered_domain",
       "category_not_in_domain",
+      "bad_subject_version",
       "unknown_authority",
       "source_not_official",
       "bad_submitted_at",

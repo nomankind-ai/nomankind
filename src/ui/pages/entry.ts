@@ -172,6 +172,31 @@ function statementNote(statement: EntryData["statement"]): Safe {
   </span>`;
 }
 
+/**
+ * The redacted payload's capture, beside the evidence block (decision D-096).
+ *
+ * A transcript in a domain that publishes a disclosure rule may be submitted
+ * with its request payload replaced by the hash of the original. The payload
+ * itself is archived at submission, at its own content address, and served from
+ * a published date — so what the page owes a reader is the date and the link,
+ * and nothing else: the evidence block above already shows the placeholder the
+ * author actually signed, and the transcript's hash is over that, redaction
+ * included.
+ *
+ * Nothing at all when the entry carries no such payload, which is almost every
+ * entry: a line saying so would read as a payload that had gone missing.
+ */
+function disclosureNote(disclosure: EntryData["disclosure"]): Safe {
+  if (disclosure === null || disclosure === undefined) return raw("");
+  return html`<span class="note">
+    payload redacted, disclosed after ${fmtDate(disclosure.disclose_after)} ·
+    <a href="/captures/${disclosure.hash}">capture</a> ·
+    <span class="break" title="${disclosure.hash}"
+      >${shortHash(disclosure.hash)}</span
+    >
+  </span>`;
+}
+
 /** The frozen core: every CORE_KEYS name, in the schema's order, with its value. */
 function core(data: EntryData): Safe {
   const author = text(data.entry, "author") ?? EM_DASH;
@@ -187,7 +212,9 @@ function core(data: EntryData): Safe {
             html`<dt>${key}</dt>
               <dd>
                 ${coreValue(data.entry, key)}${key === "evidence"
-                  ? statementNote(data.statement)
+                  ? html`${statementNote(data.statement)}${disclosureNote(
+                      data.disclosure,
+                    )}`
                   : raw("")}
               </dd>`,
         )}

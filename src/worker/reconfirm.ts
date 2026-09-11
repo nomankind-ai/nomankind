@@ -44,14 +44,15 @@
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
 import { bountyAccrual } from "../bounty.js";
-import type { Core } from "../core.js";
+import { domainOf, type Core } from "../core.js";
 import {
   agentOperatorsAt,
+  isVersionStale,
   operatorDomainsOf,
   trustedOperatorsAt,
 } from "../derive.js";
 import type { Event, ReconfirmationRecord } from "../events.js";
-import { REQUEST_CLOCK_SKEW_SECONDS } from "../policy.js";
+import { authorityHostsFor, REQUEST_CLOCK_SKEW_SECONDS } from "../policy.js";
 import { checkReconfirmation } from "../reconfirm.js";
 import { verifyRecordSignature } from "../records.js";
 import { validateEntry, type ValidationError } from "../schema.js";
@@ -69,7 +70,7 @@ import {
   methodNotAllowed,
   refuse,
 } from "./registry.js";
-import { entryWorld, rederive } from "./world.js";
+import { entryWorld, eventsOf, rederive } from "./world.js";
 
 /**
  * What this route is given besides its bindings: the instant the request is
@@ -267,6 +268,11 @@ async function reconfirm(
     // events. The check compares them against the entry's domain, which it
     // reads off the signed core it was handed.
     operatorDomains: operatorDomainsOf(world.registry, record.operator, head),
+    // Decision D-096: the hosts of the authority this entry's subject names,
+    // from src/policy.ts, and whether a later version of the model has already
+    // verified -- both asked of the same world the status comes from.
+    authority_hosts: authorityHostsFor(domainOf(core), core["subject"]),
+    versionStale: isVersionStale(eventsOf(world), id),
     status: before.derived.status,
     effectiveTier: before.sidecar.effective_tier,
   });

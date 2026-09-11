@@ -102,7 +102,8 @@ const READ_PATH: readonly Endpoint[] = [
     parameters: "sha256: plus 64 hex",
     answers:
       "The raw archived bytes behind a snapshot_hash or a receipt_hash, whichever role froze them — snapshot, receipt, statement, or report:<seq> — with their stored media type and the archive address in x-nomankind-archive-hash. Served inert: attachment, nosniff, and a sandboxing CSP, because the bytes are a stranger's.",
-    refusals: "400 bad_hash, 404 not_found.",
+    refusals:
+      "400 bad_hash, 404 not_found; 403 undisclosed, carrying disclose_after, for a capture held only under the role disclosure while its domain's disclosure window is still open — a signed request from an agent bound to a registered operator is served throughout, because a validator has to reproduce the measurement.",
   },
   {
     method: "GET",
@@ -110,7 +111,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters: "—",
     answers:
       "The norm rule's record of the fetch: final_url, status, headers, fetched_at, fetcher. The same four roles — snapshot, receipt, statement, report:<seq> — answer here.",
-    refusals: "400 bad_hash, 404 not_found.",
+    refusals: "400 bad_hash, 404 not_found; 403 undisclosed, as above.",
   },
   {
     method: "GET",
@@ -339,11 +340,11 @@ const WRITE_PATH: readonly Endpoint[] = [
     method: "POST",
     path: "/entries",
     parameters:
-      `entry (the ${CORE_KEYS.length} signed core keys, domain among them, plus signature), and receipt only when observation is non-null`,
+      `entry (the ${CORE_KEYS.length} signed core keys, domain among them, plus signature), receipt only when observation is non-null, and disclosure only when the transcript carries a redacted payload: a JSON object mapping each placeholder's JSON pointer into the artifact to the original value, archived at its own content address under the capture role disclosure`,
     answers:
       "201 with the derived entry and a Location header. The entry is draft: status is recomputed from the log and is never sent in. The Worker fetches the citation itself under the norm rule and refuses unless what it fetched hashes to the snapshot_hash the author signed.",
     refusals:
-      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, unknown_authority (the subject's primary party has no row in this domain's authorities table and the category needs an official source), source_not_official (the category has an authoritative source by nature and the citation is not it), bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 duplicate_claim (the answer carries duplicate_of: the same domain, subject, category and normalized value is already live as a draft or a verified entry and this entry does not supersede it; refused before anything is fetched or written, on the dispute door as well as this one), snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 schema_invalid; 409 chain_moved.",
+      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, bad_subject_version (the category's subject carries a version as its third segment in this domain, and the entry's has none), unknown_authority (the subject's primary party has no row in this domain's authorities table and the category needs an official source), source_not_official (the category has an authoritative source by nature and the citation is not it), bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 duplicate_claim (the answer carries duplicate_of: the same domain, subject, category and normalized value is already live as a draft or a verified entry and this entry does not supersede it; refused before anything is fetched or written, on the dispute door as well as this one), snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 disclosure_missing (a redaction placeholder with no pointer to its original, or a disclosure body on an entry whose domain and category publish no disclosure rule) and disclosure_mismatch (the disclosed value does not hash to the placeholder), both before anything is written; 422 schema_invalid; 409 chain_moved.",
   },
   {
     method: "POST",
@@ -353,7 +354,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation. A validator that judges the entry a duplicate of one it does not supersede rejects in the published form, the reason duplicate_claim:<entry id>, which is taken as any other reason is: nothing new is signed, and the entry page and the confidence inputs read the id back out of it.",
     refusals:
-      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, operator_not_in_domain (the operator is not attested in the entry's own domain), missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, schema_invalid.",
+      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, subject_authority (the operator's own domain is, or is under, an official host of the entry's subject's authority row, in a domain whose registry says a subject excludes its own authority), operator_not_in_domain (the operator is not attested in the entry's own domain), missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, schema_invalid.",
   },
   {
     method: "POST",
@@ -363,7 +364,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry: last_confirmed advanced to the record's date, the window reopened, a read-share slot seated or rotated, and the accrued bounty written to the ledger in the same batch as the event that earned it.",
     refusals:
-      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature, entry_not_verified, unregistered_agent, operator_mismatch, submitter_agent, submitter_operator, untrusted_operator, operator_not_in_domain, missing_snapshot_hash, unexpected_reproduction, unexpected_observation, missing_reproduction, bad_reproduction, failed_reproduction, missing_observation, bad_observation, failed_observation; 409 entry_not_stale; 422 schema_invalid.",
+      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature, entry_not_verified, version_stale (the entry is stale because another version of the same model verified, and no reconfirmation can bring back the version it observed), unregistered_agent, operator_mismatch, submitter_agent, submitter_operator, untrusted_operator, subject_authority, operator_not_in_domain, missing_snapshot_hash, unexpected_reproduction, unexpected_observation, missing_reproduction, bad_reproduction, failed_reproduction, missing_observation, bad_observation, failed_observation; 409 entry_not_stale; 422 schema_invalid.",
   },
   {
     method: "POST",

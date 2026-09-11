@@ -56,14 +56,27 @@
         "behavior",
         "outage",
         "misbehavior",
-        "correction"
+        "correction",
+        "in_force",
+        "amended",
+        "repealed",
+        "guidance_issued",
+        "enforcement_action",
+        "commitment_published",
+        "commitment_changed",
+        "commitment_withdrawn",
+        "conduct_observed",
+        "refusal_behavior",
+        "filter_behavior",
+        "safety_eval",
+        "incident"
       ],
-      "description": "Exactly one category. 'pricing', 'limit', and 'behavior' are volatile (staleness window per published policy: 90 days for pricing and limit, 30 for behavior). 'release', 'deprecation', 'outage', 'misbehavior', and 'correction' are events (no window): a documented incident or a correction happened, and having happened stays true. 'correction' is the category a challenge entry carries; an overturned entry's overturned_by points to the upheld correction."
+      "description": "Exactly one category. The enum is the union of every registered domain's categories (schema/nomankind-domain-registry-v1.md); which of them a domain admits is enforced by the application from the registry, because JSON Schema cannot express a per-domain enum without splitting the schema. In ai-ecosystem: 'pricing', 'limit', and 'behavior' are volatile (staleness window per published policy: 90 days for pricing and limit, 30 for behavior), and 'release', 'deprecation', 'outage', 'misbehavior', and 'correction' are events (no window): a documented incident or a correction happened, and having happened stays true. 'correction' is the category a challenge entry carries; an overturned entry's overturned_by points to the upheld correction. In ai-governance: 'in_force', 'amended', 'repealed', 'guidance_issued', 'enforcement_action'. In ai-safety: 'commitment_published', 'commitment_changed', 'commitment_withdrawn', 'conduct_observed', 'refusal_behavior', 'filter_behavior', 'safety_eval', 'incident'."
     },
     "domain": {
       "type": "string",
-      "enum": ["ai-ecosystem"],
-      "description": "The registered domain this fact belongs to (schema/nomankind-domain-registry-v1.md): a slug; ai-ecosystem is the only domain at launch. Part of the signed core, so an entry can never be re-homed."
+      "enum": ["ai-ecosystem", "ai-governance", "ai-safety"],
+      "description": "The registered domain this fact belongs to (schema/nomankind-domain-registry-v1.md): a slug; three are registered, ai-ecosystem, ai-governance and ai-safety. Part of the signed core, so an entry can never be re-homed."
     },
     "claim": {
       "type": "string",
@@ -89,7 +102,7 @@
     },
     "evidence": {
       "type": ["object", "null"],
-      "description": "Reproducible transcript artifact frozen at submission. Required for 'behavior' and 'misbehavior'; null otherwise. Verification basis is either provider_statement here, or an independent reproduction attached to at least one approver record (application-enforced). The artifact hashed into snapshot_hash is exactly the object {model, prompt, parameters, output, predicate, observed_at} per the norm rule named in norm_version.",
+      "description": "Reproducible transcript artifact frozen at submission. Required for every transcript category of every registered domain -- 'behavior' and 'misbehavior' in ai-ecosystem, 'conduct_observed', 'refusal_behavior' and 'filter_behavior' in ai-safety -- and null for every other category; which of them a domain admits is application-enforced from the registry. Verification basis is either provider_statement here, or an independent reproduction attached to at least one approver record (application-enforced). The artifact hashed into snapshot_hash is exactly the object {model, prompt, parameters, output, predicate, observed_at} per the norm rule named in norm_version.",
       "additionalProperties": false,
       "required": ["model", "prompt", "parameters", "output", "predicate", "observed_at", "provider_statement"],
       "properties": {
@@ -370,9 +383,9 @@
   },
   "allOf": [
     {
-      "$comment": "Behavior and misbehavior require a reproducible evidence artifact and are always observed; every other category requires evidence to be null.",
+      "$comment": "Every transcript category of every registered domain requires a reproducible evidence artifact and is always observed; every other category requires evidence to be null. Which of them a domain admits is enforced by the application, from the domain registry.",
       "if": {
-        "properties": { "category": { "enum": ["behavior", "misbehavior"] } },
+        "properties": { "category": { "enum": ["behavior", "misbehavior", "conduct_observed", "refusal_behavior", "filter_behavior"] } },
         "required": ["category"]
       },
       "then": {
@@ -383,9 +396,9 @@
       }
     },
     {
-      "$comment": "Outside behavior/misbehavior, an observed entry must carry an observation receipt with its proposed test.",
+      "$comment": "Outside the transcript categories, an observed entry must carry an observation receipt with its proposed test.",
       "if": {
-        "properties": { "category": { "not": { "enum": ["behavior", "misbehavior"] } }, "evidence_tier": { "const": "observed" } },
+        "properties": { "category": { "not": { "enum": ["behavior", "misbehavior", "conduct_observed", "refusal_behavior", "filter_behavior"] } }, "evidence_tier": { "const": "observed" } },
         "required": ["category", "evidence_tier"]
       },
       "then": {

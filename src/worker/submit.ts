@@ -38,6 +38,8 @@ import type { SnapshotFetcher } from "../adapters/fetch.js";
 import {
   buildTranscriptArtifact,
   checkReceiptArtifact,
+  checkTranscriptRedaction,
+  disclosurePlaceholders,
   receiptArtifactHash,
   transcriptArtifactHash,
 } from "../artifact.js";
@@ -46,15 +48,22 @@ import { deriveEntry, type DerivedEntry } from "../derive.js";
 import { checkDuplicate, type DuplicateCandidate } from "../duplicate.js";
 import { appendEvent, type Event } from "../events.js";
 import { isTranscriptCategory } from "../evidence.js";
-import { canonicalize } from "../hash.js";
+import { canonicalize, sha256Hex } from "../hash.js";
 import { archiveAddress, mediaType, snapshotHash } from "../normalize.js";
-import { LIST_PAGE_LIMIT } from "../policy.js";
+import {
+  disclosureWindowDays,
+  isDisclosureCategory,
+  LIST_PAGE_LIMIT,
+} from "../policy.js";
 import { validateEntry } from "../schema.js";
 import { verifyEntrySignature } from "../sign.js";
 import type { D1Like } from "../storage/d1.js";
+import { HEADER_AGENT, verifyRequest } from "../request.js";
+import { publicKeyFromAgentId } from "../identity.js";
+import { D1NonceStore } from "../storage/nonces.js";
 import {
   EventAppendError,
-  captureForHash,
+  capturesForHash,
   eventBySeq,
   eventsForEntry,
   entriesNewestFirst,
@@ -168,10 +177,16 @@ async function throughArchive<T>(call: () => Promise<T>): Promise<T> {
 // Reading the body
 // ---------------------------------------------------------------------------
 
-/** A submission's body: the signed entry, and the receipt when it has one. */
+/** A submission's body: the signed entry, the receipt and the disclosure. */
 interface SubmitBody {
   readonly entry: Record<string, unknown>;
   readonly receipt: Record<string, unknown> | undefined;
+  /**
+   * The original values a redacted transcript's placeholders stand for, keyed
+   * by RFC 6901 pointer (decision D-096). Undefined for every submission that
+   * redacts nothing, which is every submission before this milestone.
+   */
+  readonly disclosure: Record<string, unknown> | undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -189,7 +204,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function parseSubmitBody(body: unknown): SubmitBody | null {
   if (!isRecord(body)) return null;
   for (const key of Object.keys(body)) {
-    if (key !== "entry" && key !== "receipt") return null;
+    if (key !== "entry" && key !== "receipt" && key !== "disclosure") return null;
   }
 
   const entry = body["entry"];
@@ -209,7 +224,14 @@ function parseSubmitBody(body: unknown): SubmitBody | null {
     receipt = value;
   }
 
-  return { entry, receipt };
+  let disclosure: Record<string, unknown> | undefined;
+  if ("disclosure" in body) {
+    const value = body["disclosure"];
+    if (!isRecord(value)) return null;
+    disclosure = value;
+  }
+
+  return { entry, receipt, disclosure };
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +299,18 @@ async function transcriptCapture(
     evidence["output"] as string,
     evidence["observed_at"] as string,
   );
+  // Decision D-096: a placeholder object may stand inside the artifact's
+  // request, and only where the entry's own domain published a disclosure rule
+  // naming its category. Anywhere else it is the load-bearing redaction it has
+  // always been, and the artifact is refused before it is hashed or archived.
+  const redaction = checkTranscriptRedaction(artifact, {
+    disclosure: isDisclosureCategory(domainOf(core), core["category"]),
+  });
+  if (!redaction.ok) return { ok: false, reason: redaction.reason };
+
+  // The hash is over the artifact as submitted, placeholders included, so the
+  // snapshot_hash the author signed verifies against the archived artifact
+  // unchanged and the offline verifier never asks for the payload at all.
   const hashed = await transcriptArtifactHash(artifact);
   if (!hashed.ok) return { ok: false, reason: hashed.reason };
   if (hashed.hash !== core["snapshot_hash"]) {
@@ -450,6 +484,102 @@ async function receiptCapture(
       contentHash: hashed.hash,
       archiveHash: await archiveAddress(bytes),
       kind: "receipt",
+      mediaType: ARTIFACT_MEDIA_TYPE,
+      bytes,
+      sidecar: unfetchedSidecar(at, fetcher),
+    },
+  };
+}
+
+/**
+ * The transcript artifact of a core, rebuilt exactly as `transcriptCapture`
+ * builds it, so the pointers a disclosure is checked against are pointers into
+ * the object that was hashed and archived.
+ */
+function transcriptArtifactOf(core: Core): unknown {
+  const evidence = isRecord(core["evidence"]) ? core["evidence"] : {};
+  return buildTranscriptArtifact(
+    evidence,
+    evidence["output"] as string,
+    evidence["observed_at"] as string,
+  );
+}
+
+/** `sha256:` and the SHA-256 of the RFC 8785 canonical form of one value. */
+async function jcsHash(value: unknown): Promise<string> {
+  return `sha256:${await sha256Hex(canonicalize(value))}`;
+}
+
+/**
+ * The delayed-disclosure payload of a redacted transcript, or the refusal that
+ * stopped it (decision D-096).
+ *
+ * The body's `disclosure` maps each placeholder's RFC 6901 pointer to the
+ * original value, and the two have to agree exactly: every placeholder needs
+ * its pointer, and every pointer needs its placeholder -- a disclosure of
+ * something the artifact never redacted is a value nobody asked for, archived
+ * where a reader would take it for evidence. That, a `disclosure` on an entry
+ * whose domain and category publish no disclosure rule, and a redaction with no
+ * disclosure at all are all `disclosure_missing`; a value whose canonical hash
+ * is not the one the placeholder committed to is `disclosure_mismatch`.
+ *
+ * Both are refused before anything is written and after the artifact checks, so
+ * a submission that fails here leaves the log and the archive exactly where
+ * they were.
+ *
+ * The payload is archived at its own content address, as every artifact is: the
+ * canonical bytes, `application/json`, and the sidecar that says nobody fetched
+ * it. Its capture row carries the role `disclosure`, which is what the read
+ * gate below looks for.
+ */
+async function disclosureCapture(
+  core: Core,
+  transcript: boolean,
+  disclosure: Record<string, unknown> | undefined,
+  at: string,
+  fetcher: string,
+): Promise<
+  { ok: true; capture: PreparedCapture | null } | { ok: false; reason: string }
+> {
+  const allowed = isDisclosureCategory(domainOf(core), core["category"]);
+  const placeholders = transcript
+    ? disclosurePlaceholders(transcriptArtifactOf(core))
+    : [];
+
+  if (placeholders.length === 0 || !allowed) {
+    // Nothing was redacted, or nothing may be: a disclosure here discloses
+    // nothing, and an entry that carried one meant something the log cannot
+    // honour.
+    if (disclosure !== undefined) return { ok: false, reason: "disclosure_missing" };
+    return { ok: true, capture: null };
+  }
+  if (disclosure === undefined) {
+    return { ok: false, reason: "disclosure_missing" };
+  }
+
+  const pointers = new Set(placeholders.map((each) => each.pointer));
+  for (const pointer of Object.keys(disclosure)) {
+    if (!pointers.has(pointer)) return { ok: false, reason: "disclosure_missing" };
+  }
+  for (const placeholder of placeholders) {
+    if (!Object.prototype.hasOwnProperty.call(disclosure, placeholder.pointer)) {
+      return { ok: false, reason: "disclosure_missing" };
+    }
+    const hash = await jcsHash(disclosure[placeholder.pointer]);
+    if (hash !== placeholder.hash) {
+      return { ok: false, reason: "disclosure_mismatch" };
+    }
+  }
+
+  const bytes = artifactBytes(disclosure);
+  const address = await archiveAddress(bytes);
+  return {
+    ok: true,
+    capture: {
+      role: "disclosure",
+      contentHash: address,
+      archiveHash: address,
+      kind: "disclosure",
       mediaType: ARTIFACT_MEDIA_TYPE,
       bytes,
       sidecar: unfetchedSidecar(at, fetcher),
@@ -728,6 +858,19 @@ export async function prepareSubmission(
     return refused(refuse(400, "bad_body"));
   }
 
+  // Decision D-096: the originals behind a redacted transcript's placeholders.
+  // After the artifact checks and before any write, so a submission refused
+  // here archives nothing at all.
+  const disclosure = await disclosureCapture(
+    core,
+    transcript,
+    body.disclosure,
+    at,
+    fetcher,
+  );
+  if (!disclosure.ok) return refused(refuse(422, disclosure.reason));
+  if (disclosure.capture !== null) captures.push(disclosure.capture);
+
   // The would-be event, built on the current head but not yet written, so the
   // entry can be derived and validated exactly as it will be stored.
   const previous = await tail(env.DB);
@@ -847,6 +990,104 @@ async function entryById(env: Env, id: string): Promise<Response> {
 }
 
 /**
+ * The instant `days` after another. Arithmetic on the submitted instant and not
+ * on the calendar day it fell on: the window is "ninety days after the entry's
+ * submitted_at", and an entry submitted in the evening opens in the evening.
+ */
+function instantPlusDays(at: string, days: number): string {
+  return new Date(
+    Date.parse(at) + days * 24 * 60 * 60 * 1000,
+  ).toISOString();
+}
+
+/**
+ * The operator behind a signed read, or null when the request carries no valid
+ * signature or the key belongs to nobody registered.
+ *
+ * The same M2 request signature the write doors verify (D-014), over a null
+ * body because a GET has none. Answering null rather than a refusal is
+ * deliberate: an unsigned read of an ordinary capture is served, and only the
+ * one gate below cares whether a reader proved who they are.
+ */
+async function signedOperator(
+  request: Request,
+  env: Env,
+  deps: SubmitDeps,
+  path: string,
+): Promise<string | null> {
+  const headers: Record<string, string> = {};
+  request.headers.forEach((value, key) => {
+    headers[key.toLowerCase()] = value;
+  });
+  const agentHeader = headers[HEADER_AGENT];
+  if (agentHeader === undefined || agentHeader === "") return null;
+
+  let publicKey: Uint8Array;
+  try {
+    publicKey = publicKeyFromAgentId(agentHeader);
+  } catch {
+    return null;
+  }
+
+  const nonces = new D1NonceStore(env.DB);
+  await nonces.prune(deps.now);
+  const verdict = await verifyRequest({
+    method: request.method,
+    path,
+    body: null,
+    headers,
+    publicKey,
+    now: deps.now,
+    nonces,
+  });
+  if (!verdict.ok) return null;
+  return operatorForAgent(env.DB, verdict.agentId);
+}
+
+/**
+ * The delayed-disclosure gate (decision D-096), or null when there is none.
+ *
+ * A capture whose every index row carries the role `disclosure` is the payload
+ * of a redacted transcript, and it is public only from `disclose_after`: the
+ * entry's own `submitted_at` plus the domain's `disclosure.window_days`,
+ * computed here from the entry row and src/policy.ts rather than stored, so
+ * changing the published window changes every payload's date at once.
+ *
+ * Before that day it is served to a request carrying the M2 signed-request
+ * headers from an agent bound to a registered operator -- any operator, because
+ * the validators are the readers who need the payload to reproduce the
+ * observation -- and refused to everyone else with 403 `undisclosed` and the
+ * date it opens. A capture also referenced under another role is some entry's
+ * evidence as well, and is served as it always was.
+ */
+async function undisclosed(
+  request: Request,
+  env: Env,
+  deps: SubmitDeps,
+  path: string,
+  rows: readonly CaptureRecord[],
+): Promise<Response | null> {
+  if (rows.length === 0) return null;
+  if (!rows.every((row) => row.role === "disclosure")) return null;
+
+  const stored = await getEntry(env.DB, rows[0]!.entryId);
+  if (stored === null) return refuse(404, "not_found");
+  const core = extractCore(stored.entry);
+  const window = disclosureWindowDays(domainOf(core));
+  if (window === null) return null;
+
+  const submittedAt = core["submitted_at"];
+  if (typeof submittedAt !== "string") return null;
+  const submitted = Date.parse(submittedAt);
+  if (Number.isNaN(submitted)) return null;
+  const discloseAfter = instantPlusDays(submittedAt, window);
+  if (deps.now.getTime() >= Date.parse(discloseAfter)) return null;
+
+  if ((await signedOperator(request, env, deps, path)) !== null) return null;
+  return json({ error: "undisclosed", disclose_after: discloseAfter }, 403);
+}
+
+/**
  * The capture behind a hash: the raw bytes, exactly as they were fetched.
  *
  * The hash asked for is the content hash the entry carries, not the archive
@@ -854,10 +1095,19 @@ async function entryById(env: Env, id: string): Promise<Response> {
  * address travels back in a header, so a reader can check for themselves that
  * these bytes hash to the address they were stored at.
  */
-async function captureByHash(env: Env, hash: string): Promise<Response> {
+async function captureByHash(
+  request: Request,
+  env: Env,
+  deps: SubmitDeps,
+  path: string,
+  hash: string,
+): Promise<Response> {
   if (!HASH_PATTERN.test(hash)) return refuse(400, "bad_hash");
-  const record = await captureForHash(env.DB, hash);
+  const rows = await capturesForHash(env.DB, hash);
+  const record = rows[0] ?? null;
   if (record === null) return refuse(404, "not_found");
+  const gate = await undisclosed(request, env, deps, path, rows);
+  if (gate !== null) return gate;
 
   const stored = await throughArchive(() =>
     readCapture(env.CAPTURES, record.archiveHash),
@@ -876,10 +1126,21 @@ async function captureByHash(env: Env, hash: string): Promise<Response> {
   });
 }
 
-async function sidecarByHash(env: Env, hash: string): Promise<Response> {
+async function sidecarByHash(
+  request: Request,
+  env: Env,
+  deps: SubmitDeps,
+  path: string,
+  hash: string,
+): Promise<Response> {
   if (!HASH_PATTERN.test(hash)) return refuse(400, "bad_hash");
-  const record = await captureForHash(env.DB, hash);
+  const rows = await capturesForHash(env.DB, hash);
+  const record = rows[0] ?? null;
   if (record === null) return refuse(404, "not_found");
+  // The sidecar says when and how the payload was archived, which is a fact
+  // about the payload: it waits for the same date the bytes do.
+  const gate = await undisclosed(request, env, deps, path, rows);
+  if (gate !== null) return gate;
 
   const sidecar = await throughArchive(() =>
     readSidecar(env.CAPTURES, record.archiveHash),
@@ -964,7 +1225,9 @@ async function route(
     const hash = segmentAfter(`/${raw}`, "/");
     if (hash !== null) {
       if (request.method !== "GET") return methodNotAllowed("GET");
-      return sidecar ? sidecarByHash(env, hash) : captureByHash(env, hash);
+      return sidecar
+        ? sidecarByHash(request, env, deps, path, hash)
+        : captureByHash(request, env, deps, path, hash);
     }
   }
 

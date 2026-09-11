@@ -93,6 +93,7 @@ import {
 import {
   assignmentDeadline,
   buildAssignment,
+  authorityExclusions,
   buildAssignmentMissed,
   drawChecker,
   drawDue,
@@ -137,6 +138,7 @@ import {
   type ReadShareSlotState,
 } from "../ledger.js";
 import {
+  authorityHostsFor,
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
   SEAL_MAX_EVENTS,
@@ -2445,6 +2447,17 @@ export async function runSweep(
               operatorDomainsAt(registry, headPosition(registry)),
               pool.operators,
               domainOf(stored.entry),
+            ),
+            // Decision D-096: and every pool operator under an official host of
+            // the authority this entry's subject names. Empty for ai-ecosystem
+            // and for every subject with no authority row, so the draw an older
+            // entry gets is the draw it always got.
+            ...authorityExclusions(
+              pool.operators,
+              authorityHostsFor(
+                domainOf(stored.entry),
+                (stored.entry as Record<string, unknown>)["subject"],
+              ),
             ),
           ],
         });

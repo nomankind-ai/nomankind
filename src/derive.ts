@@ -23,8 +23,10 @@ import {
   DEFAULT_DOMAIN,
   REJECTIONS_TO_REJECT,
   SLOT_COUNT,
+  isVersionStalenessCategory,
   stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
+  versionedSubjectOf,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
 } from "./policy.js";
 import type { Entry } from "./schema.js";
@@ -727,6 +729,68 @@ function freshnessOf(
 }
 
 /**
+ * Whether a later version of the same model has verified (decision D-096).
+ *
+ * schema/nomankind-domain-registry-v1.md, "Staleness on a version change": an
+ * observation is about the version it was made against, so an entry in one of
+ * the version-staleness categories goes stale "from the position of the
+ * validation that verifies another entry of the same domain, in one of those
+ * categories, whose subject shares the party and model segments and differs in
+ * the version segment".
+ *
+ * Read off the events and nothing else, which is what makes "from the position"
+ * true without a position argument: the sibling counts once the log handed in
+ * holds the validation that verified it, and a log that stops one event earlier
+ * answers false. `expires_at` is untouched -- this is a fact about the world
+ * having moved, not about the clock -- and it never clears, because the
+ * sibling's verification never unhappens.
+ *
+ * The sibling must have been submitted after this entry: a version observed
+ * before this one is an older version, and an older version's entry verifying
+ * says nothing about this one.
+ */
+export function isVersionStale(
+  events: readonly Event[],
+  entryId: string,
+): boolean {
+  const submission = submissionOf(events, entryId);
+  if (submission === null) return false;
+  const core = submission.core;
+  const domain = domainOf(core);
+  if (!isVersionStalenessCategory(domain, core["category"])) return false;
+  const own = versionedSubjectOf(core["subject"]);
+  if (own === null) return false;
+
+  let ownSeq: number | null = null;
+  for (const event of inSeqOrder(events)) {
+    if (!isType(event, "entry_submitted")) continue;
+    if (event.payload.core["id"] === entryId) {
+      ownSeq = event.seq;
+      continue;
+    }
+    if (ownSeq === null) continue;
+
+    const other = event.payload.core;
+    const otherId = other["id"] as string;
+    if (domainOf(other) !== domain) continue;
+    if (!isVersionStalenessCategory(domain, other["category"])) continue;
+    const later = versionedSubjectOf(other["subject"]);
+    if (later === null) continue;
+    if (later.prefix !== own.prefix) continue;
+    if (later.version === own.version) continue;
+
+    const consensus = consensusFor(
+      events,
+      otherId,
+      (other["author_operator"] as string | null) ?? null,
+      other,
+    );
+    if (consensus.status === "verified") return true;
+  }
+  return false;
+}
+
+/**
  * Freshness and decay: the superseding entry "names the superseded entry inside
  * the new entry's frozen, signed core ... and the old entry's superseded-by
  * pointer is derived from it". The approvals are the check, so a superseding
@@ -1010,7 +1074,10 @@ export function deriveEntry(
     verified_at: consensus.verifiedAt,
     last_confirmed: freshness.last_confirmed,
     expires_at: freshness.expires_at,
-    stale: freshness.stale,
+    // The clock's answer, or the world's: D-096 makes an observation stale when
+    // a later version of the same model verifies, whatever the calendar says,
+    // and leaves `expires_at` exactly where the window put it.
+    stale: freshness.stale || isVersionStale(events, entryId),
     superseded_by: superseded,
     overturned_by: overturned,
     confidence: null,

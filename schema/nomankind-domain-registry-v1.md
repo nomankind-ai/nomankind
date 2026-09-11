@@ -19,6 +19,13 @@ union of every registered domain's categories; which categories a domain
 actually admits is enforced from this registry by the application, because JSON
 Schema cannot express a per-domain enum without splitting the schema.
 
+Three domains are registered (decision D-096, 2026-09-11): `ai-ecosystem`,
+`ai-governance` and `ai-safety`. One fact has one home, and the author rule that
+decides which is short. An instrument issued by a state or an intergovernmental
+body belongs to governance, whatever its force. What a non-state party committed
+to about harm to people, and what its systems and its guardrail products do,
+belongs to safety. What models cost and do stays in the ecosystem.
+
 ## The exclusion rule, in its neutral form
 
 Whitepaper Section 10, "Governance and legal posture", states the rule for the
@@ -180,6 +187,235 @@ validators make, and no host list can make it for them.
 
 Both lists are the maintainer's published policy, not whitepaper lists, and both
 move only by a later decision.
+
+### ai-governance
+
+**Name.** AI governance.
+
+**Categories.** `in_force`, `amended`, `repealed`, `guidance_issued`,
+`enforcement_action`.
+
+**Staleness window per category**, in days from the last-confirmed date; `null`
+means the category carries no window, because once the thing happened it stays
+having happened. An instrument in force keeps being in force until something
+changes it, but what is in force is worth re-reading on a cadence, and a year is
+that cadence:
+
+| category | window |
+| --- | --- |
+| in_force | 365 |
+| amended | null |
+| repealed | null |
+| guidance_issued | 365 |
+| enforcement_action | null |
+
+Both windows are the maintainer's own placeholders, not whitepaper numbers, and
+move only by a later decision.
+
+**Transcript categories.** None. Every category here rests on a document
+somebody published, so every entry carries its measurement in `observation` or
+nothing at all; nothing in this domain is measured against a model.
+
+**Excluded parties.** Two kinds of party, excluded two different ways. The model
+providers are ai-ecosystem's published list above, unchanged and by any
+subdomain of one: a provider is as close to a rule about it as to a price of it.
+The issuing bodies are excluded per entry rather than by list, because the body
+that issued the instrument is named by the entry's own subject — an operator
+whose domain is, or is under, an official host of the subject's authority row
+may not validate that entry, reconfirm it, or be drawn for it. The rule:
+
+> No body that issues an instrument this domain records, and no model provider,
+> may be a maintainer, funder, or trusted operator of the AI-governance record.
+
+**Independence attestation.** Version `nomankind-independence-v1`. The sentence,
+signed verbatim:
+
+> No model provider, and no body that issues an instrument this record checks,
+> holds control of, or a beneficial stake in, this operator.
+
+**Subject naming convention.** `<jurisdiction or body>/<instrument slug>`,
+lowercase: for example `eu/ai-act`, `us/eo-14110`, `iso/42001`. The authority is
+the first segment.
+
+**Sources.** The three classes, the host rule, and what the policy does not
+automate are ai-ecosystem's above, unchanged: they are properties of a citation
+and not of a domain. What this domain publishes is its own three tables.
+
+*Official-required categories.* `in_force`, `amended`, `repealed`,
+`guidance_issued`. What an instrument says, when it took force, when it was
+amended or repealed, and what guidance was issued under it are the issuing
+body's own to state. `enforcement_action` is not official-required: an
+enforcement is recorded by a court or a regulator, which the recognized list
+covers.
+
+*The authorities table.* The subject convention is `<jurisdiction or
+body>/<instrument slug>`, so the first segment keys this table. Every host below
+was fetched once and confirmed to answer. The table is the maintainer's own
+placeholder list and grows only by a later decision.
+
+| authority | official hosts |
+| --- | --- |
+| eu | europa.eu, eur-lex.europa.eu, digital-strategy.ec.europa.eu |
+| coe | coe.int |
+| us | federalregister.gov, whitehouse.gov, congress.gov, govinfo.gov, regulations.gov |
+| us-ca | ca.gov, leginfo.legislature.ca.gov |
+| us-co | colorado.gov, leg.colorado.gov |
+| us-ny | ny.gov, nysenate.gov |
+| uk | gov.uk, legislation.gov.uk |
+| iso | iso.org |
+| nist | nist.gov |
+| oecd | oecd.org, oecd.ai |
+| unesco | unesco.org |
+| un | un.org |
+| example | example.com, example — a fixture, never a real subject |
+
+*The recognized list.* ai-ecosystem's recognized list above, plus the courts and
+data-protection bodies that record what was enforced under an instrument:
+
+curia.europa.eu, supremecourt.gov, edpb.europa.eu
+
+### ai-safety
+
+**Name.** AI safety.
+
+**Categories.** `commitment_published`, `commitment_changed`,
+`commitment_withdrawn`, `conduct_observed`, `refusal_behavior`,
+`filter_behavior`, `safety_eval`, `incident`.
+
+**Staleness window per category**, in days from the last-confirmed date; `null`
+means the category carries no window. What a system does is as volatile as
+ai-ecosystem's `behavior`; an evaluation is a heavier measurement that moves
+more slowly, so it carries a quarter rather than a month:
+
+| category | window |
+| --- | --- |
+| commitment_published | null |
+| commitment_changed | null |
+| commitment_withdrawn | null |
+| conduct_observed | 30 |
+| refusal_behavior | 30 |
+| filter_behavior | 30 |
+| safety_eval | 90 |
+| incident | null |
+
+The four windows are the maintainer's own placeholders, not whitepaper numbers,
+and move only by a later decision.
+
+**Transcript categories.** `conduct_observed`, `refusal_behavior` and
+`filter_behavior`. These are always observed and always carry a frozen
+transcript artifact in `evidence`, exactly as behavior and misbehavior are in
+ai-ecosystem. `safety_eval` carries its measurement in `observation`;
+`incident` and the three commitment categories are stated.
+
+**Excluded parties.** Model providers and guardrail vendors, by registrable
+domain and by any subdomain of one. A product that decides what a model refuses
+is a product this domain's entries are about, so its vendor is as close to the
+record as a provider is. The published list is ai-ecosystem's twenty-two model
+providers above, plus:
+
+lakera.ai, protectai.com, hiddenlayer.com, calypsoai.com, arthur.ai,
+guardrailsai.com, patronus.ai, promptfoo.dev
+
+The party named by an entry's own subject is excluded from that entry as well:
+an operator whose domain is, or is under, an official host of the subject's
+authority row may not validate that entry, reconfirm it, or be drawn for it. The
+rule:
+
+> No model provider, no guardrail vendor, and no party funded by one may be a
+> maintainer, funder, or trusted operator of the AI-safety record.
+
+The vendor list is the maintainer's published policy, not a whitepaper list, and
+it moves only by a later decision.
+
+**Independence attestation.** Version `nomankind-independence-v1`. The sentence,
+signed verbatim:
+
+> No model provider, no guardrail vendor, and no party funded by one, holds
+> control of, or a beneficial stake in, this operator.
+
+**Subject naming convention.**
+`<party>/<document or model>, or <party>/<model>/<version>`, lowercase. The
+first form names the commitment and
+incident categories, for example `anthropic/usage-policy`; the second names the
+version-staleness categories below, for example `openai/gpt-5/2026-08`, because
+an observation is about the version it was made against. The authority is the
+first segment either way.
+
+**Sources.** The three classes, the host rule, and what the policy does not
+automate are ai-ecosystem's above, unchanged.
+
+*Official-required categories.* `commitment_published`, `commitment_changed`,
+`commitment_withdrawn`. What a party committed to, changed, or withdrew is that
+party's own to state. Conduct, a refusal, a filter, an evaluation and an
+incident are not: they are what somebody else found.
+
+*The authorities table.* Every ai-ecosystem authority row above, unchanged — a
+provider's own pages are authoritative about the provider's own commitments —
+including the `example` fixture row, plus the rows below. Every host below was
+fetched once and confirmed to answer; the added rows are the maintainer's own
+placeholders and grow only by a later decision.
+
+| authority | official hosts |
+| --- | --- |
+| lakera | lakera.ai |
+| protectai | protectai.com |
+| hiddenlayer | hiddenlayer.com |
+| calypsoai | calypsoai.com |
+| arthur | arthur.ai |
+| guardrailsai | guardrailsai.com |
+| patronus | patronus.ai |
+| promptfoo | promptfoo.dev |
+| pai | partnershiponai.org |
+| fli | futureoflife.org |
+| fmf | frontiermodelforum.org |
+| mlcommons | mlcommons.org |
+
+*The recognized list.* ai-ecosystem's recognized list above, plus the public
+register of AI incidents:
+
+incidentdatabase.ai
+
+#### Delayed disclosure
+
+A transcript in this domain is often evidence whose sensitive half is the
+request that produced it. So inside a transcript artifact's `request`, any value
+but `headers` may be submitted as the placeholder object `{"[REDACTED]":
+"sha256:<hex>"}`, where the hex is the SHA-256 of the RFC 8785 canonical JSON of
+the original value. The categories that may do it are `conduct_observed`,
+`refusal_behavior` and `filter_behavior` — this domain's transcript categories,
+and nothing else — and anywhere else a redacted load-bearing value is refused
+exactly as it is today.
+
+The submission carries the original values beside the artifact, keyed by JSON
+pointer, and they are archived at their own content address like every other
+capture. The transcript hash is taken over the artifact as submitted,
+placeholders included, so the author's signed `snapshot_hash` verifies against
+the archived artifact unchanged and the offline verifier never asks for the
+payload at all.
+
+The payload is public 90 days after the entry's `submitted_at`. Before then
+it is served only to an operator's signed request — the validators need it to
+reproduce the observation — and an unsigned read is refused with the date it
+opens. Ninety days is the maintainer's own placeholder: long enough that
+publishing the payload is not itself the harm, short enough that the evidence
+becomes public while the fact is still fresh. It moves only by a later decision.
+
+#### Staleness on a version change
+
+An observation in this domain is about the version it was made against, which is
+why `conduct_observed`, `refusal_behavior`, `filter_behavior` and `safety_eval`
+name their subject `<party>/<model>/<version>`. A fact about `openai/gpt-5` in
+August is not a fact about `openai/gpt-5` in December, and no calendar window
+says so on its own.
+
+So an entry in one of those four categories goes stale from the position of the
+validation that verifies another entry of the same domain, in one of those
+categories, submitted at a later position than this one, and whose subject
+shares the party and model segments while differing in the version segment. A
+sibling submitted before it never stales it, whenever that sibling verifies, and
+neither does one that names the same version. `expires_at` is unchanged: this is a fact about the world
+having moved, not about the clock. And a version-stale entry stays stale — a
+reconfirmation cannot clear it, because the version it observed is gone.
 
 ## Duplicate claims
 

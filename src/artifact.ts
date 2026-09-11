@@ -46,6 +46,28 @@ export const RECEIPT_ARTIFACT_KEYS = [
 /** The redaction placeholder. A string containing it counts as redacted. */
 export const REDACTED = "[REDACTED]";
 
+/** The hash a disclosure placeholder stands in for: `sha256:` and 64 hex. */
+const PLACEHOLDER_HASH = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * The hash a delayed-disclosure placeholder names, or null when the value is
+ * not one (decision D-096).
+ *
+ * The placeholder is the object `{"[REDACTED]": "sha256:<hex>"}` and nothing
+ * else: exactly one key, the marker itself, and a value that is the SHA-256 of
+ * the RFC 8785 canonical JSON of what was taken out. One key, because a
+ * placeholder carrying anything beside the hash would be a redaction that still
+ * said something, and the whole point is that the artifact hashes over a value
+ * that discloses nothing but its own commitment.
+ */
+export function disclosurePlaceholderHash(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== REDACTED) return null;
+  const hash = value[REDACTED];
+  return typeof hash === "string" && PLACEHOLDER_HASH.test(hash) ? hash : null;
+}
+
 /** Every reason an artifact can be refused. */
 export const ARTIFACT_REFUSALS = [
   "transcript_shape",
@@ -290,12 +312,18 @@ interface RedactionContext {
   readonly keys: readonly string[];
   /** Whether the value sits under `request.headers`. */
   readonly inRequestHeaders: boolean;
+  /** Whether the value sits under a `request` key, at any depth. */
+  readonly inRequest: boolean;
+  /** Whether it sits under a `headers` key inside that request. */
+  readonly inHeaders: boolean;
 }
 
 const ROOT_CONTEXT: RedactionContext = {
   root: null,
   keys: [],
   inRequestHeaders: false,
+  inRequest: false,
+  inHeaders: false,
 };
 
 function childContext(
@@ -303,7 +331,13 @@ function childContext(
   key: string,
 ): RedactionContext {
   if (context.root === null) {
-    return { root: key, keys: [], inRequestHeaders: false };
+    return {
+      root: key,
+      keys: [],
+      inRequestHeaders: false,
+      inRequest: key === "request",
+      inHeaders: false,
+    };
   }
   return {
     root: context.root,
@@ -313,7 +347,39 @@ function childContext(
       (context.root === "request" &&
         context.keys.length === 0 &&
         key === "headers"),
+    inRequest: context.inRequest || key === "request",
+    inHeaders: context.inHeaders || (context.inRequest && key === "headers"),
   };
+}
+
+/**
+ * What a walk is allowed to accept, beyond the standing redaction rules.
+ *
+ * `disclosure` is the door's own flag, true only where the entry's domain
+ * publishes a `disclosure` rule naming the entry's category (src/policy.ts,
+ * `isDisclosureCategory`). Everywhere else -- the offline verifier, a failure
+ * report, an observation receipt, a transcript in any other category -- it is
+ * absent, and a placeholder object is a load-bearing redaction like any other.
+ */
+export interface RedactionOptions {
+  readonly disclosure?: boolean;
+}
+
+/**
+ * Where a delayed-disclosure placeholder may stand: inside a `request`, never
+ * inside its `headers`, and only under the door's own option.
+ *
+ * Headers are excluded because they are already redactable as strings under the
+ * standing rule, and a placeholder there would promise a disclosure of
+ * something nobody needs to reproduce the observation. Everything else under
+ * the request is the payload the observation was made with, which is exactly
+ * what the window opens on.
+ */
+function placeholderPermitted(
+  context: RedactionContext,
+  options: RedactionOptions,
+): boolean {
+  return options.disclosure === true && context.inRequest && !context.inHeaders;
 }
 
 function matchesAny(
@@ -346,9 +412,11 @@ function firstOffendingPointer(
   value: unknown,
   pointer: string,
   context: RedactionContext,
+  options: RedactionOptions,
+  strings: boolean,
 ): string | null {
   if (typeof value === "string") {
-    if (value.includes(REDACTED) && !isRedactionPermitted(context)) {
+    if (strings && value.includes(REDACTED) && !isRedactionPermitted(context)) {
       return pointer;
     }
     return null;
@@ -359,6 +427,8 @@ function firstOffendingPointer(
         value[index],
         `${pointer}/${index}`,
         context,
+        options,
+        strings,
       );
       if (found !== null) {
         return found;
@@ -367,11 +437,19 @@ function firstOffendingPointer(
     return null;
   }
   if (isRecord(value)) {
+    // A placeholder is one value, not an object to walk into: its only string
+    // is the hash it commits to, which discloses nothing and is not a
+    // redaction of anything.
+    if (disclosurePlaceholderHash(value) !== null) {
+      return placeholderPermitted(context, options) ? null : pointer;
+    }
     for (const key of Object.keys(value).sort()) {
       const found = firstOffendingPointer(
         value[key],
         `${pointer}/${escapePointerSegment(key)}`,
         childContext(context, key),
+        options,
+        strings,
       );
       if (found !== null) {
         return found;
@@ -382,12 +460,79 @@ function firstOffendingPointer(
 }
 
 /**
+ * Every delayed-disclosure placeholder in an artifact, with the RFC 6901
+ * pointer it stands at and the hash it commits to, in the same deterministic
+ * walk the redaction check makes.
+ *
+ * The order is the order the submit door reports a missing or mismatched
+ * pointer in, so a submitter fixing them one at a time always sees the same
+ * one next.
+ */
+export function disclosurePlaceholders(
+  artifact: unknown,
+): readonly { readonly pointer: string; readonly hash: string }[] {
+  const found: { pointer: string; hash: string }[] = [];
+  const walk = (value: unknown, pointer: string): void => {
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => walk(item, `${pointer}/${index}`));
+      return;
+    }
+    if (!isRecord(value)) return;
+    const hash = disclosurePlaceholderHash(value);
+    if (hash !== null) {
+      found.push({ pointer, hash });
+      return;
+    }
+    for (const key of Object.keys(value).sort()) {
+      walk(value[key], `${pointer}/${escapePointerSegment(key)}`);
+    }
+  };
+  walk(artifact, "");
+  return found;
+}
+
+/**
  * Redaction is permitted only under `request.headers`, at credential- or
  * identifier-named keys under `request`, and at identifier-named keys under
  * `billing`. A redacted value anywhere else is load-bearing.
  */
-export function checkRedaction(receipt: unknown): ArtifactCheck {
-  const pointer = firstOffendingPointer(receipt, "", ROOT_CONTEXT);
+export function checkRedaction(
+  receipt: unknown,
+  options: RedactionOptions = {},
+): ArtifactCheck {
+  const pointer = firstOffendingPointer(receipt, "", ROOT_CONTEXT, options, true);
+  if (pointer !== null) {
+    return {
+      ok: false,
+      reason: "redacted_load_bearing",
+      detail: `redacted value at ${pointer}`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * The placeholders in a transcript artifact, checked where they stand.
+ *
+ * A transcript is not a receipt -- its key set is the six measured fields and
+ * `[REDACTED]` inside a prompt or an output is a submitter's own text, never a
+ * redaction the log makes rules about -- so this asks the one new question and
+ * nothing else: is every placeholder object in a place a placeholder may
+ * stand, under an option the door only passes for a category its domain
+ * published a disclosure rule for. Without the option, every placeholder is
+ * `redacted_load_bearing`, which is what it has always been.
+ */
+export function checkTranscriptRedaction(
+  artifact: unknown,
+  options: RedactionOptions = {},
+): ArtifactCheck {
+  const pointer = firstOffendingPointer(
+    artifact,
+    "",
+    ROOT_CONTEXT,
+    options,
+    false,
+  );
   if (pointer !== null) {
     return {
       ok: false,

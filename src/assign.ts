@@ -25,6 +25,7 @@ import { canonicalize, taggedSha256Hex } from "./hash.js";
 import { ASSIGNMENT_WINDOW_HOURS, TRUSTED_POOL_SWITCH } from "./policy.js";
 import { trustedOperatorsAt, type Clock, type EntryStatus } from "./derive.js";
 import type { Event, EventInput, EventType } from "./events.js";
+import { underHost } from "./validate.js";
 
 /**
  * Domain-separation tag for the draw digest. A format constant, not a policy
@@ -337,6 +338,29 @@ export function exclusionsFor(
     }
   }
   return [...excluded].sort();
+}
+
+/**
+ * The pool operators the entry's own subject bars (decision D-096).
+ *
+ * The draw's other exclusions are facts about the log -- who submitted, who
+ * signed, who missed -- and this one is a fact about the entry's subject: the
+ * authority that issued the instrument, or published the commitment, may not be
+ * drawn to judge the record of it. The hosts are `authorityHostsFor(domain,
+ * subject)` from src/policy.ts and are empty for every domain whose
+ * `subject_authority` is false, so ai-ecosystem's draw is untouched.
+ *
+ * Pure and list-shaped, like `exclusionsFor`: it answers which of these
+ * operators are barred and decides nothing about the draw itself.
+ */
+export function authorityExclusions(
+  operators: readonly string[],
+  authorityHosts: readonly string[],
+): string[] {
+  if (authorityHosts.length === 0) return [];
+  return operators.filter((operator) =>
+    authorityHosts.some((host) => underHost(operator, host)),
+  );
 }
 
 /** The `assignment` event for a drawn operator and the agent resolved for it. */

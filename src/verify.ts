@@ -43,7 +43,12 @@ import {
 import { canonicalize } from "./hash.js";
 import { decodeProof, verifyInclusion } from "./merkle.js";
 import { snapshotHash } from "./normalize.js";
-import { DEFAULT_DOMAIN, NORM_VERSION, SCHEMA_VERSION } from "./policy.js";
+import {
+  authorityHostsFor,
+  DEFAULT_DOMAIN,
+  NORM_VERSION,
+  SCHEMA_VERSION,
+} from "./policy.js";
 import { validateEntry } from "./schema.js";
 import { sealFor, sealsForEntries, verifySeal, type Seal } from "./seal.js";
 import { verifyEntrySignature } from "./sign.js";
@@ -606,6 +611,12 @@ function checkExclusions(
       agentOperators: bundle.registry.agents,
       operators,
       domain: domainOf(logCore),
+      // Decision D-096: computed here from the published tables, exactly as the
+      // door computes it, so a bundle carrying a decision the door would have
+      // refused as `subject_authority` names that refusal offline too. Nothing
+      // new is asked of the bundle: the domain and the subject are in the
+      // signed core it already carries.
+      authority_hosts: authorityHostsFor(domainOf(logCore), logCore["subject"]),
       priorRecords,
       openAssignment: open === null ? null : { operator: open.operator },
       excludedOperators: disputeExclusionsFor(bundle, entryId, event.seq),

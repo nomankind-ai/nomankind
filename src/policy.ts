@@ -39,8 +39,15 @@ export const ASSIGNMENT_WINDOW_HOURS = 72;
 export const REPRODUCTION_RUNS = 10;
 export const REPRODUCTION_HOLDS = 8;
 
-/** Every category in the schema's category enum. */
+/**
+ * Every category in the schema's category enum: the union of every registered
+ * domain's categories, and never a global list of what a category may be. Which
+ * of them a domain actually admits is `DOMAINS[slug].categories` and nothing
+ * else (`isDomainCategory`), because JSON Schema cannot express a per-domain
+ * enum without splitting the schema.
+ */
 export type Category =
+  // ai-ecosystem
   | "release"
   | "deprecation"
   | "pricing"
@@ -48,7 +55,22 @@ export type Category =
   | "behavior"
   | "outage"
   | "misbehavior"
-  | "correction";
+  | "correction"
+  // ai-governance (D-096)
+  | "in_force"
+  | "amended"
+  | "repealed"
+  | "guidance_issued"
+  | "enforcement_action"
+  // ai-safety (D-096)
+  | "commitment_published"
+  | "commitment_changed"
+  | "commitment_withdrawn"
+  | "conduct_observed"
+  | "refusal_behavior"
+  | "filter_behavior"
+  | "safety_eval"
+  | "incident";
 
 /**
  * A registered domain's published tables: everything about a domain that is not
@@ -67,15 +89,57 @@ export type Category =
 export interface DomainPolicy {
   readonly name: string;
   readonly categories: readonly Category[];
-  readonly staleness_window_days: Readonly<Record<Category, number | null>>;
+  /**
+   * One row per category this domain admits, and no row for any other: the
+   * schema's enum is every domain's categories at once, so a table keyed by all
+   * of them would be a domain claiming windows for facts it cannot hold.
+   */
+  readonly staleness_window_days: Readonly<
+    Partial<Record<Category, number | null>>
+  >;
   readonly transcript_categories: readonly Category[];
   readonly excluded_parties: {
     readonly rule: string;
     readonly domains: readonly string[];
+    /**
+     * When true, an operator whose own domain is (or is under) an official host
+     * of the entry's subject's authority row is refused from validating,
+     * reconfirming, or being drawn for that entry (D-096). The excluded-party
+     * list above is about the domain; this is about the single entry, which is
+     * what a record of instruments and commitments needs: the body that issued
+     * the instrument is the party the record is checking.
+     *
+     * False where the two lists already coincide -- ai-ecosystem's authorities
+     * are its excluded parties -- so nothing there changes.
+     *
+     * A fixture authority row never triggers it.
+     */
+    readonly subject_authority: boolean;
   };
   readonly attestation: { readonly version: string; readonly text: string };
   readonly subject_convention: string;
   readonly sources: DomainSourcePolicy;
+  /**
+   * The categories whose transcript payload may be submitted redacted, and how
+   * long the archived payload stays private (D-096). Absent where the domain
+   * has no such rule, which is every domain whose transcripts are about a
+   * product rather than about what somebody said to a model.
+   */
+  readonly disclosure?: {
+    /** Transcript categories whose request payload may be redacted at submit. */
+    readonly categories: readonly Category[];
+    /** Days after submitted_at before the archived payload is public. */
+    readonly window_days: number;
+  };
+  /**
+   * The categories whose subject carries a version as its third segment, and
+   * whose entries go stale when another version of the same model verifies
+   * (D-096). Absent where no category of the domain is version-shaped.
+   */
+  readonly version_staleness?: {
+    /** Categories whose subject carries a version as its third segment. */
+    readonly categories: readonly Category[];
+  };
 }
 
 /** One authority's published hosts, and whether the row is a fixture. */
@@ -129,13 +193,535 @@ export interface DomainSourcePolicy {
 }
 
 /**
+ * The AI ecosystem, the domain the log launched with. Its tables are the
+ * whitepaper's: the windows of Section 5 ("Freshness and decay"), the excluded
+ * parties and the attestation sentence of Section 10, published policy rather
+ * than the paper's own list, both moving only by a later decision.
+ *
+ * A const of its own so the domains registered after it can reference these
+ * tables -- the model-provider list, the authorities, the recognized hosts --
+ * rather than carry a second copy of them (D-096).
+ */
+const AI_ECOSYSTEM: DomainPolicy = Object.freeze({
+  name: "The AI ecosystem",
+  categories: Object.freeze([
+    "release",
+    "deprecation",
+    "pricing",
+    "limit",
+    "behavior",
+    "outage",
+    "misbehavior",
+    "correction",
+  ] as const),
+  staleness_window_days: Object.freeze({
+    release: null,
+    deprecation: null,
+    pricing: 90,
+    limit: 90,
+    behavior: 30,
+    outage: null,
+    misbehavior: null,
+    correction: null,
+  }),
+  transcript_categories: Object.freeze(["behavior", "misbehavior"] as const),
+  excluded_parties: Object.freeze({
+    rule:
+      "No lab or model provider may be a maintainer, funder, or trusted operator.",
+    domains: Object.freeze([
+      "openai.com",
+      "anthropic.com",
+      "google.com",
+      "deepmind.google",
+      "meta.com",
+      "microsoft.com",
+      "x.ai",
+      "mistral.ai",
+      "cohere.com",
+      "amazon.com",
+      "deepseek.com",
+      "alibaba.com",
+      "alibabacloud.com",
+      "moonshot.cn",
+      "01.ai",
+      "ai21.com",
+      "nvidia.com",
+      "ibm.com",
+      "baidu.com",
+      "tencent.com",
+      "bytedance.com",
+      "zhipuai.cn",
+    ]),
+    // This domain's authorities are its excluded parties already, so the
+    // per-entry rule adds nothing here and is off.
+    subject_authority: false,
+  }),
+  attestation: Object.freeze({
+    version: "nomankind-independence-v1",
+    text: "No model provider holds control of, or a beneficial stake in, this operator.",
+  }),
+  subject_convention: "<provider>/<model or product>",
+  sources: Object.freeze({
+    official_required: Object.freeze([
+      "pricing",
+      "limit",
+      "deprecation",
+      "release",
+      "outage",
+    ] as const),
+    authorities: Object.freeze({
+      openai: Object.freeze({
+        hosts: Object.freeze([
+          "openai.com",
+          "platform.openai.com",
+          "status.openai.com",
+          "help.openai.com",
+        ]),
+      }),
+      anthropic: Object.freeze({
+        hosts: Object.freeze([
+          "anthropic.com",
+          "docs.anthropic.com",
+          "status.anthropic.com",
+          "claude.com",
+          "docs.claude.com",
+        ]),
+      }),
+      google: Object.freeze({
+        hosts: Object.freeze([
+          "google.com",
+          "ai.google.dev",
+          "cloud.google.com",
+          "status.cloud.google.com",
+          "deepmind.google",
+          "blog.google",
+        ]),
+      }),
+      meta: Object.freeze({
+        hosts: Object.freeze(["meta.com", "ai.meta.com", "llama.com"]),
+      }),
+      microsoft: Object.freeze({
+        hosts: Object.freeze([
+          "microsoft.com",
+          "azure.microsoft.com",
+          "learn.microsoft.com",
+        ]),
+      }),
+      xai: Object.freeze({
+        hosts: Object.freeze(["x.ai", "docs.x.ai", "status.x.ai"]),
+      }),
+      mistral: Object.freeze({
+        hosts: Object.freeze([
+          "mistral.ai",
+          "docs.mistral.ai",
+          "status.mistral.ai",
+        ]),
+      }),
+      cohere: Object.freeze({
+        hosts: Object.freeze([
+          "cohere.com",
+          "docs.cohere.com",
+          "status.cohere.com",
+        ]),
+      }),
+      amazon: Object.freeze({
+        hosts: Object.freeze([
+          "amazon.com",
+          "aws.amazon.com",
+          "docs.aws.amazon.com",
+          "health.aws.amazon.com",
+        ]),
+      }),
+      deepseek: Object.freeze({
+        hosts: Object.freeze([
+          "deepseek.com",
+          "api-docs.deepseek.com",
+          "status.deepseek.com",
+        ]),
+      }),
+      alibaba: Object.freeze({
+        hosts: Object.freeze([
+          "alibaba.com",
+          "alibabacloud.com",
+          "help.aliyun.com",
+        ]),
+      }),
+      moonshot: Object.freeze({
+        hosts: Object.freeze(["moonshot.cn", "platform.moonshot.cn"]),
+      }),
+      // 01.ai publishes the Yi models under the org name `01-ai`, which is
+      // what a subject names; the registrable domain is the excluded party.
+      "01-ai": Object.freeze({ hosts: Object.freeze(["01.ai"]) }),
+      ai21: Object.freeze({
+        hosts: Object.freeze(["ai21.com", "docs.ai21.com"]),
+      }),
+      nvidia: Object.freeze({
+        hosts: Object.freeze([
+          "nvidia.com",
+          "docs.nvidia.com",
+          "build.nvidia.com",
+        ]),
+      }),
+      ibm: Object.freeze({
+        hosts: Object.freeze(["ibm.com", "cloud.ibm.com"]),
+      }),
+      baidu: Object.freeze({
+        hosts: Object.freeze(["baidu.com", "cloud.baidu.com"]),
+      }),
+      tencent: Object.freeze({
+        hosts: Object.freeze(["tencent.com", "cloud.tencent.com"]),
+      }),
+      bytedance: Object.freeze({
+        hosts: Object.freeze(["bytedance.com", "volcengine.com"]),
+      }),
+      zhipuai: Object.freeze({
+        hosts: Object.freeze(["zhipuai.cn", "open.bigmodel.cn"]),
+      }),
+      /**
+       * The reserved names (RFC 2606): `example.com`, which the demo's own
+       * checkpoint and the M14 fixtures cite, and the `example` top-level
+       * domain itself, which every `*.example` fixture host is a subdomain of.
+       *
+       * A fixture row and never a real subject, which is what `fixture` says
+       * and what the test pinning this table against the excluded-party list
+       * skips it for. Both entries are reserved by IANA and can never be
+       * registered by anybody, so nothing published here can become a real
+       * authority's official host by someone buying a domain.
+       */
+      example: Object.freeze({
+        hosts: Object.freeze(["example.com", "example"]),
+        fixture: true,
+      }),
+    }),
+    recognized_hosts: Object.freeze([
+      "arxiv.org",
+      "doi.org",
+      "openreview.net",
+      "acm.org",
+      "ieee.org",
+      "nature.com",
+      "science.org",
+      "nist.gov",
+      "iso.org",
+      "ietf.org",
+      "w3.org",
+      "sec.gov",
+      "federalregister.gov",
+      "courtlistener.com",
+      "gov.uk",
+      "europa.eu",
+      "eur-lex.europa.eu",
+      "reuters.com",
+      "apnews.com",
+      "bloomberg.com",
+      "nytimes.com",
+      "wsj.com",
+      "ft.com",
+      "theverge.com",
+      "techcrunch.com",
+      "wired.com",
+      "arstechnica.com",
+    ]),
+  }),
+});
+
+/**
+ * The guardrail vendors excluded from the AI-safety record, by registrable
+ * domain and by any subdomain of one (D-096). A product that decides what a
+ * model refuses is a product this domain's entries are about, so its vendor is
+ * as close to the record as a model provider is.
+ *
+ * PLACEHOLDER for the maintainer: the maintainer's own list, not a whitepaper
+ * list, exactly as the model-provider list above is. It moves only by a later
+ * decision.
+ */
+const GUARDRAIL_VENDOR_DOMAINS: readonly string[] = Object.freeze([
+  "lakera.ai",
+  "protectai.com",
+  "hiddenlayer.com",
+  "calypsoai.com",
+  "arthur.ai",
+  "guardrailsai.com",
+  "patronus.ai",
+  "promptfoo.dev",
+]);
+
+/**
+ * The fixture authority row, shared by every domain: the reserved names of RFC
+ * 2606, which nobody can register. One object rather than three copies, so a
+ * fixture can never quietly differ between domains.
+ */
+const EXAMPLE_AUTHORITY: AuthoritySources =
+  AI_ECOSYSTEM.sources.authorities["example"]!;
+
+/**
+ * AI governance (D-096). What states and intergovernmental bodies have put in
+ * force about AI: an instrument's force, its amendment, its repeal, the
+ * guidance issued under it, and the enforcement taken under it.
+ *
+ * The excluded parties are two kinds of party at once. The model providers are
+ * ai-ecosystem's list unchanged -- a provider is as close to a rule about it as
+ * to a price of it -- and the issuing bodies are excluded per entry rather than
+ * by list, because the body that issued the instrument is named by the entry's
+ * own subject (`subject_authority`).
+ */
+const AI_GOVERNANCE: DomainPolicy = Object.freeze({
+  name: "AI governance",
+  categories: Object.freeze([
+    "in_force",
+    "amended",
+    "repealed",
+    "guidance_issued",
+    "enforcement_action",
+  ] as const),
+  staleness_window_days: Object.freeze({
+    /**
+     * PLACEHOLDER for the maintainer: an instrument in force stays in force
+     * until something changes it, but what is in force is worth re-reading on a
+     * cadence, and a year is that cadence. Not a whitepaper number; it moves
+     * only by a later decision, as the M20 and M21 numbers do.
+     */
+    in_force: 365,
+    // An amendment and a repeal happened, and having happened stays true.
+    amended: null,
+    repealed: null,
+    /** PLACEHOLDER for the maintainer, on the same cadence as `in_force`. */
+    guidance_issued: 365,
+    // An enforcement action happened: an event, and no window.
+    enforcement_action: null,
+  }),
+  // Nothing here is measured against a model: every category rests on a
+  // document somebody published.
+  transcript_categories: Object.freeze([] as const),
+  excluded_parties: Object.freeze({
+    rule:
+      "No body that issues an instrument this domain records, and no model provider, may be a maintainer, funder, or trusted operator of the AI-governance record.",
+    domains: AI_ECOSYSTEM.excluded_parties.domains,
+    subject_authority: true,
+  }),
+  attestation: Object.freeze({
+    version: "nomankind-independence-v1",
+    text: "No model provider, and no body that issues an instrument this record checks, holds control of, or a beneficial stake in, this operator.",
+  }),
+  subject_convention: "<jurisdiction or body>/<instrument slug>",
+  sources: Object.freeze({
+    // What an instrument says, when it took force, when it was amended or
+    // repealed, and what guidance was issued under it are the issuing body's
+    // own to state. An enforcement action is not: it is recorded by a court or
+    // a regulator, which the recognized list covers.
+    official_required: Object.freeze([
+      "in_force",
+      "amended",
+      "repealed",
+      "guidance_issued",
+    ] as const),
+    /**
+     * PLACEHOLDER for the maintainer: the rows below are the jurisdictions and
+     * bodies the record starts with, each host fetched once and confirmed to
+     * answer. The table grows by a later decision and never by an edit
+     * anywhere but this file.
+     */
+    authorities: Object.freeze({
+      eu: Object.freeze({
+        hosts: Object.freeze([
+          "europa.eu",
+          "eur-lex.europa.eu",
+          "digital-strategy.ec.europa.eu",
+        ]),
+      }),
+      coe: Object.freeze({ hosts: Object.freeze(["coe.int"]) }),
+      us: Object.freeze({
+        hosts: Object.freeze([
+          "federalregister.gov",
+          "whitehouse.gov",
+          "congress.gov",
+          "govinfo.gov",
+          "regulations.gov",
+        ]),
+      }),
+      "us-ca": Object.freeze({
+        hosts: Object.freeze(["ca.gov", "leginfo.legislature.ca.gov"]),
+      }),
+      "us-co": Object.freeze({
+        hosts: Object.freeze(["colorado.gov", "leg.colorado.gov"]),
+      }),
+      "us-ny": Object.freeze({
+        hosts: Object.freeze(["ny.gov", "nysenate.gov"]),
+      }),
+      uk: Object.freeze({
+        hosts: Object.freeze(["gov.uk", "legislation.gov.uk"]),
+      }),
+      iso: Object.freeze({ hosts: Object.freeze(["iso.org"]) }),
+      nist: Object.freeze({ hosts: Object.freeze(["nist.gov"]) }),
+      oecd: Object.freeze({ hosts: Object.freeze(["oecd.org", "oecd.ai"]) }),
+      unesco: Object.freeze({ hosts: Object.freeze(["unesco.org"]) }),
+      un: Object.freeze({ hosts: Object.freeze(["un.org"]) }),
+      example: EXAMPLE_AUTHORITY,
+    }),
+    // The ai-ecosystem list, and the courts and data-protection bodies that
+    // record what was enforced under an instrument.
+    recognized_hosts: Object.freeze([
+      ...AI_ECOSYSTEM.sources.recognized_hosts,
+      "curia.europa.eu",
+      "supremecourt.gov",
+      "edpb.europa.eu",
+    ]),
+  }),
+});
+
+/**
+ * AI safety (D-096). What non-state parties committed to about harm to people,
+ * and what their systems and their guardrail products actually do: a published
+ * commitment, a change or a withdrawal of one, conduct observed against it, a
+ * refusal, a filter, a safety evaluation, and an incident.
+ *
+ * Three categories are observed and carry a frozen transcript, which is what
+ * the delayed-disclosure rule is for: the payload that produced a refusal is
+ * often the sensitive half of the evidence, so it may be archived redacted and
+ * opened on a published window (`disclosure`). Four are about one version of
+ * one model, which is what `version_staleness` is for: an observation of a
+ * model is about the version it was made against, and a later version's
+ * verified observation retires it.
+ */
+const AI_SAFETY: DomainPolicy = Object.freeze({
+  name: "AI safety",
+  categories: Object.freeze([
+    "commitment_published",
+    "commitment_changed",
+    "commitment_withdrawn",
+    "conduct_observed",
+    "refusal_behavior",
+    "filter_behavior",
+    "safety_eval",
+    "incident",
+  ] as const),
+  staleness_window_days: Object.freeze({
+    // A commitment published, changed or withdrawn happened, and having
+    // happened stays true.
+    commitment_published: null,
+    commitment_changed: null,
+    commitment_withdrawn: null,
+    /**
+     * PLACEHOLDER for the maintainer: what a system does is as volatile as
+     * ai-ecosystem's `behavior`, so the three observed categories carry that
+     * domain's thirty days. Not a whitepaper number; it moves only by a later
+     * decision, as the M20 and M21 numbers do.
+     */
+    conduct_observed: 30,
+    /** PLACEHOLDER for the maintainer, as `conduct_observed` is. */
+    refusal_behavior: 30,
+    /** PLACEHOLDER for the maintainer, as `conduct_observed` is. */
+    filter_behavior: 30,
+    /**
+     * PLACEHOLDER for the maintainer: an evaluation is a heavier measurement
+     * than a single observation and moves more slowly, so it carries a quarter
+     * rather than a month.
+     */
+    safety_eval: 90,
+    // An incident happened.
+    incident: null,
+  }),
+  // Always observed, always a frozen transcript in `evidence`, exactly as
+  // behavior and misbehavior are. `safety_eval` carries its measurement in
+  // `observation`; `incident` and the three commitment categories are stated.
+  transcript_categories: Object.freeze([
+    "conduct_observed",
+    "refusal_behavior",
+    "filter_behavior",
+  ] as const),
+  excluded_parties: Object.freeze({
+    rule:
+      "No model provider, no guardrail vendor, and no party funded by one may be a maintainer, funder, or trusted operator of the AI-safety record.",
+    domains: Object.freeze([
+      ...AI_ECOSYSTEM.excluded_parties.domains,
+      ...GUARDRAIL_VENDOR_DOMAINS,
+    ]),
+    subject_authority: true,
+  }),
+  attestation: Object.freeze({
+    version: "nomankind-independence-v1",
+    text: "No model provider, no guardrail vendor, and no party funded by one, holds control of, or a beneficial stake in, this operator.",
+  }),
+  // The second form is the version-staleness categories': an observation is
+  // about the version it was made against, so the version is part of the name.
+  subject_convention: "<party>/<document or model>, or <party>/<model>/<version>",
+  sources: Object.freeze({
+    // What a party committed to, changed, or withdrew is that party's own to
+    // state. Conduct, a refusal, a filter, an evaluation and an incident are
+    // not: they are what somebody else found.
+    official_required: Object.freeze([
+      "commitment_published",
+      "commitment_changed",
+      "commitment_withdrawn",
+    ] as const),
+    /**
+     * Every ai-ecosystem authority row, unchanged -- a provider's own pages are
+     * authoritative about the provider's own commitments -- plus the guardrail
+     * vendors, each on its own host, and the civil-society and industry bodies
+     * that publish commitments of their own.
+     *
+     * PLACEHOLDER for the maintainer: the rows added here were each fetched
+     * once and confirmed to answer, and the table grows by a later decision.
+     */
+    authorities: Object.freeze({
+      ...AI_ECOSYSTEM.sources.authorities,
+      lakera: Object.freeze({ hosts: Object.freeze(["lakera.ai"]) }),
+      protectai: Object.freeze({ hosts: Object.freeze(["protectai.com"]) }),
+      hiddenlayer: Object.freeze({ hosts: Object.freeze(["hiddenlayer.com"]) }),
+      calypsoai: Object.freeze({ hosts: Object.freeze(["calypsoai.com"]) }),
+      arthur: Object.freeze({ hosts: Object.freeze(["arthur.ai"]) }),
+      guardrailsai: Object.freeze({
+        hosts: Object.freeze(["guardrailsai.com"]),
+      }),
+      patronus: Object.freeze({ hosts: Object.freeze(["patronus.ai"]) }),
+      promptfoo: Object.freeze({ hosts: Object.freeze(["promptfoo.dev"]) }),
+      pai: Object.freeze({ hosts: Object.freeze(["partnershiponai.org"]) }),
+      fli: Object.freeze({ hosts: Object.freeze(["futureoflife.org"]) }),
+      fmf: Object.freeze({ hosts: Object.freeze(["frontiermodelforum.org"]) }),
+      mlcommons: Object.freeze({ hosts: Object.freeze(["mlcommons.org"]) }),
+    }),
+    // The ai-ecosystem list, and the public register of AI incidents.
+    recognized_hosts: Object.freeze([
+      ...AI_ECOSYSTEM.sources.recognized_hosts,
+      "incidentdatabase.ai",
+    ]),
+  }),
+  disclosure: Object.freeze({
+    categories: Object.freeze([
+      "conduct_observed",
+      "refusal_behavior",
+      "filter_behavior",
+    ] as const),
+    /**
+     * PLACEHOLDER for the maintainer: long enough that publishing the payload
+     * is not itself the harm, short enough that the evidence becomes public
+     * while the fact is still fresh. Not a whitepaper number; it moves only by
+     * a later decision, as the M20 and M21 numbers do.
+     */
+    window_days: 90,
+  }),
+  version_staleness: Object.freeze({
+    categories: Object.freeze([
+      "conduct_observed",
+      "refusal_behavior",
+      "filter_behavior",
+      "safety_eval",
+    ] as const),
+  }),
+});
+
+/**
  * Every registered domain, keyed by slug. The key set is exactly the schema's
  * `domain` enum, and test/domains.test.ts pins that the two never drift.
  *
- * ai-ecosystem is the only domain at launch: the field exists so the log can
- * hold a second one without a fork, not because a second one is planned.
+ * Three domains are registered (D-096): ai-ecosystem, ai-governance and
+ * ai-safety. One fact has one home -- what an instrument puts in force belongs
+ * to governance, what a non-state party committed to about harm and what its
+ * systems do belongs to safety, what models cost and do stays in the
+ * ecosystem -- and the domain is in the signed core, so nothing can be moved
+ * between them afterwards.
  *
- * The windows are the whitepaper's ("Freshness and decay": volatile categories
+ * ai-ecosystem's windows are the whitepaper's ("Freshness and decay": volatile categories
  * carry a staleness window from the last-confirmed date -- ninety days for
  * pricing and rate limits, thirty for behavior; event categories carry none,
  * because once they happened they stay true). The excluded-party list and the
@@ -143,225 +729,9 @@ export interface DomainSourcePolicy {
  * own list: both move only by a later decision.
  */
 export const DOMAINS: Readonly<Record<string, DomainPolicy>> = Object.freeze({
-  "ai-ecosystem": Object.freeze({
-    name: "The AI ecosystem",
-    categories: Object.freeze([
-      "release",
-      "deprecation",
-      "pricing",
-      "limit",
-      "behavior",
-      "outage",
-      "misbehavior",
-      "correction",
-    ] as const),
-    staleness_window_days: Object.freeze({
-      release: null,
-      deprecation: null,
-      pricing: 90,
-      limit: 90,
-      behavior: 30,
-      outage: null,
-      misbehavior: null,
-      correction: null,
-    }),
-    transcript_categories: Object.freeze(["behavior", "misbehavior"] as const),
-    excluded_parties: Object.freeze({
-      rule:
-        "No lab or model provider may be a maintainer, funder, or trusted operator.",
-      domains: Object.freeze([
-        "openai.com",
-        "anthropic.com",
-        "google.com",
-        "deepmind.google",
-        "meta.com",
-        "microsoft.com",
-        "x.ai",
-        "mistral.ai",
-        "cohere.com",
-        "amazon.com",
-        "deepseek.com",
-        "alibaba.com",
-        "alibabacloud.com",
-        "moonshot.cn",
-        "01.ai",
-        "ai21.com",
-        "nvidia.com",
-        "ibm.com",
-        "baidu.com",
-        "tencent.com",
-        "bytedance.com",
-        "zhipuai.cn",
-      ]),
-    }),
-    attestation: Object.freeze({
-      version: "nomankind-independence-v1",
-      text: "No model provider holds control of, or a beneficial stake in, this operator.",
-    }),
-    subject_convention: "<provider>/<model or product>",
-    sources: Object.freeze({
-      official_required: Object.freeze([
-        "pricing",
-        "limit",
-        "deprecation",
-        "release",
-        "outage",
-      ] as const),
-      authorities: Object.freeze({
-        openai: Object.freeze({
-          hosts: Object.freeze([
-            "openai.com",
-            "platform.openai.com",
-            "status.openai.com",
-            "help.openai.com",
-          ]),
-        }),
-        anthropic: Object.freeze({
-          hosts: Object.freeze([
-            "anthropic.com",
-            "docs.anthropic.com",
-            "status.anthropic.com",
-            "claude.com",
-            "docs.claude.com",
-          ]),
-        }),
-        google: Object.freeze({
-          hosts: Object.freeze([
-            "google.com",
-            "ai.google.dev",
-            "cloud.google.com",
-            "status.cloud.google.com",
-            "deepmind.google",
-            "blog.google",
-          ]),
-        }),
-        meta: Object.freeze({
-          hosts: Object.freeze(["meta.com", "ai.meta.com", "llama.com"]),
-        }),
-        microsoft: Object.freeze({
-          hosts: Object.freeze([
-            "microsoft.com",
-            "azure.microsoft.com",
-            "learn.microsoft.com",
-          ]),
-        }),
-        xai: Object.freeze({
-          hosts: Object.freeze(["x.ai", "docs.x.ai", "status.x.ai"]),
-        }),
-        mistral: Object.freeze({
-          hosts: Object.freeze([
-            "mistral.ai",
-            "docs.mistral.ai",
-            "status.mistral.ai",
-          ]),
-        }),
-        cohere: Object.freeze({
-          hosts: Object.freeze([
-            "cohere.com",
-            "docs.cohere.com",
-            "status.cohere.com",
-          ]),
-        }),
-        amazon: Object.freeze({
-          hosts: Object.freeze([
-            "amazon.com",
-            "aws.amazon.com",
-            "docs.aws.amazon.com",
-            "health.aws.amazon.com",
-          ]),
-        }),
-        deepseek: Object.freeze({
-          hosts: Object.freeze([
-            "deepseek.com",
-            "api-docs.deepseek.com",
-            "status.deepseek.com",
-          ]),
-        }),
-        alibaba: Object.freeze({
-          hosts: Object.freeze([
-            "alibaba.com",
-            "alibabacloud.com",
-            "help.aliyun.com",
-          ]),
-        }),
-        moonshot: Object.freeze({
-          hosts: Object.freeze(["moonshot.cn", "platform.moonshot.cn"]),
-        }),
-        // 01.ai publishes the Yi models under the org name `01-ai`, which is
-        // what a subject names; the registrable domain is the excluded party.
-        "01-ai": Object.freeze({ hosts: Object.freeze(["01.ai"]) }),
-        ai21: Object.freeze({
-          hosts: Object.freeze(["ai21.com", "docs.ai21.com"]),
-        }),
-        nvidia: Object.freeze({
-          hosts: Object.freeze([
-            "nvidia.com",
-            "docs.nvidia.com",
-            "build.nvidia.com",
-          ]),
-        }),
-        ibm: Object.freeze({
-          hosts: Object.freeze(["ibm.com", "cloud.ibm.com"]),
-        }),
-        baidu: Object.freeze({
-          hosts: Object.freeze(["baidu.com", "cloud.baidu.com"]),
-        }),
-        tencent: Object.freeze({
-          hosts: Object.freeze(["tencent.com", "cloud.tencent.com"]),
-        }),
-        bytedance: Object.freeze({
-          hosts: Object.freeze(["bytedance.com", "volcengine.com"]),
-        }),
-        zhipuai: Object.freeze({
-          hosts: Object.freeze(["zhipuai.cn", "open.bigmodel.cn"]),
-        }),
-        /**
-         * The reserved names (RFC 2606): `example.com`, which the demo's own
-         * checkpoint and the M14 fixtures cite, and the `example` top-level
-         * domain itself, which every `*.example` fixture host is a subdomain of.
-         *
-         * A fixture row and never a real subject, which is what `fixture` says
-         * and what the test pinning this table against the excluded-party list
-         * skips it for. Both entries are reserved by IANA and can never be
-         * registered by anybody, so nothing published here can become a real
-         * authority's official host by someone buying a domain.
-         */
-        example: Object.freeze({
-          hosts: Object.freeze(["example.com", "example"]),
-          fixture: true,
-        }),
-      }),
-      recognized_hosts: Object.freeze([
-        "arxiv.org",
-        "doi.org",
-        "openreview.net",
-        "acm.org",
-        "ieee.org",
-        "nature.com",
-        "science.org",
-        "nist.gov",
-        "iso.org",
-        "ietf.org",
-        "w3.org",
-        "sec.gov",
-        "federalregister.gov",
-        "courtlistener.com",
-        "gov.uk",
-        "europa.eu",
-        "eur-lex.europa.eu",
-        "reuters.com",
-        "apnews.com",
-        "bloomberg.com",
-        "nytimes.com",
-        "wsj.com",
-        "ft.com",
-        "theverge.com",
-        "techcrunch.com",
-        "wired.com",
-        "arstechnica.com",
-      ]),
-    }),
-  }),
+  "ai-ecosystem": AI_ECOSYSTEM,
+  "ai-governance": AI_GOVERNANCE,
+  "ai-safety": AI_SAFETY,
 });
 
 /** Every registered slug, in the order DOMAINS declares them. */
@@ -516,6 +886,114 @@ export function attestationFor(
   domain: string,
 ): { readonly version: string; readonly text: string } {
   return domainPolicy(domain).attestation;
+}
+
+/**
+ * The first segment of a subject, lowercased: the party the subject names.
+ *
+ * The same reading src/sources.ts makes of the same string, written out here
+ * rather than imported, because that module reads this one and a cycle between
+ * the two would be a table depending on a lookup over itself.
+ */
+function firstSegment(subject: unknown): string | null {
+  if (typeof subject !== "string") return null;
+  const slash = subject.indexOf("/");
+  if (slash <= 0) return null;
+  return subject.slice(0, slash).toLowerCase();
+}
+
+/**
+ * The official hosts of the authority this entry's subject names (D-096), or
+ * nothing at all.
+ *
+ * Nothing, four ways, and every one of them means "this entry excludes nobody
+ * by its subject": a domain nobody registered, a domain whose
+ * `excluded_parties.subject_authority` is false (ai-ecosystem, whose
+ * authorities are its excluded parties already), a subject whose first segment
+ * has no row in the authorities table, and a row marked `fixture` -- the
+ * reserved `example` names of RFC 2606, which are a test's authority and never
+ * a party with an interest in a record.
+ *
+ * A lookup and nothing more: who may validate is src/validate.ts's answer, and
+ * who may be drawn is src/assign.ts's. This only says which hosts the entry's
+ * own subject makes too close to judge it.
+ */
+export function authorityHostsFor(
+  domain: string,
+  subject: unknown,
+): readonly string[] {
+  if (!isRegisteredDomain(domain)) return EMPTY_HOSTS;
+  if (!domainPolicy(domain).excluded_parties.subject_authority) {
+    return EMPTY_HOSTS;
+  }
+  const row = authoritySources(domain, firstSegment(subject));
+  if (row === null || row.fixture === true) return EMPTY_HOSTS;
+  return row.hosts;
+}
+
+/**
+ * Whether this category of this domain may submit a redacted transcript payload
+ * (D-096). False for every domain that publishes no `disclosure` rule.
+ */
+export function isDisclosureCategory(
+  domain: string,
+  category: unknown,
+): boolean {
+  if (!isRegisteredDomain(domain) || typeof category !== "string") return false;
+  const disclosure = domainPolicy(domain).disclosure;
+  if (disclosure === undefined) return false;
+  return (disclosure.categories as readonly string[]).includes(category);
+}
+
+/**
+ * The days after an entry's `submitted_at` that its archived payload stays
+ * private, or null where the domain publishes no disclosure rule.
+ */
+export function disclosureWindowDays(domain: string): number | null {
+  if (!isRegisteredDomain(domain)) return null;
+  return domainPolicy(domain).disclosure?.window_days ?? null;
+}
+
+/**
+ * A subject read as `<party>/<model>/<version>`, or null when it is not that
+ * shape.
+ *
+ * `prefix` is the first two segments together -- the model the observation is
+ * about, whatever version it was made against -- and `version` is the third.
+ * Null when any of the three is missing or empty, which is what the submit
+ * door refuses as `bad_subject_version` for a version-staleness category and
+ * what makes every other subject in the log no version's sibling at all.
+ *
+ * A fourth segment and beyond belong to the version: `openai/gpt-5/2026-08/eu`
+ * is a version of `openai/gpt-5` and not a model of its own.
+ */
+export function versionedSubjectOf(
+  subject: unknown,
+): { readonly prefix: string; readonly version: string } | null {
+  if (typeof subject !== "string") return null;
+  const parts = subject.split("/");
+  if (parts.length < 3) return null;
+  const party = parts[0] ?? "";
+  const model = parts[1] ?? "";
+  const version = parts.slice(2).join("/");
+  if (party === "" || model === "" || version === "") return null;
+  if (parts.slice(2).some((segment) => segment === "")) return null;
+  return { prefix: `${party}/${model}`, version };
+}
+
+/**
+ * Whether this category of this domain names a version in its subject's third
+ * segment, and so goes stale when another version of the same model verifies
+ * (D-096). False for every domain that publishes no `version_staleness` rule.
+ */
+export function isVersionStalenessCategory(
+  domain: string,
+  category: unknown,
+): boolean {
+  if (!isRegisteredDomain(domain) || typeof category !== "string") return false;
+  const staleness = domainPolicy(domain).version_staleness;
+  if (staleness === undefined) return false;
+  return (staleness.categories as readonly string[]).includes(category);
 }
 
 /**
