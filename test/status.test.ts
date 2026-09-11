@@ -25,6 +25,7 @@ import {
   WITNESSES_REQUIRED,
 } from "../src/policy.js";
 import {
+  STAGE_COUNT,
   exercisedStages,
   stageStates,
   statusCounters,
@@ -88,6 +89,8 @@ function empty(): StatusInput {
     standing_position: null,
     attestations: { due: 0, total: 0 },
     mirror: { kind: "unavailable", newest: null },
+    metering: { kind: "unavailable", reported_days: 0, owed: 0 },
+    alerts: { endpoints: 0, cursor: -1, due: 0, failed: 0 },
     exercised: {
       submission: null,
       registration: null,
@@ -117,8 +120,8 @@ function swept(over: Partial<StatusInput> = {}): StatusInput {
   return { ...empty(), steps: [step("sweep")], ...over };
 }
 
-describe("the thirteen stages", () => {
-  it("names them in the pipeline's order and answers all thirteen", () => {
+describe("the fifteen stages", () => {
+  it("names them in the pipeline's order and answers all fifteen", () => {
     expect(stageStates(empty(), NOW).map((one) => one.stage)).toEqual([
       "sweep timer",
       "pool snapshot",
@@ -133,11 +136,14 @@ describe("the thirteen stages", () => {
       "standing",
       "attestations",
       "mirror export",
+      "usage metering",
+      "change alerts",
     ]);
+    expect(stageStates(empty(), NOW)).toHaveLength(STAGE_COUNT);
   });
 
   it("says each rule in the page's words, with the numbers from policy", () => {
-    // The thirteen sentences the mockup approved, pinned: the wording is the page
+    // The fifteen sentences the mockup approved, pinned: the wording is the page
     // and changing it is a design change. Two of them say a number, and both
     // come from src/policy.ts rather than from a digit typed here.
     const rules = [
@@ -154,10 +160,12 @@ describe("the thirteen stages", () => {
       "standing stored at the sealed head",
       "no open attestation past ATTESTATION_WINDOW_HOURS",
       "today's export committed to the mirror repository",
+      "every published paid read reported to the provider",
+      "every sealed change delivered to every subscribed endpoint",
     ];
     expect(stageStates(empty(), NOW).map((one) => one.rule)).toEqual(rules);
     // The rule is what the state was decided by and not a reading of it, so a
-    // world where things have happened says exactly the same thirteen.
+    // world where things have happened says exactly the same fifteen.
     expect(stageStates(swept(), NOW).map((one) => one.rule)).toEqual(rules);
   });
 
@@ -718,6 +726,121 @@ describe("12. attestations", () => {
   });
 });
 
+describe("14. usage metering", () => {
+  it("is idle where there is no provider to meter through", () => {
+    const input = swept({
+      metering: { kind: "unavailable", reported_days: 0, owed: 0 },
+    });
+    expect(stateOf(input, "usage metering")).toBe("idle");
+    expect(rowOf(input, "usage metering").last).toBe("not configured");
+  });
+
+  it("is idle while no paid read has ever been published", () => {
+    const input = swept({
+      metering: { kind: "mock", reported_days: 0, owed: 0 },
+    });
+    expect(stateOf(input, "usage metering")).toBe("idle");
+    expect(rowOf(input, "usage metering").last).toBe("no paid read");
+  });
+
+  it("is ok when every published key-day has been reported", () => {
+    const input = swept({
+      metering: { kind: "mock", reported_days: 3, owed: 0 },
+      steps: [step("sweep"), step("metering")],
+    });
+    expect(stateOf(input, "usage metering")).toBe("ok");
+    expect(rowOf(input, "usage metering").last).toContain("3 key-days reported");
+  });
+
+  it("wants attention on a key-day the provider has not been told about", () => {
+    const input = swept({
+      metering: { kind: "mock", reported_days: 1, owed: 2 },
+      steps: [
+        step("sweep"),
+        step("metering", {
+          last_ok_at: null,
+          last_skip_reason: "metering_failed",
+          last_skip_at: NOW,
+        }),
+      ],
+    });
+    expect(stateOf(input, "usage metering")).toBe("attention");
+    expect(rowOf(input, "usage metering").last).toContain("2 key-days owed");
+    expect(rowOf(input, "usage metering").last).toContain("metering_failed");
+  });
+
+  it("is failing once the step has not got through since the bar", () => {
+    const input = swept({
+      metering: { kind: "mock", reported_days: 1, owed: 2 },
+      steps: [
+        step("sweep"),
+        step("metering", {
+          last_ok_at: minutesAgo(STATUS_FAILING_AFTER_MINUTES + 1),
+          last_skip_reason: "metering_failed",
+          last_skip_at: NOW,
+        }),
+      ],
+    });
+    expect(stateOf(input, "usage metering")).toBe("failing");
+  });
+});
+
+describe("15. change alerts", () => {
+  const SEALED = { seq: 3, last_seq: 30, sealed_at: NOW, witnesses: 2 };
+
+  it("is idle while nobody has subscribed", () => {
+    expect(stateOf(swept(), "change alerts")).toBe("idle");
+    expect(rowOf(swept(), "change alerts").last).toBe("no endpoint");
+  });
+
+  it("is idle with endpoints but nothing sealed to tell them about", () => {
+    const input = swept({
+      alerts: { endpoints: 2, cursor: -1, due: 0, failed: 0 },
+    });
+    expect(stateOf(input, "change alerts")).toBe("idle");
+    expect(rowOf(input, "change alerts").last).toBe("nothing sealed");
+  });
+
+  it("is ok when the step has read to the sealed head with nothing due", () => {
+    const input = swept({
+      seal: SEALED,
+      alerts: { endpoints: 2, cursor: 30, due: 0, failed: 0 },
+      steps: [step("sweep"), step("alerts")],
+    });
+    expect(stateOf(input, "change alerts")).toBe("ok");
+    expect(rowOf(input, "change alerts").last).toContain("read to 30");
+  });
+
+  it("wants attention while it is behind the head or has deliveries due", () => {
+    const behind = swept({
+      seal: SEALED,
+      alerts: { endpoints: 2, cursor: 12, due: 0, failed: 0 },
+      steps: [step("sweep"), step("alerts")],
+    });
+    expect(stateOf(behind, "change alerts")).toBe("attention");
+    expect(rowOf(behind, "change alerts").last).toContain("read to 12 of 30");
+
+    const due = swept({
+      seal: SEALED,
+      alerts: { endpoints: 2, cursor: 30, due: 4, failed: 0 },
+      steps: [step("sweep"), step("alerts")],
+    });
+    expect(stateOf(due, "change alerts")).toBe("attention");
+    expect(rowOf(due, "change alerts").last).toContain("4 due");
+  });
+
+  it("names the deliveries that gave up without turning a light for them", () => {
+    const input = swept({
+      seal: SEALED,
+      alerts: { endpoints: 2, cursor: 30, due: 0, failed: 5 },
+      steps: [step("sweep"), step("alerts")],
+    });
+    // An endpoint that answers 500 five times is that endpoint's fault.
+    expect(stateOf(input, "change alerts")).toBe("ok");
+    expect(rowOf(input, "change alerts").last).toContain("5 failed");
+  });
+});
+
 describe("the four counters", () => {
   it("says never, empty and nothing on a world nothing has happened in", () => {
     const input = empty();
@@ -726,8 +849,8 @@ describe("the four counters", () => {
       lastSweepAt: null,
       lastSweepAge: null,
       lastSweepTrigger: null,
-      stagesOk: 13,
-      stagesTotal: 13,
+      stagesOk: 15,
+      stagesTotal: 15,
       stagesFailing: 0,
       stagesAttention: 0,
       sealedHead: null,
@@ -742,7 +865,7 @@ describe("the four counters", () => {
   it("counts idle stages with the ok ones", () => {
     const input = swept();
     const counters = statusCounters(stageStates(input, NOW), input);
-    expect([counters.stagesOk, counters.stagesTotal]).toEqual([13, 13]);
+    expect([counters.stagesOk, counters.stagesTotal]).toEqual([15, 15]);
     expect(counters.lastSweepAge).toBe("0 min ago");
     expect(counters.lastSweepTrigger).toBe("alarm");
   });
@@ -765,7 +888,7 @@ describe("the four counters", () => {
     // interval and not past the failing one.
     expect(counters.stagesFailing).toBe(2);
     expect(counters.stagesAttention).toBe(1);
-    expect(counters.stagesOk).toBe(10);
+    expect(counters.stagesOk).toBe(12);
     expect([counters.sealedHead, counters.newestSealSeq]).toEqual([30, 3]);
     expect([counters.seals, counters.witnessedSeals]).toEqual([4, 3]);
     expect(counters.unsealedEvents).toBe(1);

@@ -3,7 +3,7 @@
  *
  * Whitepaper Section 11, Deployment and status: nomankind publishes what it is
  * running and whether it is working. This module is the second half of that
- * sentence — thirteen stages of the machine, each with a state, the last thing
+ * sentence — fifteen stages of the machine, each with a state, the last thing
  * that happened in it, the rule that decides the state, and a link a reader can
  * follow to check the answer for themselves.
  *
@@ -28,6 +28,7 @@
  */
 
 import type { MirrorKind } from "./adapters/mirror.js";
+import type { PaymentsKind } from "./adapters/stripe.js";
 import { utcDay } from "./anchor.js";
 import {
   POLICY,
@@ -214,6 +215,28 @@ export interface StatusInput {
       readonly url: string;
     } | null;
   };
+  /**
+   * Usage metering (M24): which payment track this environment runs, how many
+   * key-days have been reported, and how many published ones have not.
+   *
+   * `kind` is asked of the same `paymentsAdapterFor` the sweep asks, so the page
+   * cannot claim a provider the sweep is not billing through.
+   */
+  readonly metering: {
+    readonly kind: PaymentsKind;
+    readonly reported_days: number;
+    readonly owed: number;
+  };
+  /**
+   * Change alerts (M24): how many endpoints are subscribed, how far the alert
+   * step has read over the sealed log, and what is waiting or has given up.
+   */
+  readonly alerts: {
+    readonly endpoints: number;
+    readonly cursor: number;
+    readonly due: number;
+    readonly failed: number;
+  };
   readonly exercised: ExercisedFacts;
 }
 
@@ -392,7 +415,7 @@ function detailNumber(step: SweepStep | null, key: string): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// The thirteen rules
+// The fifteen rules
 // ---------------------------------------------------------------------------
 
 /**
@@ -962,7 +985,154 @@ function mirrorExport(input: StatusInput, now: string): Stage {
 }
 
 /**
- * The thirteen stages, in the page's order, read against one instant.
+ * (14) The usage meter: is every published paid read on somebody's bill?
+ *
+ * Whitepaper Section 9, Money: "Read counts are published to the sealed log
+ * daily, so nomankind cannot quietly change the numbers later, and any operator
+ * can reconcile their payout against the log." The bill is the other side of
+ * that sentence, and this is the light that says whether the two are in step: a
+ * key-day the log published and the provider was never told about is revenue
+ * the reader was not charged for, and — worse for the reader — a number that
+ * could later be billed from somewhere other than the published count.
+ *
+ * Two kinds of nothing to do, told apart. An environment with no payment
+ * provider is not configured to meter at all, which is production's state until
+ * M25 and is not a fault; an environment that has published no paid read has
+ * nothing to report, which is every deployment before its first key.
+ */
+function usageMetering(input: StatusInput, now: string): Stage {
+  const rule = "every published paid read reported to the provider";
+  const evidence = [{ label: "/status", href: "/status" }];
+  const { kind, reported_days, owed } = input.metering;
+
+  if (kind === "unavailable") {
+    return {
+      stage: "usage metering",
+      state: "idle",
+      last: "not configured",
+      rule,
+      evidence,
+    };
+  }
+  if (reported_days === 0 && owed === 0) {
+    return {
+      stage: "usage metering",
+      state: "idle",
+      last: "no paid read",
+      rule,
+      evidence,
+    };
+  }
+
+  const step = stepOf(input, "metering");
+  if (owed === 0) {
+    return {
+      stage: "usage metering",
+      state: "ok",
+      last: line(
+        `${reported_days} key-days reported`,
+        step === null ? "" : stamp(step.last_run_at, now),
+      ),
+      rule,
+      evidence,
+    };
+  }
+
+  // Owed, and not reported. How long that has stood is the step's own record of
+  // when it last got through, exactly as the ledger stage reads its day: a
+  // provider that refused one run is a run to try again, and one that has been
+  // refusing since before the failing bar is somebody's morning.
+  const lastOk = step === null ? null : step.last_ok_at;
+  const stale = lastOk !== null && secondsBetween(lastOk, now) > FAILING_AFTER_SECONDS;
+  return {
+    stage: "usage metering",
+    state: stale ? "failing" : "attention",
+    last: line(
+      `${owed} key-days owed`,
+      freshSkip(step) ?? `${reported_days} reported`,
+      step === null ? "never run" : stamp(step.last_run_at, now),
+    ),
+    rule,
+    evidence,
+  };
+}
+
+/**
+ * (15) The change alerts: has every sealed change been offered to everyone who
+ * asked for it?
+ *
+ * Whitepaper Section 9, Money: "Revenue comes from high-rate API access,
+ * structured feeds and webhooks, change alerts." A subscriber pays to hear
+ * about a change rather than to poll for it, so the question here is whether the
+ * step has read the sealed log to its head and whether anything it built is
+ * still waiting.
+ *
+ * A delivery that gave up is named in the line and changes no light. An endpoint
+ * that answers 500 five times is that endpoint's fault and its operator's to
+ * fix, and a status page that went red for it would be reporting somebody
+ * else's outage as nomankind's.
+ */
+function changeAlerts(input: StatusInput, now: string): Stage {
+  const rule = "every sealed change delivered to every subscribed endpoint";
+  const evidence = [{ label: "/api", href: "/api" }];
+  const { endpoints, cursor, due, failed } = input.alerts;
+  const failedNote = failed === 0 ? "" : `${failed} failed`;
+
+  if (endpoints === 0) {
+    return {
+      stage: "change alerts",
+      state: "idle",
+      last: line("no endpoint", failedNote),
+      rule,
+      evidence,
+    };
+  }
+  if (input.seal === null) {
+    return {
+      stage: "change alerts",
+      state: "idle",
+      last: line("nothing sealed", failedNote),
+      rule,
+      evidence,
+    };
+  }
+
+  const head = input.seal.last_seq;
+  const step = stepOf(input, "alerts");
+  if (cursor === head && due === 0) {
+    return {
+      stage: "change alerts",
+      state: "ok",
+      last: line(
+        `${endpoints} endpoints`,
+        `read to ${head}`,
+        failedNote,
+        step === null ? "" : stamp(step.last_run_at, now),
+      ),
+      rule,
+      evidence,
+    };
+  }
+
+  const lastOk = step === null ? null : step.last_ok_at;
+  const stale = lastOk !== null && secondsBetween(lastOk, now) > FAILING_AFTER_SECONDS;
+  return {
+    stage: "change alerts",
+    state: stale ? "failing" : "attention",
+    last: line(
+      `${endpoints} endpoints`,
+      cursor === head ? `read to ${head}` : `read to ${cursor} of ${head}`,
+      due === 0 ? "" : `${due} due`,
+      failedNote,
+      step === null ? "never run" : stamp(step.last_run_at, now),
+    ),
+    rule,
+    evidence,
+  };
+}
+
+/**
+ * The fifteen stages, in the page's order, read against one instant.
  *
  * The order is the machine's own — the timer, then what the timer does, then
  * what the log owes at the end of the day — and it is fixed, because a status
@@ -983,11 +1153,13 @@ export function stageStates(input: StatusInput, now: string): Stage[] {
     standing(input, now),
     attestations(input),
     mirrorExport(input, now),
+    usageMetering(input, now),
+    changeAlerts(input, now),
   ];
 }
 
 /** How many stages there are, for a fraction that cannot drift from the list. */
-export const STAGE_COUNT = 13;
+export const STAGE_COUNT = 15;
 
 // ---------------------------------------------------------------------------
 // Exercised, not probed

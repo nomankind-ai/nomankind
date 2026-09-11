@@ -421,3 +421,167 @@ describe("a read_count event in a verified world", () => {
     expect(after).toEqual({ ok: true, entry_id: world.entryId, diffs: [] });
   });
 });
+
+// ---------------------------------------------------------------------------
+// M24: the key a receipt was served to
+// ---------------------------------------------------------------------------
+
+describe("a receipt served to a key", () => {
+  const KEY = "key_0123456789abcdef";
+
+  it("signs the key and its counter, and verifies", async () => {
+    const { receipt: signed } = await receipt({ key: KEY, key_counter: 1 });
+    expect([signed.key, signed.key_counter]).toEqual([KEY, 1]);
+    await expect(verifyReadReceipt(signed)).resolves.toBe(true);
+  });
+
+  it("puts both fields inside the signed bytes", () => {
+    const text = new TextDecoder().decode(
+      readReceiptSigningBytes({
+        entry_id: ENTRY_ID,
+        entry_hash: ENTRY_HASH,
+        read_at: "2026-09-09T12:00:00.000Z",
+        counter: 41,
+        issuer: "1F916:abc",
+        key: KEY,
+        key_counter: 2,
+      }),
+    );
+    expect(text).toContain(`"key":"${KEY}"`);
+    expect(text).toContain(`"key_counter":2`);
+  });
+
+  it("refuses a receipt whose key or counter was edited", async () => {
+    const { receipt: signed } = await receipt({ key: KEY, key_counter: 1 });
+    for (const forged of [
+      { ...signed, key: "key_ffffffffffffffff" },
+      { ...signed, key: null },
+      { ...signed, key_counter: 2 },
+      { ...signed, key_counter: null },
+    ]) {
+      await expect(verifyReadReceipt(forged)).resolves.toBe(false);
+    }
+  });
+
+  it("refuses a key or a counter that is not one", async () => {
+    const { receipt: signed } = await receipt({ key: KEY, key_counter: 1 });
+    for (const bad of [
+      { ...signed, key: 7 },
+      { ...signed, key_counter: 1.5 },
+      { ...signed, key_counter: "1" },
+    ]) {
+      await expect(verifyReadReceipt(bad)).resolves.toBe(false);
+    }
+  });
+
+  it("signs a free read's nulls, which is not the same as saying nothing", async () => {
+    const { receipt: free } = await receipt({ key: null, key_counter: null });
+    await expect(verifyReadReceipt(free)).resolves.toBe(true);
+
+    // The property is the switch: a receipt issued before M24 carries neither
+    // field, and its bytes are exactly what they were.
+    const { receipt: old } = await receipt();
+    expect("key" in old).toBe(false);
+    await expect(verifyReadReceipt(old)).resolves.toBe(true);
+    const { key, key_counter, ...stripped } = free;
+    expect(key).toBeNull();
+    expect(key_counter).toBeNull();
+    // Dropping the two fields from a receipt that was signed with them changes
+    // the bytes, so the verdict turns: they are not decoration.
+    await expect(verifyReadReceipt(stripped)).resolves.toBe(false);
+  });
+
+  it("does the same for a sync receipt", async () => {
+    const { agent, keys } = await issuer();
+    const fields: SyncReceiptFields = {
+      from: 0,
+      head: 9,
+      entries: [
+        { entry_id: ENTRY_ID, entry_hash: ENTRY_HASH, status: "verified" },
+      ],
+      event_count: 3,
+      issued_at: "2026-09-09T12:00:00.000Z",
+      counter: 12,
+      issuer: agent,
+      key: KEY,
+      key_counter: 4,
+    };
+    const signed = await signSyncReceipt(fields, keys.privateKey);
+    await expect(verifySyncReceipt(signed)).resolves.toBe(true);
+    await expect(
+      verifySyncReceipt({ ...signed, key_counter: 5 }),
+    ).resolves.toBe(false);
+    expect(
+      new TextDecoder().decode(syncReceiptSigningBytes(fields)),
+    ).toContain(`"key_counter":4`);
+  });
+});
+
+describe("buildReadCountPayload's paid block", () => {
+  it("sorts the rows by entry_id, the keys by id, and sums them", () => {
+    const payload = buildReadCountPayload(
+      "2026-09-09",
+      [
+        { entry_id: "nmk_b", count: 3 },
+        { entry_id: "nmk_a", count: 4 },
+      ],
+      1,
+      7,
+      {
+        reads: [
+          { entry_id: "nmk_b", count: 2 },
+          { entry_id: "nmk_a", count: 1 },
+        ],
+        keys: { key_bbb: 1, key_aaa: 2 },
+      },
+    );
+    expect(payload.paid).toEqual({
+      reads: [
+        { entry_id: "nmk_a", count: 1 },
+        { entry_id: "nmk_b", count: 2 },
+      ],
+      total: 3,
+      keys: { key_aaa: 2, key_bbb: 1 },
+    });
+    expect(Object.keys(payload.paid!.keys)).toEqual(["key_aaa", "key_bbb"]);
+    // The day still counts every reader; the block is the half that was billed.
+    expect(payload.total).toBe(7);
+    expect(payload.paid!.total).toBe(
+      Object.values(payload.paid!.keys).reduce((sum, count) => sum + count, 0),
+    );
+  });
+
+  it("publishes an empty block for a day nobody paid for", () => {
+    const payload = buildReadCountPayload(
+      "2026-09-09",
+      [{ entry_id: "nmk_a", count: 1 }],
+      1,
+      1,
+      { reads: [], keys: {} },
+    );
+    expect(payload.paid).toEqual({ reads: [], total: 0, keys: {} });
+  });
+
+  it("writes no block at all when none is given, as every day before M24", () => {
+    const payload = buildReadCountPayload("2026-09-09", [], null, null);
+    expect("paid" in payload).toBe(false);
+  });
+
+  it("refuses a paid row that repeats an entry or counts below one", () => {
+    expect(() =>
+      buildReadCountPayload("2026-09-09", [], null, null, {
+        reads: [
+          { entry_id: "nmk_a", count: 1 },
+          { entry_id: "nmk_a", count: 1 },
+        ],
+        keys: {},
+      }),
+    ).toThrow(/duplicate_entry_id/);
+    expect(() =>
+      buildReadCountPayload("2026-09-09", [], null, null, {
+        reads: [{ entry_id: "nmk_a", count: 0 }],
+        keys: {},
+      }),
+    ).toThrow(/bad_count/);
+  });
+});

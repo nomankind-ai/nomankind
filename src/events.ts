@@ -310,6 +310,28 @@ export type EventPayloads = {
     total: number;
     counter_first: number | null;
     counter_last: number | null;
+    /**
+     * The half of the day that was paid for (M24): the same rows over keyed
+     * receipts only, the same reads per key, and their common total.
+     *
+     * Section 9, Money: "A read is one verified entry returned by the paid API,
+     * or one verified entry delivered in a paid sync", and the contributor pool
+     * is a share of what those reads were billed at. So this is what the ledger
+     * prices, while `reads` above stays the whole day's traffic — the number a
+     * free reader's receipt is checked against.
+     *
+     * `keys` is what makes a bill checkable without trusting us: a key holder
+     * adds up the receipts they hold for a day and finds that number here,
+     * published in the sealed log where nobody can edit it afterwards.
+     *
+     * Optional, and absent on every event published before M24: a payload that
+     * never carried the block is priced from `reads`, which is what it meant.
+     */
+    paid?: {
+      reads: readonly ReadCountRow[];
+      total: number;
+      keys: Readonly<Record<string, number>>;
+    };
   };
   /**
    * An attestation opened: the probes drawn, the scorers drawn, and everything

@@ -134,4 +134,29 @@ export type Env = {
    * neither the key nor the token it mints appears in any refusal detail.
    */
   MIRROR_APP_PRIVATE_KEY?: string;
+  /**
+   * The payment provider's secret key (decision D-078): what the paid loop
+   * authenticates every REST call with. A sandbox restricted key on demo, and
+   * absent on production until M25 and on local always.
+   *
+   * A Worker secret (D-016). Never in this repository, never in wrangler.jsonc,
+   * never logged, never returned, and never in a refusal's detail — an adapter
+   * that put it in an error message would publish it.
+   *
+   * Absent is not a failure but a shape: `paymentsAdapterFor` hands production
+   * the adapter that refuses `payments_unavailable` and every other environment
+   * the mock, so the free tier is served everywhere and only the paid doors
+   * refuse.
+   */
+  STRIPE_SECRET_KEY?: string;
+  /**
+   * The signing secret of the provider's event destination: what
+   * `verifyWebhook` checks the `Stripe-Signature` header against. Set beside
+   * the key above and held to exactly the same discipline.
+   *
+   * Absent means the webhook door answers 503 `payments_unavailable` rather than
+   * trusting a body nobody signed: an unverified webhook is a stranger telling
+   * us a subscription was canceled.
+   */
+  STRIPE_WEBHOOK_SECRET?: string;
 };

@@ -215,8 +215,8 @@ describe("a log nothing has happened in", () => {
     expect(body["counters"]).toMatchObject({
       lastSweepAt: null,
       lastSweepAge: null,
-      stagesOk: 13,
-      stagesTotal: 13,
+      stagesOk: 15,
+      stagesTotal: 15,
       sealedHead: null,
     });
     // The thresholds travel with the answer: a state nobody can recompute is a
@@ -250,7 +250,7 @@ describe("a sweep's own account of itself", () => {
     await runSweep(env, { now: NOW, beacon, trigger: "cron" });
 
     const rows = await sweepSteps(store.db);
-    expect(rows).toHaveLength(15);
+    expect(rows).toHaveLength(SWEEP_STEPS.length);
     expect([...rows.map((row) => row.step)].sort()).toEqual(
       [...SWEEP_STEPS].sort(),
     );
@@ -349,7 +349,7 @@ describe("a healthy world", () => {
       lastSweepTrigger: "alarm",
       stagesFailing: 0,
       stagesAttention: 0,
-      stagesOk: 13,
+      stagesOk: 15,
       unsealedEvents: 0,
       witnessKind: "mock witnesses on local",
     });

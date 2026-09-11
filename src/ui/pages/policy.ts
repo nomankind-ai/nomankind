@@ -426,12 +426,6 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         "Read-share slots on an entry. A reconfirmation rotates the oldest holder out rather than adding one, so the share is always split among one submitter and this many slot holders.",
     },
     {
-      name: "CONTRIBUTOR_SHARE_PERCENT",
-      value: `${policy.CONTRIBUTOR_SHARE_PERCENT} percent`,
-      means:
-        "The contributor pool's share of paid-read revenue at launch. It is a floor that only rises, on published milestones, and never falls.",
-    },
-    {
       name: "READ_PRICE_MICROS_PER_READ",
       value: `${policy.READ_PRICE_MICROS_PER_READ} micro-USD per read`,
       means:
@@ -449,11 +443,94 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       means:
         "How often payouts run: one UTC calendar month per cycle, per operator (decision D-053).",
     },
+  ];
+
+  const paid: Row[] = [
+    ...Object.entries(policy.RATE_TIERS).map(([slug, tier]) => ({
+      name: `RATE_TIERS.${slug}`,
+      value: `${tier.name} · ${tier.reads_per_day} reads per day · ${
+        tier.key ? "key" : "no key"
+      }`,
+      means: tier.key
+        ? `A paid tier: ${tier.reads_per_day} reads per UTC day, counted per key. A tier buys throughput and never a discount — every paid read is priced at READ_PRICE_MICROS_PER_READ whichever tier bought it.`
+        : `The tier a reader gets without asking for anything: ${tier.reads_per_day} reads per UTC day, counted per client and served with no key at all. Section 9's "free to read at low volume, forever".`,
+    })),
     {
-      name: "paid read tiers and their rate limits",
-      value: "not yet published (M24)",
+      name: "FREE_TIER",
+      value: policy.FREE_TIER,
       means:
-        "Reads are free at low volume today. The price above is published policy; the paid tiers and the rate limits that go with them arrive with M24.",
+        "Which of the tiers above is the one a request with no key is served on.",
+    },
+    {
+      name: "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
+      value: `${policy.CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent`,
+      means:
+        "Section 9: the contributor share is a floor that only rises. So the floor is published as a number of its own, and the share beside it is checked against it — a share below this would be a broken promise rather than a smaller payment.",
+    },
+    {
+      name: "CONTRIBUTOR_SHARE_PERCENT",
+      value: `${policy.CONTRIBUTOR_SHARE_PERCENT} percent`,
+      means:
+        "The contributor pool's share of paid-read revenue today: at or above the floor above, and exactly the split it is made of (one submitter share and SLOT_COUNT validator shares). It rises on published milestones and never falls.",
+    },
+    {
+      name: "ALERT_ENDPOINTS_PER_KEY",
+      value: String(policy.ALERT_ENDPOINTS_PER_KEY),
+      means:
+        "How many live webhook endpoints one key may hold. A sixth is refused endpoint_limit; deleting one frees the slot.",
+    },
+    {
+      name: "ALERT_TIMEOUT_MS",
+      value: `${policy.ALERT_TIMEOUT_MS} ms`,
+      means:
+        "How long one alert delivery may take before it is abandoned and counted as a failed attempt.",
+    },
+    {
+      name: "ALERT_RETRY_MINUTES",
+      value: policy.ALERT_RETRY_MINUTES.join(", "),
+      means:
+        "The retry ladder, in minutes from the attempt that failed: attempt n schedules the next at now plus the nth entry, and past the last entry the delivery is failed rather than retried forever.",
+    },
+    {
+      name: "ALERT_KINDS",
+      value: policy.ALERT_KINDS.join(", "),
+      means:
+        "The six moments in an entry's life a subscriber can be told about. Every one of them is an event already in the sealed log, so an alert is a notification of something public and never a fact of its own.",
+    },
+    {
+      name: "STRIPE.api",
+      value: policy.STRIPE.api,
+      means:
+        "The payment provider's API host (decision D-078). Pinned here for the reason MIRROR and REGISTRY are: an address the system depends on is a published choice, not an adapter's private detail. No secret is here — the key and the webhook signing secret are Worker secrets and never appear in this repository.",
+    },
+    {
+      name: "STRIPE.meter_event_name",
+      value: policy.STRIPE.meter_event_name,
+      means:
+        "The provider's meter each day's published paid reads are reported under, one event per key per day.",
+    },
+    {
+      name: "STRIPE.price_lookup_prefix",
+      value: policy.STRIPE.price_lookup_prefix,
+      means:
+        "A price's lookup key is this prefix, the environment and the tier, so demo and production cannot buy each other's prices.",
+    },
+    {
+      name: "STRIPE.currency",
+      value: policy.STRIPE.currency,
+      means: "The currency every price is created in.",
+    },
+    {
+      name: "STRIPE.webhook_tolerance_seconds",
+      value: `${policy.STRIPE.webhook_tolerance_seconds} seconds`,
+      means:
+        "How far a provider webhook's own timestamp may sit from this Worker's clock before the message is refused as stale, so a captured message cannot be replayed later.",
+    },
+    {
+      name: "STRIPE.webhook_path",
+      value: policy.STRIPE.webhook_path,
+      means:
+        "The one path the provider knocks on. It trusts nothing it is sent until the signature over the raw body verifies, and it may change exactly one column: a key's status.",
     },
   ];
 
@@ -734,7 +811,17 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         ([slug, domain]) =>
           html`${domainPanel(slug, domain)}${sourcesPanel(slug, domain)}`,
       )}
-      ${group("Money and standing", money)}
+      ${group("Money and standing", money)} ${group("Paid access", paid)}
+
+      <p class="note">
+        Section 9: "The log is free to read at low volume, forever. Revenue
+        comes from high-rate API access, structured feeds and webhooks, change
+        alerts." The free row above is that sentence's first half and carries no
+        key at all; the paid rows are its second. A tier is a daily cap and
+        nothing else — the price per read is the same on every one of them, so a
+        tier buys throughput and never a discount.
+      </p>
+
       ${group("Standing", standing)} ${group("Disputes and reports", disputes)}
       ${group("Attestation", attestation)}
 

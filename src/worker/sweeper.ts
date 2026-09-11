@@ -45,6 +45,7 @@ import {
   type EnvironmentWitnessAdapter,
 } from "../adapters/witness.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
+import { paymentsAdapterFor, type PaymentsAdapter } from "../adapters/stripe.js";
 import type { AnchorAdapter } from "../anchor.js";
 import { SWEEP_INTERVAL_MINUTES } from "../policy.js";
 import type { Env } from "./env.js";
@@ -109,6 +110,7 @@ export interface SweeperDeps {
   readonly anchor?: AnchorAdapter;
   readonly payout?: PayoutAdapter;
   readonly mirror?: MirrorAdapter;
+  readonly payments?: PaymentsAdapter;
 }
 
 /**
@@ -155,6 +157,12 @@ export async function sweepDepsFor(
     // the alarm would be two different sweeps. The secret decides the track, so
     // an environment without one says so rather than failing a call a day.
     mirror: deps?.mirror ?? mirrorAdapterFor(env),
+    // Where the day's paid reads are reported (M24, D-078). Built here for the
+    // reason the payout adapter is: the alarm is a sweep like any other, and an
+    // environment that metered through the cron door and skipped
+    // `metering_unavailable` through the alarm would be two different sweeps.
+    // No alertFetch: the deployed step delivers through the platform's own.
+    payments: deps?.payments ?? paymentsAdapterFor(env),
   };
 }
 

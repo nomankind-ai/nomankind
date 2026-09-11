@@ -741,6 +741,9 @@ describe("the day's read count, published to the sealed log", () => {
       total: 0,
       counter_first: null,
       counter_last: null,
+      // A day nobody read is also a day nobody paid for, and both halves are
+      // published rather than left out (M24).
+      paid: { reads: [], total: 0, keys: {} },
     });
   }, 120_000);
 });

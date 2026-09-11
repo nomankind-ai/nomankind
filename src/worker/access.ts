@@ -1,0 +1,215 @@
+/**
+ * The tier gate.
+ *
+ * Whitepaper Section 9, Money: "The log is free to read at low volume, forever.
+ * Revenue comes from high-rate API access, structured feeds and webhooks,
+ * change alerts." This is where that sentence is enforced, and it is the whole
+ * of it: a request with no key is served on the free tier, a request with a key
+ * is served on the key's, and both are counted against a cap per UTC day.
+ *
+ * Every reading door calls `resolveAccess` first and `chargeReads` after it has
+ * served. The order matters: a reader is charged for what they got, never for
+ * what they asked for, so a refusal costs nothing and a door that failed halfway
+ * has not billed anybody. It also means a page can overshoot the cap by one
+ * page — the delta stream charges the verified entries it delivered, and the
+ * last page before the cap may carry more of them than the cap had room for.
+ * That is deliberate and documented: the alternative is refusing a page that was
+ * already built, or counting before the work, and both are worse than one page
+ * of slack at a boundary.
+ *
+ * Nothing is decided here that src/keys.ts does not decide: the shape of a
+ * secret, the three statuses, the scope a reader is counted under and the cap of
+ * a tier are all the kernel's. This file gathers the facts in order and refuses
+ * in the kernel's own words.
+ *
+ * No wall clock: `now` is the instant the router read once for the whole
+ * request, and the day every count belongs to is that instant's UTC day. No
+ * policy number lives here — the bare integers are HTTP status codes and the
+ * caps are RATE_TIERS's.
+ */
+
+import { utcDay } from "../anchor.js";
+import { FREE_TIER } from "../policy.js";
+import {
+  KEY_REFUSALS,
+  keyHash,
+  looksLikeKey,
+  quotaScopeForClient,
+  quotaScopeForKey,
+  tierLimit,
+  type KeyRecord,
+} from "../keys.js";
+import type { D1Like } from "../storage/d1.js";
+import { addQuota, keyByHash, quotaOn } from "../storage/keys.js";
+
+/** How many milliseconds a day is. Not a policy number: it is what a day is. */
+const MILLISECONDS_PER_DAY = 86_400_000;
+
+/**
+ * What a door was granted: the tier, the key behind it or null on the free
+ * tier, the scope the reads are counted under, the day they are counted on, the
+ * cap and what has been used before this request.
+ */
+export interface Access {
+  readonly tier: string;
+  readonly key: KeyRecord | null;
+  readonly scope: string;
+  /** The UTC day of `now`, captured so the charge lands on the day of the read. */
+  readonly day: string;
+  readonly limit: number;
+  readonly used: number;
+}
+
+/** A refusal from the gate, in the status and the word the door answers with. */
+export type AccessRefusal = {
+  readonly status: 401 | 402 | 429;
+  readonly reason: (typeof KEY_REFUSALS)[number];
+  readonly body: Record<string, unknown>;
+  /** Seconds until the cap resets, on a rate refusal only. */
+  readonly retryAfter?: number;
+};
+
+function refusal(
+  status: 401 | 402,
+  reason: (typeof KEY_REFUSALS)[number],
+): { ok: false; refusal: AccessRefusal } {
+  return { ok: false, refusal: { status, reason, body: { error: reason } } };
+}
+
+/** The start of the day after this one, which is when a cap resets. */
+function resetsAt(day: string): string {
+  const start = Date.parse(`${day}T00:00:00.000Z`);
+  return new Date(start + MILLISECONDS_PER_DAY).toISOString();
+}
+
+/** The bearer secret on a request, or null when the header names none. */
+function bearer(request: Request): string | null {
+  const header = request.headers.get("authorization");
+  if (header === null) return null;
+  const PREFIX = "bearer ";
+  if (!header.toLowerCase().startsWith(PREFIX)) return header.trim();
+  return header.slice(PREFIX.length).trim();
+}
+
+/**
+ * Who is asking, on what tier, and whether they have anything left today.
+ *
+ * In order, and the order is the contract: no header at all is the free tier, a
+ * header that is not a well-formed key is refused before the database is
+ * touched, an unknown key is refused before the quota is read, and a key whose
+ * subscription is not paid is refused before anything is counted. A reader who
+ * mistyped their key is told which rule refused them rather than "unauthorized".
+ */
+export async function resolveAccess(
+  db: D1Like,
+  request: Request,
+  now: Date,
+): Promise<{ ok: true; access: Access } | { ok: false; refusal: AccessRefusal }> {
+  const day = utcDay(now.toISOString());
+  const presented = bearer(request);
+
+  let key: KeyRecord | null = null;
+  let tier = FREE_TIER;
+  if (presented !== null) {
+    if (!looksLikeKey(presented)) return refusal(401, "bad_key");
+    key = await keyByHash(db, await keyHash(presented));
+    if (key === null) return refusal(401, "unknown_key");
+    if (key.status === "canceled") return refusal(402, "key_canceled");
+    if (key.status === "past_due") return refusal(402, "key_past_due");
+    tier = key.tier;
+  }
+
+  const scope =
+    key === null
+      ? await quotaScopeForClient(request.headers.get("cf-connecting-ip"))
+      : quotaScopeForKey(key.id);
+  const limit = tierLimit(tier);
+  const used = await quotaOn(db, scope, day);
+
+  if (used >= limit) {
+    const resets = resetsAt(day);
+    return {
+      ok: false,
+      refusal: {
+        status: 429,
+        reason: "rate_limited",
+        body: {
+          error: "rate_limited",
+          tier,
+          limit,
+          used,
+          resets_at: resets,
+        },
+        retryAfter: Math.max(
+          1,
+          Math.ceil((Date.parse(resets) - now.getTime()) / 1000),
+        ),
+      },
+    };
+  }
+
+  return { ok: true, access: { tier, key, scope, day, limit, used } };
+}
+
+/**
+ * Charge what was served.
+ *
+ * The day comes from the access the gate resolved and not from a clock read
+ * here, so a request that straddles midnight is counted on the day it was let
+ * in on — the same day its cap was checked against. Zero charges nothing: a
+ * sync page that delivered no verified entry delivered no read.
+ */
+export async function chargeReads(
+  db: D1Like,
+  access: Access,
+  reads: number,
+): Promise<void> {
+  if (reads <= 0) return;
+  await addQuota(db, access.scope, access.day, reads);
+}
+
+/**
+ * The next number on one key's own receipt counter.
+ *
+ * `UPDATE ... RETURNING` so the read and the write are one statement: two
+ * isolates serving the same key at the same instant get different numbers
+ * because the database hands them out, exactly as the log-wide counter's unique
+ * index makes the second writer try again. The partial unique index on
+ * (key_id, key_counter) is still there as the second guard.
+ */
+export async function nextKeyCounter(
+  db: D1Like,
+  keyId: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `UPDATE api_keys SET counter = counter + 1 WHERE id = ? RETURNING counter`,
+    )
+    .bind(keyId)
+    .first<Record<string, unknown>>();
+  const counter = row === null ? null : row["counter"];
+  if (typeof counter !== "number" || !Number.isInteger(counter)) {
+    throw new TypeError(`nextKeyCounter: no counter for ${keyId}`);
+  }
+  return counter;
+}
+
+/**
+ * What every served response says about the reader's day: the tier, the cap,
+ * and what is left after this response.
+ *
+ * Three headers and not a body field, because a reader who wants them wants
+ * them on every response including the ones they did not parse, and because a
+ * body field would have to go inside the signed receipt or be a second place
+ * the same number is written.
+ */
+export function accessHeaders(
+  access: Access,
+  remainingAfter: number,
+): Record<string, string> {
+  return {
+    "x-nomankind-tier": access.tier,
+    "x-nomankind-limit": String(access.limit),
+    "x-nomankind-remaining": String(Math.max(0, remainingAfter)),
+  };
+}

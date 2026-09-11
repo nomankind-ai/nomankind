@@ -3,7 +3,7 @@
  *
  * Whitepaper Section 11, Deployment and status: nomankind publishes what it is
  * running and whether it is working. `GET /status` is the second half of that as
- * JSON — thirteen stages, the five doors nobody probes, four counters, and the two
+ * JSON — fifteen stages, the five doors nobody probes, four counters, and the two
  * thresholds the states were decided by, so a reader can check the arithmetic
  * without this Worker.
  *
@@ -25,6 +25,7 @@
  */
 
 import { mirrorKindFor } from "../adapters/mirror.js";
+import { paymentsAdapterFor } from "../adapters/stripe.js";
 import { PRODUCTION } from "../adapters/payout.js";
 import { witnessAdapterFor } from "../adapters/witness.js";
 import { utcDay } from "../anchor.js";
@@ -39,8 +40,15 @@ import {
 } from "../status.js";
 import type { D1Like } from "../storage/d1.js";
 import {
+  alertCursor,
+  countAlertEndpoints,
+  countDueDeliveries,
+  countFailedDeliveries,
+} from "../storage/alerts.js";
+import {
   countAttestations,
   countEntries,
+  countMeterReports,
   countOperators,
   countSeals,
   countSealsSealedOn,
@@ -54,7 +62,9 @@ import {
   latestMirror,
   latestReceipt,
   latestSeal,
+  ledgerCursor,
   newestUpgradedAnchor,
+  owedMeterReports,
   payoutRows,
   reconciliationRows,
   sweepSteps,
@@ -76,6 +86,15 @@ export interface StatusDeps {
 }
 
 const MILLISECONDS_PER_DAY = 86_400_000;
+
+/**
+ * The metering step's cursor, by the name the step writes it under.
+ *
+ * Spelled here rather than imported from src/worker/sweep.ts, which imports the
+ * whole sweep: the name is one string and the step owns its meaning, while this
+ * module only asks the store how far that cursor has got.
+ */
+const METERING_CURSOR = "metering";
 
 /** The UTC day before the one `now` falls on. */
 function yesterdayOf(now: string): string {
@@ -242,6 +261,30 @@ export async function statusInput(
               url: mirror.url,
             },
     },
+    // Usage metering (M24): the track this environment runs, asked of the same
+    // `paymentsAdapterFor` the sweep asks, and the two numbers the stage reads —
+    // what has been reported, and what the published log says is still owed. The
+    // owed count is bounded by one page: the stage only asks whether it is zero.
+    metering: {
+      kind: paymentsAdapterFor(env).kind,
+      reported_days: await countMeterReports(db),
+      owed:
+        seal === null
+          ? 0
+          : await owedMeterReports(
+              db,
+              (await ledgerCursor(db, METERING_CURSOR)) ?? -1,
+              seal.last_seq,
+              LIST_PAGE_LIMIT,
+            ),
+    },
+    // Change alerts (M24), through the alert store's own four counts.
+    alerts: {
+      endpoints: await countAlertEndpoints(db),
+      cursor: await alertCursor(db),
+      due: await countDueDeliveries(db, now),
+      failed: await countFailedDeliveries(db),
+    },
     exercised: {
       submission:
         submittedEvent === null || submittedCore === null
@@ -269,7 +312,7 @@ export async function statusInput(
  *
  * The thresholds go out with the answer because a state nobody can recompute is
  * a state nobody can check: a reader holding this document and src/status.ts's
- * rules gets the same thirteen readings we did.
+ * rules gets the same fifteen readings we did.
  *
  * `as_of` is the last sweep run and never the request. The page is a reading of
  * a record, so it is dated by the record — an `as_of` of "now" would say the

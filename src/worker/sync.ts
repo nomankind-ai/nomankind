@@ -59,6 +59,13 @@ import {
   type SyncItemKind,
   type SyncQuery,
 } from "../sync.js";
+import {
+  accessHeaders,
+  chargeReads,
+  nextKeyCounter,
+  resolveAccess,
+  type Access,
+} from "./access.js";
 import type { Env } from "./env.js";
 import { signerFor, type ReceiptSigner } from "./read.js";
 import {
@@ -211,7 +218,11 @@ function wireItem(item: Item): Record<string, unknown> {
  * response accounts for: the trainer resumes from exactly where it was. No
  * receipt is issued and the counter does not move, because nothing was served.
  */
-function emptyPage(from: number, latest: Seal | null): Response {
+function emptyPage(
+  from: number,
+  latest: Seal | null,
+  access: Access,
+): Response {
   return json(
     {
       from,
@@ -223,6 +234,9 @@ function emptyPage(from: number, latest: Seal | null): Response {
       receipt: null,
     },
     200,
+    // Nothing was delivered, so nothing is charged and the day's remainder is
+    // exactly what it was before the page was asked for.
+    accessHeaders(access, access.limit - access.used),
   );
 }
 
@@ -245,6 +259,7 @@ async function issueReceipt(
     readonly delivered: readonly Item[];
   },
   signer: ReceiptSigner,
+  access: Access,
   now: Date,
 ): Promise<SyncReceipt | null> {
   const entries = syncReceiptEntries(
@@ -256,9 +271,14 @@ async function issueReceipt(
     })),
   );
   const issuedAt = now.toISOString();
+  const key = access.key;
 
   for (let attempt = 0; attempt < RECEIPT_ATTEMPTS; attempt += 1) {
     const counter = await nextReadCounter(db);
+    // Drawn inside the loop beside the log-wide counter, exactly as the read
+    // door draws it: both numbers are in the signed bytes, so a receipt signed
+    // again is signed again for both.
+    const keyCounter = key === null ? null : await nextKeyCounter(db, key.id);
     const receipt = await signSyncReceipt(
       {
         from: fields.from,
@@ -268,11 +288,18 @@ async function issueReceipt(
         issued_at: issuedAt,
         counter,
         issuer: signer.issuer,
+        key: key === null ? null : key.id,
+        key_counter: keyCounter,
       },
       signer.key,
     );
     try {
-      await putSyncReceipt(db, { createdAt: issuedAt, receipt });
+      await putSyncReceipt(db, {
+        createdAt: issuedAt,
+        receipt,
+        keyId: key === null ? null : key.id,
+        keyCounter,
+      });
       return receipt;
     } catch (error) {
       if (error instanceof ReceiptConflictError) continue;
@@ -295,13 +322,14 @@ async function page(
   db: D1Like,
   query: SyncQuery,
   signer: ReceiptSigner,
+  access: Access,
   now: Date,
 ): Promise<Response> {
   const latest = await latestSeal(db);
   // The stream is strictly by sealed position: events after the last seal are
   // never delivered, because an unsealed event has no proof to deliver with it.
   if (latest === null || query.from > latest.last_seq) {
-    return emptyPage(query.from, latest);
+    return emptyPage(query.from, latest, access);
   }
 
   const sealedHead = latest.last_seq;
@@ -367,10 +395,22 @@ async function page(
       db,
       { from: query.from, head, delivered },
       signer,
+      access,
       now,
     );
     if (receipt === null) return refuse(503, "receipt_conflict");
   }
+
+  // Section 9: "each delivered verified entry counts as a read". The receipt's
+  // own entry list is what is charged, so the number billed and the number the
+  // trainer was handed are the same number by construction — and a page that
+  // delivered nothing verified charges nothing. The cap may be overshot by the
+  // last page, which is the documented price of charging after serving.
+  const charged =
+    receipt === null
+      ? 0
+      : receipt.entries.filter((entry) => entry.status === "verified").length;
+  await chargeReads(db, access, charged);
 
   return json(
     {
@@ -385,6 +425,7 @@ async function page(
       receipt,
     },
     200,
+    accessHeaders(access, access.limit - access.used - charged),
   );
 }
 
@@ -403,12 +444,27 @@ async function route(
   // `min_tier` is told which rule refused them rather than "bad request".
   if (!parsed.ok) return refuse(400, parsed.refusal);
 
+  // The tier gate first, and before `receipts_not_configured`: a key that is
+  // over its cap or whose bill did not clear is told which rule refused it even
+  // on a deployment that could not have signed the page anyway.
+  const granted = await resolveAccess(db, request, now);
+  if (!granted.ok) {
+    const { refusal } = granted;
+    return json(
+      refusal.body,
+      refusal.status,
+      refusal.retryAfter === undefined
+        ? undefined
+        : { "retry-after": String(refusal.retryAfter) },
+    );
+  }
+
   // Before any read: a deployment that cannot sign a receipt cannot serve a
   // page, and saying so costs nothing rather than a page's worth of queries.
   const signer = await signerFor(env.SEALING_AGENT_KEY);
   if (signer === null) return refuse(503, "receipts_not_configured");
 
-  return page(db, parsed.query, signer, now);
+  return page(db, parsed.query, signer, granted.access, now);
 }
 
 /**

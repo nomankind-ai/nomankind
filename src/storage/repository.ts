@@ -3597,6 +3597,9 @@ const READ_RECEIPT_KIND = "read";
  */
 const SYNC_RECEIPT_KIND = "sync";
 
+/** The event type a day's published count is written under. */
+const READ_COUNT_TYPE: EventType = "read_count";
+
 /** The two kinds that share the running counter, in the order they are bound. */
 const COUNTED_RECEIPT_KINDS: readonly string[] = Object.freeze([
   READ_RECEIPT_KIND,
@@ -3635,7 +3638,23 @@ const SYNC_VERIFIED_ENTRIES = `
     AND receipts.created_at >= ? AND receipts.created_at < ?
     AND json_extract(item.value, '$.status') = 'verified'`;
 
-const RECEIPT_COLUMNS = `id, kind, entry_id, seq, created_at, payload_json`;
+/**
+ * The same verified entries, carrying the key the receipt was issued to.
+ *
+ * `COALESCE(key_id, '')` rather than the column, because the empty string is a
+ * value a keyset page can compare and NULL is not: no key id is ever the empty
+ * string (they are "key_" and sixteen hex), so the free tier's rows sort ahead
+ * of every key's and the page boundary is total.
+ */
+const SYNC_VERIFIED_ENTRIES_BY_KEY = `
+  SELECT json_extract(item.value, '$.entry_id') AS entry_id,
+         COALESCE(receipts.key_id, '') AS key_id
+  FROM receipts, json_each(receipts.payload_json, '$.entries') AS item
+  WHERE receipts.kind = ?
+    AND receipts.created_at >= ? AND receipts.created_at < ?
+    AND json_extract(item.value, '$.status') = 'verified'`;
+
+const RECEIPT_COLUMNS = `id, kind, entry_id, seq, created_at, payload_json, key_id, key_counter`;
 
 /**
  * The row id for a receipt that carries the running counter: the counter
@@ -3726,13 +3745,23 @@ export async function putReadReceipt(
     readonly entryId: string;
     readonly createdAt: string;
     readonly receipt: ReadReceipt;
+    /**
+     * The key this read was served to, or null on the free tier (M24).
+     *
+     * Optional only for the callers that predate paid access — a receipt with
+     * no key named is a free read, which is what every receipt written before
+     * M24 was. The read door always says which.
+     */
+    readonly keyId?: string | null;
+    /** The key's own counter, or null on the free tier. */
+    readonly keyCounter?: number | null;
   },
 ): Promise<void> {
   const counter = input.receipt.counter;
   try {
     await db
       .prepare(
-        `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         readReceiptId(counter),
@@ -3741,6 +3770,8 @@ export async function putReadReceipt(
         counter,
         input.createdAt,
         writeJson(input.receipt),
+        input.keyId ?? null,
+        input.keyCounter ?? null,
       )
       .run();
   } catch (cause) {
@@ -3771,13 +3802,17 @@ export async function putSyncReceipt(
   input: {
     readonly createdAt: string;
     readonly receipt: SyncReceipt;
+    /** The key this page was served to, or null on the free tier (M24). */
+    readonly keyId?: string | null;
+    /** The key's own counter, or null on the free tier. */
+    readonly keyCounter?: number | null;
   },
 ): Promise<void> {
   const counter = input.receipt.counter;
   try {
     await db
       .prepare(
-        `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         readReceiptId(counter),
@@ -3786,6 +3821,8 @@ export async function putSyncReceipt(
         counter,
         input.createdAt,
         writeJson(input.receipt),
+        input.keyId ?? null,
+        input.keyCounter ?? null,
       )
       .run();
   } catch (cause) {
@@ -3954,6 +3991,191 @@ export async function readCountsSplitOn(
     read_reads: readInteger(row, "read_reads"),
     sync_reads: readInteger(row, "sync_reads"),
   }));
+}
+
+/** One entry's day under one key, with the two kinds of read kept apart. */
+export interface ReadCountKeyRow extends ReadCountSplitRow {
+  /** The key the reads were served to, or null for the free tier. */
+  readonly key_id: string | null;
+}
+
+/** Where a page of `readCountsByKeyOn` resumes: the last pair it saw. */
+export interface ReadCountKeyCursor {
+  readonly entry_id: string;
+  readonly key_id: string | null;
+}
+
+/**
+ * The same day's reads as `readCountsSplitOn`, split by key as well as by
+ * entry.
+ *
+ * Whitepaper Section 9, Money: "every paid read also returns a signed receipt
+ * naming the entry, the time, and a running counter", and the day's published
+ * count is what a holder checks those receipts against. A count published per
+ * key is what makes that check possible for a payer rather than only for the
+ * log as a whole, so the same UNION runs with the key in the grouping.
+ *
+ * Keyset-paged over the (entry_id, key_id) pair, written as an OR rather than a
+ * row-value comparison so the plan is the same on every SQLite this runs on.
+ * The caller passes back the last pair it saw, and the empty string stands for
+ * the free tier throughout, exactly as the sub-select writes it.
+ */
+export async function readCountsByKeyOn(
+  db: D1Like,
+  date: string,
+  after: ReadCountKeyCursor | undefined,
+  limit: number,
+): Promise<ReadCountKeyRow[]> {
+  const [dayFrom, dayTo] = dayRange(date);
+  const bindings: unknown[] = [
+    READ_RECEIPT_KIND,
+    dayFrom,
+    dayTo,
+    SYNC_RECEIPT_KIND,
+    dayFrom,
+    dayTo,
+  ];
+  let where = "";
+  if (after !== undefined) {
+    where = "WHERE (entry_id > ? OR (entry_id = ? AND key_id > ?)) ";
+    bindings.push(after.entry_id, after.entry_id, after.key_id ?? "");
+  }
+  bindings.push(limit);
+
+  const rows = await db
+    .prepare(
+      `SELECT entry_id, key_id,
+              SUM(read_reads) AS read_reads,
+              SUM(sync_reads) AS sync_reads FROM (
+         SELECT entry_id, COALESCE(key_id, '') AS key_id,
+                COUNT(*) AS read_reads, 0 AS sync_reads FROM receipts
+           WHERE kind = ? AND created_at >= ? AND created_at < ?
+           GROUP BY entry_id, COALESCE(key_id, '')
+         UNION ALL
+         SELECT entry_id, key_id, 0 AS read_reads, 1 AS sync_reads
+           FROM (${SYNC_VERIFIED_ENTRIES_BY_KEY})
+       ) ${where}
+       GROUP BY entry_id, key_id ORDER BY entry_id, key_id LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map((row) => {
+    const key = readText(row, "key_id");
+    return {
+      entry_id: readText(row, "entry_id"),
+      key_id: key === "" ? null : key,
+      read_reads: readInteger(row, "read_reads"),
+      sync_reads: readInteger(row, "sync_reads"),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// What the provider has already been told (M24, decision D-078)
+// ---------------------------------------------------------------------------
+
+/** One key-day already reported to the payment provider, as the table holds it. */
+export interface MeterReportRow {
+  readonly key_id: string;
+  readonly date: string;
+  /** The `read_count` event the number was taken from. */
+  readonly event_seq: number;
+  readonly reads: number;
+  /** The idempotency identifier the provider was sent. */
+  readonly identifier: string;
+  readonly reported_at: string;
+}
+
+/**
+ * Whether this key-day has already been reported.
+ *
+ * The primary key is the pair, so this is one lookup and the row's existence is
+ * the whole answer: a key-day reported once is never reported again, however
+ * many times a sweep passes over the event that named it. Section 9's published
+ * count is the number of record, and a meter event sent twice would bill a
+ * reader twice for a day the log says they read once.
+ */
+export async function meterReported(
+  db: D1Like,
+  keyId: string,
+  date: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT key_id FROM meter_reports WHERE key_id = ? AND date = ? ${ONE_ROW}`,
+    )
+    .bind(keyId, date)
+    .first<Row>();
+  return row !== null;
+}
+
+/** Record one key-day as reported. Written only after the provider said yes. */
+export async function putMeterReport(
+  db: D1Like,
+  row: MeterReportRow,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO meter_reports (key_id, date, event_seq, reads, identifier, reported_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (key_id, date) DO NOTHING`,
+    )
+    .bind(
+      row.key_id,
+      row.date,
+      row.event_seq,
+      row.reads,
+      row.identifier,
+      row.reported_at,
+    )
+    .run();
+}
+
+/** How many key-days have been reported, ever. What the status stage counts. */
+export async function countMeterReports(db: D1Like): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS total FROM meter_reports`)
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "total");
+}
+
+/**
+ * How many published key-days past the metering cursor have no report yet.
+ *
+ * The status stage's one question, asked of the two tables rather than of a
+ * fold in an isolate: the key-days a `read_count` event named, left-joined
+ * against what has been reported. Bounded by the caller's own limit, because
+ * the stage only needs to know whether the number is zero and a log that fell a
+ * month behind must not turn its status page into a scan.
+ *
+ * `json_each` over `$.paid.keys` returns nothing for a payload with no paid
+ * block, which is exactly right: an event that named no paid read owes no
+ * meter event.
+ */
+export async function owedMeterReports(
+  db: D1Like,
+  afterSeq: number,
+  throughSeq: number,
+  limit: number,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS owed FROM (
+         SELECT day.key_id AS key_id, day.date AS date FROM (
+           SELECT json_extract(events.payload, '$.date') AS date,
+                  keys.key AS key_id
+           FROM events, json_each(events.payload, '$.paid.keys') AS keys
+           WHERE events.type = ? AND events.seq > ? AND events.seq <= ?
+           LIMIT ?
+         ) AS day
+         LEFT JOIN meter_reports ON meter_reports.key_id = day.key_id
+                                AND meter_reports.date = day.date
+         WHERE meter_reports.key_id IS NULL
+       )`,
+    )
+    .bind(READ_COUNT_TYPE, afterSeq, throughSeq, limit)
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "owed");
 }
 
 /**

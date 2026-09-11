@@ -62,13 +62,19 @@ import { DohResolver, type DnsResolver } from "../adapters/dns.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { mirrorAdapterFor } from "../adapters/mirror.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
+import {
+  paymentsAdapterFor,
+  type PaymentsAdapter,
+} from "../adapters/stripe.js";
 import { htmlResponse } from "../ui/html.js";
 import { renderNotFound } from "../ui/pages/errors.js";
 import type { Env } from "./env.js";
+import { handleAlerts } from "./alerts.js";
 import { handleAttest } from "./attest.js";
 import { handleDispute } from "./dispute.js";
 import { handleEvents } from "./events.js";
 import { handleFailureReports } from "./failure-reports.js";
+import { handleKeys } from "./keys.js";
 import { handleMirror } from "./mirror.js";
 import { forMethod, handlePages, wantsHtml } from "./pages.js";
 import { handleRead } from "./read.js";
@@ -78,6 +84,7 @@ import { handleRevalidate } from "./revalidate.js";
 import { handleSeals } from "./seals.js";
 import { handleStanding } from "./standing.js";
 import { handleStatus } from "./status.js";
+import { handleStripeWebhook } from "./stripe.js";
 import { handleSubmit } from "./submit.js";
 import { runSweep } from "./sweep.js";
 import {
@@ -143,6 +150,15 @@ export interface RequestDeps {
    * from here (decision D-013 as amended).
    */
   readonly beacon?: BeaconReader;
+  /**
+   * Where the paid loop's money goes (M24, decision D-078). The deployed Worker
+   * passes none and gets whichever track this environment's secrets say it
+   * runs — the real provider where a key is set, the refusal on production
+   * where none is, and the mock everywhere else — exactly as the payout and
+   * mirror adapters are built. A test passes a mock and never reaches the
+   * network.
+   */
+  readonly payments?: PaymentsAdapter;
 }
 
 /** The router. Exported by name so tests can call it without a fetch stack. */
@@ -210,6 +226,25 @@ export async function handleRequest(
 
   const synced = await handleSync(request, env, { now });
   if (synced !== null) return synced;
+
+  // M24's paid access, Section 9's "Money": the tiers, the checkout, the claim
+  // that hands a key over once, and what one key read. The payment provider
+  // enters as an injected adapter, so a test never reaches one.
+  const payments = deps?.payments ?? paymentsAdapterFor(env);
+
+  const keys = await handleKeys(request, env, { now, payments });
+  if (keys !== null) return keys;
+
+  // The one door the provider knocks on. It trusts nothing it is sent until the
+  // signature over the raw body verifies against this deployment's own webhook
+  // secret, and it may change exactly one column: a key's status.
+  const webhook = await handleStripeWebhook(request, env, { now, payments });
+  if (webhook !== null) return webhook;
+
+  // M24's change alerts, Section 9's "structured feeds and webhooks, change
+  // alerts": the endpoints one key subscribes, under /keys/me/webhooks.
+  const alerts = await handleAlerts(request, env, { now });
+  if (alerts !== null) return alerts;
 
   const events = await handleEvents(request, env);
   if (events !== null) return events;
@@ -335,6 +370,10 @@ export default {
         // Where the day's export goes (M23), built the same way and for the
         // same reason: the cron door and the alarm mirror to one repository.
         mirror: mirrorAdapterFor(env),
+        // Where the day's paid reads are reported (M24, D-078), built the same
+        // way and for the same reason: the cron door and the alarm bill through
+        // one provider, and production without a key meters nothing at all.
+        payments: paymentsAdapterFor(env),
         // Which door ran it, for the status board's own row (D-076). The Sweeper
         // Durable Object says nothing and is read as `alarm`, which is what it
         // is: the sweep's own timer, with this cron trigger as the repair.

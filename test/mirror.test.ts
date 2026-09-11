@@ -584,9 +584,18 @@ describe("the mirrors table (migration 0014)", () => {
  * the order the log put the events in, and that two builds are the same bytes.
  */
 describe("attestations, standing and the ledger", () => {
-  /** The day the read counts were published for. */
+  /** The day the read counts were published for, in the pre-M24 shape. */
   const READ_DAY = "2026-09-09";
   const READS = 10_000;
+  /**
+   * A second day, published in the M24 shape: the whole day's traffic in
+   * `reads` and the half that was billed in `paid`. The two numbers differ on
+   * purpose, so a fold that priced the wrong one could not pass by accident.
+   */
+  const PAID_DAY = "2026-09-08";
+  const PAID_DAY_READS = 600;
+  const PAID_DAY_PAID = 250;
+  const PAID_KEY = "key_0123456789abcdef";
   const RICH_SEALED_AT = "2026-09-10T02:00:00.000Z";
 
   let rich: VerifyWorld;
@@ -624,7 +633,27 @@ describe("attestations, standing and the ledger", () => {
 
     // One published day of reads on the verified entry, so the ledger fold has
     // money to price rather than only stakes.
+    // The M24 day first: free reads beside paid ones, and only the paid half
+    // is money. Published before the pre-M24 day in log order so the file holds
+    // both shapes and neither is the last word.
     richEvents = await appendEvent(rich.bundle.events, {
+      at: "2026-09-10T00:20:00.000Z",
+      type: "read_count",
+      entry_id: null,
+      payload: {
+        date: PAID_DAY,
+        reads: [{ entry_id: VERIFIED_ENTRY_ID, count: PAID_DAY_READS }],
+        total: PAID_DAY_READS,
+        counter_first: 1,
+        counter_last: PAID_DAY_READS,
+        paid: {
+          reads: [{ entry_id: VERIFIED_ENTRY_ID, count: PAID_DAY_PAID }],
+          total: PAID_DAY_PAID,
+          keys: { [PAID_KEY]: PAID_DAY_PAID },
+        },
+      },
+    });
+    richEvents = await appendEvent(richEvents, {
       at: "2026-09-10T00:30:00.000Z",
       type: "read_count",
       entry_id: null,
@@ -632,8 +661,8 @@ describe("attestations, standing and the ledger", () => {
         date: READ_DAY,
         reads: [{ entry_id: VERIFIED_ENTRY_ID, count: READS }],
         total: READS,
-        counter_first: 1,
-        counter_last: READS,
+        counter_first: PAID_DAY_READS + 1,
+        counter_last: PAID_DAY_READS + READS,
       },
     });
 
@@ -739,14 +768,37 @@ describe("attestations, standing and the ledger", () => {
     expect(kinds.indexOf("dispute_stake")).toBeLessThan(
       kinds.indexOf("read_share"),
     );
-    // The reconciliation closes the day it reconciles.
+    // The reconciliation closes each day it reconciles.
     expect(kinds[kinds.length - 1]).toBe("reconciliation");
 
     const shares = rows.filter((row) => row.kind === "read_share");
     expect(shares.every((row) => row.entry_id === VERIFIED_ENTRY_ID)).toBe(true);
-    expect(shares.every((row) => row.date === READ_DAY)).toBe(true);
     expect(shares.some((row) => row.role === "submitter")).toBe(true);
-    expect(shares.every((row) => row.reads === READS)).toBe(true);
+
+    // The pre-M24 day carries no paid block at all, and every read it published
+    // was billed for: the whole of `reads` is what it meant when it was sealed,
+    // so that is what the mirror's fold prices — the same number the sweep's
+    // ledger step wrote, because both call src/ledger.ts's one function.
+    const plain = shares.filter((row) => row.date === READ_DAY);
+    expect(plain.length).toBeGreaterThan(0);
+    expect(plain.every((row) => row.reads === READS)).toBe(true);
+
+    // The M24 day carries the block, so the money follows `paid.reads` and not
+    // the free reads beside it: nobody was billed for those, so nobody earned
+    // anything from them.
+    const paid = shares.filter((row) => row.date === PAID_DAY);
+    expect(paid.length).toBe(plain.length);
+    expect(paid.every((row) => row.reads === PAID_DAY_PAID)).toBe(true);
+    expect(paid.some((row) => row.reads === PAID_DAY_READS)).toBe(false);
+
+    // And the reconciliation of each day closes over the same half it priced.
+    const closes = rows.filter((row) => row.kind === "reconciliation");
+    expect(
+      closes.map((row) => [row.date, row.reads, row.ref["ok"]]),
+    ).toEqual([
+      [PAID_DAY, PAID_DAY_PAID, true],
+      [READ_DAY, READS, true],
+    ]);
 
     const stake = rows.find((row) => row.kind === "dispute_stake")!;
     expect(stake.unit).toBe("standing");

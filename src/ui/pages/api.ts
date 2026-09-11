@@ -11,11 +11,22 @@
  * wrong can fix it; a caller handed the last one has to guess what came before.
  */
 
+import { HASH_TAG_ALERT } from "../../alerts.js";
 import { CORE_KEYS } from "../../core.js";
 import {
+  ALERT_ENDPOINTS_PER_KEY,
+  ALERT_KINDS,
+  ALERT_RETRY_MINUTES,
+  ALERT_TIMEOUT_MS,
+  CONTRIBUTOR_SHARE_FLOOR_PERCENT,
+  CONTRIBUTOR_SHARE_PERCENT,
   DISPUTE_FILING_FEE_CENTS,
+  FREE_TIER,
   LIST_PAGE_LIMIT,
+  RATE_TIERS,
+  READ_PRICE_MICROS_PER_READ,
   SCHEMA_VERSION,
+  STRIPE,
 } from "../../policy.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
@@ -459,24 +470,149 @@ const ATTESTATION_PATH: readonly Endpoint[] = [
   },
 ];
 
+/**
+ * The paid loop's own doors (Section 9), in the order a caller meets them: what
+ * the tiers are, buy one, claim the key it paid for, then the three reads a
+ * holder makes about their own key.
+ *
+ * Every one of them is JSON with `cache-control: no-store`, and the three
+ * `/keys/me` doors take the key as a bearer token. They are account doors and
+ * not reading doors, so they charge no quota and a key whose bill has not
+ * cleared can still reach them — a door that refused `key_past_due` here would
+ * lock a customer out of the page that fixes it.
+ */
+const KEY_PATH: readonly Endpoint[] = [
+  {
+    method: "GET",
+    path: "/keys/tiers",
+    parameters: "—",
+    answers:
+      "What is on sale: tiers (each with name, reads_per_day and key), price_micros_per_read, contributor_share_percent, contributor_share_floor_percent. Free and unauthenticated, which is the whole point of it.",
+    refusals: "405 with Allow: GET.",
+  },
+  {
+    method: "POST",
+    path: "/keys/checkout",
+    parameters: "tier, email?",
+    answers:
+      "200 with { session, url }: the provider's hosted checkout to send a buyer to. The success URL comes back to /keys/claim with the session id.",
+    refusals:
+      "400 bad_body; 422 free_tier_needs_no_key, unknown_tier; 503 payments_unavailable when this deployment takes no money at all; 502 provider_error, bad_response, network with the provider's status and error code — never its message, and never a request header.",
+  },
+  {
+    method: "GET",
+    path: "/keys/claim",
+    parameters: "session=<checkout session id>",
+    answers:
+      "201 with { key, id, tier, status, customer, created_at }. The key is shown exactly once and is stored here only as a hash, so there is no door that can show it again. A browser — which is where the provider's success redirect lands a person — gets the same fields as a page, with that warning on it.",
+    refusals:
+      "400 missing_session; 404 unknown_session; 402 not_paid; 422 unknown_tier; 409 already_claimed, which is the unique index and not a check that hoped nobody raced: one checkout session mints one key however many times its success URL is opened.",
+  },
+  {
+    method: "GET",
+    path: "/keys/me",
+    parameters: "—",
+    answers:
+      "The holder's own key: id, tier, status, created_at, limit, used_today, remaining_today, counter. Never the hash and never the secret.",
+    refusals: "401 missing_key, bad_key, unknown_key.",
+  },
+  {
+    method: "GET",
+    path: "/keys/me/usage",
+    parameters: "days=<n>",
+    answers:
+      "{ key, days: [{ date, reads, published }] }, over a window of thirty days by default and ninety at most. reads is this Worker's own counter, which is what the cap was enforced against; published is what the sealed read_count event for that day says the key read, which is what the ledger priced — { reads, seq }, or null while no event has been published for that day. A day where the two disagree is a day to ask about.",
+    refusals: "401 as above; 400 bad_days.",
+  },
+  {
+    method: "GET",
+    path: "/keys/me/receipts",
+    parameters: `after=<key_counter>, limit=<1..${LIST_PAGE_LIMIT}>`,
+    answers:
+      "{ key, receipts: [{ kind, key_counter, counter, created_at, receipt }] } in the key's own counter order, keyset paged. The receipt goes out verbatim: the bytes that were signed, not a summary of them.",
+    refusals: "401 as above; 400 bad_after, bad_limit.",
+  },
+  {
+    method: "POST",
+    path: "/keys/me/portal",
+    parameters: "—",
+    answers:
+      "200 with { url }: the provider's own billing page for the customer behind this key. nomankind holds no card, no address and no invoice; it hands out the link.",
+    refusals:
+      "401 as above; 503 payments_unavailable; 502 provider_error, bad_response, network.",
+  },
+];
+
+/**
+ * The change-alert doors (Section 9's "structured feeds and webhooks, change
+ * alerts"), all under the holder's own key.
+ */
+const ALERT_PATH: readonly Endpoint[] = [
+  {
+    method: "POST",
+    path: "/keys/me/webhooks",
+    parameters: "url, domain?, subject?, category?, kinds?",
+    answers:
+      "201 with { id, url, filter, created_at, secret }. The secret is the delivery signature's key and is shown exactly once, here; there is no door that shows it again, and deleting the endpoint is how a leaked one is revoked.",
+    refusals: `401 missing_key, bad_key, unknown_key; 402 key_canceled; 400 bad_body; 422 unknown_kind; 422 bad_url (https only, a hostname with a dot, no credentials, no localhost); 422 unknown_domain; 409 endpoint_limit past ${ALERT_ENDPOINTS_PER_KEY} live endpoints.`,
+  },
+  {
+    method: "GET",
+    path: "/keys/me/webhooks",
+    parameters: "—",
+    answers:
+      "{ key, endpoints: [{ id, url, filter, created_at }] } — this key's live endpoints, and never a secret.",
+    refusals: "401 and 402 as above.",
+  },
+  {
+    method: "DELETE",
+    path: "/keys/me/webhooks/{id}",
+    parameters: "—",
+    answers:
+      "204 and no body. The endpoint is disabled rather than deleted, so the deliveries that name it keep naming something, and the slot it held is free.",
+    refusals:
+      "401 and 402 as above; 404 not_found, which is also the answer for an endpoint that exists under another key — a holder learning that an id is somebody else's has learned something about another customer.",
+  },
+  {
+    method: "GET",
+    path: "/keys/me/webhooks/{id}/deliveries",
+    parameters: `after=<delivery id>, limit=<1..${LIST_PAGE_LIMIT}>`,
+    answers:
+      "{ key, endpoint, deliveries: [{ id, event_seq, kind, entry_id, status, attempts, next_at, delivered_at, last_status, last_error, created_at, body }] }, newest first. The bodies are whole because they are public; the endpoint's secret is in no delivery record at all.",
+    refusals: "401 and 402 as above; 404 not_found; 400 bad_limit.",
+  },
+];
+
 const NOT_YET_BUILT: readonly { readonly what: string; readonly when: string }[] =
   [
-    { what: "API keys, paid tiers, webhooks, rate limits", when: "M24" },
     {
       what: "Production submission, genesis, and the payout provider",
       when: "M25",
     },
   ];
 
+/**
+ * The tier the 429 example is written in, and the cap it hits.
+ *
+ * The cap is read from RATE_TIERS rather than typed into the example, for the
+ * reason no number on this page is ever typed: a policy that moved by decision
+ * would leave a documented body claiming the old one, and a reader checking
+ * their refusal against the docs would find the docs wrong.
+ */
+const EXAMPLE_TIER = "standard";
+
 export function renderApi(ctx: PageContext): string {
   const origin = ctx.origin;
+  const exampleCap = RATE_TIERS[EXAMPLE_TIER]!.reads_per_day;
   return layout(ctx, {
     title: "API",
     description: "Every endpoint that exists, what it answers, how it refuses.",
     body: html`
       <div class="page-head"><h1>API</h1></div>
       <p class="lede">
-        Reads need no key. Writes are signed requests from a 1F916 agent key:
+        Reads need no key at low volume, forever: the free tier is served to
+        anybody, and a key buys a higher rate, receipts that name it, and change
+        alerts. Writes are signed requests from a 1F916 agent key:
         there are no passwords and no sessions anywhere in this system. Every
         response is JSON with <span class="mono">cache-control: no-store</span>,
         and every read that serves a verified entry returns a signed receipt.
@@ -686,6 +822,228 @@ npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt;
         </p>
         <pre class="block mono">npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; [--domain &lt;slug&gt;] [--genesis &lt;key.json&gt;]
 npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; --join &lt;slug&gt;</pre>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Paid access: tiers and keys</h2>
+        <p class="note">
+          Section 9: "The log is free to read at low volume, forever. Revenue
+          comes from high-rate API access, structured feeds and webhooks, change
+          alerts." A tier is a daily cap and nothing else. The free tier carries
+          no key and is counted per client; the paid tiers carry a key and are
+          counted per key. Every paid read is priced at
+          ${READ_PRICE_MICROS_PER_READ} micro-USD whichever tier bought it, so a
+          tier buys throughput and never a discount.
+        </p>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>tier</th>
+                <th>name</th>
+                <th>reads per UTC day</th>
+                <th>key</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${Object.entries(RATE_TIERS).map(
+                ([slug, tier]) => html`<tr>
+                  <td class="mono">${slug}</td>
+                  <td>${tier.name}</td>
+                  <td class="mono">${tier.reads_per_day}</td>
+                  <td class="mono">${tier.key ? "required" : "none"}</td>
+                </tr>`,
+              )}
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          The free tier is <span class="mono">${FREE_TIER}</span>: a request with
+          no <span class="mono">Authorization</span> header at all is served on
+          it, counted against the address it came from. A paid read sends the key
+          as a bearer token, on <span class="mono">/read</span>,
+          <span class="mono">/sync</span> and the account doors below.
+        </p>
+        <pre class="block mono">Authorization: Bearer nmk_&lt;43 characters&gt;</pre>
+        <p class="note">
+          Every served response carries
+          <span class="mono">x-nomankind-tier</span>,
+          <span class="mono">x-nomankind-limit</span> and
+          <span class="mono">x-nomankind-remaining</span>. A key is refused in
+          one word, in the order the gate checks: a header that is not a
+          well-formed key is 401 <span class="mono">bad_key</span> before the
+          database is touched, a key nobody holds is 401
+          <span class="mono">unknown_key</span>, a canceled subscription is 402
+          <span class="mono">key_canceled</span> and one whose bill did not clear
+          is 402 <span class="mono">key_past_due</span>. A reader who mistyped
+          their key is told which rule refused them rather than "unauthorized".
+        </p>
+        <p class="note">
+          Past the cap the answer is 429 with
+          <span class="mono">retry-after</span> in seconds and this body. A door
+          charges after it has served, so a refusal costs nothing and a delta
+          page may overshoot the cap by the entries in the page that crossed it.
+        </p>
+        <pre class="block mono">{ "error": "rate_limited", "tier": "${EXAMPLE_TIER}", "limit": ${exampleCap},
+  "used": ${exampleCap}, "resets_at": "2026-09-12T00:00:00.000Z" }</pre>
+        ${endpoints(
+          "The key doors",
+          html`Buying one is the provider's hosted checkout and the claim that
+          follows it. The key is shown exactly once, at the claim: it is stored
+          here as a SHA-256 of the secret, so a copy of the key table cannot be
+          used to read as anybody, and a reader who loses a key cancels and buys
+          another.`,
+          KEY_PATH,
+        )}
+        <p class="note">
+          The claim answers JSON to an agent and a page to a browser, because the
+          provider's success redirect lands a person on it and a person owed a
+          credential should not be shown a JSON blob they may close. The JSON is
+          the contract; the page is the same fields, through the same layout
+          every other page uses, with the one warning that matters — the key is
+          on that page and nowhere else, ever again.
+        </p>
+        <p class="note">
+          The contributor pool's share of this revenue is
+          ${CONTRIBUTOR_SHARE_PERCENT} percent, at or above the published floor
+          of ${CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent. Both are on
+          <a href="/policy">the policy page</a>, and the share is a floor that
+          only rises.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Receipts for paid reads</h2>
+        <p class="note">
+          Every read receipt and every sync receipt now carries
+          <span class="mono">key</span> and
+          <span class="mono">key_counter</span>: the key's public id, never its
+          secret, and that key's own running number. Both are
+          <span class="mono">null</span> on a free read, and a receipt issued
+          before M24 carries neither property at all and verifies exactly as it
+          always did — the signing bytes cover the two fields only when the
+          object has them.
+        </p>
+        <p class="note">
+          Two counters rather than one, on purpose. The
+          <span class="mono">counter</span> is the log-wide running number shared
+          by every receipt this deployment has ever issued; the
+          <span class="mono">key_counter</span> is this key's own, so a holder
+          can say "I hold reads 1 through n of mine" without knowing what anybody
+          else read. <span class="mono">GET /keys/me/receipts</span> pages by the
+          second one.
+        </p>
+        <p class="note">
+          <span class="mono">GET /keys/me/usage</span> puts the two records side
+          by side, which is the check Section 9 asks readers to make. Its
+          <span class="mono">reads</span> is the quota counter the cap was
+          enforced against; its <span class="mono">published</span> is the sealed
+          <span class="mono">read_count</span> event for that day, whose
+          <span class="mono">paid.keys[&lt;key id&gt;]</span> is what the ledger
+          priced and what the provider's meter was told. A reader holding their
+          own receipts can add them up and compare all three, and a day where
+          they disagree is a day to ask about. The event's
+          <span class="mono">paid</span> block also carries
+          <span class="mono">reads</span> per entry and a
+          <span class="mono">total</span>, and the per-key counts sum to that
+          total.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Webhooks and change alerts</h2>
+        <p class="note">
+          An endpoint is a URL this deployment POSTs to when something a key
+          subscribed to changes in the sealed log. Sealed and never live: an
+          alert is only ever sent for an event a seal covers, and the body
+          carries that seal, so a subscriber woken by one can check it against
+          the root rather than taking this Worker's word for what happened.
+        </p>
+        ${endpoints(
+          "The webhook doors",
+          html`Each takes the holder's own key as a bearer token and charges no
+          quota: an endpoint is not a read. The filters are matched on equality,
+          and a field left out means "any".`,
+          ALERT_PATH,
+        )}
+        <p class="note">
+          The kinds are ${ALERT_KINDS.join(", ")}. Each is a moment already in
+          the log: a submission, the validation that verified or rejected the
+          entry, a reconfirmation, the verifying entry that superseded an earlier
+          one, and an upheld dispute. An alert is a notification of something
+          public and never a fact of its own.
+        </p>
+        <pre class="block mono">POST &lt;your endpoint&gt;
+content-type: application/json
+x-nomankind-alert: alert_&lt;16 hex&gt;
+x-nomankind-kind: verified
+x-nomankind-signature: t=&lt;unix seconds&gt;,v1=&lt;64 hex&gt;
+
+{ "id": "alert_&lt;16 hex&gt;", "kind": "verified", "entry_id": "nmk_...",
+  "domain": "ai-ecosystem", "subject": "&lt;provider&gt;/&lt;model&gt;",
+  "category": "pricing", "status": "verified", "entry_hash": "sha256:...",
+  "seq": 128, "seal": { "seq": 11, "root": "sha256:...", "sealed_at": "..." },
+  "at": "2026-09-11T12:00:00.000Z",
+  "links": { "entry": "/entries/nmk_...", "proof": "/events/128/proof" } }</pre>
+        <p class="note">
+          <span class="mono">links</span> are paths and not absolute URLs: a
+          subscriber knows the host it subscribed to, and a body that spelled one
+          would be this Worker guessing at its own public name.
+        </p>
+        <p class="note">
+          The signature recipe is exact, and it is the provider-webhook shape on
+          purpose, so a subscriber that already verifies one has a verifier for
+          this (${HASH_TAG_ALERT}). Take the
+          <span class="mono">t</span> from the header, join it to the raw request
+          body with a single <span class="mono">.</span>, take the HMAC-SHA256 of
+          those UTF-8 bytes under the endpoint's secret, and compare the
+          lowercase hex against <span class="mono">v1</span> in constant time.
+          Verify against the bytes that arrived, never a re-encoding of the
+          parsed JSON, and check that <span class="mono">t</span> is recent —
+          the timestamp is inside the signature, so a delivery captured off the
+          wire cannot be replayed later under a fresh one.
+        </p>
+        <pre class="block mono">signed = "&lt;t&gt;" + "." + &lt;raw body bytes&gt;
+v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
+        <p class="note">
+          A delivery is made once per matching endpoint, with a timeout of
+          ${ALERT_TIMEOUT_MS} ms. Any 2xx is delivered. Anything else — a status,
+          a timeout, a connection that never opened — is one more attempt, and
+          the next is scheduled on the published ladder, in minutes from the
+          attempt that failed: ${ALERT_RETRY_MINUTES.join(", ")}. Past the last
+          rung the delivery is <span class="mono">failed</span> rather than
+          retried forever, and
+          <span class="mono">GET /keys/me/webhooks/{id}/deliveries</span> says
+          what happened to every one of them. A failed delivery is the
+          endpoint's own problem and never the log's: nothing about the record
+          depends on an alert arriving.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">The provider's webhook</h2>
+        <p class="note">
+          <span class="mono">POST ${STRIPE.webhook_path}</span> is the one door
+          the payment provider knocks on, and it is not for callers. It trusts
+          nothing it is sent until the signature over the raw body verifies
+          against this deployment's own signing secret and the message's own
+          timestamp is inside ${STRIPE.webhook_tolerance_seconds} seconds of now;
+          a forged or stale one is 400
+          <span class="mono">bad_signature</span>. A deployment that takes no
+          money, which is production's state until M25, answers 503
+          <span class="mono">payments_unavailable</span> and goes on serving the
+          free tier.
+        </p>
+        <p class="note">
+          It may change exactly one column: a key's status. A message it has
+          already acted on answers 200
+          <span class="mono">{ received: true, outcome: "duplicate" }</span>,
+          because a provider retries and a retried cancellation must not cancel a
+          key that was paid for again in between. Everything it understood is
+          recorded — applied, ignored, or about a subscription nobody here holds
+          a key for — and everything is 200 after that, because a provider told
+          anything else retries a message that was already handled.
+        </p>
       </section>
 
       <section class="panel">

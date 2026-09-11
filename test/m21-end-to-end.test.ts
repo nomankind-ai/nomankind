@@ -47,6 +47,7 @@ import {
   exportPublicKeyRaw,
   generateKeypair,
 } from "../src/identity.js";
+import { mintKey } from "../src/keys.js";
 import type { LedgerRow } from "../src/ledger.js";
 import {
   DEFAULT_DOMAIN,
@@ -75,6 +76,7 @@ import {
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
 import { runSweep, type SweepReport } from "../src/worker/sweep.js";
+import { putKey } from "../src/storage/keys.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
   FixtureResolver,
@@ -199,11 +201,30 @@ function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, world.env, { ...world.deps, now });
 }
 
+/**
+ * The key every read in this file is served on (M24).
+ *
+ * Section 9 pays the contributor pool out of paid-read revenue, so the reads a
+ * money test makes have to be paid reads: a free read earns its holders nothing
+ * and would leave this file pricing a day nobody was billed for. One standard
+ * key, minted here and stored exactly as the claim door stores one.
+ */
+let readerSecret = "";
+
 async function read(
   path: string,
   now: Date = NOW,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await send(new Request(`${TEST_ORIGIN}${path}`), now);
+  const response = await send(
+    new Request(`${TEST_ORIGIN}${path}`, {
+      // Only the reading doors: the rest of the paths here are the log's own
+      // and are free to everyone, key or no key.
+      headers: path.startsWith("/read")
+        ? { authorization: `Bearer ${readerSecret}` }
+        : {},
+    }),
+    now,
+  );
   return {
     status: response.status,
     body: (await response.json()) as Record<string, unknown>,
@@ -512,6 +533,21 @@ beforeAll(async () => {
 
   const store = await openTestDatabase();
   const maintainer = await makeAgent();
+
+  // The reader whose reads this file prices: a standard key, active, stored the
+  // way GET /keys/claim stores one.
+  const minted = mintKey();
+  readerSecret = minted.secret;
+  await putKey(store.db, {
+    id: minted.id,
+    keyHash: await minted.hash,
+    tier: "standard",
+    status: "active",
+    customer: "cus_m21",
+    subscription: "sub_m21",
+    checkoutSession: "cs_m21",
+    createdAt: AT,
+  });
 
   k1 = await makeParty("k1.example");
   k2 = await makeParty("k2.example");
