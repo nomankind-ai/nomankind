@@ -56,6 +56,7 @@ import { DOMAIN_SLUGS, MIRROR, NORM_VERSION, SCHEMA_VERSION } from "./policy.js"
 import { deriveAttestation, type DerivedAttestation } from "./attest.js";
 import { bountyAccrual } from "./bounty.js";
 import { deriveEntry, type Sidecar } from "./derive.js";
+import { recordMeasured } from "./evidence.js";
 import {
   bountyAccrualRow,
   clawbackRows,
@@ -63,6 +64,7 @@ import {
   reconciliationRow,
   type EntryShareState,
   type LedgerRow,
+  type ReadShareSlotState,
 } from "./ledger.js";
 import {
   STANDING_FORMULA,
@@ -472,9 +474,28 @@ export function mirrorStanding(
 /** What pricing needs about an entry, held once per entry across the fold. */
 interface PricingState {
   readonly author_operator: string | null;
-  readonly read_share_slots: Sidecar["read_share_slots"];
+  readonly read_share_slots: readonly ReadShareSlotState[] | null;
   readonly expires_at: string | null;
   readonly verified: boolean;
+  /** The tier verification fixed (D-035), which is what the rate is read from. */
+  readonly effective_tier: Sidecar["effective_tier"];
+}
+
+/**
+ * Whether the holder seated at `seq` measured anything (decision D-087).
+ *
+ * The sweep asks the same question of the same event through `eventBySeq`; this
+ * asks it of the events the fold already holds, so two independent recomputes
+ * of one log give one answer. An event that is not in the range, or is not a
+ * validation or a reconfirmation, is false — the stated rate.
+ */
+function slotMeasured(bySeq: ReadonlyMap<number, Event>, seq: number): boolean {
+  const event = bySeq.get(seq);
+  if (event === undefined) return false;
+  if (isType(event, "validation") || isType(event, "reconfirmation")) {
+    return recordMeasured(event.payload.record);
+  }
+  return false;
 }
 
 /** The `dispute_filed` an outcome settles, or null when the range holds none. */
@@ -561,6 +582,7 @@ export function mirrorLedgerRows(
   const ordered = inSeqOrder(events);
   const rows: LedgerRow[] = [];
   const states = new Map<string, PricingState | null>();
+  const bySeq = new Map<number, Event>(ordered.map((event) => [event.seq, event]));
 
   const stateOf = (entryId: string): PricingState | null => {
     const held = states.get(entryId);
@@ -571,11 +593,20 @@ export function mirrorLedgerRows(
       const entry = derived.entry as unknown as Record<string, unknown>;
       const author = entry["author_operator"];
       const expires = entry["expires_at"];
+      const slots = derived.sidecar.read_share_slots;
       state = {
         author_operator: typeof author === "string" ? author : null,
-        read_share_slots: derived.sidecar.read_share_slots,
+        read_share_slots:
+          slots === null
+            ? null
+            : slots.map((slot) => ({
+                operator: slot.operator,
+                seq: slot.seq,
+                measured: slotMeasured(bySeq, slot.seq),
+              })),
         expires_at: typeof expires === "string" ? expires : null,
         verified: typeof entry["verified_at"] === "string",
+        effective_tier: derived.sidecar.effective_tier,
       };
     } catch {
       // An entry the sealed events carry no submission for is not part of the
@@ -600,6 +631,7 @@ export function mirrorLedgerRows(
           // day's reads into half a day's.
           stale: state.expires_at !== null && state.expires_at < date,
           verified: state.verified,
+          effective_tier: state.effective_tier,
         };
       });
       // Every share row of one entry carries that entry's published count, so

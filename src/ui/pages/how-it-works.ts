@@ -139,10 +139,13 @@ export function renderHowItWorks(
 ): string {
   // 15/5/5/5: the submitter's share and one slot holder's, repeated for every
   // slot there is. Written from the two policy numbers rather than typed out, so
-  // a fourth slot or a different split moves this line with it.
+  // a fourth slot or a different split moves this line with it. The stated
+  // tier's split, which is the launch one; the observed tier's larger split
+  // (D-087) is named in full on /policy.
+  const stated = READ_SHARE_SPLIT.stated;
   const splitShares = [
-    READ_SHARE_SPLIT.submitter,
-    ...Array.from({ length: SLOT_COUNT }, () => READ_SHARE_SPLIT.validator),
+    stated.submitter,
+    ...Array.from({ length: SLOT_COUNT }, () => stated.validator),
   ].join("/");
   const witnessPins = new Set(WITNESS_PIN.map((pin) => pin.operator)).size;
   const exampleId = data.entry === null ? "<entry-id>" : data.entry.id;

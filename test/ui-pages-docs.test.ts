@@ -15,6 +15,8 @@
  * on what the browser refused is a page nobody sees.
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { HASH_TAG_ALERT } from "../src/alerts.js";
 import { ANSWER_REFUSALS, SCORE_REFUSALS } from "../src/attest.js";
@@ -240,11 +242,6 @@ describe("renderPolicy", () => {
 
     for (const [name, value] of [
       ["FREE_TIER", POLICY.FREE_TIER],
-      [
-        "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
-        `${POLICY.CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent`,
-      ],
-      ["CONTRIBUTOR_SHARE_PERCENT", `${POLICY.CONTRIBUTOR_SHARE_PERCENT} percent`],
       ["ALERT_ENDPOINTS_PER_KEY", String(POLICY.ALERT_ENDPOINTS_PER_KEY)],
       ["ALERT_TIMEOUT_MS", `${POLICY.ALERT_TIMEOUT_MS} ms`],
       ["ALERT_RETRY_MINUTES", POLICY.ALERT_RETRY_MINUTES.join(", ")],
@@ -268,6 +265,57 @@ describe("renderPolicy", () => {
     }
   });
 
+  it("publishes the read-share split per evidence tier, both rows, from POLICY", () => {
+    // Decision D-087, and Section 9's "observed entries take a larger read
+    // share than stated ones, by published policy". Two rows and not one, each
+    // naming both roles, and every number read off the frozen object: a page
+    // that printed one split would be publishing a rule the ledger no longer
+    // applies, and a literal here would let the page and the module disagree.
+    expect(page).toContain(">Money and standing</h2>");
+    for (const [tier, split] of Object.entries(POLICY.READ_SHARE_SPLIT)) {
+      expect(page, `READ_SHARE_SPLIT.${tier} has no row`).toContain(
+        `<td class="mono">READ_SHARE_SPLIT.${tier}</td>`,
+      );
+      expect(page, `READ_SHARE_SPLIT.${tier} does not print its value`).toContain(
+        `<td class="mono">submitter ${split.submitter} percent · validator ${split.validator} percent</td>`,
+      );
+    }
+    // The observed row is the larger one, which is the whole point of there
+    // being two of them.
+    expect(POLICY.READ_SHARE_SPLIT.observed.submitter).toBeGreaterThan(
+      POLICY.READ_SHARE_SPLIT.stated.submitter,
+    );
+    expect(POLICY.READ_SHARE_SPLIT.observed.validator).toBeGreaterThan(
+      POLICY.READ_SHARE_SPLIT.stated.validator,
+    );
+    // The pool per tier, beside the one floor both of them sit above.
+    expect(page).toContain(
+      `<td class="mono">CONTRIBUTOR_SHARE_FLOOR_PERCENT</td>`,
+    );
+    expect(page).toContain(
+      `<td class="mono">${POLICY.CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent</td>`,
+    );
+    for (const [tier, percent] of Object.entries(
+      POLICY.CONTRIBUTOR_SHARE_PERCENT,
+    )) {
+      expect(page, `CONTRIBUTOR_SHARE_PERCENT.${tier} has no row`).toContain(
+        `<td class="mono">CONTRIBUTOR_SHARE_PERCENT.${tier}</td>`,
+      );
+      expect(page).toContain(`<td class="mono">${percent} percent</td>`);
+      expect(percent).toBeGreaterThanOrEqual(
+        POLICY.CONTRIBUTOR_SHARE_FLOOR_PERCENT,
+      );
+    }
+    // The rule beside the numbers: the observed validator rate is earned by a
+    // measurement, and the difference never reaches the reader's price. Both
+    // sentences are interpolated, so the apostrophes are escaped ones.
+    expect(page).toContain("larger than the stated row above");
+    expect(page).toContain(
+      "only when its own signed record carried a passing measurement",
+    );
+    expect(page).toContain("never out of the reader&#39;s price");
+  });
+
   it("has no placeholder left: every number the paper names is published", () => {
     // M21 published the standing formula, the price, the payout minimum and the
     // cycle; M24 published the tiers, the rate limits and the alert numbers, so
@@ -287,6 +335,11 @@ describe("renderPolicy", () => {
       [
         "STANDING_VALIDATION_ASSIGNED",
         `${POLICY.STANDING_VALIDATION_ASSIGNED} standing`,
+      ],
+      // D-087: the standing side of "the operators who measure are paid more".
+      [
+        "STANDING_VALIDATION_REPRODUCED",
+        `${POLICY.STANDING_VALIDATION_REPRODUCED} standing`,
       ],
       [
         "STANDING_SUBMISSION_VERIFIED",
@@ -1153,6 +1206,33 @@ describe("renderApi", () => {
     );
   });
 
+  it("documents the per-tier split and the measured rule (D-087)", () => {
+    // Section 9's promise, on the page a caller reads before they call: both
+    // splits by number, what earns the observed validator rate, and the two ref
+    // fields a row carries so the caller can check a row against the rule.
+    expect(page).toContain("What the ledger pays, per evidence tier");
+    for (const [tier, split] of Object.entries(POLICY.READ_SHARE_SPLIT)) {
+      expect(page, `${tier} submitter rate is not documented`).toContain(
+        `${split.submitter} percent`,
+      );
+      expect(page, `${tier} validator rate is not documented`).toContain(
+        `${split.validator} percent`,
+      );
+    }
+    expect(page).toContain(
+      `${POLICY.CONTRIBUTOR_SHARE_PERCENT.observed} percent of a read of an`,
+    );
+    expect(page).toContain("carries a passing measurement");
+    expect(page).toContain("paid at the stated rate on the same entry");
+    // The two fields the ledger row actually carries, named as fields.
+    expect(page).toContain("<span class=\"mono\">tier</span>");
+    expect(page).toContain("<span class=\"mono\">measured</span>");
+    // And the reader's side of it: one price per read, whatever the tier.
+    expect(page).toContain(
+      `${POLICY.READ_PRICE_MICROS_PER_READ} micro-USD whatever tier the entry is`,
+    );
+  });
+
   it("counts the status stages as the status rules count them", () => {
     // The mirror export is a stage of the pipeline now, so the endpoint's own
     // description says thirteen: a page naming twelve would be documenting a
@@ -1761,5 +1841,76 @@ describe("LANDING_CSS", () => {
 
   it("stacks the grids on a narrow viewport", () => {
     expect(LANDING_CSS).toContain("@media (max-width: 900px)");
+  });
+});
+
+/**
+ * The two spec files, read as files (decision D-087).
+ *
+ * A page can be made to say anything the test asks for. The paper and the
+ * README are the documents the pages are checked against, so the rule that
+ * observed entries pay more has to be in them, labeled, and in the section it
+ * belongs to — beside the sentence it makes precise and not appended somewhere
+ * a reader of that sentence would never reach it.
+ */
+const whitepaper = readFileSync(
+  fileURLToPath(new URL("../paper/WHITEPAPER.md", import.meta.url)),
+  "utf8",
+);
+const readme = readFileSync(
+  fileURLToPath(new URL("../README.md", import.meta.url)),
+  "utf8",
+);
+
+describe("the paper and the README carry observed pays more (D-087)", () => {
+  it("labels the money side in Section 9, after the promise it makes precise", () => {
+    const promise = whitepaper.indexOf(
+      "paid more than the operators who copy (Section 4).",
+    );
+    const addition = whitepaper.indexOf(
+      "[Spec change 2026-09-11, D-087] The split is published per evidence tier",
+    );
+    expect(promise).toBeGreaterThan(-1);
+    expect(addition).toBeGreaterThan(promise);
+    expect(whitepaper).toContain("READ_SHARE_SPLIT in the policy module");
+    expect(whitepaper).toContain("the tier is the one fixed when the entry verified");
+    expect(whitepaper).toContain(
+      "only when its own signed record carries a passing measurement",
+    );
+    expect(whitepaper).toContain(
+      "a validator who accepted the test without running it is paid at the stated rate",
+    );
+    expect(whitepaper).toContain("rather than moving the reader's price");
+  });
+
+  it("labels the standing side in Section 4, beside the tier sentence", () => {
+    const tiers = whitepaper.indexOf("is paid more for it (Section 9)");
+    const standing = whitepaper.indexOf(
+      "[Spec change 2026-09-11, D-087] The standing side of the same rule is STANDING_VALIDATION_REPRODUCED",
+    );
+    const money = whitepaper.indexOf(
+      "[Spec change 2026-09-11, D-087] The split is published per evidence tier",
+    );
+    expect(tiers).toBeGreaterThan(-1);
+    expect(standing).toBeGreaterThan(tiers);
+    // Section 4 comes before Section 9, so the standing sentence comes first:
+    // a paragraph landing in the wrong section would still contain the words.
+    expect(standing).toBeLessThan(money);
+    expect(whitepaper).toContain(
+      "earns it beside the assigned or volunteered amount",
+    );
+  });
+
+  it("names the rule in the README, in the section about the ledger", () => {
+    const section = readme.indexOf("## Standing and the ledger");
+    const rule = readme.indexOf("**Observed pays more**");
+    const next = readme.indexOf("## Attesting a model");
+    expect(section).toBeGreaterThan(-1);
+    expect(rule).toBeGreaterThan(section);
+    expect(rule).toBeLessThan(next);
+    expect(readme).toContain("`READ_SHARE_SPLIT.observed`");
+    expect(readme).toContain("`STANDING_VALIDATION_REPRODUCED`");
+    expect(readme).toContain("`measured` on a slot holder");
+    expect(readme).toContain("never out of the reader's price");
   });
 });

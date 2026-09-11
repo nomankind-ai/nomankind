@@ -17,6 +17,8 @@ import { describe, expect, it } from "vitest";
 import {
   DISPUTE_STAKE_STANDING,
   POLICY,
+  REPRODUCTION_HOLDS,
+  REPRODUCTION_RUNS,
   REVALIDATION_REQUEST_STAKE_STANDING,
   STANDING_ASSIGNMENT_MISSED,
   STANDING_DISPUTE_UPHELD,
@@ -24,6 +26,7 @@ import {
   STANDING_SUBMISSION_VERIFIED,
   STANDING_TRUSTED_ENTRY,
   STANDING_VALIDATION_ASSIGNED,
+  STANDING_VALIDATION_REPRODUCED,
   STANDING_VALIDATION_VOLUNTEERED,
   STANDING_FORMULA,
   appendEvent,
@@ -214,6 +217,93 @@ describe("standingAt", () => {
     expect(STANDING_VALIDATION_ASSIGNED).toBeGreaterThan(
       STANDING_VALIDATION_VOLUNTEERED,
     );
+  });
+
+  it("pays a validator that measured beside the credit for the decision (D-087)", async () => {
+    // Section 4: "the operators who measure are paid more than the operators
+    // who copy." The standing side of that rule: the same volunteered
+    // validation, once with a passing n-of-k measurement and once without.
+    let events = await verified();
+    const copier = standingOf(events, VALIDATORS[0], HEAD);
+    expect(copier.earned).toBe(STANDING_VALIDATION_VOLUNTEERED);
+    expect(copier.counts.validations_reproduced).toBe(0);
+
+    events = await seal(events, {
+      type: "validation",
+      entry_id: ENTRY,
+      payload: {
+        record: {
+          ...approval(VALIDATORS[2], false, at(events.length)),
+          test_accepted: true,
+          observation: {
+            method: "completed_request",
+            runs: REPRODUCTION_RUNS,
+            holds: REPRODUCTION_HOLDS,
+          },
+        } as ApproverRecord,
+        signature: "c2ln",
+      },
+    });
+    const measurer = standingOf(events, VALIDATORS[2], HEAD);
+    expect(measurer.earned).toBe(
+      STANDING_VALIDATION_VOLUNTEERED + STANDING_VALIDATION_REPRODUCED,
+    );
+    expect(measurer.counts.validations_volunteered).toBe(1);
+    expect(measurer.counts.validations_reproduced).toBe(1);
+    expect(measurer.earned).toBeGreaterThan(copier.earned);
+  });
+
+  it("pays nothing extra for a measurement that did not pass the n-of-k rule", async () => {
+    let events = await verified();
+    events = await seal(events, {
+      type: "validation",
+      entry_id: ENTRY,
+      payload: {
+        record: {
+          ...approval(VALIDATORS[2], false, at(events.length)),
+          test_accepted: true,
+          // Accepted the test, ran it, and it did not hold often enough: the
+          // decision is paid, the measurement is not.
+          observation: {
+            method: "completed_request",
+            runs: REPRODUCTION_RUNS,
+            holds: REPRODUCTION_HOLDS - 1,
+          },
+        } as ApproverRecord,
+        signature: "c2ln",
+      },
+    });
+    const standing = standingOf(events, VALIDATORS[2], HEAD);
+    expect(standing.earned).toBe(STANDING_VALIDATION_VOLUNTEERED);
+    expect(standing.counts.validations_reproduced).toBe(0);
+  });
+
+  it("pays a reconfirmation that measured the same way", async () => {
+    let events = await verified();
+    events = await seal(events, {
+      type: "reconfirmation",
+      entry_id: ENTRY,
+      payload: {
+        record: {
+          agent: `1F916:agent-${VALIDATORS[2]}`,
+          operator: VALIDATORS[2],
+          snapshot_hash: `sha256:${"4d".repeat(32)}`,
+          reproduction: {
+            method: "rerun_prompt",
+            runs: REPRODUCTION_RUNS,
+            holds: REPRODUCTION_RUNS,
+          },
+          observation: null,
+          signed_at: at(events.length),
+        },
+        signature: "c2ln",
+      },
+    });
+    const standing = standingOf(events, VALIDATORS[2], HEAD);
+    expect(standing.earned).toBe(
+      STANDING_VALIDATION_VOLUNTEERED + STANDING_VALIDATION_REPRODUCED,
+    );
+    expect(standing.counts.validations_reproduced).toBe(1);
   });
 
   it("pays the submitter's operator once, and only once the entry verifies", async () => {

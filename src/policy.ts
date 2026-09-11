@@ -525,11 +525,38 @@ export function attestationFor(
 export const HOLDBACK_DAYS = 30;
 
 /**
- * Incentives / Money. Of paid-read revenue, fifteen percent goes to the
- * submitter and five to each of the three validators.
+ * The two evidence tiers, named here rather than imported (decision D-087).
+ *
+ * src/evidence.ts owns `EvidenceTier` and it is the same pair of strings, but
+ * evidence imports this module for REPRODUCTION_RUNS and the domain tables, and
+ * policy must not import back: a policy number that depended on a rule would be
+ * a rule. The two are checked against each other in test/policy.test.ts.
  */
-export const READ_SHARE_SPLIT: Readonly<{ submitter: number; validator: number }> =
-  Object.freeze({ submitter: 15, validator: 5 });
+type SplitTier = "stated" | "observed";
+
+/**
+ * Incentives / Money, per evidence tier (decision D-087).
+ *
+ * Of paid-read revenue, fifteen percent goes to the submitter of a stated entry
+ * and five to each of its three validators — the paper's launch split. An
+ * observed entry pays more, twenty and seven: Section 4, "A submitter who can
+ * measure a fact may submit it as observed, and is paid more for it", and
+ * Section 9, "observed entries take a larger read share than stated ones, by
+ * published policy, so the operators who measure are paid more than the
+ * operators who copy".
+ *
+ * The difference comes out of nomankind's own share and never out of the
+ * reader's price, which stays one number per read
+ * (READ_PRICE_MICROS_PER_READ). Not whitepaper numbers: the paper names the
+ * rule and states no amount, so both splits are the maintainer's published
+ * placeholders, moving only by a later decision.
+ */
+export const READ_SHARE_SPLIT: Readonly<
+  Record<SplitTier, Readonly<{ submitter: number; validator: number }>>
+> = Object.freeze({
+  stated: Object.freeze({ submitter: 15, validator: 5 }),
+  observed: Object.freeze({ submitter: 20, validator: 7 }),
+});
 
 /**
  * The log / Incentives. An entry's read share is always split among exactly one
@@ -538,10 +565,13 @@ export const READ_SHARE_SPLIT: Readonly<{ submitter: number; validator: number }
 export const SLOT_COUNT = 3;
 
 /**
- * Incentives / Money. Thirty percent of paid-read revenue goes to the
- * contributor pool at launch: 15 + 3 x 5.
+ * Incentives / Money. What reaches the contributor pool, per tier: the
+ * submitter's share plus SLOT_COUNT validators' — 30 on a stated entry
+ * (15 + 3 x 5) and 41 on an observed one (20 + 3 x 7). Both at or above the
+ * published floor, which is what "a floor that only rises" means.
  */
-export const CONTRIBUTOR_SHARE_PERCENT = 30;
+export const CONTRIBUTOR_SHARE_PERCENT: Readonly<Record<SplitTier, number>> =
+  Object.freeze({ stated: 30, observed: 41 });
 
 /**
  * Lifecycle of an entry (Seal). Witnesses countersign the registry head at an
@@ -961,6 +991,18 @@ export const STANDING_OVERTURNED_SIGNER = 5;
 export const STANDING_ASSIGNMENT_MISSED = 2;
 
 /**
+ * Incentives / Standing (decision D-087): a validation or reconfirmation whose
+ * signed record carries a passing n-of-k measurement earns this beside
+ * STANDING_VALIDATION_ASSIGNED or STANDING_VALIDATION_VOLUNTEERED, so the
+ * trusted pool tilts toward the operators who measure rather than the ones who
+ * accept a test without running it (Section 4, Section 9).
+ *
+ * Not a whitepaper number: the maintainer's own placeholder, moving only by a
+ * later decision, exactly as the six above it.
+ */
+export const STANDING_VALIDATION_REPRODUCED = 2;
+
+/**
  * Incentives / Standing: standing "gates everything discretionary, from entry to
  * and stay in the trusted pool". Two numbers rather than one, because a single
  * threshold would flap: an operator sitting exactly at the bar would be trusted
@@ -1208,6 +1250,7 @@ export const POLICY = Object.freeze({
   STANDING_DISPUTE_UPHELD,
   STANDING_OVERTURNED_SIGNER,
   STANDING_ASSIGNMENT_MISSED,
+  STANDING_VALIDATION_REPRODUCED,
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
   STANDING_DECAY_PAUSED,

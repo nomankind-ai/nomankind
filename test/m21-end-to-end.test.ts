@@ -677,9 +677,9 @@ describe("after a sweep, standing", () => {
     // One submitter and the two operators that verified it: three shares of two
     // reads, at the published price and the published split.
     expect(rows.map((row) => [row.operator, row.amount])).toEqual([
-      [k1.operator, share(2, READ_SHARE_SPLIT.submitter)],
-      [k2.operator, share(2, READ_SHARE_SPLIT.validator)],
-      [k3.operator, share(2, READ_SHARE_SPLIT.validator)],
+      [k1.operator, share(2, READ_SHARE_SPLIT.stated.submitter)],
+      [k2.operator, share(2, READ_SHARE_SPLIT.stated.validator)],
+      [k3.operator, share(2, READ_SHARE_SPLIT.stated.validator)],
     ]);
     expect(rows[0]!.available_at).toBe(`${dayDate(HOLDBACK_DAYS)}T00:00:00.000Z`);
 
@@ -714,11 +714,11 @@ describe("an operator whose released rows sit below the minimum", () => {
     const ledger = await ledgerOf(k1.operator, at);
     expect(ledger.balance["held"]).toBe(0);
     expect(ledger.balance["released"]).toBe(
-      share(2, READ_SHARE_SPLIT.submitter),
+      share(2, READ_SHARE_SPLIT.stated.submitter),
     );
     expect(ledger.balance["paid"]).toBe(0);
     expect(ledger.balance["carried_forward"]).toBe(
-      share(2, READ_SHARE_SPLIT.submitter),
+      share(2, READ_SHARE_SPLIT.stated.submitter),
     );
     expect(await payoutRows(world.store.db, LIST_PAGE_LIMIT)).toEqual([]);
   }, 600_000);
@@ -743,7 +743,7 @@ describe("a dispute upheld after the holdback", () => {
     const ledger = await ledgerOf(k2.operator, at);
     expect(ledger.balance["clawed_back"]).toBe(0);
     expect(ledger.balance["released"]).toBe(
-      share(2, READ_SHARE_SPLIT.validator),
+      share(2, READ_SHARE_SPLIT.stated.validator),
     );
 
     // The signers burn, and the challenger earns.
@@ -844,9 +844,9 @@ describe("a stale entry", () => {
       (row) => row.date === dayDate(STALE_READ_DAY),
     );
     const full = [
-      share(2, READ_SHARE_SPLIT.submitter),
-      share(2, READ_SHARE_SPLIT.validator),
-      share(2, READ_SHARE_SPLIT.validator),
+      share(2, READ_SHARE_SPLIT.stated.submitter),
+      share(2, READ_SHARE_SPLIT.stated.validator),
+      share(2, READ_SHARE_SPLIT.stated.validator),
     ];
     expect(shares.map((row) => [row.operator, row.amount])).toEqual([
       [k1.operator, Math.floor(full[0]! / 2)],
@@ -925,10 +925,10 @@ describe("a day of reads over an entry with a submitter and three slots", () => 
       (row) => row.date === dayDate(FRESH_READ_DAY),
     );
     expect(shares.map((row) => [row.operator, row.role, row.amount])).toEqual([
-      [k1.operator, "submitter", share(3, READ_SHARE_SPLIT.submitter)],
-      [k2.operator, "validator", share(3, READ_SHARE_SPLIT.validator)],
-      [k3.operator, "validator", share(3, READ_SHARE_SPLIT.validator)],
-      [k4.operator, "validator", share(3, READ_SHARE_SPLIT.validator)],
+      [k1.operator, "submitter", share(3, READ_SHARE_SPLIT.stated.submitter)],
+      [k2.operator, "validator", share(3, READ_SHARE_SPLIT.stated.validator)],
+      [k3.operator, "validator", share(3, READ_SHARE_SPLIT.stated.validator)],
+      [k4.operator, "validator", share(3, READ_SHARE_SPLIT.stated.validator)],
     ]);
     // Fresh again, so nothing is withheld on that day.
     expect(

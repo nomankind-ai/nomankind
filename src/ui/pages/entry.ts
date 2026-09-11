@@ -908,6 +908,36 @@ function stakes(data: EntryData): Safe {
  * summed and nothing is derived: a total on this page would be a second answer
  * to a question the ledger endpoint already answers from the same rows.
  */
+/**
+ * What rate one read-share row was priced at, in the row's own words.
+ *
+ * Section 9, as of decision D-087: the split is published per evidence tier, so
+ * a row that says only its amount no longer says why that amount. The rate is
+ * read back out of `ref` — the percent the ledger applied, the entry's tier as
+ * verification fixed it, and on a slot holder's row whether that holder's own
+ * signed record carried a passing measurement — and never recomputed here: a
+ * page that reapplied the rule would be a second answer to it, and a split that
+ * moved by decision would silently restate a row it never priced.
+ *
+ * On an observed entry the submitter takes the observed rate and a slot holder
+ * takes it only when it measured, which is the whole of Section 4's "paid more
+ * for it" on one line. A row written before D-087 carries no tier at all, so it
+ * renders its percent alone rather than being labeled with a tier nobody
+ * priced it under.
+ */
+function shareRate(ref: Record<string, unknown>): string | null {
+  const percent = ref["share_percent"];
+  if (typeof percent !== "number") return null;
+  const tier = ref["tier"];
+  if (typeof tier !== "string") return `${percent} percent`;
+  const measured = ref["measured"];
+  const holder = typeof measured === "boolean";
+  const observed = tier === "observed" && (!holder || measured === true);
+  const rate = observed ? "observed rate" : "stated rate";
+  const suffix = holder && measured === true ? " · measured" : "";
+  return `${percent} percent · ${rate}${suffix}`;
+}
+
 function readShares(data: EntryData): Safe {
   if (data.readShares.length === 0) {
     return html`<section class="panel">
@@ -933,6 +963,7 @@ function readShares(data: EntryData): Safe {
             <th>role</th>
             <th>date</th>
             <th>reads</th>
+            <th>rate</th>
             <th>amount</th>
             <th>available at</th>
           </tr>
@@ -951,6 +982,7 @@ function readShares(data: EntryData): Safe {
               <td>${row.role ?? EM_DASH}</td>
               <td class="dim">${fmtDate(row.date)}</td>
               <td class="dim">${row.reads === null ? EM_DASH : `${row.reads}`}</td>
+              <td class="dim">${shareRate(row.ref) ?? EM_DASH}</td>
               <td>${row.amount} ${row.unit}</td>
               <td class="dim">${fmtInstant(row.available_at)}</td>
             </tr>`,
@@ -963,6 +995,17 @@ function readShares(data: EntryData): Safe {
       it next collects it, which is the bounty accrual beside it. A row's
       available_at is when it may leave, thirty days after the day it accrued;
       a clawback carries the same instant as the share it negates.
+    </p>
+    <p class="note">
+      The rate column is what the ledger applied, read off the row and not
+      recomputed: the percent, and the evidence tier the entry verified at, since
+      the split is published per tier and an observed entry pays more than a
+      stated one. A slot holder's row says measured when that holder's own signed
+      record carried a passing measurement, which is what earns it the observed
+      validator rate — a validator that accepted the test without running it is
+      paid at the stated rate, and the difference stays with nomankind rather
+      than moving the reader's price. A row priced before the per-tier split was
+      published names its percent and no tier.
     </p>
   </section>`;
 }

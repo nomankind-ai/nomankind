@@ -25,6 +25,7 @@ import {
   LIST_PAGE_LIMIT,
   RATE_TIERS,
   READ_PRICE_MICROS_PER_READ,
+  READ_SHARE_SPLIT,
   SCHEMA_VERSION,
   STRIPE,
 } from "../../policy.js";
@@ -259,7 +260,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/operators/{id}/ledger",
     parameters: "—",
     answers:
-      `One operator's money: operator, balance (accrued, held, released, clawed_back, paid, carried_forward, all in micro-USD), and rows — the newest ${LIST_PAGE_LIMIT} ledger rows, newest first, each with id, kind, entry_id, operator, role, date, reads, unit, amount, available_at, seq, at, ref.`,
+      `One operator's money: operator, balance (accrued, held, released, clawed_back, paid, carried_forward, all in micro-USD), and rows — the newest ${LIST_PAGE_LIMIT} ledger rows, newest first, each with id, kind, entry_id, operator, role, date, reads, unit, amount, available_at, seq, at, ref. A read_share row's ref carries price_micros_per_read, share_percent, stale, the entry's evidence tier as tier, and on a slot holder's row measured — whether that holder's own signed record carried a passing measurement, which is what decides between the two validator rates.`,
     refusals: "404 not_found.",
   },
   {
@@ -487,7 +488,7 @@ const KEY_PATH: readonly Endpoint[] = [
     path: "/keys/tiers",
     parameters: "—",
     answers:
-      "What is on sale: tiers (each with name, reads_per_day and key), price_micros_per_read, contributor_share_percent, contributor_share_floor_percent. Free and unauthenticated, which is the whole point of it.",
+      "What is on sale: tiers (each with name, reads_per_day and key), price_micros_per_read, contributor_share_percent — an object keyed by evidence tier, stated and observed, because the split is published per tier and the observed one is larger — and contributor_share_floor_percent, the floor both of them sit at or above. Free and unauthenticated, which is the whole point of it.",
     refusals: "405 with Allow: GET.",
   },
   {
@@ -904,9 +905,11 @@ npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; --join &l
           on that page and nowhere else, ever again.
         </p>
         <p class="note">
-          The contributor pool's share of this revenue is
-          ${CONTRIBUTOR_SHARE_PERCENT} percent, at or above the published floor
-          of ${CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent. Both are on
+          The contributor pool's share of this revenue is published per evidence
+          tier: ${CONTRIBUTOR_SHARE_PERCENT.stated} percent of a read of a stated
+          entry and ${CONTRIBUTOR_SHARE_PERCENT.observed} percent of a read of an
+          observed one, each at or above the published floor of
+          ${CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent. All three are on
           <a href="/policy">the policy page</a>, and the share is a floor that
           only rises.
         </p>
@@ -1043,6 +1046,41 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
           recorded — applied, ignored, or about a subscription nobody here holds
           a key for — and everything is 200 after that, because a provider told
           anything else retries a message that was already handled.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">What the ledger pays, per evidence tier</h2>
+        <p class="note">
+          Section 9: "observed entries take a larger read share than stated ones,
+          by published policy, so the operators who measure are paid more than
+          the operators who copy". The split is published per tier and read off
+          <a href="/policy">the policy page</a>: on a stated entry
+          ${READ_SHARE_SPLIT.stated.submitter} percent of the read goes to the
+          submitter's operator and ${READ_SHARE_SPLIT.stated.validator} percent
+          to each read-share slot holder; on an observed entry
+          ${READ_SHARE_SPLIT.observed.submitter} percent and
+          ${READ_SHARE_SPLIT.observed.validator} percent. The tier that prices a read is
+          the one fixed when the entry verified, so a reconfirmation never
+          reprices the entry into another tier.
+        </p>
+        <p class="note">
+          The observed validator rate is earned rather than inherited. A slot
+          holder takes it only when its own signed record — the approval or the
+          reconfirmation that seated it — carries a passing measurement under the
+          n-of-k rule; a validator that accepted the test without running it is
+          paid at the stated rate on the same entry, and a slot whose seating
+          event cannot be read is priced at the stated rate rather than an
+          invented observed one. Every row says which it was: the ref on a
+          read_share row carries <span class="mono">tier</span> and, on a slot
+          holder's row, <span class="mono">measured</span>, beside the
+          <span class="mono">share_percent</span> actually applied.
+        </p>
+        <p class="note">
+          The difference between the two splits comes out of nomankind's share
+          and never out of the reader's: a paid read is
+          ${READ_PRICE_MICROS_PER_READ} micro-USD whatever tier the entry is, so
+          no reader pays more for an observed fact than for a stated one.
         </p>
       </section>
 
