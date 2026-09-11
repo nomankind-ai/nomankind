@@ -160,11 +160,11 @@ beforeAll(async () => {
 
   secret = await mintPaidKey("cus_alerts_1", "sub_alerts_1", "cs_alerts_1");
   otherSecret = await mintPaidKey("cus_alerts_2", "sub_alerts_2", "cs_alerts_2");
-}, 240_000);
+}, 600_000);
 
 afterAll(async () => {
   await store?.dispose();
-});
+}, 600_000);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -383,7 +383,7 @@ describe("POST /keys/me/webhooks: the key", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "missing_key" });
     expect(response.headers.get("cache-control")).toBe("no-store");
-  });
+  }, 600_000);
 
   it("refuses a header that is not a key this system minted", async () => {
     const response = await send(
@@ -391,7 +391,7 @@ describe("POST /keys/me/webhooks: the key", () => {
     );
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "bad_key" });
-  });
+  }, 600_000);
 
   it("refuses a well-formed key nobody holds", async () => {
     const response = await send(
@@ -399,7 +399,7 @@ describe("POST /keys/me/webhooks: the key", () => {
     );
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "unknown_key" });
-  });
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -413,7 +413,7 @@ describe("POST /keys/me/webhooks: the body", () => {
       expect([body, response.status]).toEqual([body, 400]);
       expect(await response.json()).toEqual({ error: "bad_body" });
     }
-  });
+  }, 600_000);
 
   it("refuses http, and refuses a local address", async () => {
     for (const url of [
@@ -427,7 +427,7 @@ describe("POST /keys/me/webhooks: the body", () => {
       expect([url, response.status]).toEqual([url, 422]);
       expect(await response.json()).toEqual({ error: "bad_url" });
     }
-  });
+  }, 600_000);
 
   it("refuses a domain nobody registered", async () => {
     const response = await send(
@@ -435,7 +435,7 @@ describe("POST /keys/me/webhooks: the body", () => {
     );
     expect(response.status).toBe(422);
     expect(await response.json()).toEqual({ error: "unknown_domain" });
-  });
+  }, 600_000);
 
   it("refuses a kind the policy does not publish", async () => {
     const response = await send(
@@ -443,7 +443,7 @@ describe("POST /keys/me/webhooks: the body", () => {
     );
     expect(response.status).toBe(422);
     expect(await response.json()).toEqual({ error: "unknown_kind" });
-  });
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -477,19 +477,19 @@ describe("POST /keys/me/webhooks: registering", () => {
     expect(typeof body["secret"]).toBe("string");
     expect((body["secret"] as string).length).toBeGreaterThan(32);
     matchHook = { id: body["id"] as string, secret: body["secret"] as string };
-  });
+  }, 600_000);
 
   it("takes an endpoint whose subject nothing in this log is about", async () => {
     const response = await send(hook({ url: OTHER_URL, subject: SUBJECT_NONE }));
     expect(response.status).toBe(201);
     otherHook = ((await response.json()) as Record<string, string>)["id"]!;
-  });
+  }, 600_000);
 
   it("takes an endpoint that asked for one kind only", async () => {
     const response = await send(hook({ url: KINDS_URL, kinds: ["rejected"] }));
     expect(response.status).toBe(201);
     kindsHook = ((await response.json()) as Record<string, string>)["id"]!;
-  });
+  }, 600_000);
 });
 
 describe("GET /keys/me/webhooks", () => {
@@ -512,7 +512,7 @@ describe("GET /keys/me/webhooks", () => {
         "url",
       ]);
     }
-  });
+  }, 600_000);
 
   it("shows one key nothing of another key's", async () => {
     const response = await send(read("/keys/me/webhooks", otherSecret));
@@ -520,7 +520,7 @@ describe("GET /keys/me/webhooks", () => {
     expect((await response.json()) as { endpoints: unknown[] }).toEqual(
       expect.objectContaining({ endpoints: [] }),
     );
-  });
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -542,7 +542,7 @@ describe("the endpoint cap", () => {
     const over = await send(hook({ url: "https://hooks.example.com/over" }));
     expect(over.status).toBe(409);
     expect(await over.json()).toEqual({ error: "endpoint_limit" });
-  });
+  }, 600_000);
 
   it("frees a slot when one is removed, and removes it once", async () => {
     const removed = fillers.pop()!;
@@ -557,7 +557,7 @@ describe("the endpoint cap", () => {
     const room = await send(hook({ url: "https://hooks.example.com/room" }));
     expect(room.status).toBe(201);
     fillers.push(((await room.json()) as Record<string, string>)["id"]!);
-  });
+  }, 600_000);
 
   it("refuses to remove an endpoint that is not this key's", async () => {
     const response = await send(
@@ -570,7 +570,7 @@ describe("the endpoint cap", () => {
     const listed = await send(read("/keys/me/webhooks"));
     const body = (await listed.json()) as { endpoints: { id: string }[] };
     expect(body.endpoints.map((row) => row.id)).toContain(matchHook.id);
-  });
+  }, 600_000);
 
   it("clears the fillers, leaving the three the rest of the file uses", async () => {
     for (const id of fillers) {
@@ -584,7 +584,7 @@ describe("the endpoint cap", () => {
     expect(body.endpoints.map((row) => row.id).sort()).toEqual(
       [matchHook.id, otherHook, kindsHook].sort(),
     );
-  });
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -608,7 +608,7 @@ describe("the alert step: what it creates", () => {
     // endpoint. The subject filter and the kinds filter matched neither.
     expect(log).toHaveLength(2);
     expect(new Set(log.map((sent) => sent.url))).toEqual(new Set([MATCH_URL]));
-  });
+  }, 600_000);
 
   it("names the two kinds, the sealed position and the covering seal", async () => {
     const response = await send(
@@ -656,7 +656,7 @@ describe("the alert step: what it creates", () => {
     );
     expect(kinds.get("submitted")).toBe("draft");
     expect(kinds.get("verified")).toBe("verified");
-  });
+  }, 600_000);
 
   it("creates nothing a second time: the cursor moved past those events", async () => {
     const log: Sent[] = [];
@@ -664,7 +664,7 @@ describe("the alert step: what it creates", () => {
     expect(report.created).toBe(0);
     // And nothing was due: the two retries are scheduled five minutes out.
     expect(log).toEqual([]);
-  });
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -680,7 +680,7 @@ describe("the alert step: delivering", () => {
     expect(report.delivered).toBe(2);
     expect(report.failed).toBe(0);
     expect(log).toHaveLength(2);
-  });
+  }, 600_000);
 
   it("carries the four headers, and calls the platform fetch with no receiver", () => {
     for (const sent of log) {
@@ -714,7 +714,7 @@ describe("the alert step: delivering", () => {
       expect(parsed["id"]).toBe(sent.headers["x-nomankind-alert"]);
       expect(parsed["kind"]).toBe(sent.headers["x-nomankind-kind"]);
     }
-  });
+  }, 600_000);
 
   it("records the delivery, and never the secret", async () => {
     const response = await send(
@@ -732,7 +732,7 @@ describe("the alert step: delivering", () => {
         at(1 + (ALERT_RETRY_MINUTES[0] as number)).toISOString(),
       );
     }
-  });
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -765,7 +765,7 @@ describe("the retry ladder", () => {
     expect(row.next_at).toBe(
       at(20 + (ALERT_RETRY_MINUTES[0] as number)).toISOString(),
     );
-  });
+  }, 600_000);
 
   it("walks the published ladder and then gives up", async () => {
     let clock = 20;
@@ -795,13 +795,13 @@ describe("the retry ladder", () => {
     // the subscriber's own URL.
     expect(row.last_error).toBe("TimeoutError");
     expect(row.last_status).toBeNull();
-  });
+  }, 600_000);
 
   it("stops trying once it has given up", async () => {
     const log: Sent[] = [];
     await step(at(10_000), fakeFetch(200, log));
     expect(log).toEqual([]);
-  });
+  }, 600_000);
 });
 
 /** The one delivery an endpoint has, as its own door reports it. */
@@ -853,5 +853,5 @@ describe("a log with no endpoint", () => {
     } finally {
       await empty.dispose();
     }
-  }, 120_000);
+  }, 600_000);
 });

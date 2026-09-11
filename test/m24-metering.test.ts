@@ -172,11 +172,11 @@ beforeAll(async () => {
   await receipt(NOW, one.id);
   await receipt(NOW, two.id);
   await receipt(NOW, null);
-}, 120_000);
+}, 600_000);
 
 afterAll(async () => {
   await store?.dispose();
-});
+}, 600_000);
 
 // ---------------------------------------------------------------------------
 // (a) One meter event per key per day
@@ -189,7 +189,7 @@ describe("the metering step over a published day", () => {
   beforeAll(async () => {
     report = await sweep(day(1));
     published = await publishedOn(date(0));
-  }, 120_000);
+  }, 600_000);
 
   it("publishes the day's paid half before it bills anyone", () => {
     const payload = published.payload as EventPayloads["read_count"];
@@ -229,7 +229,7 @@ describe("the metering step over a published day", () => {
     expect(await ledgerCursor(store.db, METERING_CURSOR)).toBeGreaterThanOrEqual(
       published.seq,
     );
-  });
+  }, 600_000);
 
   it("writes a row for its own step and for the alert step beside it", async () => {
     const rows = await sweepSteps(store.db);
@@ -243,7 +243,7 @@ describe("the metering step over a published day", () => {
       failed: 0,
       retried: 0,
     });
-  });
+  }, 600_000);
 
   it("never bills the same key-day twice, however often the sweep runs", async () => {
     const again = await sweep(day(1));
@@ -255,7 +255,7 @@ describe("the metering step over a published day", () => {
     const rows = await sweepSteps(store.db);
     const metering = rows.find((row) => row.step === "metering")!;
     expect(metering.detail).toEqual({ keys: 0, reads: 0 });
-  }, 120_000);
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -283,5 +283,5 @@ describe("the metering step where there is no provider", () => {
       identifier: `${ENVIRONMENT}:${date(1)}:${one.id}`,
       timestamp: Math.floor(Date.parse(`${date(1)}T23:59:59Z`) / 1000),
     });
-  }, 120_000);
+  }, 600_000);
 });

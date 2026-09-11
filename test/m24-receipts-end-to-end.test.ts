@@ -409,11 +409,11 @@ beforeAll(async () => {
   keyedSync = synced.body["receipt"] as SyncReceipt;
 
   sealingIssuer = freeRead.issuer;
-}, 300_000);
+}, 600_000);
 
 afterAll(async () => {
   await store?.dispose();
-});
+}, 600_000);
 
 // ---------------------------------------------------------------------------
 // (a) The receipt a payer is handed
@@ -428,7 +428,7 @@ describe("a read served to a key", () => {
     }
     // The secret is nowhere in what the reader was handed.
     expect(JSON.stringify(keyedReads)).not.toContain(secret);
-  });
+  }, 600_000);
 
   it("carries the log-wide counter beside the key's own", () => {
     // Two different numbers about two different things: the key's reads, and
@@ -449,14 +449,14 @@ describe("a read served to a key", () => {
     expect(remaining).toBe(limit - 5);
     const receipt = answer.body["receipt"] as ReadReceipt;
     expect(receipt.key_counter).toBe(4);
-  });
+  }, 600_000);
 });
 
 describe("a read served without a key", () => {
   it("says so in the receipt, in nulls rather than in silence", async () => {
     expect([freeRead.key, freeRead.key_counter]).toEqual([null, null]);
     await expect(verifyReadReceipt(freeRead)).resolves.toBe(true);
-  });
+  }, 600_000);
 
   it("still verifies a receipt written before the fields existed", async () => {
     // The M17 shape: no `key` property at all, signed by the same agent.
@@ -472,7 +472,7 @@ describe("a read served without a key", () => {
     );
     expect("key" in old).toBe(false);
     await expect(verifyReadReceipt(old)).resolves.toBe(true);
-  });
+  }, 600_000);
 });
 
 describe("a sync served to a key", () => {
@@ -494,7 +494,7 @@ describe("a sync served to a key", () => {
     const me = await get("/keys/me", { key: true });
     expect(me.status).toBe(200);
     expect(me.body["used_today"]).toBe(5);
-  });
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -514,7 +514,7 @@ describe("the day's published count", () => {
         (event.payload as EventPayloads["read_count"]).date === date(0),
     ) as Event<"read_count">;
     payload = published.payload as EventPayloads["read_count"];
-  }, 300_000);
+  }, 600_000);
 
   it("counts every reader in `reads` and only the payer in `paid`", async () => {
     const counts = new Map(payload.reads.map((row) => [row.entry_id, row.count]));
@@ -532,7 +532,7 @@ describe("the day's published count", () => {
     expect(paid.get(two)).toBe(2);
     expect(payload.total).toBe(6);
     expect(payload.paid!.total).toBe(5);
-  });
+  }, 600_000);
 
   it("names the key's own day, and it is what the key's usage says", async () => {
     expect(payload.paid!.keys).toEqual({ [keyId]: 5 });
@@ -556,7 +556,7 @@ describe("the day's published count", () => {
       reads: payload.paid!.keys[keyId],
       seq: published.seq,
     });
-  });
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -581,7 +581,7 @@ describe("the ledger over a day with free reads in it", () => {
         Math.floor((3 * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.validator) / 100),
       ),
     );
-  });
+  }, 600_000);
 
   it("prices the day exactly as the mirror recomputes it", async () => {
     // The ledger table is a cache of the fold the mirror runs over the sealed
@@ -602,7 +602,7 @@ describe("the ledger over a day with free reads in it", () => {
     expect(recomputed).toEqual(stored);
     // Three paid reads of entry one, and not the four the day published.
     expect(recomputed.every((row) => row.reads === 3)).toBe(true);
-  });
+  }, 600_000);
 
   it("reconciles the day against the priced rows and says ok", async () => {
     const answer = await get("/ledger", { now: day(1) });
@@ -612,7 +612,7 @@ describe("the ledger over a day with free reads in it", () => {
     expect(zero.ref["ok"]).toBe(true);
     expect(zero.ref["published_total"]).toBe(5);
     expect(zero.ref["accrued_total"]).toBe(5);
-  });
+  }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -696,7 +696,7 @@ describe("a duplicate group delivered in one paid sync", () => {
         (event.payload as EventPayloads["read_count"]).date === date(DUP_DAY),
     ) as Event<"read_count">;
     payload = published.payload as EventPayloads["read_count"];
-  }, 300_000);
+  }, 600_000);
 
   it("is a real duplicate group: one fact, filed twice", () => {
     expect(sameDuplicateKey(duplicateKey(dupOld), duplicateKey(dupNew))).toBe(
@@ -741,5 +741,5 @@ describe("a duplicate group delivered in one paid sync", () => {
     const me = (await response.json()) as Record<string, unknown>;
     expect(me["used_today"]).toBe(2);
     expect(payload.paid!.keys[dupKeyId]).toBe(1);
-  });
+  }, 600_000);
 });

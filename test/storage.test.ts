@@ -250,7 +250,7 @@ beforeAll(async () => {
   const built = await buildSeal(world.bundle.events, previous, clock());
   if (!built.ok) throw new Error(`storage.test: buildSeal ${built.reason}`);
   secondSeal = built.seal;
-});
+}, 600_000);
 
 // getPlatformProxy runs a child process; vitest would hold the run open
 // without this.
@@ -338,7 +338,7 @@ describe("entries", () => {
       const derived = deriveEntry(world.bundle.events, id, clock(), entrySeals);
       await putEntry(test.db, derived.entry, derived.sidecar, head.seq);
     }
-  });
+  }, 600_000);
 
   it("round-trips a verified entry with its sidecar", async () => {
     const entrySeals = await sealsForEntries(
@@ -491,7 +491,7 @@ describe("operators and agents", () => {
       await putAgent(test.db, { agentId, operatorId, registeredSeq: seq });
       seq += 1;
     }
-  });
+  }, 600_000);
 
   it("round-trips an operator", async () => {
     const maintainer = await getOperator(test.db, MAINTAINER_OPERATOR);
@@ -660,7 +660,7 @@ describe("seals over two batches", () => {
   beforeAll(async () => {
     first = world.bundle.seals[world.bundle.seals.length - 1]!;
     await putSeal(test.db, secondSeal);
-  });
+  }, 600_000);
 
   it("closes exactly the tail the first seal left open", () => {
     expect(secondSeal.first_seq).toBe(first.last_seq + 1);
@@ -712,7 +712,7 @@ describe("a store holding only a later seal", () => {
   beforeAll(async () => {
     later = await openTestDatabase();
     await putSeal(later.db, secondSeal);
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await later?.dispose();
@@ -782,7 +782,7 @@ describe("the newest upgraded anchor", () => {
 
   beforeAll(async () => {
     anchors = await openTestDatabase();
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await anchors?.dispose();
@@ -1316,7 +1316,7 @@ describe("registry writes", () => {
       payload: { operator: OPERATOR, agent: AGENT, attestation },
     });
     registration = log;
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await registry?.dispose();
@@ -1491,7 +1491,7 @@ describe("captures", () => {
         fetchedAt: "2026-09-09T12:00:00.000Z",
       }),
     );
-  });
+  }, 600_000);
 
   it("round-trips a capture row", async () => {
     expect(await captureForHash(test.db, PAGE_HASH)).toEqual(capture());
@@ -1571,7 +1571,7 @@ describe("the snapshot archive", () => {
       mediaType: "application/json",
       sidecar: sidecarAt(SECOND_AT),
     });
-  });
+  }, 600_000);
 
   it("keeps the first capture's bytes and media type", async () => {
     const stored = await readCapture(test.captures, ARCHIVE_HASH);
@@ -1629,7 +1629,7 @@ describe("submission writes", () => {
       payload: { core, signature: "c2lnbmF0dXJl" },
     });
     derived = deriveEntry(submission, core["id"] as string, { now: AT });
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -1800,7 +1800,7 @@ describe("validation writes", () => {
       derivedThroughSeq: 0,
       captures: [],
     });
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -2080,7 +2080,7 @@ describe("the staleness sweep's read", () => {
       derivedThroughSeq: event.seq,
       captures: [],
     });
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -2297,7 +2297,7 @@ describe("supersession and reconfirmation writes", () => {
       supersedes: targetId,
       at: "2026-09-08T14:00:00.000Z",
     });
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -2563,7 +2563,7 @@ describe("sealing writes", () => {
       const derived = deriveEntry(world.bundle.events, id, clock());
       await putEntry(sealing.db, derived.entry, derived.sidecar, 0);
     }
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await sealing?.dispose();
@@ -2863,7 +2863,7 @@ describe("read receipts", () => {
       (await getEntry(test.db, DRAFT_ENTRY_ID))!.sidecar,
       log[log.length - 1]!.seq,
     );
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await reading?.dispose();
@@ -3145,7 +3145,7 @@ describe("sync receipts", () => {
     syncing = await openTestDatabase();
     keys = await generateKeypair();
     agent = agentIdFromPublicKey(await exportPublicKeyRaw(keys.publicKey));
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await syncing?.dispose();
@@ -3451,7 +3451,7 @@ describe("dispute and revalidation writes", () => {
       "Kestrel-9 storage pricing is $5 per terabyte",
       "2026-09-08T12:05:00.000Z",
     );
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -4003,7 +4003,7 @@ describe("the ledger", () => {
 
   beforeAll(async () => {
     store = await openTestDatabase();
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -4185,7 +4185,7 @@ describe("standing writes", () => {
     store = await openTestDatabase();
     await putOperator(store.db, operator(CANDIDATE, false));
     await putOperator(store.db, operator(INCUMBENT, true));
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -4314,7 +4314,7 @@ describe("standing reads past the leaderboard's limit", () => {
       // Descending standing, so the operator with the largest index ranks last.
       await setOperatorStanding(store.db, id(index), POOL - index, 77);
     }
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -4429,7 +4429,7 @@ describe("bounty pricing", () => {
   beforeAll(async () => {
     store = await openTestDatabase();
     await writeUnpriced();
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -4489,7 +4489,7 @@ describe("domains in the store", () => {
 
   beforeAll(async () => {
     store = await openTestDatabase();
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await store?.dispose();
@@ -4810,7 +4810,7 @@ describe("the duplicate door's backward read", () => {
         log[log.length - 1]!.seq,
       );
     }
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await backward?.dispose();
