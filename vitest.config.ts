@@ -30,6 +30,14 @@ const isMacOS = process.platform === "darwin";
 export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
+    // A minute for a test and a minute for a hook, because vitest's own
+    // defaults are five and ten seconds and CI timed out twice on 2026-09-11 —
+    // a storage case at the five-second default and a hook at the ten-second
+    // one — on a loaded runner, both green locally. The end-to-end files pass
+    // their own 600_000 per case and keep it: this is the floor under
+    // everything that names no timeout of its own, not a ceiling over them.
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
     ...(isMacOS ? { minWorkers: 1, maxWorkers: 2 } : {}),
   },
 });

@@ -30,16 +30,19 @@ import type { DnsResolver } from "../adapters/dns.js";
 import type { PayoutAdapter } from "../adapters/payout.js";
 import { appendEvent, type Attestation, type Event } from "../events.js";
 import { publicKeyFromAgentId } from "../identity.js";
-import { LIST_PAGE_LIMIT } from "../policy.js";
+import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "../policy.js";
 import {
+  checkAgentBind,
   checkDomainJoin,
   checkGenesisNaming,
   checkRegistration,
+  parseAgentBindBody,
   parseDomainJoinBody,
   parseGenesisBody,
   parseRegistrationBody,
   txtMatches,
   txtRecordName,
+  type AgentBindRefusal,
   type GenesisRefusal,
   type JoinRefusal,
   type RegistrationRefusal,
@@ -60,6 +63,7 @@ import {
   listOperators,
   operatorDomains,
   operatorForAgent,
+  recordAgentBind,
   recordDomainJoin,
   registerOperator,
   trustOperator,
@@ -139,6 +143,25 @@ const JOIN_STATUS: Record<JoinRefusal, number> = {
   unregistered_domain: 422,
   excluded_party: 403,
   already_joined: 409,
+  missing_attestation: 422,
+  bad_attestation: 422,
+  attestation_domain_mismatch: 422,
+};
+
+/**
+ * The status each agent-bind refusal answers with.
+ *
+ * An operator the registry does not hold is 404 and not 422: the path names it,
+ * so this is the route's own not_found said in the kernel's word for it. A
+ * request signed by somebody else's key is 403 — understood, proved, and still
+ * refused — a key already bound is 409, and everything else is a well-formed
+ * request whose contents do not hold up (422).
+ */
+const AGENT_BIND_STATUS: Record<AgentBindRefusal, number> = {
+  unregistered_operator: 404,
+  not_operator_agent: 403,
+  agent_bound: 409,
+  bad_agent: 422,
   missing_attestation: 422,
   bad_attestation: 422,
   attestation_domain_mismatch: 422,
@@ -557,6 +580,93 @@ async function joinDomain(
 }
 
 // ---------------------------------------------------------------------------
+// POST /operators/{id}/agents
+// ---------------------------------------------------------------------------
+
+/**
+ * Bind a second agent to an operator.
+ *
+ * Whitepaper Section 5: "An operator runs agents", and every agent under one
+ * counts as one for validation. Registration binds the first; this binds the
+ * next. The operator vouches for the new key by signing the request with a key
+ * it already has, and the new key signs the independence attestation for the
+ * domain the operator registered under, so both halves of the binding are in the
+ * log and an offline reader can recheck either.
+ *
+ * The DNS TXT record is not looked up again. It proves control of the domain and
+ * it proved it when the first agent was bound; a second lookup would ask the
+ * operator to republish a record naming a different key, which is not what the
+ * record is for. Nothing here reaches outside the process at all.
+ *
+ * The order is every other write's: the body, then the request signature, then
+ * the store, then the pure check, then one atomic batch — so a malformed request
+ * never costs a signature verification and a refusal leaves the log where it was.
+ */
+async function bindAgent(
+  request: Request,
+  env: Env,
+  deps: RegistryDeps,
+  path: string,
+  operator: string,
+): Promise<Response> {
+  const auth = await authenticate(request, env, deps, path);
+  if (!auth.ok) return auth.response;
+
+  const parsed = parseAgentBindBody(auth.body);
+  if (!parsed.ok) return refuse(400, parsed.reason);
+  const { agent, attestation } = parsed.value;
+
+  const record = await getOperator(env.DB, operator);
+  const agents =
+    record === null
+      ? []
+      : await agentsForOperator(env.DB, operator, LIST_PAGE_LIMIT);
+  const domains = record === null ? [] : await operatorDomains(env.DB, operator);
+
+  const check = await checkAgentBind({
+    operator,
+    signer: auth.agent,
+    agent,
+    attestation,
+    registered: record !== null,
+    // The domain registration attested to: the first row, which is the one
+    // `registerOperator` wrote. A registration sealed before v0.7 carries the
+    // default domain, which is what it meant (decision D-071).
+    registrationDomain: domains[0]?.domain ?? DEFAULT_DOMAIN,
+    agents: agents.map((bound) => bound.agentId),
+    agentOperator: await operatorForAgent(env.DB, agent),
+    now: deps.now,
+  });
+  if (!check.ok) return refuse(AGENT_BIND_STATUS[check.reason], check.reason);
+  if (record === null) {
+    // Unreachable: checkAgentBind refuses an unregistered operator above.
+    return refuse(
+      AGENT_BIND_STATUS.unregistered_operator,
+      "unregistered_operator",
+    );
+  }
+
+  // The event is the record and the row is the index into it, written in one
+  // batch (recordAgentBind), so the binding is either fully in the log and
+  // resolvable by the next validation or not there at all.
+  const bound = await recordAgentBind(env.DB, {
+    at: deps.now.toISOString(),
+    type: "agent_bound",
+    entry_id: null,
+    payload: { operator, agent, attestation: attestationOf(attestation) },
+  });
+
+  return json(
+    {
+      ...record,
+      agents: [...agents.map((held) => held.agentId), bound.payload.agent],
+      domains: domains.map((row) => row.domain),
+    },
+    201,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // POST /genesis
 // ---------------------------------------------------------------------------
 
@@ -684,15 +794,14 @@ function segmentAfter(path: string, prefix: string): string | null {
 }
 
 /**
- * The operator id in `/operators/{id}/domains`, or null when the path is not
+ * The operator id in `/operators/{id}/{suffix}`, or null when the path is not
  * that shape — including `/operators/domains`, which names an operator called
  * "domains" and belongs to the read below rather than here. An id that will not
  * percent-decode comes back as the empty string, so the route answers `bad_id`
  * rather than a 404 that would claim the path does not exist at all.
  */
-function domainsPathOperator(path: string): string | null {
+function subresourceOperator(path: string, suffix: string): string | null {
   const prefix = "/operators/";
-  const suffix = "/domains";
   if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
   if (path.length <= prefix.length + suffix.length) return null;
   const middle = path.slice(prefix.length, -suffix.length);
@@ -750,11 +859,18 @@ async function route(
     return methodNotAllowed("POST");
   }
 
-  const joiner = domainsPathOperator(path);
+  const joiner = subresourceOperator(path, "/domains");
   if (joiner !== null) {
     if (joiner === "") return refuse(400, "bad_id");
     if (request.method !== "POST") return methodNotAllowed("POST");
     return joinDomain(request, env, deps, path, joiner);
+  }
+
+  const binder = subresourceOperator(path, "/agents");
+  if (binder !== null) {
+    if (binder === "") return refuse(400, "bad_id");
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return bindAgent(request, env, deps, path, binder);
   }
 
   const operatorId = segmentAfter(path, "/operators/");

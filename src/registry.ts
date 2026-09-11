@@ -21,15 +21,24 @@
 import { base64urlDecode, base64urlEncode } from "./encoding.js";
 import type { Attestation } from "./events.js";
 import { canonicalize } from "./hash.js";
-import { publicKeyFromAgentId, signBytes, verifyBytes } from "./identity.js";
+import {
+  isAgentId,
+  publicKeyFromAgentId,
+  signBytes,
+  verifyBytes,
+} from "./identity.js";
 import {
   attestationFor,
   DEFAULT_DOMAIN,
   excludedPartyDomains,
   isRegisteredDomain,
+  REQUEST_CLOCK_SKEW_SECONDS,
 } from "./policy.js";
 
 const encoder = new TextEncoder();
+
+/** Seconds to milliseconds. A unit conversion, not a policy number. */
+const MILLISECONDS_PER_SECOND = 1000;
 
 /** ISO 8601 date-time with a seconds field and an explicit offset or Z. */
 const ISO_DATE_TIME =
@@ -331,6 +340,19 @@ export interface DomainJoinBody {
   readonly attestation: unknown;
 }
 
+/**
+ * What binding a second agent carries: the new agent's id, and the attestation
+ * that agent signed for the operator's registration domain.
+ *
+ * The request is signed by an agent the operator already has, so the operator
+ * this is about is the path's and never the body's: a body that could name an
+ * operator would be a body that could ask for someone else's.
+ */
+export interface AgentBindBody {
+  readonly agent: string;
+  readonly attestation: unknown;
+}
+
 /** What a genesis naming carries. */
 export interface GenesisBody {
   readonly operator: string;
@@ -432,6 +454,30 @@ export function parseDomainJoinBody(body: unknown): ParseResult<DomainJoinBody> 
     if (attestation === null) return refused;
   }
   return { ok: true, value: { domain, attestation } };
+}
+
+/**
+ * Read an agent-bind body: the new agent, and the attestation it signed.
+ *
+ * The attestation stays `unknown` for the reason a registration's does, and an
+ * absent or null one parses as null so `checkAgentBind` can refuse it by name.
+ * The agent id is read as a string and judged no further here: whether it spells
+ * a key is `bad_agent`, one step later, and not a malformed body.
+ */
+export function parseAgentBindBody(body: unknown): ParseResult<AgentBindBody> {
+  const refused = { ok: false, reason: "bad_body" } as const;
+  const object = asObject(body);
+  if (object === null) return refused;
+  if (!hasKeys(object, ["agent"], ["attestation"])) return refused;
+  const agent = object["agent"];
+  if (typeof agent !== "string") return refused;
+  const supplied = object["attestation"];
+  let attestation: unknown = null;
+  if (supplied !== undefined && supplied !== null) {
+    attestation = asObject(supplied);
+    if (attestation === null) return refused;
+  }
+  return { ok: true, value: { agent, attestation } };
 }
 
 /** Read a genesis naming body: an operator, and nothing else. */
@@ -625,6 +671,134 @@ export async function checkDomainJoin(
     return { ok: false, reason: "attestation_domain_mismatch" };
   }
   return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Binding a second agent
+// ---------------------------------------------------------------------------
+
+/**
+ * Why binding a second agent was refused, in the order the checks run. The
+ * facts the store already holds come first, then the shape of the new id, then
+ * the cryptography, so a request from a stranger never costs a signature
+ * verification.
+ */
+export const AGENT_BIND_REFUSALS = [
+  "unregistered_operator",
+  "not_operator_agent",
+  "agent_bound",
+  "bad_agent",
+  "missing_attestation",
+  "bad_attestation",
+  "attestation_domain_mismatch",
+] as const;
+
+export type AgentBindRefusal = (typeof AGENT_BIND_REFUSALS)[number];
+
+/** What deciding a bind needs, all of it already gathered. */
+export interface AgentBindInput {
+  readonly operator: string;
+  /** The agent that signed the request: one the operator already has. */
+  readonly signer: string;
+  /** The new agent being bound. */
+  readonly agent: string;
+  readonly attestation: unknown;
+  /** Whether the operator is registered at all. */
+  readonly registered: boolean;
+  /**
+   * The domain the operator registered under, whose sentence the new agent
+   * signs (decision D-071). The first of the operator's domains: registration
+   * took it, and a join only ever adds to the list.
+   */
+  readonly registrationDomain: string;
+  /** The agents already bound to this operator (src/derive.ts, agentOperatorsAt). */
+  readonly agents: readonly string[];
+  /** The operator the new agent is already bound to, or null when it is free. */
+  readonly agentOperator: string | null;
+  /** The instant the request is served at. Injected; nothing here reads a clock. */
+  readonly now: Date;
+}
+
+export type AgentBindCheck =
+  | { ok: true }
+  | { ok: false; reason: AgentBindRefusal };
+
+/**
+ * Decide whether this operator may bind a second agent.
+ *
+ * Whitepaper Section 5: "An operator runs agents", and "every agent under an
+ * operator counts as one for validation" — so an operator with more than one
+ * key is the ordinary case, and the second key has to arrive the way the first
+ * did: by a signed act in the log that an offline reader can recheck.
+ *
+ * Registration's own three steps are not rerun. The DNS TXT record proves
+ * control of the domain and was checked when the operator's first agent was
+ * bound; payout onboarding is the operator's and was checked then too. What is
+ * new here is the key, and the operator vouches for it by signing the request
+ * with a key it already has while the new key signs the independence
+ * attestation for the domain the operator registered under. Both signatures are
+ * required and neither stands for the other: the request proves the operator
+ * asked, and the attestation proves the new key exists and made Section 10's
+ * statement itself.
+ *
+ * The attestation's own timestamp is held to REQUEST_CLOCK_SKEW_SECONDS of the
+ * request clock. The request signature carries its own window, but it is made by
+ * the *old* key: without this, an attestation signed long ago by a key that has
+ * since changed hands would still bind it today.
+ */
+export async function checkAgentBind(
+  input: AgentBindInput,
+): Promise<AgentBindCheck> {
+  if (!input.registered) {
+    return { ok: false, reason: "unregistered_operator" };
+  }
+  if (!input.agents.includes(input.signer)) {
+    return { ok: false, reason: "not_operator_agent" };
+  }
+  // Bound anywhere at all, this operator included: an agent answers for one
+  // operator (Section 5), so rebinding one is not a thing this door does.
+  if (input.agentOperator !== null) {
+    return { ok: false, reason: "agent_bound" };
+  }
+  if (!isAgentId(input.agent)) {
+    return { ok: false, reason: "bad_agent" };
+  }
+  if (input.attestation === null || input.attestation === undefined) {
+    return { ok: false, reason: "missing_attestation" };
+  }
+  const signed = await verifyAttestation(
+    input.operator,
+    input.agent,
+    input.attestation,
+  );
+  if (!signed) {
+    return { ok: false, reason: "bad_attestation" };
+  }
+  if (!withinSkew(input.attestation, input.now)) {
+    return { ok: false, reason: "bad_attestation" };
+  }
+  if (attestationDomain(input.attestation) !== input.registrationDomain) {
+    return { ok: false, reason: "attestation_domain_mismatch" };
+  }
+  return { ok: true };
+}
+
+/**
+ * Whether an attestation's `signed_at` is inside the request window.
+ *
+ * The record has already verified by the time this is asked, so the timestamp is
+ * an ISO 8601 string that the signature covers; anything else is a "no" rather
+ * than an exception.
+ */
+function withinSkew(attestation: unknown, now: Date): boolean {
+  const signedAt = (attestation as Record<string, unknown>)["signed_at"];
+  if (typeof signedAt !== "string") return false;
+  const at = Date.parse(signedAt);
+  if (Number.isNaN(at)) return false;
+  return (
+    Math.abs(now.getTime() - at) / MILLISECONDS_PER_SECOND <=
+    REQUEST_CLOCK_SKEW_SECONDS
+  );
 }
 
 // ---------------------------------------------------------------------------

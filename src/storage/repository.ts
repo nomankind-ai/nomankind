@@ -1190,6 +1190,36 @@ export async function registerOperator(
 }
 
 /**
+ * Bind a second agent to an operator: append the `agent_bound` event and write
+ * the agents row, atomically, for the reason `registerOperator` is atomic.
+ *
+ * Section 5: "An operator runs agents", and every agent under an operator counts
+ * as one for validation. The event is the record and the row is the index into
+ * it: a row without its event would be a key nobody can verify offline, and an
+ * event without its row would be a key the Worker cannot resolve when a
+ * validation names its operator. One `batch` makes both impossible.
+ *
+ * The row's `registeredSeq` is the binding event's own position, which is what
+ * orders an operator's agents oldest binding first (`agentsForOperator`).
+ */
+export async function recordAgentBind(
+  db: D1Like,
+  input: EventInput<"agent_bound">,
+): Promise<Event<"agent_bound">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  const bound = event as Event<"agent_bound">;
+  statements.push(
+    agentStatement(db, {
+      agentId: bound.payload.agent,
+      operatorId: bound.payload.operator,
+      registeredSeq: bound.seq,
+    }),
+  );
+  await db.batch(statements);
+  return bound;
+}
+
+/**
  * Record a domain join: append the `operator_joined_domain` event and write its
  * row, atomically, for the reason `registerOperator` is atomic. The event is the
  * record and the row is the index into it: a row without its event would be an

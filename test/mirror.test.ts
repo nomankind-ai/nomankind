@@ -21,7 +21,14 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { appendEvent, buildSeal, deriveEntry, entryHash, extractCore } from "../src/index.js";
+import {
+  appendEvent,
+  buildSeal,
+  deriveEntry,
+  entryHash,
+  extractCore,
+  signRecord,
+} from "../src/index.js";
 import type { LedgerRow } from "../src/ledger.js";
 import { STANDING_FORMULA, standingAt } from "../src/standing.js";
 import type { Event } from "../src/events.js";
@@ -62,6 +69,7 @@ import {
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
   CORRECTION_ENTRY_ID,
+  OUTSIDE_OPERATORS,
   VERIFIED_ENTRY_ID,
   DRAFT_ENTRY_ID,
   buildVerifyWorld,
@@ -823,5 +831,136 @@ describe("attestations, standing and the ledger", () => {
 
   it("builds the same bytes twice with all three families in it", () => {
     expect(buildMirror(richInput())).toEqual(files);
+  });
+});
+
+/**
+ * A day is priced at its own position in the log, never at the head (M24b).
+ *
+ * The sweep prices a published day in the run that published it, so the entry
+ * it reads is the entry the log derives at that `read_count` — and a slot
+ * rotation that lands afterwards belongs to the days after it. Rederiving every
+ * day at the export's `asOf` would hand a verifier holders the entry did not
+ * have on the day they were paid for, and the mirror's rows would disagree with
+ * the ledger's on the same events.
+ *
+ * So: a verified entry read on one day, then reconfirmed by an operator that
+ * held no slot, then read again on the next. Two days, one entry, two different
+ * sets of holders.
+ */
+describe("the ledger fold across a slot rotation", () => {
+  const DAY_ONE = "2026-09-09";
+  const DAY_TWO = "2026-09-10";
+  const READS = 1_000;
+
+  /** The whole log: both days, with the rotation between them. */
+  let rotated: Event[];
+  /** The same log cut off after day one, which is all the sweep had then. */
+  let throughDayOne: Event[];
+  /** The operator the reconfirmation seats, which held no slot before it. */
+  let newcomer = "";
+  /** The operators the two approvals seated, in slot order. */
+  let seated: string[] = [];
+
+  function shares(events: readonly Event[], date: string): LedgerRow[] {
+    return mirrorLedgerRows(events, "2026-09-11T00:00:00.000Z").filter(
+      (row) => row.kind === "read_share" && row.date === date,
+    );
+  }
+
+  function validators(rows: readonly LedgerRow[]): string[] {
+    return rows
+      .filter((row) => row.role === "validator")
+      .map((row) => row.operator as string)
+      .sort();
+  }
+
+  function readCount(date: string, at: string): Parameters<typeof appendEvent>[1] {
+    return {
+      at,
+      type: "read_count",
+      entry_id: null,
+      payload: {
+        date,
+        reads: [{ entry_id: VERIFIED_ENTRY_ID, count: READS }],
+        total: READS,
+        counter_first: 1,
+        counter_last: READS,
+        paid: {
+          reads: [{ entry_id: VERIFIED_ENTRY_ID, count: READS }],
+          total: READS,
+          keys: { key_0123456789abcdef: READS },
+        },
+        duplicates: [],
+      },
+    };
+  }
+
+  beforeAll(async () => {
+    const world = await buildVerifyWorld();
+    seated = [OUTSIDE_OPERATORS[0]!, OUTSIDE_OPERATORS[1]!].sort();
+    newcomer = OUTSIDE_OPERATORS[2]!;
+
+    const agent = Object.entries(world.bundle.registry.agents).find(
+      ([, operator]) => operator === newcomer,
+    )![0];
+
+    // Day one, published the morning after it: the entry still holds exactly
+    // the slots its two approvals seated.
+    throughDayOne = await appendEvent(
+      world.bundle.events,
+      readCount(DAY_ONE, "2026-09-10T00:20:00.000Z"),
+    );
+
+    // The rotation: a trusted operator that signed nothing of this entry's
+    // reconfirms it, and takes a slot for doing so.
+    const record = {
+      agent,
+      operator: newcomer,
+      snapshot_hash: world.entry["snapshot_hash"] as string,
+      reproduction: null,
+      observation: null,
+      signed_at: "2026-09-10T12:00:00.000Z",
+    };
+    rotated = await appendEvent(throughDayOne, {
+      at: "2026-09-10T12:00:00.000Z",
+      type: "reconfirmation",
+      entry_id: VERIFIED_ENTRY_ID,
+      payload: {
+        record,
+        signature: await signRecord(
+          VERIFIED_ENTRY_ID,
+          "reconfirmation",
+          record,
+          world.keys[agent]!.privateKey,
+        ),
+      },
+    });
+
+    rotated = await appendEvent(
+      rotated,
+      readCount(DAY_TWO, "2026-09-11T00:20:00.000Z"),
+    );
+  }, 120_000);
+
+  it("pays the first day the holders it had on the first day", () => {
+    const rows = shares(rotated, DAY_ONE);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(validators(rows)).toEqual(seated);
+    expect(validators(rows)).not.toContain(newcomer);
+    expect(rows.every((row) => row.reads === READS)).toBe(true);
+  });
+
+  it("pays the second day the holder the rotation seated", () => {
+    const rows = shares(rotated, DAY_TWO);
+    expect(validators(rows)).toEqual([...seated, newcomer].sort());
+    expect(rows.every((row) => row.reads === READS)).toBe(true);
+  });
+
+  it("leaves the first day's rows exactly what they were before the log grew", () => {
+    // The equality that makes the mirror a recomputation of the ledger rather
+    // than a second opinion: what the sweep stored for a day is what this fold
+    // says for it, on a log that has since moved on.
+    expect(shares(rotated, DAY_ONE)).toEqual(shares(throughDayOne, DAY_ONE));
   });
 });

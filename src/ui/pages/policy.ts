@@ -494,7 +494,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "ALERT_KINDS",
       value: policy.ALERT_KINDS.join(", "),
       means:
-        "The six moments in an entry's life a subscriber can be told about. Every one of them is an event already in the sealed log, so an alert is a notification of something public and never a fact of its own.",
+        "The seven moments in an entry's life a subscriber can be told about. Every one of them is a fact already in the sealed log, so an alert is a notification of something public and never a fact of its own.",
     },
     {
       name: "STRIPE.api",
@@ -551,6 +551,12 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       value: `${policy.STANDING_VALIDATION_REPRODUCED} standing`,
       means:
         "Earned beside the amount above when the validation's own signed record carries a passing measurement, and likewise for a measured reconfirmation, so the trusted pool tilts toward the operators who run the test rather than accept it. The money side of the same rule is READ_SHARE_SPLIT.observed above.",
+    },
+    {
+      name: "STANDING_ATTESTATION_SCORED",
+      value: `${policy.STANDING_ATTESTATION_SCORED} standing`,
+      means:
+        "Earned by the operator behind a drawn scorer when it signs a drift attestation's score. Smaller than an assigned validation because the probes were drawn for the scorer and the answers were already there — and a scorer that never answers burns STANDING_ASSIGNMENT_MISSED, the same burn an unanswered assignment carries.",
     },
     {
       name: "STANDING_SUBMISSION_VERIFIED",

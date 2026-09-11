@@ -51,6 +51,7 @@ import {
   STANDING_TRUSTED_STAY,
   STANDING_VALIDATION_ASSIGNED,
   STANDING_VALIDATION_REPRODUCED,
+  STANDING_ATTESTATION_SCORED,
   STANDING_VALIDATION_VOLUNTEERED,
   SWEEP_INTERVAL_MINUTES,
   TRUSTED_POOL_SWITCH,
@@ -113,6 +114,7 @@ const EXPECTED_POLICY_KEYS = [
   "STANDING_OVERTURNED_SIGNER",
   "STANDING_ASSIGNMENT_MISSED",
   "STANDING_VALIDATION_REPRODUCED",
+  "STANDING_ATTESTATION_SCORED",
   "STANDING_TRUSTED_ENTRY",
   "STANDING_TRUSTED_STAY",
   "STANDING_DECAY_PAUSED",
@@ -206,6 +208,21 @@ describe("policy numbers", () => {
     // the rule would say nothing.
     expect(STANDING_VALIDATION_REPRODUCED).toBe(2);
     expect(STANDING_VALIDATION_REPRODUCED).toBeGreaterThan(0);
+  });
+
+  it("pays standing for a drift attestation's score (Section 8)", () => {
+    // Section 8 draws three trusted operators to score and Section 9 pays
+    // "completed validations": a placeholder, positive, and smaller than an
+    // assigned validation because the probes and the answers were already
+    // there. And the miss is the burn an unanswered assignment already carries,
+    // so no second number exists for it.
+    expect(STANDING_ATTESTATION_SCORED).toBe(1);
+    expect(STANDING_ATTESTATION_SCORED).toBeLessThan(
+      STANDING_VALIDATION_ASSIGNED,
+    );
+    for (const key of Object.keys(POLICY)) {
+      expect(key).not.toMatch(/ATTESTATION_MISSED/);
+    }
   });
 
   it("covers every category of the default domain with a staleness window", () => {
@@ -455,6 +472,7 @@ describe("policy numbers", () => {
       STANDING_OVERTURNED_SIGNER,
       STANDING_ASSIGNMENT_MISSED,
       STANDING_VALIDATION_REPRODUCED,
+      STANDING_ATTESTATION_SCORED,
       STANDING_TRUSTED_ENTRY,
     ]) {
       expect(Number.isInteger(value)).toBe(true);
@@ -551,6 +569,9 @@ describe("policy numbers", () => {
     expect(POLICY.READ_SHARE_SPLIT).toBe(READ_SHARE_SPLIT);
     expect(POLICY.SLOT_COUNT).toBe(SLOT_COUNT);
     expect(POLICY.CONTRIBUTOR_SHARE_PERCENT).toBe(CONTRIBUTOR_SHARE_PERCENT);
+    expect(POLICY.STANDING_ATTESTATION_SCORED).toBe(
+      STANDING_ATTESTATION_SCORED,
+    );
     expect(POLICY.STANDING_VALIDATION_REPRODUCED).toBe(
       STANDING_VALIDATION_REPRODUCED,
     );

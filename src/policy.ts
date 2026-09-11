@@ -1003,6 +1003,25 @@ export const STANDING_ASSIGNMENT_MISSED = 2;
 export const STANDING_VALIDATION_REPRODUCED = 2;
 
 /**
+ * Incentives / Standing: a drift attestation's score, earned by the operator
+ * behind the scorer that signed it.
+ *
+ * Section 8, Drift attestation: "three operators from the trusted pool ... score
+ * its answers against the log and sign the result", and Section 9 earns standing
+ * for "completed validations". Scoring an attestation is completed work of
+ * exactly that kind — drawn, windowed, and burned when it goes unanswered by
+ * STANDING_ASSIGNMENT_MISSED, the same burn an unanswered assignment carries —
+ * so the log would be paying the miss and not the work if this number did not
+ * exist.
+ *
+ * One rather than STANDING_VALIDATION_ASSIGNED's three because a score is a
+ * smaller piece of work than a validation: the probes are drawn for the scorer
+ * and the answers are already there. Not a whitepaper number: the maintainer's
+ * own placeholder, moving only by a later decision, exactly as the seven above.
+ */
+export const STANDING_ATTESTATION_SCORED = 1;
+
+/**
  * Incentives / Standing: standing "gates everything discretionary, from entry to
  * and stay in the trusted pool". Two numbers rather than one, because a single
  * threshold would flap: an operator sitting exactly at the bar would be trusted
@@ -1144,10 +1163,11 @@ export const ALERT_RETRY_MINUTES: readonly number[] = Object.freeze([
 ]);
 
 /**
- * What a change alert can be about: the six moments in an entry's life a
- * subscriber is told about. Every one of them is an event already in the sealed
+ * What a change alert can be about: the seven moments in an entry's life a
+ * subscriber is told about. Every one of them is a fact already in the sealed
  * log, so an alert is a notification of something public and never a fact of
- * its own.
+ * its own — `stale` included, which is the moment an entry's confirmation
+ * window closed with no reconfirmation and the sweep marked it stale.
  */
 export const ALERT_KINDS = Object.freeze([
   "submitted",
@@ -1156,6 +1176,7 @@ export const ALERT_KINDS = Object.freeze([
   "reconfirmed",
   "superseded",
   "overturned",
+  "stale",
 ] as const);
 
 export type AlertKind = (typeof ALERT_KINDS)[number];
@@ -1251,6 +1272,7 @@ export const POLICY = Object.freeze({
   STANDING_OVERTURNED_SIGNER,
   STANDING_ASSIGNMENT_MISSED,
   STANDING_VALIDATION_REPRODUCED,
+  STANDING_ATTESTATION_SCORED,
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
   STANDING_DECAY_PAUSED,

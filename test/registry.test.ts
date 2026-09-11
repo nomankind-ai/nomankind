@@ -16,8 +16,13 @@ import {
   exportPublicKeyRaw,
   generateKeypair,
 } from "../src/identity.js";
-import { DEFAULT_DOMAIN, excludedPartyDomains } from "../src/policy.js";
 import {
+  DEFAULT_DOMAIN,
+  REQUEST_CLOCK_SKEW_SECONDS,
+  excludedPartyDomains,
+} from "../src/policy.js";
+import {
+  AGENT_BIND_REFUSALS,
   ATTESTATION_TEXT,
   ATTESTATION_VERSION,
   DNS_LABEL_MAX_LENGTH,
@@ -27,10 +32,12 @@ import {
   REGISTRATION_REFUSALS,
   TXT_RECORD_PREFIX,
   attestationSigningBytes,
+  checkAgentBind,
   checkGenesisNaming,
   checkRegistration,
   isOperatorDomain,
   isProviderDomain,
+  parseAgentBindBody,
   parseGenesisBody,
   parseRegistrationBody,
   signAttestation,
@@ -61,6 +68,14 @@ const otherAgent = await makeAgent();
 const attestation = await signAttestation(agent.privateKey, {
   operator: OPERATOR,
   agent: agent.id,
+  signed_at: SIGNED_AT,
+});
+
+/** A second key for the same operator, and the sentence it signed itself. */
+const secondAgent = await makeAgent();
+const secondAttestation = await signAttestation(secondAgent.privateKey, {
+  operator: OPERATOR,
+  agent: secondAgent.id,
   signed_at: SIGNED_AT,
 });
 
@@ -508,6 +523,252 @@ describe("checkRegistration", () => {
         }),
       ),
     ).toEqual({ ok: false, reason: "agent_bound" });
+  });
+});
+
+describe("binding a second agent", () => {
+  /**
+   * The agent the operator is about to bind, and its attestation: the operator's
+   * registration domain's sentence, signed by the new key itself.
+   */
+  const newAgent = secondAgent;
+  const bindAttestation = secondAttestation;
+
+  /** A bind that passes every check, so each test can spoil one thing. */
+  function bind(
+    overrides: Partial<Parameters<typeof checkAgentBind>[0]> = {},
+  ): Parameters<typeof checkAgentBind>[0] {
+    return {
+      operator: OPERATOR,
+      signer: agent.id,
+      agent: newAgent.id,
+      attestation: bindAttestation as unknown,
+      registered: true,
+      registrationDomain: DEFAULT_DOMAIN,
+      agents: [agent.id],
+      agentOperator: null,
+      now: new Date(SIGNED_AT),
+      ...overrides,
+    };
+  }
+
+  it("reads a bind body, and refuses extra keys and wrong types", () => {
+    expect(
+      parseAgentBindBody({ agent: newAgent.id, attestation: bindAttestation }),
+    ).toEqual({
+      ok: true,
+      value: { agent: newAgent.id, attestation: bindAttestation },
+    });
+    for (const bad of [
+      null,
+      undefined,
+      "agent",
+      [],
+      {},
+      { agent: newAgent.id, attestation: bindAttestation, operator: OPERATOR },
+      { agent: 42, attestation: bindAttestation },
+      { agent: newAgent.id, attestation: "signed" },
+      { agent: newAgent.id, attestation: [] },
+    ]) {
+      expect(parseAgentBindBody(bad)).toEqual({ ok: false, reason: "bad_body" });
+    }
+  });
+
+  it("parses an absent or null attestation as none, not as a bad body", async () => {
+    for (const missing of [
+      { agent: newAgent.id },
+      { agent: newAgent.id, attestation: null },
+    ]) {
+      const parsed = parseAgentBindBody(missing);
+      expect(parsed).toEqual({
+        ok: true,
+        value: { agent: newAgent.id, attestation: null },
+      });
+      if (parsed.ok) {
+        expect(
+          await checkAgentBind(bind({ attestation: parsed.value.attestation })),
+        ).toEqual({ ok: false, reason: "missing_attestation" });
+      }
+    }
+  });
+
+  it("names its refusals in check order", () => {
+    expect(AGENT_BIND_REFUSALS).toEqual([
+      "unregistered_operator",
+      "not_operator_agent",
+      "agent_bound",
+      "bad_agent",
+      "missing_attestation",
+      "bad_attestation",
+      "attestation_domain_mismatch",
+    ]);
+  });
+
+  it("binds a second key an existing agent asked for (Section 5)", async () => {
+    expect(await checkAgentBind(bind())).toEqual({ ok: true });
+  });
+
+  it("refuses an operator the registry does not hold", async () => {
+    expect(await checkAgentBind(bind({ registered: false }))).toEqual({
+      ok: false,
+      reason: "unregistered_operator",
+    });
+  });
+
+  it("refuses a request signed by an agent of another operator", async () => {
+    // The operator vouches for the new key by signing with one of its own; a
+    // key that answers for somebody else is not the operator asking.
+    expect(await checkAgentBind(bind({ signer: otherAgent.id }))).toEqual({
+      ok: false,
+      reason: "not_operator_agent",
+    });
+    expect(await checkAgentBind(bind({ agents: [] }))).toEqual({
+      ok: false,
+      reason: "not_operator_agent",
+    });
+  });
+
+  it("refuses a key already bound, to this operator or to any other", async () => {
+    for (const held of [OPERATOR, OTHER_OPERATOR]) {
+      expect(await checkAgentBind(bind({ agentOperator: held }))).toEqual({
+        ok: false,
+        reason: "agent_bound",
+      });
+    }
+  });
+
+  it("refuses a new agent that is not a 1F916 id", async () => {
+    // A id that carries too few key bytes, one with no prefix at all, and one
+    // that is not base64url: none of them spells a key, so none is an agent.
+    for (const bad of ["", "not-an-agent", "1F916:zzz", "1F916:not base64url!"]) {
+      expect(await checkAgentBind(bind({ agent: bad }))).toEqual({
+        ok: false,
+        reason: "bad_agent",
+      });
+    }
+  });
+
+  it("refuses a missing attestation", async () => {
+    for (const missing of [null, undefined]) {
+      expect(await checkAgentBind(bind({ attestation: missing }))).toEqual({
+        ok: false,
+        reason: "missing_attestation",
+      });
+    }
+  });
+
+  it("refuses an attestation the new key did not sign", async () => {
+    for (const bad of [
+      {},
+      "signed",
+      // The operator's own first agent signed it, not the key being bound.
+      attestation,
+      // The right key, the wrong operator.
+      await signAttestation(newAgent.privateKey, {
+        operator: OTHER_OPERATOR,
+        agent: newAgent.id,
+        signed_at: SIGNED_AT,
+      }),
+    ]) {
+      expect(await checkAgentBind(bind({ attestation: bad }))).toEqual({
+        ok: false,
+        reason: "bad_attestation",
+      });
+    }
+  });
+
+  it("refuses an attestation signed outside the request window", async () => {
+    // The request signature carries its own window, but it is made by the key
+    // the operator already has. Without this, a sentence signed long ago by a
+    // key that has since changed hands would still bind it today.
+    const skew = REQUEST_CLOCK_SKEW_SECONDS * 1000;
+    const at = new Date(SIGNED_AT).getTime();
+    for (const now of [new Date(at + skew), new Date(at - skew)]) {
+      expect(await checkAgentBind(bind({ now }))).toEqual({ ok: true });
+    }
+    for (const now of [new Date(at + skew + 1000), new Date(at - skew - 1000)]) {
+      expect(await checkAgentBind(bind({ now }))).toEqual({
+        ok: false,
+        reason: "bad_attestation",
+      });
+    }
+  });
+
+  it("refuses a sentence signed for a domain the operator did not register in", async () => {
+    // ai-ecosystem is the one registered domain today (src/policy.ts), so this
+    // refusal is unreachable through the door and is pinned here on the check's
+    // own context: the sentence verifies, and it is the wrong domain's.
+    expect(
+      await checkAgentBind(bind({ registrationDomain: "biotech" })),
+    ).toEqual({ ok: false, reason: "attestation_domain_mismatch" });
+  });
+
+  it("reports the first refusal when several apply, in that order", async () => {
+    const allWrong = {
+      registered: false,
+      signer: otherAgent.id,
+      agentOperator: OTHER_OPERATOR,
+      agent: "not-an-agent",
+      attestation: null as unknown,
+      registrationDomain: "biotech",
+    };
+    expect(await checkAgentBind(bind(allWrong))).toEqual({
+      ok: false,
+      reason: "unregistered_operator",
+    });
+    expect(
+      await checkAgentBind(bind({ ...allWrong, registered: true })),
+    ).toEqual({ ok: false, reason: "not_operator_agent" });
+    expect(
+      await checkAgentBind(
+        bind({ ...allWrong, registered: true, signer: agent.id }),
+      ),
+    ).toEqual({ ok: false, reason: "agent_bound" });
+    expect(
+      await checkAgentBind(
+        bind({
+          ...allWrong,
+          registered: true,
+          signer: agent.id,
+          agentOperator: null,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: "bad_agent" });
+    expect(
+      await checkAgentBind(
+        bind({
+          ...allWrong,
+          registered: true,
+          signer: agent.id,
+          agentOperator: null,
+          agent: newAgent.id,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: "missing_attestation" });
+    expect(
+      await checkAgentBind(
+        bind({
+          ...allWrong,
+          registered: true,
+          signer: agent.id,
+          agentOperator: null,
+          agent: newAgent.id,
+          attestation: {},
+        }),
+      ),
+    ).toEqual({ ok: false, reason: "bad_attestation" });
+    expect(
+      await checkAgentBind(
+        bind({
+          ...allWrong,
+          registered: true,
+          signer: agent.id,
+          agentOperator: null,
+          agent: newAgent.id,
+          attestation: bindAttestation,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: "attestation_domain_mismatch" });
   });
 });
 

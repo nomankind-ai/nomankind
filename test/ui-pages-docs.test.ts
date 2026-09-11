@@ -43,6 +43,7 @@ import { renderApi } from "../src/ui/pages/api.js";
 import { renderDryRun } from "../src/ui/pages/dry-run.js";
 import { VALIDATION_REFUSALS } from "../src/validate.js";
 import { renderGenesis } from "../src/ui/pages/genesis.js";
+import { renderHowItWorks } from "../src/ui/pages/how-it-works.js";
 import { APEX_URL, CONTACT_EMAIL, shortHash } from "../src/ui/html.js";
 import {
   LANDING_CSS,
@@ -52,6 +53,7 @@ import {
 import { renderPolicy } from "../src/ui/pages/policy.js";
 import type {
   GenesisData,
+  HowItWorksData,
   LandingData,
   PageContext,
 } from "../src/ui/types.js";
@@ -515,6 +517,48 @@ describe("renderApi", () => {
     }
   });
 
+  it("documents binding a second agent under an operator, and its refusals in order", () => {
+    // M12's gap: an operator with one key had no way to add a second. The door
+    // and the command are the record of how, so the page has to name both — and
+    // the refusals in the order the kernel checks them, because a caller told
+    // only that it was refused cannot tell which rule refused it.
+    const opens = page.indexOf("/operators/{id}/agents");
+    expect(opens, "the door is not documented").toBeGreaterThan(-1);
+    // That row alone: the same words appear on the registration and the join
+    // rows, so an order checked over the whole page would check nothing.
+    const row = page.slice(opens, page.indexOf("/agents/{agent_id}", opens));
+
+    let at = 0;
+    for (const refusal of [
+      "unregistered_operator",
+      "not_operator_agent",
+      "agent_bound",
+      "bad_agent",
+      "missing_attestation",
+      "bad_attestation",
+      "attestation_domain_mismatch",
+    ]) {
+      const found = row.indexOf(refusal, at);
+      expect(
+        found,
+        `${refusal} is not named after the one before it`,
+      ).toBeGreaterThan(-1);
+      at = found + refusal.length;
+    }
+    // The three codes that are not 422, which a caller has to be able to tell
+    // apart: an operator nobody registered, somebody else's agent, and an agent
+    // that is already bound.
+    expect(row).toContain("404 unregistered_operator");
+    expect(row).toContain("403 not_operator_agent");
+    expect(row).toContain("409 agent_bound");
+    // The body it takes, and the record it answers with.
+    expect(row).toContain("agent, attestation");
+    expect(row).toContain("201 with the operator record");
+    expect(page).toContain(
+      `npm run register -- &lt;existing-key.json&gt; ${ctx.origin} &lt;operator-domain&gt; --bind &lt;new-key.json&gt;`,
+    );
+  });
+
   it("names every role the two capture routes serve", () => {
     // Section 4 and decision D-059 put a provider statement's page in the
     // archive beside the transcript, under the role `statement`. A caller
@@ -665,6 +709,15 @@ describe("renderApi", () => {
 
     // Every kind, from POLICY.
     expect(page).toContain(POLICY.ALERT_KINDS.join(", "));
+
+    // And the seventh, which is the one a subscriber cannot work out from the
+    // log: no event carries it, so the page has to say where its position, its
+    // seal and its `at` come from instead.
+    expect(POLICY.ALERT_KINDS).toContain("stale");
+    const flat = page.replace(/\s+/g, " ");
+    expect(flat).toContain("the only one no event carries");
+    expect(flat).toContain("the entry's own submission");
+    expect(flat).toContain("the day the window ran out");
 
     // The four headers a delivery carries.
     for (const header of [
@@ -1244,6 +1297,85 @@ describe("renderApi", () => {
   it("carries no script and no inline style", () => {
     expect(page).not.toContain("<script");
     expect(page).not.toContain(' style="');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// How it works: the tenth stage
+// ---------------------------------------------------------------------------
+
+/**
+ * A log holding nothing at all, which is what production is the day it opens.
+ *
+ * The tenth stage is the one panel that reads no live value — what is on sale
+ * and what an alert can be about are policy rather than a record — so an empty
+ * log is the honest fixture for it: everything the test pins below has to be
+ * there before the first entry is.
+ */
+const EMPTY_PIPELINE: HowItWorksData = {
+  entry: null,
+  capture: null,
+  pool: { names: [], trusted: 0, registered: 0 },
+  validation: null,
+  seal: null,
+  anchor: null,
+  readCount: null,
+  overturned: null,
+  stale: 0,
+  nextWindowEnds: null,
+  standing: { position: null, rows: [] },
+  reconciliation: null,
+  attestation: null,
+  syncFrom: 0,
+  mirror: null,
+};
+
+describe("renderHowItWorks: paid access, metering, and alerts", () => {
+  const page = renderHowItWorks(
+    { ...ctx, path: "/how-it-works" },
+    EMPTY_PIPELINE,
+  );
+  const STAGE = "Paid access, metering, and alerts";
+
+  it("puts the stage in the stack and in the strip, tenth and after the mirror", () => {
+    expect(page).toContain('class="panel" id="s10"');
+    expect(page).toContain('<span class="stage-num">10</span>');
+    expect(page).toContain(STAGE);
+    expect(page).toContain("SECTION 9 · MONEY");
+    // The strip is the page's own table of contents: a stage in the stack and
+    // not in it is a stage a reader never learns is there.
+    expect(page).toContain('class="step" href="#s10"');
+    expect(page.indexOf("Mirror and fork")).toBeLessThan(page.indexOf(STAGE));
+  });
+
+  it("names the four policy numbers it runs under, through the link to /policy", () => {
+    const tiers = Object.keys(POLICY.RATE_TIERS).join("/");
+    const share = `${POLICY.CONTRIBUTOR_SHARE_PERCENT.stated}/${POLICY.CONTRIBUTOR_SHARE_PERCENT.observed}`;
+    expect(page).toContain(
+      `<a href="/policy">RATE_TIERS ${tiers} · READ_PRICE_MICROS_PER_READ ${POLICY.READ_PRICE_MICROS_PER_READ} · CONTRIBUTOR_SHARE_PERCENT ${share} · ALERT_KINDS ${POLICY.ALERT_KINDS.length}</a>`,
+    );
+  });
+
+  it("links into the live record rather than describing it", () => {
+    expect(page).toContain('<a href="/keys/tiers">GET /keys/tiers</a>');
+    expect(page).toContain('<a href="/status">GET /status</a>');
+    // Every tier there is, with its own cap: a ladder shown two rungs of is a
+    // ladder nobody can see the top of.
+    for (const [slug, tier] of Object.entries(POLICY.RATE_TIERS)) {
+      expect(page, `${slug} is not named`).toContain(
+        `${slug} ${tier.reads_per_day} a day`,
+      );
+    }
+  });
+
+  it("says what Section 9 says about the money", () => {
+    // The prose wraps, so the whitespace is collapsed before a sentence of it
+    // is looked for.
+    const prose = page.replace(/\s+/g, " ");
+    expect(prose).toContain("free to read at low volume, forever");
+    expect(prose).toContain("the paid product is never the data");
+    expect(prose).toContain("No ads, no token");
+    expect(prose).toContain("a daily cap and nothing else");
   });
 });
 

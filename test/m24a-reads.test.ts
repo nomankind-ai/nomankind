@@ -581,8 +581,45 @@ describe("the day's read count, with duplicates inside it", () => {
         // Every read of this day was free, so the block is empty — and it is
         // there, because a day that published no paid read published that fact.
         payload.paid!,
+        payload.duplicates!,
       ),
     );
+  });
+
+  it("names every read it dropped, and where the group's reads went", () => {
+    // M24b: a reader holding a sync receipt for the older entry of a group
+    // cannot tell the D-085 rule from an under-count unless the day says so.
+    // Both groups are here — the one whose older entry was also read by hand
+    // and the one nobody read — because both lost a sync read to the rule.
+    expect(payload.duplicates).toEqual(
+      [
+        {
+          entry_id: readOld["id"] as string,
+          newest: readNew["id"] as string,
+          sync_reads: 1,
+        },
+        {
+          entry_id: quietOld["id"] as string,
+          newest: quietNew["id"] as string,
+          sync_reads: 1,
+        },
+      ].sort((left, right) => (left.entry_id < right.entry_id ? -1 : 1)),
+    );
+
+    // The pair that only looks alike lost nothing: it is not a group.
+    const dropped = payload.duplicates!.map((row) => row.entry_id);
+    expect(dropped).not.toContain(apartOne["id"]);
+    expect(dropped).not.toContain(apartTwo["id"]);
+
+    // And the drop is exactly the gap between what the sync delivered and what
+    // the day counted: the older entry of the quiet group is in neither `reads`
+    // nor `paid`, and the reason is here rather than nowhere.
+    const counts = new Map(
+      payload.reads.map((row) => [row.entry_id, row.count]),
+    );
+    for (const row of payload.duplicates!) {
+      expect(counts.get(row.newest)).toBe(1);
+    }
   });
 
   it("reports the day it published and skips nothing new for it", () => {

@@ -137,7 +137,7 @@ const EMPTY: HowItWorksData = {
   mirror: null,
 };
 
-/** The nine panels, as the artboard heads them. */
+/** The ten panels, as the artboard heads them. */
 const PANELS: readonly { readonly id: string; readonly number: string; readonly title: string; readonly label: string }[] =
   [
     { id: "s1", number: "01", title: "Submit and snapshot", label: "SECTION 6 · SUBMIT" },
@@ -159,12 +159,18 @@ const PANELS: readonly { readonly id: string; readonly number: string; readonly 
       title: "Mirror and fork",
       label: "SECTION 11 · EXIT AS A PROTOCOL RIGHT",
     },
+    {
+      id: "s10",
+      number: "10",
+      title: "Paid access, metering, and alerts",
+      label: "SECTION 9 · MONEY",
+    },
   ];
 
 describe("renderHowItWorks", () => {
   const page = renderHowItWorks(ctx, LIVE);
 
-  it("carries the nine panels, each with its heading and its section label", () => {
+  it("carries the ten panels, each with its heading and its section label", () => {
     for (const panel of PANELS) {
       expect(page, `${panel.title} has no panel`).toContain(
         `id="${panel.id}"`,
@@ -179,7 +185,7 @@ describe("renderHowItWorks", () => {
     }
   });
 
-  it("puts the nine steps across the top, each anchored at its panel, and counts nine", () => {
+  it("puts the ten steps across the top, each anchored at its panel, and counts ten", () => {
     expect(page).toContain('class="steps"');
     for (const panel of PANELS) {
       expect(page, `no step for ${panel.title}`).toContain(
@@ -189,9 +195,9 @@ describe("renderHowItWorks", () => {
     // The strip is the page's own table of contents: a stage added to the stack
     // and left out of the strip is a stage a reader never learns is there. So
     // the count is checked and not merely the presence of each one.
-    expect(PANELS).toHaveLength(9);
-    expect(page.match(/class="step" href="#/g) ?? []).toHaveLength(9);
-    expect(page.match(/class="panel" id="s/g) ?? []).toHaveLength(9);
+    expect(PANELS).toHaveLength(10);
+    expect(page.match(/class="step" href="#/g) ?? []).toHaveLength(10);
+    expect(page.match(/class="panel" id="s/g) ?? []).toHaveLength(10);
   });
 
   it("styles the strip through the selector the markup actually uses", () => {
@@ -311,7 +317,7 @@ describe("renderHowItWorks", () => {
     ]) {
       expect(empty, `the empty page never says "${words}"`).toContain(words);
     }
-    // And the nine panels are still all there: an empty log is a log, and the
+    // And the ten panels are still all there: an empty log is a log, and the
     // page explains the machine either way.
     for (const panel of PANELS) {
       expect(empty, `${panel.title} vanished on an empty log`).toContain(

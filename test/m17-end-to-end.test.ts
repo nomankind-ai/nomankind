@@ -744,6 +744,9 @@ describe("the day's read count, published to the sealed log", () => {
       // A day nobody read is also a day nobody paid for, and both halves are
       // published rather than left out (M24).
       paid: { reads: [], total: 0, keys: {} },
+      // And a day nobody read dropped nothing, said out loud for the same
+      // reason (M24b): an empty block is an answer, a missing one is not.
+      duplicates: [],
     });
   }, 120_000);
 });
