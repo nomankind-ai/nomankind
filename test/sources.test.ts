@@ -23,7 +23,7 @@ import {
   domainPolicy,
   excludedPartyDomains,
   isOfficialRequiredCategory,
-  providerSources,
+  authoritySources,
   recognizedHosts,
   sourcePolicy,
 } from "../src/policy.js";
@@ -34,7 +34,7 @@ import {
   SOURCE_REFUSALS,
   checkSource,
   isSourceClass,
-  providerOf,
+  primaryPartyOf,
   sourceClassOf,
   sourceClassSatisfies,
 } from "../src/sources.js";
@@ -73,13 +73,13 @@ describe("the source tables", () => {
     }
   });
 
-  it("puts every excluded party in exactly one provider row", () => {
+  it("puts every excluded party in exactly one authority row", () => {
     // The two lists are one statement made twice: a party too close to judge the
     // record is exactly the party whose own pages are authoritative about its own
-    // products, so an excluded domain with no provider row would be a subject
+    // products, so an excluded domain with no authority row would be a subject
     // nobody could ever cite officially, and one in two rows would be a subject
     // with two official sources.
-    const rows = Object.entries(sourcePolicy(DEFAULT_DOMAIN).providers).filter(
+    const rows = Object.entries(sourcePolicy(DEFAULT_DOMAIN).authorities).filter(
       ([, row]) => row.fixture !== true,
     );
 
@@ -87,27 +87,27 @@ describe("the source tables", () => {
       const owners = rows.filter(([, row]) => row.hosts.includes(party));
       expect(
         owners.map(([slug]) => slug),
-        `${party} must belong to exactly one provider row`,
+        `${party} must belong to exactly one authority row`,
       ).toHaveLength(1);
     }
   });
 
   it("marks the fixture row, and only it, as a fixture", () => {
-    const providers = sourcePolicy(DEFAULT_DOMAIN).providers;
-    const fixtures = Object.entries(providers)
+    const authorities = sourcePolicy(DEFAULT_DOMAIN).authorities;
+    const fixtures = Object.entries(authorities)
       .filter(([, row]) => row.fixture === true)
       .map(([slug]) => slug);
 
     expect(fixtures).toEqual(["example"]);
     // RFC 2606's reserved names, which nobody can register: the fixture path is
-    // honest about being a fixture rather than borrowing a real provider's name.
-    expect([...providers["example"]!.hosts]).toEqual(["example.com", "example"]);
+    // honest about being a fixture rather than borrowing a real authority's name.
+    expect([...authorities["example"]!.hosts]).toEqual(["example.com", "example"]);
   });
 
   it("states every host lowercase, with no scheme, port or path", () => {
     const sources = sourcePolicy(DEFAULT_DOMAIN);
     const hosts = [
-      ...Object.values(sources.providers).flatMap((row) => [...row.hosts]),
+      ...Object.values(sources.authorities).flatMap((row) => [...row.hosts]),
       ...sources.recognized_hosts,
     ];
 
@@ -120,7 +120,7 @@ describe("the source tables", () => {
     expect(new Set(sources.recognized_hosts).size).toBe(
       sources.recognized_hosts.length,
     );
-    for (const row of Object.values(sources.providers)) {
+    for (const row of Object.values(sources.authorities)) {
       expect(new Set(row.hosts).size).toBe(row.hosts.length);
     }
   });
@@ -132,8 +132,8 @@ describe("the source tables", () => {
       for (const category of sources.official_required) {
         expect(registryDoc).toContain(`\`${category}\``);
       }
-      for (const [provider, row] of Object.entries(sources.providers)) {
-        expect(registryDoc).toContain(`| ${provider} | `);
+      for (const [authority, row] of Object.entries(sources.authorities)) {
+        expect(registryDoc).toContain(`| ${authority} | `);
         for (const host of row.hosts) expect(registryDoc).toContain(host);
       }
       for (const host of sources.recognized_hosts) {
@@ -154,9 +154,9 @@ describe("the source tables", () => {
     const sources = sourcePolicy(DEFAULT_DOMAIN);
     expect(Object.isFrozen(sources)).toBe(true);
     expect(Object.isFrozen(sources.official_required)).toBe(true);
-    expect(Object.isFrozen(sources.providers)).toBe(true);
+    expect(Object.isFrozen(sources.authorities)).toBe(true);
     expect(Object.isFrozen(sources.recognized_hosts)).toBe(true);
-    for (const row of Object.values(sources.providers)) {
+    for (const row of Object.values(sources.authorities)) {
       expect(Object.isFrozen(row)).toBe(true);
       expect(Object.isFrozen(row.hosts)).toBe(true);
     }
@@ -165,16 +165,16 @@ describe("the source tables", () => {
   it("answers nothing for a domain nobody registered", () => {
     expect(() => sourcePolicy(OTHER_DOMAIN)).toThrow(/unregistered domain/);
     expect(isOfficialRequiredCategory(OTHER_DOMAIN, "pricing")).toBe(false);
-    expect(providerSources(OTHER_DOMAIN, "openai")).toBeNull();
+    expect(authoritySources(OTHER_DOMAIN, "openai")).toBeNull();
     expect([...recognizedHosts(OTHER_DOMAIN)]).toEqual([]);
   });
 
-  it("has no row for a provider nobody published", () => {
-    expect(providerSources(DEFAULT_DOMAIN, "openai")).not.toBeNull();
-    expect(providerSources(DEFAULT_DOMAIN, "kestrel")).toBeNull();
-    // Not a prototype walk: `constructor` is not a provider.
-    expect(providerSources(DEFAULT_DOMAIN, "constructor")).toBeNull();
-    expect(providerSources(DEFAULT_DOMAIN, 42)).toBeNull();
+  it("has no row for an authority nobody published", () => {
+    expect(authoritySources(DEFAULT_DOMAIN, "openai")).not.toBeNull();
+    expect(authoritySources(DEFAULT_DOMAIN, "kestrel")).toBeNull();
+    // Not a prototype walk: `constructor` is not an authority.
+    expect(authoritySources(DEFAULT_DOMAIN, "constructor")).toBeNull();
+    expect(authoritySources(DEFAULT_DOMAIN, 42)).toBeNull();
   });
 });
 
@@ -208,16 +208,16 @@ describe("the source classes", () => {
   });
 });
 
-describe("providerOf", () => {
+describe("primaryPartyOf", () => {
   it("takes the first segment of the subject, lowercased", () => {
-    expect(providerOf("openai/gpt-5")).toBe("openai");
-    expect(providerOf("OpenAI/GPT-5")).toBe("openai");
-    expect(providerOf("google/gemini-3/preview")).toBe("google");
+    expect(primaryPartyOf("openai/gpt-5")).toBe("openai");
+    expect(primaryPartyOf("OpenAI/GPT-5")).toBe("openai");
+    expect(primaryPartyOf("google/gemini-3/preview")).toBe("google");
   });
 
-  it("answers null for a subject that names no provider", () => {
+  it("answers null for a subject that names no primary party", () => {
     for (const subject of ["gpt-5", "", "/gpt-5", null, 42, undefined]) {
-      expect(providerOf(subject)).toBeNull();
+      expect(primaryPartyOf(subject)).toBeNull();
     }
   });
 });
@@ -230,11 +230,11 @@ describe("sourceClassOf", () => {
   const official = (citation: string) =>
     sourceClassOf(DEFAULT_DOMAIN, "anthropic/claude-4", citation);
 
-  it("calls a provider's own host official, and names the host it matched", () => {
+  it("calls an authority's own host official, and names the host it matched", () => {
     expect(official("https://anthropic.com/pricing")).toEqual({
       class: "official",
       matched_host: "anthropic.com",
-      provider: "anthropic",
+      authority: "anthropic",
     });
   });
 
@@ -244,7 +244,7 @@ describe("sourceClassOf", () => {
     expect(official("https://docs.anthropic.com/en/api/pricing")).toEqual({
       class: "official",
       matched_host: "docs.anthropic.com",
-      provider: "anthropic",
+      authority: "anthropic",
     });
     // A subdomain of a listed host that is not itself listed still matches.
     expect(official("https://www.anthropic.com/news").matched_host).toBe(
@@ -259,7 +259,7 @@ describe("sourceClassOf", () => {
     ).toEqual({
       class: "official",
       matched_host: "platform.openai.com",
-      provider: "openai",
+      authority: "openai",
     });
   });
 
@@ -310,16 +310,16 @@ describe("sourceClassOf", () => {
     ).toEqual({
       class: "recognized",
       matched_host: "arxiv.org",
-      provider: "openai",
+      authority: "openai",
     });
-    // A subdomain of a recognized host counts the same way a provider's does.
+    // A subdomain of a recognized host counts the same way an authority's does.
     expect(
       sourceClassOf(DEFAULT_DOMAIN, "openai/gpt-5", "https://www.reuters.com/x")
         .class,
     ).toBe("recognized");
   });
 
-  it("calls everything else other, and still names the provider", () => {
+  it("calls everything else other, and still names the authority", () => {
     expect(
       sourceClassOf(
         DEFAULT_DOMAIN,
@@ -329,12 +329,12 @@ describe("sourceClassOf", () => {
     ).toEqual({
       class: "other",
       matched_host: null,
-      provider: "openai",
+      authority: "openai",
     });
   });
 
-  it("prefers the subject's own provider over the recognized list", () => {
-    // A provider's own page about its own product is the strongest source there
+  it("prefers the subject's own authority over the recognized list", () => {
+    // An authority's own page about its own product is the strongest source there
     // is for what that product costs, so official wins where both could match.
     expect(
       sourceClassOf(DEFAULT_DOMAIN, "google/gemini-3", "https://blog.google/x")
@@ -352,10 +352,10 @@ describe("sourceClassOf", () => {
       .toBe("other");
     expect(
       sourceClassOf(DEFAULT_DOMAIN, null, "https://arxiv.org/abs/1"),
-    ).toEqual({ class: "recognized", matched_host: "arxiv.org", provider: null });
+    ).toEqual({ class: "recognized", matched_host: "arxiv.org", authority: null });
   });
 
-  it("classifies the fixture provider's reserved hosts as official", () => {
+  it("classifies the fixture authority's reserved hosts as official", () => {
     // The demo's own checkpoint, and every `*.example` host the fixtures cite.
     expect(
       sourceClassOf(DEFAULT_DOMAIN, "example/demo-model", "https://example.com/")
@@ -370,7 +370,7 @@ describe("sourceClassOf", () => {
     ).toEqual({
       class: "official",
       matched_host: "example",
-      provider: "example",
+      authority: "example",
     });
   });
 });
@@ -382,7 +382,7 @@ describe("sourceClassOf", () => {
 describe("checkSource", () => {
   it("names both refusals, in check order", () => {
     expect([...SOURCE_REFUSALS]).toEqual([
-      "unknown_provider",
+      "unknown_authority",
       "source_not_official",
     ]);
   });
@@ -435,7 +435,7 @@ describe("checkSource", () => {
 
   it("refuses source_not_official for a recognized host: recognized is not official", () => {
     // A newspaper reporting a price change is a real source and the entry may
-    // cite it; what it is not is the provider saying what its own product costs.
+    // cite it; what it is not is the authority saying what its own product costs.
     expect(
       checkSource(
         DEFAULT_DOMAIN,
@@ -446,9 +446,9 @@ describe("checkSource", () => {
     ).toEqual({ ok: false, reason: "source_not_official" });
   });
 
-  it("refuses unknown_provider before it looks at the citation at all", () => {
-    // A provider with no published row has no official source, so the log cannot
-    // tell an official page from a lookalike and refuses rather than guessing --
+  it("refuses unknown_authority before it looks at the citation at all", () => {
+    // An authority with no published row has no official source, so the log
+    // cannot tell an official page from a lookalike and refuses rather than guessing --
     // even when the citation happens to be somebody else's official host.
     for (const citation of [
       "https://kestrel.example/pricing",
@@ -456,12 +456,12 @@ describe("checkSource", () => {
     ]) {
       expect(
         checkSource(DEFAULT_DOMAIN, "pricing", "kestrel/kestrel-1", citation),
-      ).toEqual({ ok: false, reason: "unknown_provider" });
+      ).toEqual({ ok: false, reason: "unknown_authority" });
     }
-    // A subject with no provider segment at all names no provider either.
+    // A subject with no primary-party segment at all names no authority either.
     expect(
       checkSource(DEFAULT_DOMAIN, "pricing", "gpt-5", "https://openai.com/"),
-    ).toEqual({ ok: false, reason: "unknown_provider" });
+    ).toEqual({ ok: false, reason: "unknown_authority" });
   });
 
   it("gates every official-required category the same way", () => {

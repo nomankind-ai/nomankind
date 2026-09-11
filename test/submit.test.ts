@@ -42,8 +42,8 @@ function proposal(
   overrides: Partial<SubmissionProposal> = {},
 ): SubmissionProposal {
   return {
-    // The fixture provider (decision D-080): `example` is the reserved-name row
-    // in the domain's provider table, and `kestrel.example` is a subdomain of
+    // The fixture authority (decision D-080): `example` is the reserved-name row
+    // in the domain's authority table, and `kestrel.example` is a subdomain of
     // the reserved `example` TLD it lists. So a pricing claim here cites its
     // subject's official source, exactly as a real one must.
     subject: "example/kestrel-2",
@@ -291,7 +291,7 @@ describe("checkSubmission", () => {
       "missing_domain",
       "unregistered_domain",
       "category_not_in_domain",
-      "unknown_provider",
+      "unknown_authority",
       "source_not_official",
       "bad_submitted_at",
       "author_mismatch",
@@ -466,7 +466,7 @@ describe("checkSubmission", () => {
     });
   });
 
-  it("refuses unknown_provider for a subject no provider row names", async () => {
+  it("refuses unknown_authority for a subject no authority row names", async () => {
     const core = await buildSubmittedCore(
       proposal({
         subject: "kestrel/kestrel-2",
@@ -477,7 +477,7 @@ describe("checkSubmission", () => {
 
     expect(checkSubmission(core, await contextFor(core))).toEqual({
       ok: false,
-      reason: "unknown_provider",
+      reason: "unknown_authority",
     });
   });
 
@@ -527,7 +527,7 @@ describe("checkSubmission", () => {
     });
     expect(checkSubmission(badClock, await contextFor(badClock))).toEqual({
       ok: false,
-      reason: "unknown_provider",
+      reason: "unknown_authority",
     });
   });
 

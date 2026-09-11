@@ -151,7 +151,7 @@ function sidecarOf(fixture: Fixture): Sidecar {
     // Fixed here rather than computed: these rows go in through the repository's
     // own writer, and what the browsing reads are being held to is what was
     // stored, not what a classifier would say about it now.
-    source: { class: "other", matched_host: null, provider: null },
+    source: { class: "other", matched_host: null, authority: null },
     trusted_count_at_decision: null,
     read_share_slots: null,
     revalidations: [],

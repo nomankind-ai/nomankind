@@ -122,12 +122,12 @@ const sidecar: Sidecar = {
   effective_tier: "stated",
   test_verdict: "rejected",
   // The class this entry's own citation earned (decision D-080). Official, with
-  // the host that matched and the provider the subject names, so the entry page
+  // the host that matched and the authority the subject names, so the entry page
   // has all three to show; the `other` wording is exercised on its own below.
   source: {
     class: "official",
     matched_host: "docs.kestrel.example",
-    provider: "kestrel",
+    authority: "kestrel",
   },
   trusted_count_at_decision: 3,
   read_share_slots: [
@@ -1015,7 +1015,7 @@ describe("the entry page", () => {
     expect(document.slice(at, at + 200)).toContain(DEFAULT_DOMAIN);
   });
 
-  it("shows the source class, its matched host and its provider, as derived", () => {
+  it("shows the source class, its matched host and its authority, as derived", () => {
     // Decision D-080. The class is a reading of the citation the core already
     // carried, so it sits among the derived fields and not among the signed
     // ones, and all three of its parts are shown: a class with no host beside
@@ -1024,8 +1024,7 @@ describe("the entry page", () => {
     const at = document.indexOf("<dt>source</dt>");
     const cell = document.slice(at, at + 300);
     expect(cell).toContain("official");
-    expect(cell).toContain("docs.kestrel.example");
-    expect(cell).toContain("kestrel");
+    expect(cell).toContain("docs.kestrel.example · authority kestrel");
   });
 
   it("says in words what an `other` source class means", () => {
@@ -1036,7 +1035,7 @@ describe("the entry page", () => {
       ...entryData,
       sidecar: {
         ...sidecar,
-        source: { class: "other", matched_host: null, provider: "kestrel" },
+        source: { class: "other", matched_host: null, authority: "kestrel" },
       },
     });
     expect(unofficial).toContain(
@@ -1051,15 +1050,15 @@ describe("the entry page", () => {
     expect(unofficial.slice(at, at + 300)).not.toContain("docs.kestrel.example");
   });
 
-  it("says when the subject named no provider at all", () => {
+  it("says when the subject named no primary party at all", () => {
     const nameless = renderEntry(ctx, {
       ...entryData,
       sidecar: {
         ...sidecar,
-        source: { class: "other", matched_host: null, provider: null },
+        source: { class: "other", matched_host: null, authority: null },
       },
     });
-    expect(nameless).toContain("no provider in the subject");
+    expect(nameless).toContain("no primary party in the subject");
   });
 
   it("says a legacy core's domain is absent, and what the log reads it as", () => {

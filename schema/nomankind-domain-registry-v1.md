@@ -102,7 +102,7 @@ everywhere else it is a label published beside the entry.
 
 | class | what it means |
 | --- | --- |
-| official | the host is one the subject's own provider published, from the provider table below |
+| official | the host is one the subject's own authority published, from the authorities table below |
 | recognized | the host is on the recognized list below: an editorial process, a standards body, a court or regulator, a journal or a preprint server |
 | other | neither. Not an accusation: it says this log publishes no authority for this subject |
 
@@ -115,24 +115,26 @@ a subdomain of it — `docs.anthropic.com` matches `anthropic.com`, and
 
 *Official-required categories.* `pricing`, `limit`, `deprecation`, `release`,
 `outage`. These have an authoritative source by nature — what a product costs,
-what its limits are, what was released, deprecated, or down is the provider's own
-to state — so an entry in one of them must cite the subject's official source or
-it is refused at submit, with `unknown_provider` when the subject's provider has
-no row and `source_not_official` when it has one and the citation is not among
-its hosts. A correction entry is a submission like any other, and is checked
-under its own category — `correction`, which is not official-required — so the
-rule that binds a challenge is the one its target carries: the dispute door runs
-the same check against the challenged entry's domain and category, and
-overturning an official-required claim takes an official source too.
+what its limits are, what was released, deprecated, or down is the authority's
+own to state — so an entry in one of them must cite the subject's official
+source or it is refused at submit, with `unknown_authority` when the subject's
+primary party has no row and `source_not_official` when it has one and the
+citation is not among its hosts. A correction entry is a submission like any
+other, and is checked under its own category — `correction`, which is not
+official-required — so the rule that binds a challenge is the one its target
+carries: the dispute door runs the same check against the challenged entry's
+domain and category, and overturning an official-required claim takes an
+official source too.
 
-*The provider table.* The subject convention is `<provider>/<model or product>`,
-so the provider slug — the first path segment, lowercase — keys this table. Every
-excluded party of this domain appears here: a party too close to judge the record
-is exactly the party whose own pages are authoritative about its own products. A
-provider absent from the table has no official source published here, so its
-official-required claims are refused until a decision adds the row.
+*The authorities table.* The subject convention is `<provider>/<model or
+product>`, so the subject's primary party — the first path segment, lowercase —
+keys this table. Every excluded party of this domain appears here: a party too
+close to judge the record is exactly the party whose own pages are authoritative
+about its own products. An authority absent from the table has no official
+source published here, so its official-required claims are refused until a
+decision adds the row.
 
-| provider | official hosts |
+| authority | official hosts |
 | --- | --- |
 | openai | openai.com, platform.openai.com, status.openai.com, help.openai.com |
 | anthropic | anthropic.com, docs.anthropic.com, status.anthropic.com, claude.com, docs.claude.com |
@@ -159,7 +161,7 @@ official-required claims are refused until a decision adds the row.
 `example` is the reserved-name row (RFC 2606): `example.com`, which the demo's
 own checkpoint cites, and the `example` top-level domain itself, which every
 `*.example` fixture host is a subdomain of. Both are reserved by IANA and can
-never be registered, so nothing in this row can become a real provider's
+never be registered, so nothing in this row can become a real authority's
 official host. It is marked a fixture in `DOMAINS`, and the test that pins this
 table against the excluded-party list skips it for that reason.
 
@@ -184,7 +186,7 @@ move only by a later decision.
 A new domain is a decision, not a pull request: the block above is filled in
 first — categories, windows, transcript categories, excluded parties and their
 list, attestation version and sentence, subject convention, and the sources
-section (the official-required categories, the provider table with a row for
+section (the official-required categories, the authorities table with a row for
 every excluded party, and the recognized list) — the slug is added to the
 schema's `domain` enum, and `DOMAINS` in `src/policy.ts` is extended to match. A
 test pins that `DOMAINS`' key set is exactly the schema's enum, so the two can

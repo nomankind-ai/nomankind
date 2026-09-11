@@ -1032,8 +1032,15 @@ describe("a sidecar stored before revalidations existed", () => {
  * the first time anybody asks for it.
  */
 describe("a sidecar stored before the source class existed", () => {
-  /** One entries row whose sidecar_json is shaped as the previous Worker wrote it. */
-  async function putPreM23b(id: string): Promise<Record<string, unknown>> {
+  /**
+   * One entries row whose sidecar_json is shaped as the previous Worker wrote
+   * it: no `source` at all, or -- with `staleSource` -- the pre-D-081 object
+   * that carried `provider` where `authority` now goes.
+   */
+  async function putPreM23b(
+    id: string,
+    staleSource?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
     const entrySeals = await sealsForEntries(
       world.bundle.events,
       world.bundle.seals,
@@ -1046,8 +1053,10 @@ describe("a sidecar stored before the source class existed", () => {
     );
     const entry = { ...derived.entry, id } as Record<string, unknown>;
     // The key removed rather than nulled: undefined is what the page would meet.
-    const { source: _gone, ...older } = derived.sidecar;
-    expect(Object.keys(older)).not.toContain("source");
+    const { source: _gone, ...without } = derived.sidecar;
+    expect(Object.keys(without)).not.toContain("source");
+    const older =
+      staleSource === undefined ? without : { ...without, source: staleSource };
 
     await test.db
       .prepare(
@@ -1074,7 +1083,12 @@ describe("a sidecar stored before the source class existed", () => {
       .prepare(`SELECT sidecar_json FROM entries WHERE id = ?`)
       .bind(id)
       .first<{ sidecar_json: string }>();
-    expect(JSON.parse(raw!.sidecar_json)).not.toHaveProperty("source");
+    const stored = JSON.parse(raw!.sidecar_json) as Record<string, unknown>;
+    if (staleSource === undefined) {
+      expect(stored).not.toHaveProperty("source");
+    } else {
+      expect(stored["source"]).toEqual(staleSource);
+    }
     return entry;
   }
 
@@ -1097,6 +1111,33 @@ describe("a sidecar stored before the source class existed", () => {
     // Nothing else about the sidecar is invented by the default.
     expect(stored!.sidecar.effective_tier).toBeDefined();
     expect(stored!.sidecar.revalidations).toEqual([]);
+  });
+
+  it("recomputes a source that still carries the pre-D-081 key", async () => {
+    // A row written between M23b and the rename holds `provider` and no
+    // `authority`, and its class is valid, so a check on the class alone would
+    // hand a page an object missing the key it reads. The default is keyed on
+    // the key: the object is thrown away and rebuilt from the row's own core,
+    // which is where the old value came from in the first place.
+    const id = `nmk_${"0".repeat(31)}4`;
+    const entry = await putPreM23b(id, {
+      class: "official",
+      matched_host: "kestrel.example",
+      provider: "kestrel",
+    });
+
+    const stored = await getEntry(test.db, id);
+    expect(stored).not.toBeNull();
+    expect(stored!.sidecar.source).toEqual(
+      sourceClassOf(
+        entry["domain"] as string,
+        entry["subject"],
+        entry["citation"],
+      ),
+    );
+    // The stale key goes with the object it was on, and the new one is there.
+    expect(stored!.sidecar.source).not.toHaveProperty("provider");
+    expect(stored!.sidecar.source).toHaveProperty("authority");
   });
 
   it("leaves a row that already carries the key alone", async () => {

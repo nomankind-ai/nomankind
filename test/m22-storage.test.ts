@@ -114,7 +114,7 @@ function sidecarOf(fixture: Fixture): Sidecar {
     trusted_count_at_decision: null,
     read_share_slots: null,
     revalidations: [],
-    source: { class: "other", matched_host: null, provider: "openai" },
+    source: { class: "other", matched_host: null, authority: "openai" },
   };
 }
 

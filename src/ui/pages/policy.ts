@@ -198,7 +198,7 @@ function domainPanel(slug: string, domain: DomainPolicy): Safe {
  * submission, and every other citation is labeled rather than gated.
  *
  * Three tables, all read off the frozen object and none of them retyped here:
- * the categories the gate applies to, one row per provider with the hosts it
+ * the categories the gate applies to, one row per authority with the hosts it
  * publishes under, and the recognized list. The judgment the policy does not
  * automate is named in words underneath, because a reader who took the tables
  * for the whole check would be trusting a hostname where the actual promise is
@@ -207,7 +207,7 @@ function domainPanel(slug: string, domain: DomainPolicy): Safe {
 function sourcesPanel(slug: string, domain: DomainPolicy): Safe {
   const path = `DOMAINS.${slug}.sources`;
   const sources = domain.sources;
-  const providers = Object.entries(sources.providers);
+  const authorities = Object.entries(sources.authorities);
   return html`<section class="panel">
         <h2 class="panel-title">Domains · ${slug} · sources</h2>
         <p class="note">
@@ -218,8 +218,8 @@ function sourcesPanel(slug: string, domain: DomainPolicy): Safe {
           authoritative source by nature: an entry in one of them must cite the
           subject's own official source or it is refused at submission, with
           <span class="mono">source_not_official</span>, or with
-          <span class="mono">unknown_provider</span> when this table holds no row
-          for the subject's provider at all. Every other citation is classified
+          <span class="mono">unknown_authority</span> when this table holds no row
+          for the subject's primary party at all. Every other citation is classified
           and labeled — <span class="mono">official</span>,
           <span class="mono">recognized</span>,
           <span class="mono">other</span> — and never gated.
@@ -232,8 +232,8 @@ function sourcesPanel(slug: string, domain: DomainPolicy): Safe {
           <span class="mono">anthropic.com</span> and
           <span class="mono">anthropic.com.evil.tld</span> does not. A port or
           userinfo in the URL makes it <span class="mono">other</span>. The
-          provider is the first path segment of the subject, lowercased, under
-          this domain's subject convention.
+          authority is the subject's primary party: the first path segment,
+          lowercased, under this domain's subject convention.
         </p>
         <div class="table-wrap">
           <table class="table">
@@ -249,15 +249,15 @@ function sourcesPanel(slug: string, domain: DomainPolicy): Safe {
           <table class="table">
             <thead>
               <tr>
-                <th>provider</th>
+                <th>authority</th>
                 <th>official hosts</th>
               </tr>
             </thead>
             <tbody>
-              ${providers.map(
-                ([provider, row]) => html`<tr>
+              ${authorities.map(
+                ([authority, row]) => html`<tr>
                   <td class="mono">
-                    ${row.fixture === true ? `${provider} (fixture)` : provider}
+                    ${row.fixture === true ? `${authority} (fixture)` : authority}
                   </td>
                   <td class="mono">${row.hosts.join(", ")}</td>
                 </tr>`,
@@ -277,7 +277,7 @@ function sourcesPanel(slug: string, domain: DomainPolicy): Safe {
           That is the judgment this policy does not automate and does not replace:
           the tables above say which sources may be cited for what, and three
           independent operators still say whether the page cited actually says
-          it. A provider absent from the table has no published official source
+          it. An authority absent from the table has no published official source
           here, so its official-required claims are refused until a recorded
           decision adds the row.
         </p>

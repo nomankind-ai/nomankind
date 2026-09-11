@@ -356,15 +356,22 @@ export interface StoredEntry {
  * the stored core's domain, subject and citation, so computing it here from the
  * row's own entry gives the identical answer `deriveEntry` would. No migration,
  * and a page never sees the key missing.
+ *
+ * The same default carries D-081's rename: a row written between M23b and that
+ * decision holds `source.provider` and no `authority`, so the key check is for
+ * the key this code reads and not merely for a class. Such a row is recomputed
+ * from its own core, which is what the old key held anyway, and the stale key
+ * goes with the object it was on -- again no migration.
  */
 function toSidecar(row: Row, entry: Entry): Sidecar {
   const stored = readJson<Sidecar>(row, "sidecar_json");
   const sidecar = Array.isArray(stored.revalidations)
     ? stored
     : { ...stored, revalidations: [] };
-  if (isSourceClass((sidecar.source as SourceClassification | undefined)?.class)) {
-    return sidecar;
-  }
+  const source = sidecar.source as SourceClassification | undefined;
+  const usable =
+    source !== undefined && isSourceClass(source.class) && "authority" in source;
+  if (usable) return sidecar;
   const core = entry as unknown as Record<string, unknown>;
   return {
     ...sidecar,

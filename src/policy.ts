@@ -78,13 +78,13 @@ export interface DomainPolicy {
   readonly sources: DomainSourcePolicy;
 }
 
-/** One provider's published hosts, and whether the row is a fixture. */
-export interface ProviderSources {
+/** One authority's published hosts, and whether the row is a fixture. */
+export interface AuthoritySources {
   readonly hosts: readonly string[];
   /**
    * True for the reserved row the demo's own checkpoint cites. A fixture
-   * provider is never a real subject, and the test that pins the provider table
-   * against the excluded-party list skips it for exactly that reason.
+   * authority is never a real subject, and the test that pins the authorities
+   * table against the excluded-party list skips it for exactly that reason.
    */
   readonly fixture?: boolean;
 }
@@ -101,16 +101,17 @@ export interface ProviderSources {
  *
  * `official_required` is a gate. Those categories have an authoritative source
  * by nature -- what a product costs, what its limits are, what was released,
- * deprecated, or down is the provider's own to state -- so an entry in one of
+ * deprecated, or down is the authority's own to state -- so an entry in one of
  * them must cite the subject's official source or it is refused at submit.
  *
- * `providers` says what "the subject's official source" means. The subject
- * convention is `<provider>/<model or product>`, so the first path segment keys
- * this table. Every excluded party of the domain appears here: a party too close
- * to judge the record is exactly the party whose own pages are authoritative
- * about its own products. A provider with no row has no official source
- * published here, so its official-required claims are refused until a decision
- * adds the row -- refused, and never quietly accepted from anywhere.
+ * `authorities` says what "the subject's official source" means. The subject
+ * convention is `<provider>/<model or product>`, so the subject's primary
+ * party -- its first path segment -- keys this table. Every excluded party of
+ * the domain appears here: a party too close to judge the record is exactly the
+ * party whose own pages are authoritative about its own products. An authority
+ * with no row has no official source published here, so its official-required
+ * claims are refused until a decision adds the row -- refused, and never quietly
+ * accepted from anywhere.
  *
  * `recognized_hosts` is a label and never a gate: sources with an editorial
  * process, a standards body, a court or regulator, a journal or a preprint
@@ -123,7 +124,7 @@ export interface ProviderSources {
  */
 export interface DomainSourcePolicy {
   readonly official_required: readonly Category[];
-  readonly providers: Readonly<Record<string, ProviderSources>>;
+  readonly authorities: Readonly<Record<string, AuthoritySources>>;
   readonly recognized_hosts: readonly string[];
 }
 
@@ -206,7 +207,7 @@ export const DOMAINS: Readonly<Record<string, DomainPolicy>> = Object.freeze({
         "release",
         "outage",
       ] as const),
-      providers: Object.freeze({
+      authorities: Object.freeze({
         openai: Object.freeze({
           hosts: Object.freeze([
             "openai.com",
@@ -323,7 +324,7 @@ export const DOMAINS: Readonly<Record<string, DomainPolicy>> = Object.freeze({
          * and what the test pinning this table against the excluded-party list
          * skips it for. Both entries are reserved by IANA and can never be
          * registered by anybody, so nothing published here can become a real
-         * provider's official host by someone buying a domain.
+         * authority's official host by someone buying a domain.
          */
         example: Object.freeze({
           hosts: Object.freeze(["example.com", "example"]),
@@ -453,7 +454,7 @@ export function excludedPartyDomains(domain: string): readonly string[] {
 }
 
 /**
- * One domain's source policy: the official-required categories, the provider
+ * One domain's source policy: the official-required categories, the authorities
  * table, and the recognized hosts (decision D-080).
  *
  * Throws for a domain nobody registered, exactly as `domainPolicy` does and for
@@ -484,21 +485,21 @@ export function isOfficialRequiredCategory(
 }
 
 /**
- * One provider's published hosts in one domain, or null when the table has no
+ * One authority's published hosts in one domain, or null when the table has no
  * row for it.
  *
- * Null is the load-bearing answer: a provider with no row has no official source
- * published here, which is what refuses its official-required claims rather than
- * accepting them from anywhere.
+ * Null is the load-bearing answer: an authority with no row has no official
+ * source published here, which is what refuses its official-required claims
+ * rather than accepting them from anywhere.
  */
-export function providerSources(
+export function authoritySources(
   domain: string,
-  provider: unknown,
-): ProviderSources | null {
-  if (!isRegisteredDomain(domain) || typeof provider !== "string") return null;
-  const table = sourcePolicy(domain).providers;
-  if (!Object.prototype.hasOwnProperty.call(table, provider)) return null;
-  return table[provider] ?? null;
+  authority: unknown,
+): AuthoritySources | null {
+  if (!isRegisteredDomain(domain) || typeof authority !== "string") return null;
+  const table = sourcePolicy(domain).authorities;
+  if (!Object.prototype.hasOwnProperty.call(table, authority)) return null;
+  return table[authority] ?? null;
 }
 
 /** The hosts a domain labels recognized: an editorial, standards, court or journal source. */

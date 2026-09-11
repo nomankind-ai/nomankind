@@ -14,7 +14,7 @@
  *   - a claim in an official-required category must cite the subject's own
  *     official source, or the door refuses it before it fetches anything and
  *     before it writes anything;
- *   - a subject whose provider the table does not name is refused too, because
+ *   - a subject whose authority the table does not name is refused too, because
  *     "no published authority" is not the same as "any authority will do";
  *   - the host rule is exact — http is never official, however official the host;
  *   - everywhere else the class is a label: recognized for an editorial or
@@ -97,12 +97,12 @@ function hour(hours: number): Date {
 const VERIFIED_REFERENCE = "mock-verified-m23b";
 
 /**
- * The subject every entry here is about: a provider the table names, so the
+ * The subject every entry here is about: an authority the table names, so the
  * gate has something to be satisfied by and something to refuse.
  */
 const SUBJECT = "openai/gpt-5";
 
-/** A subject whose provider the table does not name, and by design cannot. */
+/** A subject whose authority the table does not name, and by design cannot. */
 const UNKNOWN_SUBJECT = "nobodyco/model-1";
 
 /** The subject's own official source, and the same URL over http. */
@@ -510,7 +510,7 @@ describe("an official-required claim must cite the subject's official source", (
     expect(await getEntry(store.db, core["id"] as string)).toBeNull();
   });
 
-  it("refuses a pricing claim whose provider the table does not name", async () => {
+  it("refuses a pricing claim whose authority the table does not name", async () => {
     const before = await head();
     const core = await submittedCore(author, {
       ...pricing(
@@ -521,12 +521,12 @@ describe("an official-required claim must cite the subject's official source", (
     } as never);
     const answer = await submit(author, core);
 
-    // Not source_not_official: the log has no opinion about this provider's
+    // Not source_not_official: the log has no opinion about this authority's
     // sources at all, and saying so is a different fact from saying the cited
     // one is wrong. A row is added by decision, not by a submission.
     expect([answer.status, answer.body["error"]]).toEqual([
       422,
-      "unknown_provider",
+      "unknown_authority",
     ]);
     expect(await head()).toBe(before);
   });
@@ -537,7 +537,7 @@ describe("an official-required claim must cite the subject's official source", (
     // returns are not the publisher's word.
     expect(
       sourceClassOf(DEFAULT_DOMAIN, SUBJECT, OFFICIAL_OVER_HTTP),
-    ).toEqual({ class: "other", matched_host: null, provider: "openai" });
+    ).toEqual({ class: "other", matched_host: null, authority: "openai" });
 
     const before = await head();
     const core = await submittedCore(author, {
@@ -554,13 +554,13 @@ describe("an official-required claim must cite the subject's official source", (
 
   it("accepts the same claim citing the subject's official source", async () => {
     // The entry that was accepted in the world above, with the class the
-    // derivation gave it: the host that matched, and the provider its subject
+    // derivation gave it: the host that matched, and the authority its subject
     // names. Nothing about the signed core carries any of it.
     const sidecar = await sidecarOf(officialId);
     expect(sidecar.source).toEqual({
       class: "official",
       matched_host: "platform.openai.com",
-      provider: "openai",
+      authority: "openai",
     });
 
     const { body } = await getJson(`/entries/${officialId}`);
@@ -598,7 +598,7 @@ describe("everywhere else the class is a label and never a gate", () => {
     expect(sidecar.source).toEqual({
       class: "recognized",
       matched_host: "arxiv.org",
-      provider: "openai",
+      authority: "openai",
     });
     const { body } = await getJson(`/entries/${recognizedId}`);
     expect(body["status"]).toBe("verified");
@@ -609,7 +609,7 @@ describe("everywhere else the class is a label and never a gate", () => {
     expect(sidecar.source).toEqual({
       class: "other",
       matched_host: null,
-      provider: "openai",
+      authority: "openai",
     });
     const { body } = await getJson(`/entries/${otherId}`);
     expect(body["status"]).toBe("verified");
@@ -710,7 +710,7 @@ describe("a dispute's correction is gated on the entry it challenges", () => {
     expect(sidecar.source).toEqual({
       class: "official",
       matched_host: "platform.openai.com",
-      provider: "openai",
+      authority: "openai",
     });
   });
 
@@ -729,7 +729,7 @@ describe("a dispute's correction is gated on the entry it challenges", () => {
     expect(sidecar.source).toEqual({
       class: "other",
       matched_host: null,
-      provider: "openai",
+      authority: "openai",
     });
   });
 });
@@ -913,7 +913,7 @@ describe("the policy is published, not merely applied", () => {
     expect(page.text).toContain(
       `DOMAINS.${DEFAULT_DOMAIN}.sources.official_required`,
     );
-    for (const host of DOMAINS[DEFAULT_DOMAIN]!.sources.providers["openai"]!
+    for (const host of DOMAINS[DEFAULT_DOMAIN]!.sources.authorities["openai"]!
       .hosts) {
       expect(page.text, `${host} is not published`).toContain(host);
     }
@@ -923,9 +923,9 @@ describe("the policy is published, not merely applied", () => {
     const page = await getHtml("/api");
     const at = page.text.indexOf("category_not_in_domain");
     expect(at).toBeGreaterThan(-1);
-    const provider = page.text.indexOf("unknown_provider", at);
-    const official = page.text.indexOf("source_not_official", provider);
-    expect(provider).toBeGreaterThan(at);
-    expect(official).toBeGreaterThan(provider);
+    const authority = page.text.indexOf("unknown_authority", at);
+    const official = page.text.indexOf("source_not_official", authority);
+    expect(authority).toBeGreaterThan(at);
+    expect(official).toBeGreaterThan(authority);
   });
 });
