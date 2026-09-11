@@ -37,7 +37,7 @@ import { SYNC_QUERY_REFUSALS } from "../src/sync.js";
 import { renderApi } from "../src/ui/pages/api.js";
 import { VALIDATION_REFUSALS } from "../src/validate.js";
 import { renderGenesis } from "../src/ui/pages/genesis.js";
-import { shortHash } from "../src/ui/html.js";
+import { APEX_URL, shortHash } from "../src/ui/html.js";
 import {
   LANDING_CSS,
   LANDING_CSS_HREF,
@@ -1254,7 +1254,12 @@ describe("renderLanding", () => {
   });
 
   it("closes on the two tiers and the licence line", () => {
-    expect(page).toContain("Quotations you can trace.");
+    expect(page).toContain("Claims you can trace.");
+    expect(page).toContain("<em>Truths that held.</em>");
+    // The maintainer's words, 2026-09-11: claims and truths, not quotations and
+    // measurements. The old pair is gone from the page, not merely joined.
+    expect(page).not.toContain("Quotations");
+    expect(page).not.toContain("Measurements");
     expect(page).toContain(
       "CODE APACHE-2.0 · DATA CC0 · TRAINING ON THE FEED IS FREE",
     );
@@ -1264,6 +1269,23 @@ describe("renderLanding", () => {
     expect(page).not.toContain("<script");
     expect(page).not.toContain("style=");
     expect(page).not.toContain("javascript:");
+    // And the same of an app page, which is drawn by the shared layout: both
+    // halves of this UI are server-rendered markup the CSP can allow whole.
+    const app = renderPolicy(ctx, POLICY);
+    expect(app).not.toContain("<script");
+    expect(app).not.toContain(' style="');
+  });
+
+  /**
+   * The top bar's wordmark is a link home like the app header's, and home is
+   * the apex — the landing is served from the apex root, but also from demo and
+   * from a local Worker, where a reader clicking it means nomankind.ai.
+   */
+  it("links its top bar wordmark to the apex", () => {
+    expect(page).toContain(
+      `<a class="wordmark mono" href="${APEX_URL}">NOMANKIND</a>`,
+    );
+    expect(page).not.toContain(`<span class="wordmark mono">`);
   });
 
   it("escapes a seal hash that is markup", () => {

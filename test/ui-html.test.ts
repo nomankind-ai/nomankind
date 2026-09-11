@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  APEX_URL,
   APP_CSS_HREF,
   CONTENT_SECURITY_POLICY,
   badge,
@@ -189,6 +190,30 @@ describe("layout", () => {
     expect(APP_CSS_HREF).toMatch(/^\/static\/app\.css\?v=[0-9a-f]{8}$/);
     expect(document).toContain("https://fonts.googleapis.com/css2?family=Space+Grotesk");
     expect(document).toContain("family=JetBrains+Mono");
+  });
+
+  /**
+   * The wordmark is the way back to the front door, and the front door is the
+   * apex: a header on demo, on app or on a path of the apex itself that pointed
+   * at "/" sent a reader to that host's own root instead. One fixed URL, the
+   * same from every environment, and no rel and no target — it is our host.
+   */
+  it("points the wordmark at the apex from every environment", () => {
+    expect(APEX_URL).toBe("https://nomankind.ai/");
+    for (const environment of ["local", "demo", "production"]) {
+      const page = layout(
+        { ...ctx, environment },
+        { title: "Entries", body: html`<p>body</p>` },
+      );
+      expect(page).toContain(`<a class="wordmark" href="${APEX_URL}">`);
+      expect(page).not.toContain(`<a class="wordmark" href="/">`);
+      const anchor = page.slice(
+        page.indexOf(`<a class="wordmark"`),
+        page.indexOf("</a>", page.indexOf(`<a class="wordmark"`)),
+      );
+      expect(anchor).not.toContain("rel=");
+      expect(anchor).not.toContain("target=");
+    }
   });
 
   it("carries no script and no inline style attribute", () => {
