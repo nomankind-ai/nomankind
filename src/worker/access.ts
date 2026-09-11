@@ -29,6 +29,7 @@
  */
 
 import { utcDay } from "../anchor.js";
+import { publicKeyFromAgentId } from "../identity.js";
 import { FREE_TIER } from "../policy.js";
 import {
   KEY_REFUSALS,
@@ -39,8 +40,12 @@ import {
   tierLimit,
   type KeyRecord,
 } from "../keys.js";
+import { HEADER_AGENT, verifyRequest } from "../request.js";
 import type { D1Like } from "../storage/d1.js";
 import { addQuota, keyByHash, quotaOn } from "../storage/keys.js";
+import { D1NonceStore } from "../storage/nonces.js";
+import { operatorForAgent } from "../storage/repository.js";
+import type { Env } from "./env.js";
 
 /** How many milliseconds a day is. Not a policy number: it is what a day is. */
 const MILLISECONDS_PER_DAY = 86_400_000;
@@ -212,4 +217,145 @@ export function accessHeaders(
     "x-nomankind-limit": String(access.limit),
     "x-nomankind-remaining": String(Math.max(0, remainingAfter)),
   };
+}
+
+// ---------------------------------------------------------------------------
+// The release window's reader (decision D-100)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who is reading, for the one question the release window asks: may this
+ * request see content that has not been released yet?
+ *
+ * Three answers and no fourth. `key` is a valid active bearer key, resolved by
+ * `resolveAccess` above and by nothing else, so a paid reader is the same reader
+ * at every door and is metered the same way. `operator` is a request carrying
+ * the M2 signed-request headers (D-014) from an agent bound to a registered
+ * operator -- any operator, exactly as the M24c disclosure gate decides it,
+ * because the people who have to reproduce an observation are the validators.
+ * `free` is everybody else.
+ *
+ * A bad key or a bad signature is never quietly downgraded to free: a reader who
+ * mistyped their key is refused in the gate's own words, and a signature that
+ * does not verify is `bad_signature` rather than a free read that silently
+ * showed them less than they asked for.
+ */
+export type ReaderAccess =
+  | { readonly kind: "key"; readonly key: Access }
+  | { readonly kind: "operator"; readonly operator: string; readonly agent: string }
+  | { readonly kind: "free" };
+
+/**
+ * What a reader can be refused with: the key gate's own refusals, and the one
+ * this gate adds.
+ *
+ * `bad_signature` is 401 and never a free read. A request that carried no agent
+ * header asked for nothing and is free; a request that presented a signature
+ * which does not verify asked for something and must be told it did not get it,
+ * for the same reason a mistyped key is `bad_key` rather than a quiet
+ * downgrade. An agent whose signature verifies but who is bound to no registered
+ * operator is neither: they proved who they are and are simply not entitled, so
+ * they read free.
+ */
+export type ReaderRefusal =
+  | AccessRefusal
+  | {
+      readonly status: 401;
+      readonly reason: "bad_signature";
+      readonly body: Record<string, unknown>;
+    };
+
+/**
+ * The four M2 headers off a request, lowercased, as `verifyRequest` reads them.
+ */
+function headersOf(request: Request): Record<string, string> {
+  const headers: Record<string, string> = {};
+  request.headers.forEach((value, key) => {
+    headers[key.toLowerCase()] = value;
+  });
+  return headers;
+}
+
+/**
+ * The operator behind a signed GET, or null when the request carries no valid
+ * signature or the key belongs to nobody registered.
+ *
+ * Exactly the form the M24c disclosure gate verifies (src/worker/submit.ts):
+ * method `GET`, the request's own `pathname` with no query string, a null body,
+ * the four headers, and the nonce store pruned at the injected clock. One form,
+ * so a command that can sign for the disclosure gate can sign for this one.
+ */
+async function signedOperator(
+  request: Request,
+  env: Env,
+  now: Date,
+): Promise<{ operator: string; agent: string } | null | "bad_signature"> {
+  const headers = headersOf(request);
+  const agentHeader = headers[HEADER_AGENT];
+  if (agentHeader === undefined || agentHeader === "") return null;
+
+  let publicKey: Uint8Array;
+  try {
+    publicKey = publicKeyFromAgentId(agentHeader);
+  } catch {
+    return "bad_signature";
+  }
+
+  const nonces = new D1NonceStore(env.DB);
+  await nonces.prune(now);
+  const verdict = await verifyRequest({
+    method: request.method,
+    path: new URL(request.url).pathname,
+    body: null,
+    headers,
+    publicKey,
+    now,
+    nonces,
+  });
+  if (!verdict.ok) return "bad_signature";
+  const operator = await operatorForAgent(env.DB, verdict.agentId);
+  return operator === null ? null : { operator, agent: verdict.agentId };
+}
+
+/**
+ * The reader behind one request, resolved once per request.
+ *
+ * The key first, because a key is the cheaper and the commoner answer and
+ * because its refusals are the ones a reader has paid to be told; then the
+ * signature, which costs a nonce write; then free. Every door the window touches
+ * calls this exactly once and passes the answer down, so two checks in one
+ * request can never disagree about who is asking.
+ */
+export async function readerAccess(
+  request: Request,
+  env: Env,
+  db: D1Like,
+  now: Date,
+): Promise<
+  { ok: true; reader: ReaderAccess } | { ok: false; refusal: ReaderRefusal }
+> {
+  const resolved = await resolveAccess(db, request, now);
+  if (!resolved.ok) return resolved;
+  if (resolved.access.key !== null) {
+    return { ok: true, reader: { kind: "key", key: resolved.access } };
+  }
+
+  const signed = await signedOperator(request, env, now);
+  if (signed === "bad_signature") {
+    return {
+      ok: false,
+      refusal: {
+        status: 401,
+        reason: "bad_signature",
+        body: { error: "bad_signature" },
+      },
+    };
+  }
+  if (signed !== null) {
+    return {
+      ok: true,
+      reader: { kind: "operator", operator: signed.operator, agent: signed.agent },
+    };
+  }
+  return { ok: true, reader: { kind: "free" } };
 }

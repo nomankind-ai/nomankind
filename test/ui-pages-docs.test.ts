@@ -77,6 +77,13 @@ const ctx: PageContext = {
   origin: "https://demo.nomankind.ai",
 };
 
+/** One count per registered domain, for the tests that only need the page. */
+const DOMAINS_READING: DomainsData = {
+  counts: Object.fromEntries(
+    DOMAIN_SLUGS.map((slug) => [slug, { entries: 4, trustedOperators: 3 }]),
+  ),
+};
+
 describe("renderPolicy", () => {
   const page = renderPolicy(ctx, POLICY);
 
@@ -2234,9 +2241,16 @@ describe("renderLanding", () => {
     // measurements. The old pair is gone from the page, not merely joined.
     expect(page).not.toContain("Quotations");
     expect(page).not.toContain("Measurements");
+    // The maintainer's words, 2026-09-11 (D-103): the data is CC0 and training
+    // on it is free once the release window is up, and the line says so.
     expect(page).toContain(
+      "CODE APACHE-2.0 · DATA CC0 ON RELEASE · TRAINING ON THE DATA IS FREE ON RELEASE",
+    );
+    expect(page).not.toContain(
       "CODE APACHE-2.0 · DATA CC0 · TRAINING ON THE FEED IS FREE",
     );
+    // And the one other sentence that called the data free says the same.
+    expect(page).toContain("public-domain data on release");
   });
 
   it("survives the content-security-policy: no script, no inline style", () => {
@@ -2436,5 +2450,70 @@ describe("the paper and the README carry observed pays more (D-087)", () => {
     expect(readme).toContain("`STANDING_VALIDATION_REPRODUCED`");
     expect(readme).toContain("`measured` on a slot holder");
     expect(readme).toContain("never out of the reader's price");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The release window on the documentation pages (decision D-100)
+// ---------------------------------------------------------------------------
+
+describe("the release window, as the pages publish it", () => {
+  const policy = renderPolicy(ctx, POLICY);
+  const api = renderApi(ctx);
+  const domains = renderDomains({ ...ctx, path: "/domains" }, DOMAINS_READING);
+
+  it("publishes the window as a number the page read from policy", () => {
+    expect(policy).toContain(`<td class="mono">RELEASE_WINDOW_DAYS</td>`);
+    expect(policy).toContain(
+      `<td class="mono">${POLICY.RELEASE_WINDOW_DAYS} days</td>`,
+    );
+    // In the money group, where the thing it prices is: the window is what a
+    // key buys, beside the holdback and the read price.
+    const money = policy.indexOf("Money and standing");
+    const paid = policy.indexOf("Paid access");
+    expect(policy.indexOf("RELEASE_WINDOW_DAYS")).toBeGreaterThan(money);
+    expect(policy.indexOf("RELEASE_WINDOW_DAYS")).toBeLessThan(paid);
+  });
+
+  it("names every door the window changed, in the doors' own words", () => {
+    // 402 on a free read, with the date; the released head on a free sync; the
+    // envelope on the plain entry fetch; hash lines on the events door; and the
+    // 403 on a capture nothing of whose entries is released.
+    expect(api).toContain("402 unreleased with release_date");
+    expect(api).toContain("served to the released head rather than the sealed");
+    expect(api).toContain("{ proof, release_date }");
+    expect(api).toContain("goes to a free reader as a hash line");
+    expect(api).toContain("403 unreleased, carrying release_date");
+  });
+
+  it("explains the rule once, under the keys section, and links it", () => {
+    expect(api).toContain(`<section class="panel" id="keys">`);
+    const keys = api.indexOf(`id="keys"`);
+    const rule = api.indexOf("The release window (decision D-100) is what a key");
+    expect(rule).toBeGreaterThan(keys);
+    expect(api).toContain(
+      `${POLICY.RELEASE_WINDOW_DAYS} days after the seal that covers`,
+    );
+    expect(api).toContain("The proof is never withheld from anyone");
+  });
+
+  it("names the flag that reaches unreleased content from a command", () => {
+    expect(api).toContain("--sign &lt;key.json&gt;");
+    expect(api.replace(/\s+/g, " ")).toContain(
+      "signs the export's reads with an operator's agent key",
+    );
+  });
+
+  it("names the window in the Domains lede, from policy", () => {
+    expect(domains.replace(/\s+/g, " ")).toContain(
+      `its content is released ${POLICY.RELEASE_WINDOW_DAYS} days after the seal that covers it (decision D-100)`,
+    );
+  });
+
+  it("adds no script and no inline style to any of them", () => {
+    for (const document of [policy, api, domains]) {
+      expect(document).not.toContain("<script");
+      expect(document).not.toContain(' style="');
+    }
   });
 });

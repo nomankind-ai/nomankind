@@ -188,7 +188,7 @@ const VALUES: readonly { readonly head: string; readonly body: string }[] = [
   {
     head: "Forkable.",
     body:
-      "Open code, public-domain data, the whole log exportable. If nomankind breaks its rules, anyone leaves with the record.",
+      "Open code, public-domain data on release, the whole log exportable. If nomankind breaks its rules, anyone leaves with the record.",
   },
 ];
 
@@ -430,7 +430,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
       </section>
 
       <footer class="landing-footer row mono">
-        <span>CODE APACHE-2.0 · DATA CC0 · TRAINING ON THE FEED IS FREE</span>
+        <span>CODE APACHE-2.0 · DATA CC0 ON RELEASE · TRAINING ON THE DATA IS FREE ON RELEASE</span>
         <span
           >NOMANKIND.AI ·
           <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL.toUpperCase()}</a></span

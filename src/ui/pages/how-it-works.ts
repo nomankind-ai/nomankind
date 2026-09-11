@@ -36,6 +36,7 @@ import {
   RATE_TIERS,
   READ_PRICE_MICROS_PER_READ,
   READ_SHARE_SPLIT,
+  RELEASE_WINDOW_DAYS,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   SCHEMA_VERSION,
@@ -270,6 +271,12 @@ export function renderHowItWorks(
       sealed, with one signed sync receipt covering every entry delivered; an
       overturned entry travels as an explicit unlearn signal. Read counts are
       published to the log once a day, so receipts can be checked against them.
+      An entry's content is read with a key, or by a registered operator's
+      signed request, for ${RELEASE_WINDOW_DAYS} days after the seal that covers
+      it; then it is released, free to read at low volume and CC0, and it enters
+      the mirror. The proof is public the whole time: an unreleased read answers
+      402 with the release date, and a free sync stops at the released head and
+      still reports the sealed one.
     </p>
     <dl class="kv">
       ${row(
@@ -305,6 +312,7 @@ export function renderHowItWorks(
                     )} · counters ${data.readCount.counterFirst} to ${data.readCount.counterLast}`,
               )}`,
       )}
+      ${row("the rule", rule(`RELEASE_WINDOW_DAYS ${RELEASE_WINDOW_DAYS}`))}
     </dl>`;
 
   const keep = html`<p class="prose">

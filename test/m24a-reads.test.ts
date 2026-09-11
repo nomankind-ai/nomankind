@@ -69,6 +69,7 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
   type TestAgent,
 } from "./helpers/registry.js";
@@ -164,11 +165,24 @@ function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, env, { ...deps, now });
 }
 
+/**
+ * One GET, signed by an agent bound to a registered operator.
+ *
+ * Every entry in this file is read inside the release window (decision D-100),
+ * where a free reader is handed the proof and a release date rather than the
+ * content. These tests are about what the doors serve and not about the window,
+ * so they read the way an entitled client does — the M2 signature the
+ * disclosure gate already asks for. The free reader's own answers are tested in
+ * test/m24d-doors.test.ts.
+ */
 async function read(
   path: string,
   now: Date = NOW,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await send(new Request(`${TEST_ORIGIN}${path}`), now);
+  const response = await send(
+    await signedGet(k1.agent, { path, timestamp: now.toISOString() }),
+    now,
+  );
   return {
     status: response.status,
     body: (await response.json()) as Record<string, unknown>,

@@ -30,7 +30,13 @@ import {
   exportPrivateKeyPkcs8,
   generateKeypair,
 } from "../src/identity.js";
-import { DEFAULT_DOMAIN, POLICY, TRUSTED_POOL_SWITCH } from "../src/policy.js";
+import {
+  DEFAULT_DOMAIN,
+  POLICY,
+  RELEASE_WINDOW_DAYS,
+  TRUSTED_POOL_SWITCH,
+} from "../src/policy.js";
+import { releaseDateOf } from "../src/release.js";
 import { signRecord } from "../src/records.js";
 import { txtRecordName } from "../src/registry.js";
 import {
@@ -56,6 +62,7 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedHeaders,
   signedPost,
   type TestAgent,
 } from "./helpers/registry.js";
@@ -75,6 +82,21 @@ import {
 
 const NOW = SUBMIT_NOW;
 const AT = NOW.toISOString();
+
+/** How many milliseconds a day is. Not a policy number: it is what a day is. */
+const DAY_MS = 86_400_000;
+
+/**
+ * A day past the release window, for the pages that show an entry's content
+ * (decision D-100).
+ *
+ * Everything this world submits is sealed at NOW, so at NOW every entry in it
+ * is inside the window and a browser with no key is served the withheld view.
+ * The tests that read content therefore ask at an instant past the window —
+ * which is the same page, drawn by the same function, for a reader the window
+ * is done with. The withheld view at NOW is checked on its own below.
+ */
+const RELEASED = new Date(NOW.getTime() + (RELEASE_WINDOW_DAYS + 1) * DAY_MS);
 
 /** What a browser sends, and what an agent sends. */
 const HTML = { accept: "text/html,application/xhtml+xml" };
@@ -113,8 +135,12 @@ let positionA = 0;
 let positionB = 0;
 let sealedHead = 0;
 
-function send(request: Request, on: Env = env): Promise<Response> {
-  return handleRequest(request, on, { ...deps, now: NOW });
+function send(
+  request: Request,
+  on: Env = env,
+  now: Date = NOW,
+): Promise<Response> {
+  return handleRequest(request, on, { ...deps, now });
 }
 
 /** One page, with the headers every HTML answer has to carry checked once. */
@@ -122,10 +148,12 @@ async function page(
   path: string,
   headers: Record<string, string> = HTML,
   on: Env = env,
+  now: Date = NOW,
 ): Promise<{ status: number; body: string }> {
   const response = await send(
     new Request(`${TEST_ORIGIN}${path}`, { headers }),
     on,
+    now,
   );
   const body = await response.text();
   if ((response.headers.get("content-type") ?? "").includes("text/html")) {
@@ -140,10 +168,31 @@ async function page(
 }
 
 /** One page that has to be HTML and has to be 200. */
-async function ok(path: string): Promise<string> {
-  const answer = await page(path);
+async function ok(path: string, now: Date = NOW): Promise<string> {
+  const answer = await page(path, HTML, env, now);
   expect([path, answer.status]).toEqual([path, 200]);
   return answer.body;
+}
+
+/** One page asked for as a browser carrying a registered operator's signature. */
+async function signedPage(
+  agent: TestAgent,
+  path: string,
+  now: Date = NOW,
+): Promise<string> {
+  const headers = await signedHeaders(agent, {
+    method: "GET",
+    path,
+    body: null,
+    timestamp: now.toISOString(),
+  });
+  const response = await send(
+    new Request(`${TEST_ORIGIN}${path}`, { headers: { ...headers, ...HTML } }),
+    env,
+    now,
+  );
+  expect([path, response.status]).toEqual([path, 200]);
+  return response.text();
 }
 
 async function register(party: Party): Promise<void> {
@@ -406,7 +455,9 @@ describe("the entry page", () => {
   it("shows the value of every core key the entry carries", async () => {
     const stored = (await getEntry(store.db, idB))!;
     const record = stored.entry as unknown as Record<string, unknown>;
-    const body = await ok(`/entries/${idB}`);
+    // Past the window: the content is everybody's (decision D-100), and this is
+    // the page every reader sees from that day on.
+    const body = await ok(`/entries/${idB}`, RELEASED);
 
     for (const key of CORE_KEYS) {
       expect([key, body.includes(`<dt>${key}</dt>`)]).toEqual([key, true]);
@@ -520,13 +571,120 @@ describe("the entry page", () => {
 });
 
 // ---------------------------------------------------------------------------
+// (c2) The release window, through the router (decision D-100)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every entry in this world was sealed at NOW, so at NOW every one of them is
+ * inside the window: a browser with no key gets the proof and the date, the same
+ * browser carrying a registered operator's signature gets the whole entry, and
+ * so does everybody a day past the window. One rule, one renderer, three
+ * readers.
+ */
+describe("an entry inside the release window", () => {
+  /** The day this entry's content opens: its covering seal, through the window. */
+  async function releaseDay(): Promise<string> {
+    const seal = await latestSeal(store.db);
+    return releaseDateOf(seal!.sealed_at).slice(0, 10);
+  }
+
+  it("shows a free reader the proof, and the day the rest of it opens", async () => {
+    const stored = (await getEntry(store.db, idB))!;
+    const record = stored.entry as unknown as Record<string, unknown>;
+    const body = await ok(`/entries/${idB}`);
+
+    expect(body).toContain(`Released on ${await releaseDay()}.`);
+    expect(body).toContain('href="/api#keys"');
+    // The content is not on the page at all, as a value or as a field.
+    expect(body).not.toContain(escapeHtml(record["claim"] as string));
+    expect(body).not.toContain("<dt>claim</dt>");
+    expect(body).not.toContain("<dt>citation</dt>");
+    expect(body).not.toContain("<dt>evidence</dt>");
+    // The proof is, whole: the id, the subject, the snapshot hash, the seal it
+    // was sealed under, its inclusion proof, and every event by hash.
+    expect(body).toContain(idB);
+    expect(body).toContain(escapeHtml(record["subject"] as string));
+    expect(body).toContain(record["snapshot_hash"] as string);
+    expect(body).toContain(`<span class="field-name">signature</span>`);
+    expect(body).toContain(record["signature"] as string);
+    const onEntry = record["seal"] as Record<string, unknown>;
+    expect(body).toContain(escapeHtml(onEntry["inclusion_proof"]));
+    for (const event of await eventsForEntry(store.db, idB)) {
+      expect([event.seq, body.includes(event.hash)]).toEqual([event.seq, true]);
+    }
+    expect(body).toContain(`npm run export -- ${TEST_ORIGIN} ${idB} ./out`);
+    // And every decision's reason reads the same, because the words are content.
+    expect(body).toContain("withheld until release");
+  }, 60_000);
+
+  it("shows the listing and the home page released <date> in place of the claim", async () => {
+    const day = await releaseDay();
+    const stored = (await getEntry(store.db, idB))!;
+    const claim = (stored.entry as unknown as Record<string, unknown>)["claim"];
+
+    for (const path of ["/entries", "/"]) {
+      const body = await ok(path);
+      expect([path, body.includes(`released ${day}`)]).toEqual([path, true]);
+      expect([path, body.includes(escapeHtml(claim as string))]).toEqual([
+        path,
+        false,
+      ]);
+      // The row is still a row: its position, its subject and its link stand.
+      expect([path, body.includes(`href="/entries/${idB}"`)]).toEqual([
+        path,
+        true,
+      ]);
+    }
+  }, 60_000);
+
+  it("shows a registered operator's signed request the whole entry", async () => {
+    const stored = (await getEntry(store.db, idB))!;
+    const record = stored.entry as unknown as Record<string, unknown>;
+    const body = await signedPage(k1.agent, `/entries/${idB}`);
+
+    expect(body).toContain(escapeHtml(record["claim"] as string));
+    expect(body).toContain("<dt>claim</dt>");
+    expect(body).toContain("<dt>citation</dt>");
+    expect(body).not.toContain("Released on");
+    expect(body).not.toContain("withheld until release");
+  }, 60_000);
+
+  it("shows everybody the whole entry a day past the window", async () => {
+    const stored = (await getEntry(store.db, idB))!;
+    const record = stored.entry as unknown as Record<string, unknown>;
+    const body = await ok(`/entries/${idB}`, RELEASED);
+
+    expect(body).toContain(escapeHtml(record["claim"] as string));
+    expect(body).not.toContain("Released on");
+    const listing = await ok("/entries", RELEASED);
+    expect(listing).toContain(escapeHtml(record["claim"] as string));
+    expect(listing).not.toContain("released ");
+  }, 60_000);
+
+  it("adds no script and no inline style to any of them", async () => {
+    for (const body of [
+      await ok(`/entries/${idB}`),
+      await ok("/entries"),
+      await ok("/"),
+    ]) {
+      expect(body).not.toContain("<script");
+      expect(body).not.toContain(' style="');
+    }
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
 // (d) The same path, two voices
 // ---------------------------------------------------------------------------
 
 describe("a path a browser and an agent both ask for", () => {
   it("answers JSON to the agent and HTML to the browser", async () => {
+    // Past the window, where the entry is served whole either way: what the two
+    // voices say inside it is the window's own test, not this one's.
     const agent = await send(
       new Request(`${TEST_ORIGIN}/entries/${idB}`, { headers: JSON_ACCEPT }),
+      env,
+      RELEASED,
     );
     expect(agent.status).toBe(200);
     expect(agent.headers.get("content-type")).toContain("application/json");
@@ -534,6 +692,8 @@ describe("a path a browser and an agent both ask for", () => {
 
     const browser = await send(
       new Request(`${TEST_ORIGIN}/entries/${idB}`, { headers: HTML }),
+      env,
+      RELEASED,
     );
     expect(browser.status).toBe(200);
     expect(browser.headers.get("content-type")).toContain("text/html");

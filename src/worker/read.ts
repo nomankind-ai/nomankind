@@ -49,6 +49,7 @@ import { agentIdFromPublicKey, importPrivateKeyPkcs8 } from "../identity.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
 import { chooseReadable, parseReadQuery, type ReadQuery } from "../read.js";
 import { signReadReceipt, type ReadReceipt } from "../receipt.js";
+import { isReleased, releaseDateOf } from "../release.js";
 import type { Entry } from "../schema.js";
 import type { D1Like } from "../storage/d1.js";
 import {
@@ -64,8 +65,11 @@ import {
   accessHeaders,
   chargeReads,
   nextKeyCounter,
+  readerAccess,
   resolveAccess,
   type Access,
+  type ReaderAccess,
+  type ReaderRefusal,
 } from "./access.js";
 import type { Env } from "./env.js";
 import {
@@ -152,6 +156,33 @@ export function signerFor(
   const pending = importSigner(secret);
   SIGNERS.set(secret, pending);
   return pending;
+}
+
+/**
+ * When one entry's content opens, and whether it has (decision D-100).
+ *
+ * The rule is src/release.ts's and nothing here decides it: an entry's release
+ * date is its `entry_submitted` event's covering seal's `sealed_at` plus the
+ * window, and an entry nothing has sealed yet is not released and has no date
+ * to name — `release_date` is then null, which is the honest answer and the one
+ * a reader can act on, because a date computed from a seal that does not exist
+ * would be a promise the log has not made.
+ *
+ * Exported because the entry door and the captures door in src/worker/submit.ts
+ * ask exactly this question, and two places working it out from a seal row
+ * would be two chances to disagree about when a thing opens.
+ */
+export async function entryRelease(
+  db: D1Like,
+  submittedSeq: number,
+  now: Date,
+): Promise<{ readonly released: boolean; readonly release_date: string | null }> {
+  const seal = await sealCovering(db, submittedSeq);
+  const sealedAt = seal === null ? null : seal.sealed_at;
+  return {
+    released: isReleased(sealedAt, now),
+    release_date: sealedAt === null ? null : releaseDateOf(sealedAt),
+  };
 }
 
 /** A required string field on a stored entry, read by the schema's own name. */
@@ -269,6 +300,7 @@ async function byId(
   db: D1Like,
   id: string,
   env: Env,
+  reader: ReaderAccess,
   access: Access,
   now: Date,
 ): Promise<Response> {
@@ -289,7 +321,36 @@ async function byId(
     );
   }
 
+  // Last of the refusals and never before them (decision D-100): what an entry
+  // is and whether it was verified are proof and are answered to everybody, so
+  // the window changes what a free reader is handed and not what they are told
+  // about. Nothing is charged and no receipt is issued, because nothing was
+  // served.
+  const unreleased = await withheld(db, stored.submittedSeq, reader, now);
+  if (unreleased !== null) return unreleased;
+
   return serve(db, stored, env, access, now);
+}
+
+/**
+ * The 402 a free reader gets before an entry's content opens, or null when this
+ * reader may see it.
+ *
+ * Free only. A paid key and a signed request from an agent bound to a
+ * registered operator both read inside the window and are served exactly as
+ * they are today, receipt, charge and all — the window is what the paid product
+ * is, not a second gate on top of it.
+ */
+async function withheld(
+  db: D1Like,
+  submittedSeq: number,
+  reader: ReaderAccess,
+  now: Date,
+): Promise<Response | null> {
+  if (reader.kind !== "free") return null;
+  const release = await entryRelease(db, submittedSeq, now);
+  if (release.released) return null;
+  return json({ error: "unreleased", release_date: release.release_date }, 402);
 }
 
 /**
@@ -305,6 +366,7 @@ async function bySubject(
   db: D1Like,
   query: Extract<ReadQuery, { by: "subject" }>,
   env: Env,
+  reader: ReaderAccess,
   access: Access,
   now: Date,
 ): Promise<Response> {
@@ -330,7 +392,15 @@ async function bySubject(
     if (chosen !== null) {
       const id = field(chosen.entry, "id");
       const stored = page.find((row) => field(row.entry, "id") === id);
-      if (stored !== undefined) return serve(db, stored, env, access, now);
+      if (stored !== undefined) {
+        // The entry the reader's demands chose, and then the window on it: a
+        // free reader is told when that answer opens rather than handed the
+        // next-best one, which would be a different answer to the question
+        // they asked.
+        const unreleased = await withheld(db, stored.submittedSeq, reader, now);
+        if (unreleased !== null) return unreleased;
+        return serve(db, stored, env, access, now);
+      }
     }
 
     if (page.length < LIST_PAGE_LIMIT) break;
@@ -354,30 +424,52 @@ function idAfterPrefix(path: string): string | null {
 }
 
 /**
- * The tier gate, in the words the door answers with.
+ * One refusal from either gate, in the words the door answers with.
  *
- * Nothing is decided here: `resolveAccess` decides, and this only turns its
- * refusal into the response — the status it named, the body it built, and
- * `retry-after` on the one refusal that has a number of seconds to give.
+ * Nothing is decided here: the gate decides, and this only turns its refusal
+ * into the response — the status it named, the body it built, and `retry-after`
+ * on the one refusal that has a number of seconds to give.
+ */
+export function refusalResponse(refusal: ReaderRefusal): Response {
+  const retryAfter = "retryAfter" in refusal ? refusal.retryAfter : undefined;
+  return json(
+    refusal.body,
+    refusal.status,
+    retryAfter === undefined ? undefined : { "retry-after": String(retryAfter) },
+  );
+}
+
+/**
+ * Who is reading and what their day looks like, resolved once for the request.
+ *
+ * `readerAccess` is called exactly once, here, and its answer is passed down to
+ * every check below it, so no two checks in one request can disagree about who
+ * is asking (decision D-100). It carries the resolved tier only on the keyed
+ * branch, which is the branch that has one to carry; a free or operator read is
+ * metered on the free tier exactly as it is today, so the gate is asked for
+ * that tier's day here and the answer cannot refuse, because `readerAccess`
+ * just asked it the same question.
  */
 async function gate(
   db: D1Like,
   request: Request,
+  env: Env,
   now: Date,
-): Promise<{ ok: true; access: Access } | { ok: false; response: Response }> {
-  const granted = await resolveAccess(db, request, now);
-  if (granted.ok) return { ok: true, access: granted.access };
-  const { refusal } = granted;
-  return {
-    ok: false,
-    response: json(
-      refusal.body,
-      refusal.status,
-      refusal.retryAfter === undefined
-        ? undefined
-        : { "retry-after": String(refusal.retryAfter) },
-    ),
-  };
+): Promise<
+  | { ok: true; reader: ReaderAccess; access: Access }
+  | { ok: false; response: Response }
+> {
+  const granted = await readerAccess(request, env, db, now);
+  if (!granted.ok) {
+    return { ok: false, response: refusalResponse(granted.refusal) };
+  }
+  const reader = granted.reader;
+  if (reader.kind === "key") {
+    return { ok: true, reader, access: reader.key };
+  }
+  const free = await resolveAccess(db, request, now);
+  if (!free.ok) return { ok: false, response: refusalResponse(free.refusal) };
+  return { ok: true, reader, access: free.access };
 }
 
 async function route(
@@ -392,9 +484,9 @@ async function route(
   const id = idAfterPrefix(path);
   if (id !== null) {
     if (request.method !== "GET") return methodNotAllowed("GET");
-    const granted = await gate(db, request, now);
+    const granted = await gate(db, request, env, now);
     if (!granted.ok) return granted.response;
-    return byId(db, id, env, granted.access, now);
+    return byId(db, id, env, granted.reader, granted.access, now);
   }
 
   if (path === "/read") {
@@ -406,11 +498,11 @@ async function route(
     // After the query is read and before anything else, `receipts_not_configured`
     // included: a key that is over its cap or whose bill did not clear is told
     // so even on a deployment that could not have signed the receipt anyway.
-    const granted = await gate(db, request, now);
+    const granted = await gate(db, request, env, now);
     if (!granted.ok) return granted.response;
     return parsed.query.by === "entry"
-      ? byId(db, parsed.query.entry_id, env, granted.access, now)
-      : bySubject(db, parsed.query, env, granted.access, now);
+      ? byId(db, parsed.query.entry_id, env, granted.reader, granted.access, now)
+      : bySubject(db, parsed.query, env, granted.reader, granted.access, now);
   }
 
   return null;

@@ -32,6 +32,7 @@ import {
   PAYOUT_MINIMUM_MICROS,
   POLICY,
   READ_PRICE_MICROS_PER_READ,
+  RELEASE_WINDOW_DAYS,
   REGISTRY,
   REQUEST_CLOCK_SKEW_SECONDS,
   READ_SHARE_SPLIT,
@@ -121,6 +122,7 @@ const EXPECTED_POLICY_KEYS = [
   "STANDING_TRUSTED_STAY",
   "STANDING_DECAY_PAUSED",
   "READ_PRICE_MICROS_PER_READ",
+  "RELEASE_WINDOW_DAYS",
   "RATE_TIERS",
   "FREE_TIER",
   "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
@@ -550,6 +552,22 @@ describe("policy numbers", () => {
     for (const key of Object.keys(POLICY)) expect(key).not.toMatch(/SEED_FEE/);
     for (const name of Object.keys(policyModule)) {
       expect(name).not.toMatch(/SEED_FEE/);
+    }
+  });
+
+  it("publishes the release window the data is free on (D-100, D-101)", () => {
+    // Section 8 as D-100 amends it: training on the data is free on release,
+    // and this is the wait. Thirty days, set by the maintainer in D-101 and not
+    // a placeholder — the number the paid product is sold against, moving only
+    // by a later decision.
+    expect(RELEASE_WINDOW_DAYS).toBe(30);
+    expect(Number.isInteger(RELEASE_WINDOW_DAYS)).toBe(true);
+    expect(RELEASE_WINDOW_DAYS).toBeGreaterThan(0);
+    expect(POLICY.RELEASE_WINDOW_DAYS).toBe(RELEASE_WINDOW_DAYS);
+    // One window, and no environment's own: a rule that a deployment could
+    // shorten would be a rule the paper does not describe.
+    for (const key of Object.keys(POLICY)) {
+      expect(key).not.toMatch(/RELEASE_WINDOW_DAYS_[A-Z]/);
     }
   });
 

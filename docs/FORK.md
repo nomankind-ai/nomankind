@@ -40,13 +40,13 @@ re-serialization.
 
 | Path | What it holds |
 | --- | --- |
-| `mirror.json` | The manifest: `format` (`nomankind-mirror-v2`), environment, `exported_at`, `as_of` (the newest seal's `sealed_at`), `head` (its `last_seq`), `seal_seq`, the counts of seals, events, entries, operators, attestations and ledger rows, the position standing was computed at, the schema and norm versions, the registered domains, `captures_base`, the code repository, the verify command, and the license. |
-| `events/<seal seq, 8 digits>.jsonl` | The events that seal covers, exactly as `GET /events` serves them. A seal's range never moves, so a seal's file never changes once written. |
+| `mirror.json` | The manifest: `format` (`nomankind-mirror-v3`), environment, `exported_at`, `as_of` (the newest seal's `sealed_at`), `head` (its `last_seq`), `seal_seq`, `release_window_days` and `released_head` (the window this export was built under, and the highest position it carries in full), the counts of seals, events, entries, operators, attestations and ledger rows, the position standing was computed at, the schema and norm versions, the registered domains, `captures_base`, the code repository, the verify command, and the license. |
+| `events/<seal seq, 8 digits>.jsonl` | The events that seal covers, exactly as `GET /events` serves them — in full once the seal has released, and as hash lines until then. A seal's range never moves and its release date never moves, so a seal's file changes exactly once, on that date. |
 | `seals.jsonl` | Every seal in seq order, exactly as `GET /seals/{seq}` serves it — witnesses and registry receipt included. Rewritten as countersignatures arrive. |
 | `anchors.jsonl` | Every daily anchor in date order, exactly as `GET /anchors/{date}` serves it, external timestamp receipt included. |
 | `operators.json` | `{operators: [{operator, maintainer, provider, trusted, domains, agents}], agents: {agent id: operator id}}` — everything the offline verifier's registry needs, so you can build a bundle without asking anybody. |
-| `entries/<entry id>.json` | `{entry, sidecar, entry_hash}`, the entry derived at the sealed head with its own seal object, exactly as `GET /sync` produces one. The sidecar carries the state the schema cannot hold — the effective tier, the test verdict, the read-share slots, the revalidations, and the `source: {class, matched_host, authority}` the source policy derives from the entry's own citation (D-080). Every one of them is a pure function of the sealed events and the frozen core, so the verifier below re-derives them rather than trusting them. |
-| `index.json` | One row per entry in submission order: id, domain, subject, category, status, tier, effective tier, submitted_at, position, covering seal, stale, superseded_by, entry hash. |
+| `entries/<entry id>.json` | `{entry, sidecar, entry_hash}`, the entry derived at the sealed head with its own seal object, exactly as `GET /sync` produces one — written from the release date of its own submission event, and not before it. The sidecar carries the state the schema cannot hold — the effective tier, the test verdict, the read-share slots, the revalidations, and the `source: {class, matched_host, authority}` the source policy derives from the entry's own citation (D-080). Every one of them is a pure function of the sealed events and the frozen core, so the verifier below re-derives them rather than trusting them. |
+| `index.json` | One row per entry in submission order: id, domain, subject, category, status, tier, effective tier, submitted_at, position, covering seal, stale, superseded_by, entry hash, and `release_date` — the day that entry's file appears. Every column is proof, so the row is the same row before and after release. |
 | `attestations/<attestation id>.json` | `{attestation, answers}` — the drift attestation folded from the sealed events exactly as `GET /attestations/{id}` serves it, and the model's answers beside it. Only attestations whose request the seals cover. The answers are the one field here the log does not carry: it seals their hash. |
 | `standing.json` | `{position, formula, operators}` — the body of `GET /standing` computed at the sealed head, operators sorted by id. Not a table: `standingAt` over the sealed events, which is what "anyone can recompute anyone's standing from the log" means. |
 | `ledger.jsonl` | Every ledger row that is a pure function of the log, in the order the events produced them: read shares and the halves a stale entry withheld, the day's reconciliation, clawbacks, reconfirmation bounties, and dispute and revalidation stakes with their refunds, forfeits and rewards. Recomputed from the sealed events, never read from the ledger table, so your fork recomputes the same file. Payouts are not here: a payout records money leaving through a provider, which no replay of the log reproduces. |
@@ -56,11 +56,43 @@ An older copy is still an exit: a directory whose manifest says
 and the sidecar's `source` joined the export — is verified and imported as what
 v1 was: the first seven rows of the table above, with no attestations directory,
 no `standing.json` and no `ledger.jsonl` asked of it, and its entry sidecars
-compared on the keys a v1 sidecar carried.
+compared on the keys a v1 sidecar carried. A `nomankind-mirror-v2` copy — pulled
+before the release window — is verified and imported as the whole sealed log it
+was.
 
 Nothing unsealed is ever exported. The mirror is the sealed record: an entry
 whose submission event no seal covers is not in it, and neither are the events
 after the head.
+
+### The release window
+
+An event's content is public thirty days after the seal that covers it
+(`RELEASE_WINDOW_DAYS` in `src/policy.ts`, decisions D-100 and D-101); an entry's
+content is public thirty days after the seal covering its own submission event.
+Before that date the mirror carries the **proof** and not the content; on that
+date it carries both, under CC0, and the file it is in never changes again.
+
+There are two views of one directory, and the difference between them is exactly
+the payloads:
+
+- **the proof**, which is in every export from the first minute — every event's
+  seq, instant, type, entry id, chain link and hash; every seal, anchor and
+  operator record; and every entry's id, domain, subject, category, status,
+  effective tier, entry hash, seal object, signers, the hashes inside its records
+  and its release date;
+- **the content**, which arrives on the release date — the event payloads, and
+  with them the entry files: an entry's claim, what it changed from and to, when
+  it took effect, its citation, its evidence and observation, and its validators'
+  written reasons.
+
+An unreleased event is written as a hash line: the same fields, with
+`"payload": null` and `"withheld": true`. It chains and seals exactly as it
+always did — the hash is the log's own, and it is the leaf the seal's Merkle root
+is over — so the record can be proved complete a month before it can be read.
+
+A fork that is entitled to the content sooner reads it with a key or with its
+own signed request; see "Building the mirror yourself" below. A fork that is not
+waits, exactly as everyone else does, and the wait is thirty days.
 
 ## How to verify
 
@@ -77,7 +109,9 @@ It checks, in this order, and prints one line per item:
 
 1. `mirror.json` — the format and every count against the files that are there;
 2. the event chain over every events file in seq order (each hash recomputed,
-   each `prev_hash` linked, no gap from seq 0);
+   each `prev_hash` linked, no gap from seq 0) — a withheld line's hash is the
+   one thing not recomputed, because nobody was given the payload to recompute
+   it with, and it is checked as the seal's own leaf in step 3 instead;
 3. every seal — its size, its chain link, its Merkle root over the events it
    names, and its own hash;
 4. every anchor — the day's roots against the seals of that day, and its hash;
@@ -114,6 +148,19 @@ cannot be applied to bytes that never claimed them, and the line says so:
 legacy <id> (v0.6 record, not decided on again; core, signature, derivation,
 chain, and seal checked; captures and records not, the verifier checks v0.7 only)
 ```
+
+`withheld <id>` is a check the release window put out of reach, and it is neither
+a pass nor a failure: an entry whose submission has not released has no file yet,
+an entry one of whose own events is a hash line cannot be re-derived from this
+clone, and the attestations, the standing and the ledger are folds over payloads
+a withheld export does not carry. The count stands beside `ok`, `legacy` and
+`failed` in the summary, and it falls to zero on its own as the windows run out —
+the same clone, checked again next month, checks whole. Everything that is about
+the log rather than about a payload — the manifest, the chain, every seal, every
+anchor and every index row — is checked either way, and those are what an edited
+export breaks first. A `warn` line says the opposite: this copy carries an event
+whose release date has already passed, so it is a stale export and the next one
+heals it.
 
 The last line is the summary. The exit code is the answer: **0** when nothing
 failed, **1** on any failure or an unreadable directory, **2** on a usage error.
@@ -154,7 +201,21 @@ diff -r ./my-mirror/production ../log/production
 ```
 
 Both paths hand the same input to the same builder, so for the same sealed head
-the bytes are the same and `diff` is silent. If it is not, one of the two is
+and the same instant the bytes are the same and `diff` is silent. With no
+credential the command builds the released view — what a stranger can see — and
+says so on its last line. `--key <api key>` reads with a paid key and
+`--sign <key.json>` with an operator's own agent key, which is how a fork that is
+entitled to the unreleased content exports it before the window runs out; the
+signature is the same M2 signed request every write door verifies, over the
+method, the path, a timestamp, a nonce and an empty body. **The full view is the
+published export plus the content: the same `released_head` and the same
+`standing_position`, judged at the same clock, with every seal and every entry
+written in full on top of them.** It is yours under the API terms rather than
+under CC0, and **it must not be published — nor any part of it — before the
+release date the content itself carries.** So `diff` against the log repository
+is a diff of two different views until the last of those seals opens, while a
+keyless `npm run mirror` at the same instant is byte for byte the published
+mirror. If it is not, one of the two is
 wrong and you have the evidence in your hands. The sealed head is pinned from
 the seal chain before anything else is read; an instance that seals again
 mid-read stops the command with `head_moved` rather than mixing two moments into
@@ -182,6 +243,13 @@ npm run import-mirror -- ../log/production
 npm run dev
 ```
 
+The import replays the **released** record. A hash line has no payload to chain,
+to derive from or to seal over, so the import stops at the released head, says in
+its summary how many lines it stopped in front of, and your fork seals on from
+there; a directory in which nothing has released yet is refused with
+`nothing_released` rather than replayed into an empty log. Tomorrow's export
+carries more, and `--force` catches your instance up with it.
+
 `npm run import-mirror -- <mirror-dir>/<env>` replays one environment's export
 into the local D1 database `npm run dev` serves from — miniflare's, under
 `.wrangler/state` in the clone, with the migrations applied first — and
@@ -205,7 +273,7 @@ the anchors and the model's answers are stored as they stand, because a
 signature, an external timestamp and a thing a model said are not functions of
 the log. It prints one summary line and exits 0, or names its refusal and exits
 1 — `verify_failed`, `entry_differs`, `operators_differ`, `not_a_prefix`,
-`database_not_empty` and the rest — and never a stack trace.
+`database_not_empty`, `nothing_released` and the rest — and never a stack trace.
 
 Three flags and one rule about them. `--captures <url-or-dir>` is passed straight
 to the verification, so a fork with no network at all imports from a local
@@ -274,7 +342,9 @@ publish it.
 - **The log is CC0-1.0.** The entries, events, hashes, seals, anchors and
   indexes in the mirror are dedicated to the public domain. Fork it, mirror it,
   train on it, sell what you build from it. No attribution is required and none
-  is asked for.
+  is asked for. The dedication is not what the window delays: the proof is here
+  from the first minute and the content arrives thirty days after its seal, and
+  both are CC0 the moment they are here.
 - **The code is Apache-2.0**, in this repository, patent grant included.
 - **The snapshots are not in the mirror.** Only their hashes are. The captured
   bytes are served from the archive at `/captures/{hash}`, and they are somebody

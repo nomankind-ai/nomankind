@@ -44,6 +44,7 @@ import {
   fetchAndHash,
   getJson,
   readKeyFile,
+  signingHttp,
   reasonOf,
   signedPost,
   WebHttpClient,
@@ -147,11 +148,15 @@ function stopped(error: string): RevalidateRun {
 /** The entry, as a core, or the reason it could not be read. */
 async function readCore(
   deps: RevalidateDeps,
+  key: ValidatorKey,
   baseUrl: string,
   entryId: string,
 ): Promise<{ ok: true; core: Core } | { ok: false; reason: string }> {
+  // Signed with the operator key this run already holds (decision D-100): an
+  // entry inside the release window is served to a signed request from an agent
+  // bound to a registered operator, and a revalidator is exactly that reader.
   const read = await getJson(
-    deps.http,
+    signingHttp(deps.http, key, deps.now),
     baseUrl,
     `/entries/${encodeURIComponent(entryId)}`,
   );
@@ -224,7 +229,7 @@ async function resolve_(input: {
 }): Promise<RevalidateRun> {
   const { deps } = input;
 
-  const read = await readCore(deps, input.baseUrl, input.entryId);
+  const read = await readCore(deps, input.key, input.baseUrl, input.entryId);
   if (!read.ok) return stopped(read.reason);
 
   const operator = await operatorFor(

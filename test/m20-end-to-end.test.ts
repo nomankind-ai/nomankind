@@ -74,7 +74,9 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
+  signingHttp,
   type TestAgent,
 } from "./helpers/registry.js";
 import {
@@ -188,11 +190,24 @@ function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, world.env, { ...world.deps, now });
 }
 
+/**
+ * One GET, signed by an agent bound to a registered operator.
+ *
+ * Every entry in this file is read inside the release window (decision D-100),
+ * where a free reader is handed the proof and a release date rather than the
+ * content. These tests are about what the doors serve and not about the window,
+ * so they read the way an entitled client does — the M2 signature the
+ * disclosure gate already asks for. The free reader's own answers are tested in
+ * test/m24d-doors.test.ts.
+ */
 async function read(
   path: string,
   now: Date = NOW,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await send(new Request(`${TEST_ORIGIN}${path}`), now);
+  const response = await send(
+    await signedGet(k1.agent, { path, timestamp: now.toISOString() }),
+    now,
+  );
   return {
     status: response.status,
     body: (await response.json()) as Record<string, unknown>,
@@ -1182,7 +1197,9 @@ describe("the overturned entry", () => {
     const exported = await buildExport({
       baseUrl: TEST_ORIGIN,
       entryId: overturnedEntry["id"] as string,
-      http: new InProcessHttp(),
+      // Signed, because the export reads the entry, the log and the captures
+      // and every one of them is inside the release window (decision D-100).
+      http: signingHttp((request) => send(request, hour(8)), k1.agent, hour(8)),
       now: hour(8),
     });
     const report = await verifyOffline(exported.entry, exported.bundle);

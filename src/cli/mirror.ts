@@ -30,6 +30,21 @@
  * standing. `mirror.json`'s `captures_base` says where they are served from,
  * and `npm run verify-mirror` fetches them from there or from a local archive.
  *
+ * Two views, since the release window (decision D-100). With no credential the
+ * command reads the public doors as a stranger does and builds the released
+ * view: the same directory the Worker builds, with the unreleased seals as hash
+ * lines and no entry file for an entry whose submission has not opened yet. With
+ * `--key <api key>` or `--sign <key.json>` — a paid key, or an operator's own
+ * agent key — it reads the content the fork is entitled to and builds the same
+ * directory with those seals and those entries written in full. Either way the
+ * window is judged at the injected clock and at nothing else, so the released
+ * view is the Worker's export byte for byte for the same sealed head and the
+ * same instant, and the full view is that directory plus the content — the same
+ * `released_head` and the same `standing_position`, with more files under them.
+ *
+ * A signed read is the M2 signature the disclosure gate already verifies: GET,
+ * the path with no query string, a null body, and the four headers (D-014).
+ *
  * The core is exported over the injected http client, so a test drives it in
  * process against `handleRequest` with no network. node:fs and node:path are
  * allowed in this CLI file only.
@@ -49,18 +64,22 @@ import {
   type MirrorInput,
   type MirrorOperator,
 } from "../mirror.js";
-import { LIST_PAGE_LIMIT } from "../policy.js";
+import { LIST_PAGE_LIMIT, RELEASE_WINDOW_DAYS } from "../policy.js";
+import { signRequest } from "../request.js";
 import type { Seal } from "../seal.js";
 import { readEvents, readSeals } from "./export.js";
 import {
   errorOf,
   getJson,
+  readKeyFile,
   WebHttpClient,
   type HttpClient,
   type ValidatorIo,
+  type ValidatorKey,
 } from "./validator.js";
 
-const USAGE = "usage: mirror <base-url> <out-dir>";
+const USAGE =
+  "usage: mirror <base-url> <out-dir> [--key <api key>] [--sign <key.json>]";
 
 /** Exit codes, named where they are decided rather than spelt at each return. */
 const OK = 0;
@@ -220,17 +239,23 @@ export async function readMirrorOperators(
  * them; the records are the same record, so the last one seen wins and the map
  * keeps one per id.
  *
- * A page that reports a different sealed head or a different `as_of` than the
- * one pinned from the seal chain stops the run: two moments in one directory
- * would be a mirror nobody could reproduce.
+ * A page that reports a different sealed head than the one pinned from the seal
+ * chain stops the run: two moments in one directory would be a mirror nobody
+ * could reproduce. The page's `as_of` is held to being the same on every page
+ * rather than to being the sealed head's, because it is not always the sealed
+ * head's: a keyless reader is served to the released head and every entry as it
+ * stood there (decision D-100), and that boundary is this view's own instant.
+ * The two coincide the moment the reader is entitled to the whole log.
  */
 export async function readMirrorEntries(
   http: HttpClient,
   baseUrl: string,
   head: number,
   asOf: string,
+  events: readonly Event[],
 ): Promise<MirrorEntryRecord[]> {
   const byId = new Map<string, MirrorEntryRecord>();
+  let pageAsOf: unknown = null;
   let from = 0;
   for (;;) {
     const body = (await read(
@@ -240,15 +265,29 @@ export async function readMirrorEntries(
     )) as Record<string, unknown>;
 
     const sealedHead = body["sealed_head"];
-    const pageAsOf = body["as_of"];
-    if (sealedHead !== head || pageAsOf !== asOf) {
+    if (sealedHead !== head) {
       throw new MirrorFailure(
         "head_moved",
-        `the log sealed again while it was read: ${String(sealedHead)} at ${String(pageAsOf)}`,
+        `the log sealed again while it was read: ${String(sealedHead)} at ${String(body["as_of"])}`,
       );
     }
 
     const items = Array.isArray(body["events"]) ? body["events"] : [];
+    // A page with nothing on it is the end of what this reader is served: the
+    // range past the released head is empty for a keyless one, and past the
+    // sealed head for everybody. It carries the sealed head's own `as_of`
+    // rather than the page's, so it is never what this run's instant is taken
+    // from.
+    if (items.length === 0) break;
+    if (pageAsOf === null) pageAsOf = body["as_of"];
+    if (body["as_of"] !== pageAsOf) {
+      throw new MirrorFailure(
+        "head_moved",
+        `two instants in one export: ${String(pageAsOf)} and ${String(body["as_of"])}`,
+      );
+    }
+    void asOf;
+
     for (const item of items) {
       if (!isRecord(item)) continue;
       const entry = item["entry"];
@@ -267,7 +306,61 @@ export async function readMirrorEntries(
     if (typeof pageHead !== "number" || pageHead >= head) break;
     from = pageHead + 1;
   }
+
+  // And the entries the stream could not hand over (decision D-100).
+  //
+  // A keyless reader is served `/sync` only to the released head, so an entry
+  // whose submission is still inside its window never appears on a page — and
+  // the export it is left out of would be a directory whose index is short two
+  // rows the Worker's own export writes. The submissions are all in the hash
+  // lines `GET /events` serves, which name the event's `entry_id` with a null
+  // payload beside it, and the free `GET /entries/{id}` answers every one of
+  // them with the proof, the sidecar, the entry hash and the release date. That
+  // is exactly the triple the index row is written from, so the row the fork
+  // writes is byte for byte the row the Worker wrote.
+  //
+  // Trimmed to the pinned head for the same reason the events are: anything
+  // past it is not the sealed record this directory is of. An id the stream
+  // already delivered is left alone — the stream is the derivation, and a
+  // second read of the same entry would be a second moment.
+  for (const event of events) {
+    if (event.type !== "entry_submitted") continue;
+    if (event.seq > head) continue;
+    const id = event.entry_id;
+    if (typeof id !== "string" || byId.has(id)) continue;
+    const record = await readWithheldEntry(http, baseUrl, id);
+    if (record !== null) byId.set(id, record);
+  }
   return [...byId.values()];
+}
+
+/**
+ * One unreleased entry, off the free entry door: its proof, its sidecar and the
+ * hash of its whole core.
+ *
+ * Null when the door answered with the entry itself, which is what an entitled
+ * reader is served — and an entitled reader was already handed that entry by
+ * `GET /sync`, so there is nothing here to take from the second read. The
+ * withheld envelope is told apart by the key it arrives under (`proof`, never
+ * `entry`), exactly as the export command tells the two apart.
+ */
+async function readWithheldEntry(
+  http: HttpClient,
+  baseUrl: string,
+  id: string,
+): Promise<MirrorEntryRecord | null> {
+  const body = await read(http, baseUrl, `/entries/${encodeURIComponent(id)}`);
+  if (!isRecord(body)) return null;
+  const proof = body["proof"];
+  const sidecar = body["sidecar"];
+  const entryHash = body["entry_hash"];
+  if (!isRecord(proof) || !isRecord(sidecar)) return null;
+  if (typeof entryHash !== "string") return null;
+  return {
+    entry: proof as unknown as MirrorEntryRecord["entry"],
+    sidecar: sidecar as unknown as MirrorEntryRecord["sidecar"],
+    entry_hash: entryHash,
+  };
 }
 
 /**
@@ -327,6 +420,101 @@ export async function readMirrorAnswers(
   return answers;
 }
 
+// ---------------------------------------------------------------------------
+// The two views
+// ---------------------------------------------------------------------------
+
+/** What one invocation asks for. */
+export interface MirrorPlan {
+  readonly baseUrl: string;
+  readonly outDir: string;
+  /** A paid API key, or null. */
+  readonly key: string | null;
+  /** The path to an operator's agent key file, or null. */
+  readonly signPath: string | null;
+}
+
+/**
+ * The plan one invocation names, or null when the arguments are not one.
+ *
+ * Refuses rather than guesses, exactly as `verify-mirror` and `sync` do, and
+ * refuses both credentials at once: a run that presented a key and a signature
+ * would leave a reader guessing which one reached the content.
+ */
+export function mirrorPlan(args: readonly string[]): MirrorPlan | null {
+  const [baseUrl, outDir, ...rest] = args;
+  if (baseUrl === undefined || outDir === undefined) return null;
+  if (baseUrl.startsWith("--") || outDir.startsWith("--")) return null;
+
+  const values = new Map<string, string>();
+  for (let index = 0; index < rest.length; ) {
+    const flag = rest[index];
+    if (flag !== "--key" && flag !== "--sign") return null;
+    const value = rest[index + 1];
+    if (value === undefined || value.startsWith("--")) return null;
+    if (values.has(flag)) return null;
+    values.set(flag, value);
+    index += 2;
+  }
+  if (values.has("--key") && values.has("--sign")) return null;
+
+  return {
+    baseUrl,
+    outDir,
+    key: values.get("--key") ?? null,
+    signPath: values.get("--sign") ?? null,
+  };
+}
+
+/**
+ * The same client, with a bearer key on every read.
+ *
+ * A wrapper rather than a parameter threaded through six readers: what a
+ * credential changes is the request, not the export, and `buildMirror` decides
+ * the layout from the same inputs either way.
+ */
+class KeyedHttp implements HttpClient {
+  constructor(
+    private readonly inner: HttpClient,
+    private readonly key: string,
+  ) {}
+
+  fetch(request: Request): Promise<Response> {
+    const headers = new Headers(request.headers);
+    headers.set("authorization", `Bearer ${this.key}`);
+    return this.inner.fetch(new Request(request, { headers }));
+  }
+}
+
+/**
+ * The same client, with the M2 signature on every read.
+ *
+ * Exactly the form the disclosure gate verifies and the form `readerAccess`
+ * verifies: GET, the path with no query string, a null body, and a fresh nonce
+ * per request — which is why the headers are built per request rather than once.
+ */
+class SigningHttp implements HttpClient {
+  constructor(
+    private readonly inner: HttpClient,
+    private readonly key: ValidatorKey,
+    private readonly now: Date,
+  ) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const signed = await signRequest({
+      method: request.method,
+      path: new URL(request.url).pathname,
+      body: null,
+      agentId: this.key.agentId,
+      privateKey: this.key.privateKey,
+      timestamp: this.now.toISOString(),
+    });
+    const headers = new Headers(request.headers);
+    for (const [name, value] of Object.entries(signed)) headers.set(name, value);
+    return this.inner.fetch(new Request(request, { headers }));
+  }
+}
+
 /** What one export is: which directory it lands in, and the files in it. */
 export interface MirrorBuild {
   readonly environment: string;
@@ -365,6 +553,19 @@ export async function buildMirrorFromApi(input: {
   readonly baseUrl: string;
   readonly http: HttpClient;
   readonly now: Date;
+  /**
+   * Which of the two directories to build (decision D-100).
+   *
+   * `released` is the published layout, judged at this run's own instant: the
+   * seals inside their window as hash lines, and no file for an entry nobody
+   * may read yet. `full` is the copy an entitled fork takes with `--key` or
+   * `--sign`: the same layout, judged as of the day the newest seal opens, so
+   * every payload this reader was served is written out and the manifest's
+   * `released_head` says so rather than claiming a public head the files do not
+   * match. A reader with no credential cannot build it, because the doors do
+   * not hand them the payloads it is made of.
+   */
+  readonly view?: "released" | "full";
 }): Promise<MirrorBuild> {
   const environment = await readEnvironment(input.http, input.baseUrl);
   const seals = await readSeals(input.http, input.baseUrl);
@@ -380,9 +581,19 @@ export async function buildMirrorFromApi(input: {
     (event: Event) => event.seq <= head,
   );
 
+  // The instant the window is judged at is this run's own, in both views. A
+  // fork that was served the whole log writes the whole log, and says so with
+  // its files; it does not get to say that more of the log is public than is.
+  // `released_head` and `standing_position` are therefore the same numbers the
+  // Worker's export of the same head carries at the same clock, and the full
+  // directory is a superset of the published one rather than a rival reading of
+  // it.
   const mirrorInput: MirrorInput = {
     environment,
     exported_at: input.now.toISOString(),
+    now: input.now.toISOString(),
+    release_window_days: RELEASE_WINDOW_DAYS,
+    view: input.view ?? "released",
     seals,
     anchors: await readAnchors(input.http, input.baseUrl),
     events,
@@ -391,6 +602,7 @@ export async function buildMirrorFromApi(input: {
       input.baseUrl,
       head,
       newest.sealed_at,
+      events,
     ),
     operators: await readMirrorOperators(input.http, input.baseUrl),
     attestations: await readMirrorAnswers(input.http, input.baseUrl, head),
@@ -438,15 +650,36 @@ export async function runMirror(
   http: HttpClient = new WebHttpClient(),
   now: Date = new Date(),
 ): Promise<number> {
-  const [baseUrl, outDir, ...rest] = args;
-  if (baseUrl === undefined || outDir === undefined || rest.length > 0) {
+  const plan = mirrorPlan(args);
+  if (plan === null) {
     io.stderr(USAGE);
     return BAD_ARGUMENTS;
   }
 
+  // The released view is what a stranger gets and what the line says they got:
+  // a fork that is entitled to more has to say so with a key or a signature.
+  let reader = http;
+  if (plan.key !== null) reader = new KeyedHttp(http, plan.key);
+  if (plan.signPath !== null) {
+    try {
+      reader = new SigningHttp(http, await readKeyFile(plan.signPath), now);
+    } catch (error) {
+      io.stderr(
+        `mirror bad_key_file ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
+      );
+      return FAILED;
+    }
+  }
+  const view = plan.key === null && plan.signPath === null ? "released" : "full";
+
   let build: MirrorBuild;
   try {
-    build = await buildMirrorFromApi({ baseUrl, http, now });
+    build = await buildMirrorFromApi({
+      baseUrl: plan.baseUrl,
+      http: reader,
+      now,
+      view,
+    });
   } catch (error) {
     if (error instanceof MirrorFailure) {
       io.stderr(`mirror ${error.reason} ${error.message}`);
@@ -462,9 +695,9 @@ export async function runMirror(
     return FAILED;
   }
 
-  const target = await writeMirror(outDir, build);
+  const target = await writeMirror(plan.outDir, build);
   io.stdout(
-    `mirror ${build.environment} head ${build.head} seal ${build.sealSeq} files ${build.files.length}`,
+    `mirror ${build.environment} head ${build.head} seal ${build.sealSeq} files ${build.files.length} view ${view}`,
   );
   io.stdout(target);
   return OK;

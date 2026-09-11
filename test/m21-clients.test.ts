@@ -42,6 +42,7 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
   type TestAgent,
 } from "./helpers/registry.js";
@@ -105,9 +106,25 @@ async function post(
 }
 
 /** An HttpClient that routes straight into the router, with no network. */
+/**
+ * The log, read the way a command with `--sign <key.json>` reads it.
+ *
+ * The standing command re-derives the whole fold from `GET /events`, and inside
+ * the release window (decision D-100) a free reader is handed unreleased events
+ * as hash lines — proof enough to check the chain, and nothing to re-derive a
+ * ledger from. So this client signs, exactly as an operator checking its own
+ * standing would.
+ */
 class InProcessHttp implements HttpClient {
   async fetch(request: Request): Promise<Response> {
-    return send(request);
+    if (request.method !== "GET") return send(request);
+    const url = new URL(request.url);
+    return send(
+      await signedGet(first.agent, {
+        path: `${url.pathname}${url.search}`,
+        timestamp: NOW.toISOString(),
+      }),
+    );
   }
 }
 
@@ -116,8 +133,11 @@ class InProcessHttp implements HttpClient {
  * publishes a standing the log does not support.
  */
 class TamperingHttp implements HttpClient {
+  /** The same signed reads as InProcessHttp, with one served number edited. */
+  readonly #inner = new InProcessHttp();
+
   async fetch(request: Request): Promise<Response> {
-    const response = await send(request);
+    const response = await this.#inner.fetch(request);
     const { pathname } = new URL(request.url);
     if (!pathname.startsWith("/operators/") || !pathname.endsWith("/standing")) {
       return response;

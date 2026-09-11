@@ -79,7 +79,9 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
+  signingHttp,
   type TestAgent,
 } from "./helpers/registry.js";
 import {
@@ -610,7 +612,9 @@ describe("the offline verifier, on a sealed entry", () => {
     const exported = await buildExport({
       baseUrl: TEST_ORIGIN,
       entryId: verifiedEntry["id"] as string,
-      http: { fetch: (request: Request) => send(request) },
+      // Signed, because the export reads the entry, the log and the captures
+      // and every one of them is inside the release window (decision D-100).
+      http: signingHttp((request) => send(request), k1.agent, NOW),
       now: NOW,
     });
 

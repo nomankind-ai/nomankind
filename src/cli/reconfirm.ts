@@ -62,6 +62,7 @@ import {
   getJson,
   parsePredicate,
   readKeyFile,
+  signingHttp,
   reasonOf,
   runPredicate,
   signedPost,
@@ -218,8 +219,12 @@ export async function runReconfirm(input: {
 }): Promise<ReconfirmRun> {
   const { deps } = input;
 
+  // Signed with the operator key this run already holds (decision D-100): an
+  // entry inside the release window is served to a signed request from an agent
+  // bound to a registered operator, and a validator is exactly that reader —
+  // the people who have to judge an entry are the ones the window is not for.
   const read = await getJson(
-    deps.http,
+    signingHttp(deps.http, input.key, deps.now),
     input.baseUrl,
     `/entries/${encodeURIComponent(input.entryId)}`,
   );

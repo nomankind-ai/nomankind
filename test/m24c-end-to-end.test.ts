@@ -186,11 +186,20 @@ async function post(
   };
 }
 
+/**
+ * One GET, signed by an agent bound to a registered operator.
+ *
+ * The entries in this file are read at the instant they were written, inside
+ * the release window (decision D-100), where a free reader is handed the proof
+ * and a release date rather than the content. What is under test here is the
+ * domains and the disclosure rule, so the reads are made the way a validator's
+ * client makes them; the window's own answers are in test/m24d-doors.test.ts.
+ */
 async function getJson(
   path: string,
   now: Date = NOW,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await send(new Request(`${TEST_ORIGIN}${path}`), now);
+  const response = await getSigned(g1.agent, path, now);
   return {
     status: response.status,
     body: (await response.json()) as Record<string, unknown>,
@@ -203,13 +212,16 @@ async function getSigned(
   path: string,
   now: Date = NOW,
 ): Promise<Response> {
+  // The signature is over the pathname with no query string, which is the one
+  // form both the disclosure gate and `readerAccess` verify.
+  const url = new URL(`${TEST_ORIGIN}${path}`);
   const headers = await signedHeaders(agent, {
     method: "GET",
-    path,
+    path: url.pathname,
     body: null,
     timestamp: now.toISOString(),
   });
-  return send(new Request(`${TEST_ORIGIN}${path}`, { headers }), now);
+  return send(new Request(url.toString(), { headers }), now);
 }
 
 /** The log's head, so a refusal can be shown to have written nothing. */
@@ -805,14 +817,28 @@ describe("a redacted transcript payload is archived and disclosed on a window", 
       answer.body["errors"] ?? null,
     ]).toEqual([201, null, null]);
     redactedId = core["id"] as string;
+
+    // A second seal, over the redacted submission. The disclosure window this
+    // block is about runs ninety days from the submission and the release
+    // window (decision D-100) thirty from the seal, so a sealed entry is what
+    // lets the last test below read the payload as anybody at all.
+    await runSweep(env, {
+      now: hour(2),
+      beacon,
+      witness: new FakeWitnessAdapter(),
+      pinned: pinnedSet([]),
+      ineligibleAgents: new Set<string>(),
+      anchor: new FakeAnchorAdapter(null),
+      payout,
+    });
   }, 600_000);
 
   it("hashes the artifact as submitted, placeholders and all", async () => {
     const { status, body } = await getJson(`/entries/${redactedId}`);
     expect([status, body["snapshot_hash"]]).toEqual([200, transcriptHash]);
-    const capture = await send(
-      new Request(`${TEST_ORIGIN}/captures/${transcriptHash}`),
-    );
+    // Signed, because the transcript is this entry's evidence and the entry is
+    // inside the release window (decision D-100).
+    const capture = await getSigned(s1.agent, `/captures/${transcriptHash}`);
     expect(capture.status).toBe(200);
     expect(await capture.text()).toContain("[REDACTED]");
   });

@@ -66,6 +66,7 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
   type TestAgent,
 } from "./helpers/registry.js";
@@ -208,8 +209,31 @@ function send(
   return handleRequest(request, env, { ...world.deps, now });
 }
 
-function get(path: string): Request {
-  return new Request(`${TEST_ORIGIN}${path}`);
+/**
+ * One GET, signed by an agent bound to a registered operator.
+ *
+ * The release window (decision D-100) withholds an unreleased entry's content
+ * from a free reader, and every entry in this file is inside the window: it is
+ * read at the instant it was submitted, before any seal has aged thirty days.
+ * So these reads are made the way a validator's client makes them, with the M2
+ * signature the disclosure gate already asks for. What is under test here is
+ * the receipt and the count, and both are exactly what a free read of a
+ * released entry would produce — an operator read is metered on the free tier
+ * and issues a receipt, as any read does.
+ */
+function get(path: string, now: Date = NOW): Promise<Request> {
+  return signedGet(k1.agent, { path, timestamp: now.toISOString() });
+}
+
+/** The same signature on every request one client makes, at one instant. */
+function signingClient(now: Date): { fetch: (request: Request) => Promise<Response> } {
+  return {
+    fetch: async (request: Request): Promise<Response> => {
+      if (request.method !== "GET") return send(request, now);
+      const path = new URL(request.url).pathname + new URL(request.url).search;
+      return send(await get(path, now), now);
+    },
+  };
 }
 
 /** One GET, with its status and whatever JSON came back. */
@@ -218,7 +242,7 @@ async function read(
   now: Date = NOW,
   env: Env = world.env,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await send(get(path), now, env);
+  const response = await send(await get(path, now), now, env);
   expect(response.headers.get("cache-control")).toBe("no-store");
   return {
     status: response.status,
@@ -760,7 +784,7 @@ describe("the offline verifier, on a log carrying read counts", () => {
     const exported = await buildExport({
       baseUrl: TEST_ORIGIN,
       entryId: verifiedEntry["id"] as string,
-      http: { fetch: (request: Request) => send(request, day(3)) },
+      http: signingClient(day(3)),
       now: day(3),
     });
 

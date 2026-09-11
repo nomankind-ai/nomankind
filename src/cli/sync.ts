@@ -43,16 +43,18 @@ import { eventHash, type Event } from "../events.js";
 import { entryHash } from "../hash.js";
 import { decodeProof, verifyInclusion } from "../merkle.js";
 import { verifySyncReceipt } from "../receipt.js";
-import { readKey, withKey } from "./read.js";
+import { readKey, readSign, withKey } from "./read.js";
 import {
   getJson,
+  readKeyFile,
+  signingHttp,
   WebHttpClient,
   type HttpClient,
   type ValidatorIo,
 } from "./validator.js";
 
 const USAGE =
-  "usage: sync <base-url> [--from <n>] [--limit <n>] [--domain <slug>] [--flatten] [--min-tier <tier>] [--key <secret>] [--twice]";
+  "usage: sync <base-url> [--from <n>] [--limit <n>] [--domain <slug>] [--flatten] [--min-tier <tier>] [--key <secret>] [--sign <key.json>] [--twice]";
 
 /** The checks, in the order they are made. The order is the contract. */
 export const SYNC_CHECKS = [
@@ -77,8 +79,10 @@ const VALUED_FLAGS = [
   "--domain",
   "--min-tier",
   // The key is sent as a header, never as a query parameter: a credential in a
-  // URL is a credential in somebody's access log.
+  // URL is a credential in somebody's access log. The signing key file is a
+  // path to a key that never leaves the machine at all.
   "--key",
+  "--sign",
 ];
 const BARE_FLAGS = ["--flatten", "--twice"];
 
@@ -126,6 +130,10 @@ export function syncPlan(args: readonly string[]): SyncPlan | null {
     values.set(flag, value);
     index += 2;
   }
+
+  // One credential or the other, never both: a trainer presenting both has not
+  // said which one they meant to be billed as (decision D-100).
+  if (values.has("--key") && values.has("--sign")) return null;
 
   // A sealed position and a page size are integers or they are nothing: a
   // trainer who wrote `--from yesterday` gets the usage, not a page from 0.
@@ -408,6 +416,7 @@ export async function runSync(
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   },
+  now: Date = new Date(),
 ): Promise<number> {
   const plan = syncPlan(args);
   if (plan === null) {
@@ -415,8 +424,15 @@ export async function runSync(
     return BAD_ARGUMENTS;
   }
   const baseUrl = args[0] as string;
-  // Every request this run makes goes out on the same tier, the trainer's own.
-  const client = withKey(http, readKey(args));
+  // Every request this run makes goes out on the same tier, the trainer's own,
+  // and under the same credential: the key, or the operator signature that
+  // reaches past the released head without one (decision D-100). A trainer with
+  // neither is served to the released head, which is the free stream.
+  const signPath = readSign(args);
+  const client =
+    signPath === null
+      ? withKey(http, readKey(args))
+      : signingHttp(http, await readKeyFile(signPath), now);
 
   const answer = await getJson(client, baseUrl, plan.path);
   if (answer.status !== 200) {

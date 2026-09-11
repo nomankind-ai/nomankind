@@ -47,13 +47,15 @@ import { verifyReadReceipt } from "../receipt.js";
 import {
   errorOf,
   getJson,
+  readKeyFile,
+  signingHttp,
   WebHttpClient,
   type HttpClient,
   type ValidatorIo,
 } from "./validator.js";
 
 const USAGE =
-  "usage: read <base-url> <entry-id> [--key <secret>] | read <base-url> --subject <subject> --category <category> [--domain <slug>] [--min-tier <tier>] [--max-age <days>] [--key <secret>]";
+  "usage: read <base-url> <entry-id> [--key <secret>] [--sign <key.json>] | read <base-url> --subject <subject> --category <category> [--domain <slug>] [--min-tier <tier>] [--max-age <days>] [--key <secret>] [--sign <key.json>]";
 
 /** The checks, in the order they are made. The order is the contract. */
 export const READ_CHECKS = [
@@ -82,6 +84,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export function readKey(args: readonly string[]): string | null {
   const at = args.indexOf("--key");
+  if (at === -1) return null;
+  const value = args[at + 1];
+  if (value === undefined || value.startsWith("--")) return null;
+  return value;
+}
+
+/**
+ * The operator key file one invocation signs its reads with, or null.
+ *
+ * The other way through the release window (decision D-100): a reader who holds
+ * no API key but whose agent the registry puts behind an operator signs the
+ * read instead, which is the form the disclosure gate has verified since M24c.
+ */
+export function readSign(args: readonly string[]): string | null {
+  const at = args.indexOf("--sign");
   if (at === -1) return null;
   const value = args[at + 1];
   if (value === undefined || value.startsWith("--")) return null;
@@ -122,12 +139,15 @@ export function readPath(args: readonly string[]): string | null {
 
   const first = rest[0];
   if (first !== undefined && !first.startsWith("--")) {
-    // The by-id form: one positional entry id, and at most the key beside it.
+    // The by-id form: one positional entry id, and at most one credential
+    // beside it — the key or the signing key file, never both, because a reader
+    // presenting both has not said which one they meant to be billed as.
     const after = rest.slice(1);
-    if (after.length !== 0 && (after.length !== 2 || after[0] !== "--key")) {
-      return null;
+    if (after.length !== 0 && after.length !== 2) return null;
+    if (after.length === 2) {
+      if (after[0] !== "--key" && after[0] !== "--sign") return null;
+      if (after[1]!.startsWith("--")) return null;
     }
-    if (after.length === 2 && after[1]!.startsWith("--")) return null;
     return `/read/${encodeURIComponent(first)}`;
   }
 
@@ -148,8 +168,10 @@ export function readPath(args: readonly string[]): string | null {
     "--min-tier",
     "--max-age",
     // The key is sent as a header, never as a query parameter: a credential in
-    // a URL is a credential in somebody's access log.
+    // a URL is a credential in somebody's access log. The signing key file is a
+    // path to a key that never leaves the machine at all.
     "--key",
+    "--sign",
   ];
   for (const flag of values.keys()) {
     if (!known.includes(flag)) return null;
@@ -241,6 +263,7 @@ export async function runRead(
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   },
+  now: Date = new Date(),
 ): Promise<number> {
   const path = readPath(args);
   if (path === null) {
@@ -248,13 +271,27 @@ export async function runRead(
     return BAD_ARGUMENTS;
   }
   const baseUrl = args[0] as string;
-  // Every request this run makes goes out on the same tier, the reader's own.
-  const client = withKey(http, readKey(args));
+  // Every request this run makes goes out on the same tier, the reader's own,
+  // and under the same credential: the key, or the operator signature that
+  // reaches inside the release window without one (decision D-100).
+  const signPath = readSign(args);
+  const client =
+    signPath === null
+      ? withKey(http, readKey(args))
+      : signingHttp(http, await readKeyFile(signPath), now);
 
   const answer = await getJson(client, baseUrl, path);
   if (answer.status !== 200) {
     const error = errorOf(answer.body) ?? "unknown";
     let line = `refused ${answer.status} ${error}`;
+    // The release window's own refusal (decision D-100) carries the day the
+    // entry opens, and a reader who is told to come back is told when.
+    if (answer.status === 402 && error === "unreleased" && isRecord(answer.body)) {
+      const releaseDate = answer.body["release_date"];
+      line += ` release_date ${
+        typeof releaseDate === "string" ? releaseDate : "unsealed"
+      }`;
+    }
     if (answer.status === 409 && isRecord(answer.body)) {
       const status = answer.body["status"];
       const superseded = answer.body["superseded_by"];

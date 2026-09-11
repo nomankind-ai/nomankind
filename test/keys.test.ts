@@ -59,13 +59,18 @@ import {
   setKeyStatus,
   stripeEventSeen,
 } from "../src/storage/keys.js";
+import { signRequest } from "../src/request.js";
+import { putAgent, putOperator } from "../src/storage/repository.js";
 import {
   accessHeaders,
   chargeReads,
   nextKeyCounter,
+  readerAccess,
   resolveAccess,
 } from "../src/worker/access.js";
+import type { Env } from "../src/worker/env.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
+import { makeAgent, type TestAgent } from "./helpers/registry.js";
 
 const NOW = new Date("2026-09-11T12:00:00.000Z");
 const DAY = "2026-09-11";
@@ -620,5 +625,171 @@ describe("nextKeyCounter", () => {
 
   it("throws rather than guessing for a key that is not there", async () => {
     await expect(nextKeyCounter(db, "key_nobody")).rejects.toThrow(TypeError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The release window's reader (decision D-100)
+// ---------------------------------------------------------------------------
+
+/**
+ * `readerAccess`: which of the three readers is asking.
+ *
+ * The one question the release window puts to every door — a paid key, an agent
+ * bound to a registered operator, or everybody else — and the three answers it
+ * has. What is pinned here is that the two credentials are the ones the rest of
+ * the system already uses (`resolveAccess`'s key gate and M2's signed request,
+ * in the form the M24c disclosure gate verifies: GET, the path with no query
+ * string, a null body), and that neither a bad key nor a bad signature is ever
+ * quietly served as free.
+ */
+describe("readerAccess", () => {
+  const PATH = "/read/nmk_1";
+  const URL_ = `https://nomankind.ai${PATH}`;
+
+  /** An env with nothing in it but the database, which is all this gate reads. */
+  function envOf(): Env {
+    return { DB: db } as unknown as Env;
+  }
+
+  /** One signed GET, exactly as the disclosure gate verifies one. */
+  async function signedGet(
+    agent: TestAgent,
+    at: Date = NOW,
+    path: string = PATH,
+  ): Promise<Request> {
+    const headers = await signRequest({
+      method: "GET",
+      path,
+      body: null,
+      agentId: agent.agentId,
+      privateKey: agent.privateKey,
+      timestamp: at.toISOString(),
+    });
+    return new Request(`https://nomankind.ai${path}`, { headers });
+  }
+
+  /** An agent bound to a registered operator, and one bound to nobody. */
+  async function bound(operator: string): Promise<TestAgent> {
+    const agent = await makeAgent();
+    await putOperator(db, {
+      id: operator,
+      maintainer: false,
+      provider: false,
+      registeredSeq: 0,
+      details: {},
+    });
+    await putAgent(db, {
+      agentId: agent.agentId,
+      operatorId: operator,
+      registeredSeq: 0,
+    });
+    return agent;
+  }
+
+  it("answers free for a request that presents nothing", async () => {
+    const resolved = await readerAccess(new Request(URL_), envOf(), db, NOW);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.reader.kind).toBe("free");
+  });
+
+  it("answers key for a valid active key, through the M24 resolver", async () => {
+    const claimed = await claim({ suffix: "reader" });
+    const resolved = await readerAccess(
+      new Request(URL_, { headers: { authorization: `Bearer ${claimed.secret}` } }),
+      envOf(),
+      db,
+      NOW,
+    );
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok || resolved.reader.kind !== "key") {
+      expect.unreachable("a valid key did not read as a key");
+      return;
+    }
+    expect(resolved.reader.key.key?.id).toBe(claimed.id);
+    expect(resolved.reader.key.tier).toBe("standard");
+  });
+
+  it("refuses a bad key rather than serving it free", async () => {
+    const resolved = await readerAccess(
+      new Request(URL_, { headers: { authorization: "Bearer not-a-key" } }),
+      envOf(),
+      db,
+      NOW,
+    );
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect([resolved.refusal.status, resolved.refusal.reason]).toEqual([
+      401,
+      "bad_key",
+    ]);
+  });
+
+  it("answers operator for a signed GET from a bound agent", async () => {
+    const agent = await bound("reader.example");
+    const resolved = await readerAccess(
+      await signedGet(agent),
+      envOf(),
+      db,
+      NOW,
+    );
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok || resolved.reader.kind !== "operator") {
+      expect.unreachable("a signed read did not read as an operator");
+      return;
+    }
+    expect(resolved.reader.operator).toBe("reader.example");
+    expect(resolved.reader.agent).toBe(agent.agentId);
+  });
+
+  it("refuses a signature that does not verify, rather than downgrading it", async () => {
+    const agent = await bound("skew.example");
+    // The same request an hour late: the timestamp is signed, so the verdict is
+    // clock_skew and the reader asked for something they did not get.
+    const stale = await signedGet(agent, new Date(NOW.getTime() - 3_600_000));
+    const resolved = await readerAccess(stale, envOf(), db, NOW);
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect([resolved.refusal.status, resolved.refusal.reason]).toEqual([
+      401,
+      "bad_signature",
+    ]);
+  });
+
+  it("refuses a signature over another path", async () => {
+    const agent = await bound("path.example");
+    const elsewhere = await signedGet(agent, NOW, "/entries/nmk_1");
+    const moved = new Request(URL_, { headers: elsewhere.headers });
+    const resolved = await readerAccess(moved, envOf(), db, NOW);
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.refusal.reason).toBe("bad_signature");
+  });
+
+  it("reads an agent bound to nobody as free", async () => {
+    // The signature verifies and proves who they are; they are simply not
+    // entitled to anything, which is what the free tier is.
+    const stranger = await makeAgent();
+    const resolved = await readerAccess(
+      await signedGet(stranger),
+      envOf(),
+      db,
+      NOW,
+    );
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.reader.kind).toBe("free");
+  });
+
+  it("spends the nonce, so the same signed read cannot be replayed", async () => {
+    const agent = await bound("replay.example");
+    const request = await signedGet(agent);
+    const first = await readerAccess(request.clone(), envOf(), db, NOW);
+    expect(first.ok).toBe(true);
+    const again = await readerAccess(request, envOf(), db, NOW);
+    expect(again.ok).toBe(false);
+    if (again.ok) return;
+    expect(again.refusal.reason).toBe("bad_signature");
   });
 });

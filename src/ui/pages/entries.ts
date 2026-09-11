@@ -15,6 +15,12 @@
  * that carries the other three filters and drops this one, which is exactly what
  * "no category filter" means as a URL.
  *
+ * Decision D-100, the release window: a row whose entry's content has not been
+ * released to this reader carries "released <date>" where the claim would be.
+ * Every other column — the position, the status, the subject, the category, the
+ * tier, the dates — is proof or derived from proof and is shown as it always
+ * is, so the listing counts and orders exactly as it did before the window.
+ *
  * Pure: the rows, the total and the cursor were all decided by the route.
  */
 
@@ -125,6 +131,27 @@ function filters(filter: EntriesFilter): Safe {
   </form>`;
 }
 
+/**
+ * The claim cell, or what stands there before the entry's content is released
+ * (decision D-100): "released <date>", still linking the entry, because the
+ * proof of it — every hash, the seal, the events — is on that page today.
+ *
+ * An entry nothing has sealed yet has no release date to name: the row already
+ * says "unsealed" beside its position, and the cell says what it is waiting for
+ * rather than printing a date the log cannot back.
+ */
+export function claimCell(entry: EntryRow): Safe {
+  if (entry.withheld === null) {
+    return html`<a href="/entries/${entry.id}">${entry.claim}</a>`;
+  }
+  const date = entry.withheld.releaseDate;
+  return html`<a class="dim" href="/entries/${entry.id}"
+    >${date === null
+      ? "released after sealing"
+      : `released ${fmtDate(date)}`}</a
+  >`;
+}
+
 function row(entry: EntryRow): Safe {
   const expiresClass = entry.stale ? "warn" : "dim";
   return html`<tr class="row">
@@ -136,7 +163,7 @@ function row(entry: EntryRow): Safe {
     <td>${badge(statusClass(entry.status), entry.status)}</td>
     <td>${entry.subject}</td>
     <td class="muted">${entry.category}</td>
-    <td class="prose"><a href="/entries/${entry.id}">${entry.claim}</a></td>
+    <td class="prose">${claimCell(entry)}</td>
     <td class="muted">${entry.tier ?? "—"}</td>
     <td class="dim">${fmtDate(entry.last_confirmed)}</td>
     <td class="${expiresClass}">${fmtDate(entry.expires_at)}</td>

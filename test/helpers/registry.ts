@@ -108,6 +108,68 @@ export async function signedHeaders(
 export const TEST_ORIGIN = "https://nomankind.ai";
 
 /**
+ * A signed GET, ready to hand to the router: the M24c disclosure form, which is
+ * the form `readerAccess` verifies (decision D-100).
+ *
+ * Method GET, the path with no query string, a null body, the four M2 headers
+ * and a fresh nonce per request. A test whose reader has to see inside the
+ * release window signs its reads with an agent bound to a registered operator,
+ * exactly as a validator's client does, rather than asking the door for less.
+ */
+export async function signedGet(
+  agent: TestAgent,
+  input: {
+    path: string;
+    timestamp: string;
+    nonce?: string;
+  },
+): Promise<Request> {
+  const url = new URL(`${TEST_ORIGIN}${input.path}`);
+  const headers = await signedHeaders(agent, {
+    method: "GET",
+    path: url.pathname,
+    body: null,
+    timestamp: input.timestamp,
+    nonce: input.nonce,
+  });
+  return new Request(url.toString(), { method: "GET", headers });
+}
+
+/**
+ * An http client whose every GET carries one agent's M2 signature.
+ *
+ * What a command's `--sign <key.json>` does, in process: the export, the
+ * checkpoint and the fork kit read the public doors through an injected client,
+ * and inside the release window (decision D-100) a free one is handed hash
+ * lines, a withheld entry and a refused capture. Writes are passed through
+ * untouched — a signed POST carries its own signature over its own body, and
+ * overwriting it with a GET-shaped one would refuse every write door there is.
+ */
+export function signingHttp(
+  send: (request: Request) => Promise<Response>,
+  agent: TestAgent,
+  now: Date,
+): { fetch(request: Request): Promise<Response> } {
+  return {
+    async fetch(request: Request): Promise<Response> {
+      if (request.method !== "GET") return send(request);
+      const url = new URL(request.url);
+      const headers = await signedHeaders(agent, {
+        method: "GET",
+        path: url.pathname,
+        body: null,
+        timestamp: now.toISOString(),
+      });
+      const merged = new Headers(request.headers);
+      for (const [name, value] of Object.entries(headers)) {
+        merged.set(name, value);
+      }
+      return send(new Request(request, { headers: merged }));
+    },
+  };
+}
+
+/**
  * A signed POST, ready to hand to the router.
  *
  * The nonce is a parameter because a replay test has to send the very same

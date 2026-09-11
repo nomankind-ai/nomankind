@@ -439,6 +439,12 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
 
   const money: Row[] = [
     {
+      name: "RELEASE_WINDOW_DAYS",
+      value: `${policy.RELEASE_WINDOW_DAYS} days`,
+      means:
+        "The release window (decision D-100): how long after the seal that covers it an entry's content stays paid. An event's release date is its covering seal's sealed_at plus this many days, and an entry's is its submission event's; until then the proof — every hash, every seal, every anchor, and each entry's id, subject, category, status, tier and seal — is public and free as it always was, and the content is served to a paid key or to a signed request from a registered operator. On release it is public, CC0, and in the mirror. An unsealed event is not released at all.",
+    },
+    {
       name: "HOLDBACK_DAYS",
       value: `${policy.HOLDBACK_DAYS} days`,
       means:

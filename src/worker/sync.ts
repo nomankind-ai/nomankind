@@ -39,6 +39,7 @@ import type { Event } from "../events.js";
 import type { EvidenceTier } from "../evidence.js";
 import { entryHash } from "../hash.js";
 import { signSyncReceipt, type SyncReceipt } from "../receipt.js";
+import { releasedHead } from "../release.js";
 import type { Entry } from "../schema.js";
 import type { Seal } from "../seal.js";
 import type { SourceClass } from "../sources.js";
@@ -50,6 +51,7 @@ import {
   nextReadCounter,
   putSyncReceipt,
   sealCovering,
+  sealsBetween,
 } from "../storage/repository.js";
 import {
   keepSyncItem,
@@ -63,11 +65,13 @@ import {
   accessHeaders,
   chargeReads,
   nextKeyCounter,
+  readerAccess,
   resolveAccess,
   type Access,
+  type ReaderAccess,
 } from "./access.js";
 import type { Env } from "./env.js";
-import { signerFor, type ReceiptSigner } from "./read.js";
+import { refusalResponse, signerFor, type ReceiptSigner } from "./read.js";
 import {
   StorageUnreachable,
   guardDatabase,
@@ -322,6 +326,7 @@ async function page(
   db: D1Like,
   query: SyncQuery,
   signer: ReceiptSigner,
+  reader: ReaderAccess,
   access: Access,
   now: Date,
 ): Promise<Response> {
@@ -333,8 +338,31 @@ async function page(
   }
 
   const sealedHead = latest.last_seq;
-  const asOf = latest.sealed_at;
-  const head = Math.min(query.from + query.limit - 1, sealedHead);
+  const asked = Math.min(query.from + query.limit - 1, sealedHead);
+
+  // The release window (decision D-100). A free reader's page stops at the
+  // released head over the seals the page would have covered, and the whole
+  // page is then the world as it stood at that boundary: `head` and the receipt
+  // name it, and `sealed_head` still reports the true sealed head, so a reader
+  // sees exactly how far ahead the log is of what they were handed. A key and a
+  // signed operator are served to the sealed head, as today.
+  let head = asked;
+  let worldHead = sealedHead;
+  let asOf = latest.sealed_at;
+  if (reader.kind === "free") {
+    const covering = await sealsBetween(db, query.from, asked);
+    const released = releasedHead(covering, now);
+    // Nothing in the range has opened yet: an empty page, with `head` null and
+    // no receipt, exactly as a trainer already past the sealed head is answered.
+    if (released === null || released < query.from) {
+      return emptyPage(query.from, latest, access);
+    }
+    head = Math.min(asked, released);
+    worldHead = released;
+    const boundary = await sealCovering(db, released);
+    if (boundary !== null) asOf = boundary.sealed_at;
+  }
+
   const events = await eventsInRange(db, query.from, head);
 
   const covering = new Covering();
@@ -352,7 +380,11 @@ async function page(
     const state =
       kind === "event" || event.entry_id === null
         ? null
-        : await entries.state(db, event.entry_id, at, sealedHead);
+        // Derived at the head of the page's own world and never past it: a
+        // reader served to the released head is handed every entry as it stood
+        // there, so a validation the window still withholds cannot reach them
+        // through a re-derived record (decision D-100).
+        : await entries.state(db, event.entry_id, at, worldHead);
 
     items.push({
       seq: event.seq,
@@ -446,17 +478,22 @@ async function route(
 
   // The tier gate first, and before `receipts_not_configured`: a key that is
   // over its cap or whose bill did not clear is told which rule refused it even
-  // on a deployment that could not have signed the page anyway.
-  const granted = await resolveAccess(db, request, now);
-  if (!granted.ok) {
-    const { refusal } = granted;
-    return json(
-      refusal.body,
-      refusal.status,
-      refusal.retryAfter === undefined
-        ? undefined
-        : { "retry-after": String(refusal.retryAfter) },
-    );
+  // on a deployment that could not have signed the page anyway. Called exactly
+  // once for the request, and its answer passed down (decision D-100).
+  const granted = await readerAccess(request, env, db, now);
+  if (!granted.ok) return refusalResponse(granted.refusal);
+  const reader = granted.reader;
+
+  // The keyed branch carries the tier it resolved; a free or an operator page
+  // is metered on the free tier exactly as it is today, so the gate is asked
+  // for that tier's day here.
+  let access: Access;
+  if (reader.kind === "key") {
+    access = reader.key;
+  } else {
+    const free = await resolveAccess(db, request, now);
+    if (!free.ok) return refusalResponse(free.refusal);
+    access = free.access;
   }
 
   // Before any read: a deployment that cannot sign a receipt cannot serve a
@@ -464,7 +501,7 @@ async function route(
   const signer = await signerFor(env.SEALING_AGENT_KEY);
   if (signer === null) return refuse(503, "receipts_not_configured");
 
-  return page(db, parsed.query, signer, granted.access, now);
+  return page(db, parsed.query, signer, reader, access, now);
 }
 
 /**

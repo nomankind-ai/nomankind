@@ -26,6 +26,7 @@ import {
   RATE_TIERS,
   READ_PRICE_MICROS_PER_READ,
   READ_SHARE_SPLIT,
+  RELEASE_WINDOW_DAYS,
   SCHEMA_VERSION,
   STRIPE,
 } from "../../policy.js";
@@ -93,7 +94,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/entries/{id}",
     parameters: "—",
     answers:
-      "The derived entry. Status is recomputed from the log and is draft until validation closes it. The plain fetch, with no receipt.",
+      "The derived entry. Status is recomputed from the log and is draft until validation closes it. The plain fetch, with no receipt. Before the release window is up, a reader with no key and no signature is answered { proof, release_date } instead of { entry }: every proof field as it stands, the content fields null, and the instant the rest of it opens.",
     refusals: "400 bad_id, 404 not_found.",
   },
   {
@@ -103,7 +104,7 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "The raw archived bytes behind a snapshot_hash or a receipt_hash, whichever role froze them — snapshot, receipt, statement, or report:<seq> — with their stored media type and the archive address in x-nomankind-archive-hash. Served inert: attachment, nosniff, and a sandboxing CSP, because the bytes are a stranger's.",
     refusals:
-      "400 bad_hash, 404 not_found; 403 undisclosed, carrying disclose_after, for a capture held only under the role disclosure while its domain's disclosure window is still open — a signed request from an agent bound to a registered operator is served throughout, because a validator has to reproduce the measurement.",
+      "400 bad_hash, 404 not_found; 403 unreleased, carrying release_date, for a capture every one of whose entries is still inside the release window — a key or an operator signature is served throughout; 403 undisclosed, carrying disclose_after, for a capture held only under the role disclosure while its domain's disclosure window is still open — a signed request from an agent bound to a registered operator is served throughout, because a validator has to reproduce the measurement.",
   },
   {
     method: "GET",
@@ -111,14 +112,15 @@ const READ_PATH: readonly Endpoint[] = [
     parameters: "—",
     answers:
       "The norm rule's record of the fetch: final_url, status, headers, fetched_at, fetcher. The same four roles — snapshot, receipt, statement, report:<seq> — answer here.",
-    refusals: "400 bad_hash, 404 not_found; 403 undisclosed, as above.",
+    refusals:
+      "400 bad_hash, 404 not_found; 403 unreleased and 403 undisclosed, as above.",
   },
   {
     method: "GET",
     path: "/events",
     parameters: `after=<seq>, limit=<1..${LIST_PAGE_LIMIT}>`,
     answers:
-      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all.",
+      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. An event whose release date has not arrived goes to a free reader as a hash line — seq, at, type, entry_id, prev_hash, hash, payload null and withheld true — so the chain still links and the seal's root is still over the same leaves.",
     refusals: "400 bad_query.",
   },
   {
@@ -166,7 +168,7 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "The frozen reader's single signed fact: entry, sidecar, seal, receipt. Only a verified entry is served with a receipt, stale or not.",
     refusals:
-      "400 bad_id; 404 not_found; 409 entry_not_verified with status and superseded_by, which issues no receipt and moves no counter; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 bad_id; 402 unreleased with release_date, to a reader with neither a key nor an operator signature, while the entry's content is inside the release window; 404 not_found; 409 entry_not_verified with status and superseded_by, which issues no receipt and moves no counter; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
@@ -176,7 +178,7 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed; min_source is the lowest source class the reader will take, official above recognized above other, compared against the class the sidecar derived from the entry's own citation; and the age is whole UTC days against last_confirmed.",
     refusals:
-      "400 unknown_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_max_age; 402 unreleased with release_date, as above; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
@@ -184,7 +186,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters:
       `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, min_source=official|recognized, domain=<slug>`,
     answers:
-      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the four can touch an unlearn.",
+      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the four can touch an unlearn. A reader with no key and no signature is served to the released head rather than the sealed one: head names that boundary and sealed_head still reports the true head, so the gap is visible rather than silent, and a range with nothing released in it is an empty page with head null.",
     refusals:
       "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, bad_min_source, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
@@ -858,8 +860,31 @@ npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; --join &l
 npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; --bind &lt;new-key.json&gt;</pre>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="keys">
         <h2 class="panel-title">Paid access: tiers and keys</h2>
+        <p class="note">
+          The release window (decision D-100) is what a key buys first. An
+          entry's content — its claim, what it changed from and to, when it took
+          effect, its citation, its evidence, its observation, and the words each
+          validator wrote — is served to a key or to a signed request from an
+          agent bound to a registered operator from the first minute, and to
+          everybody else ${RELEASE_WINDOW_DAYS} days after the seal that covers
+          its submission, when it becomes public and CC0 and enters the daily
+          mirror. The proof is never withheld from anyone: every event's seq,
+          instant, type, entry id and hash, every seal, anchor and operator
+          record, and each entry's id, domain, subject, category, status,
+          effective tier, entry hash, seal, signers and hashes are public and
+          free today, as they always were. Inside the window a free read of an
+          entry is 402 <span class="mono">unreleased</span> with its
+          <span class="mono">release_date</span>, a free sync stops at the
+          released head, and a free
+          <span class="mono">GET /entries/{id}</span> answers
+          <span class="mono">{ proof, release_date }</span>. The window is one
+          number in <a href="/policy">policy</a> and one rule everywhere: an
+          event's release date is its covering seal's
+          <span class="mono">sealed_at</span> plus that many days, an entry's is
+          its submission event's, and an unsealed event is not released at all.
+        </p>
         <p class="note">
           Section 9: "The log is free to read at low volume, forever. Revenue
           comes from high-rate API access, structured feeds and webhooks, change
@@ -1201,8 +1226,16 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
           snapshot, seals, seal — and exits 0 clean or 1 with one named diff per
           line.
         </p>
-        <pre class="block mono">npm run export -- ${origin} &lt;entry-id&gt; ./bundle
+        <pre class="block mono">npm run export -- ${origin} &lt;entry-id&gt; ./bundle [--key &lt;api key&gt; | --sign &lt;key.json&gt;]
 npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
+        <p class="note">
+          <span class="mono">--sign</span> signs the export's reads with an
+          operator's agent key and <span class="mono">--key</span> presents an
+          API key: either reaches content that is still inside the release
+          window, and with neither the export writes the released view and says
+          so. <span class="mono">npm run read</span> and
+          <span class="mono">npm run sync</span> take the same two flags.
+        </p>
         <p class="note">
           The verifier prints the schema version it checked against
           (<span class="mono">${SCHEMA_VERSION}</span>) and refuses a core that
@@ -1221,8 +1254,8 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
           recomputed from the entry's core, and the inclusion proof against the
           covering seal's root.
         </p>
-        <pre class="block mono">npm run read -- ${origin} &lt;entry-id&gt; [--domain &lt;slug&gt;]
-npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT} [--domain &lt;slug&gt;]</pre>
+        <pre class="block mono">npm run read -- ${origin} &lt;entry-id&gt; [--domain &lt;slug&gt;] [--key &lt;api key&gt; | --sign &lt;key.json&gt;]
+npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT} [--domain &lt;slug&gt;] [--key &lt;api key&gt; | --sign &lt;key.json&gt;]</pre>
         <p class="note">
           Standing has a command of the same shape: it folds the sealed events by
           the published formula itself and compares its own answer with the

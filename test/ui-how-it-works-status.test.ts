@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_DOMAIN,
   NORM_VERSION,
+  RELEASE_WINDOW_DAYS,
   SCHEMA_VERSION,
   SWEEP_INTERVAL_MINUTES,
   TRUSTED_POOL_SWITCH,
@@ -169,6 +170,29 @@ const PANELS: readonly { readonly id: string; readonly number: string; readonly 
 
 describe("renderHowItWorks", () => {
   const page = renderHowItWorks(ctx, LIVE);
+
+  /**
+   * The read stage names the release window (decision D-100), in the number
+   * policy holds and beside the rule line that links it: the stage that tells a
+   * reader how to read the log is where the window they are reading under
+   * belongs.
+   */
+  it("names the release window in the read stage, from policy", () => {
+    const squeezed = page.replace(/\s+/g, " ");
+    expect(squeezed).toContain(
+      `for ${RELEASE_WINDOW_DAYS} days after the seal that covers it`,
+    );
+    expect(squeezed).toContain(
+      `RELEASE_WINDOW_DAYS ${RELEASE_WINDOW_DAYS}`,
+    );
+    // In the read stage and not somewhere else on the page.
+    const read = page.indexOf(`id="s4"`);
+    const next = page.indexOf(`id="s5"`);
+    expect(page.indexOf("RELEASE_WINDOW_DAYS")).toBeGreaterThan(read);
+    expect(page.indexOf("RELEASE_WINDOW_DAYS")).toBeLessThan(next);
+    expect(page).not.toContain("<script");
+    expect(page).not.toContain(' style="');
+  });
 
   it("carries the ten panels, each with its heading and its section label", () => {
     for (const panel of PANELS) {

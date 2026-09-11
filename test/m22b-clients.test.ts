@@ -54,6 +54,7 @@ import {
   attestFor,
   makeAgent,
   signedPost,
+  signingHttp,
   type TestAgent,
 } from "./helpers/registry.js";
 import {
@@ -445,6 +446,9 @@ describe("submit: the fields file names the domain", () => {
 describe("read: --domain", () => {
   it("puts the filter in the query it sends", async () => {
     const io = recorder();
+    // Read through a signing client, which is what `--sign <key.json>` builds:
+    // the entry is minutes old and the release window has not opened on it
+    // (decision D-100), and what this test is about is the domain filter.
     const code = await runRead(
       [
         TEST_ORIGIN,
@@ -455,7 +459,7 @@ describe("read: --domain", () => {
         "--domain",
         DEFAULT_DOMAIN,
       ],
-      new InProcessHttp(),
+      signingHttp((request) => send(request), k1.agent, NOW),
       io.io,
     );
     expect(code).toBe(0);

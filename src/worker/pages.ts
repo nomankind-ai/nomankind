@@ -22,6 +22,15 @@
  * the way — the counters are counts, the listing is one keyset page, and every
  * derived field an entry shows was derived when the entry was written.
  *
+ * The release window (decision D-100) is read here and decided nowhere else on
+ * the way to a page: the three gatherers that show an entry's content — the home
+ * page, the listing and the entry page — resolve the reader once with
+ * `readerAccess` and ask src/release.ts whether the covering seal is old enough.
+ * A free reader of an unreleased entry is handed the proof and the date it
+ * opens; a keyed or operator reader is handed everything, through the same
+ * renderer. Nothing else on any page changes, because the window holds back
+ * content and never a count, a hash, a seal or a proof.
+ *
  * No policy number lives here: the bare integers are HTTP status codes, and the
  * page sizes are LIST_PAGE_LIMIT, HOME_LATEST_ENTRIES and LANDING_BAND_SEALS
  * from src/policy.ts. No wall clock either — `deps.now` is the instant the router read once.
@@ -47,6 +56,8 @@ import {
   POLICY,
   WITNESS_PIN,
 } from "../policy.js";
+import { isReleased, releaseDateOf, withholdEntry } from "../release.js";
+import type { Seal } from "../seal.js";
 import { exercisedStages, stageStates, statusCounters } from "../status.js";
 import type { D1Like } from "../storage/d1.js";
 import {
@@ -79,6 +90,7 @@ import {
   reconciliationRows,
   sealCovering,
   sealsAfter,
+  sealsBetween,
   standingByOperator,
   standingForOperators,
   supersedersOf,
@@ -123,7 +135,9 @@ import type {
   OperatorRow,
   PageContext,
   StatusData,
+  WithheldView,
 } from "../ui/types.js";
+import { readerAccess, type ReaderAccess } from "./access.js";
 import type { Env } from "./env.js";
 import { StorageUnreachable, guardDatabase, json, refuse } from "./registry.js";
 import { statusInput } from "./status.js";
@@ -175,7 +189,7 @@ function field(source: Record<string, unknown>, name: string): string {
  * (Section 4): the tier a reader is shown is the one the entry actually verified
  * at. `sealed` is whether the entry carries a seal object at all.
  */
-function toRow(stored: StoredEntry): EntryRow {
+function toRow(stored: StoredEntry, withheld: WithheldView | null): EntryRow {
   const entry = stored.entry as unknown as Record<string, unknown>;
   const expires = entry["expires_at"];
   return {
@@ -185,12 +199,90 @@ function toRow(stored: StoredEntry): EntryRow {
     status: field(entry, "status"),
     subject: field(entry, "subject"),
     category: field(entry, "category"),
-    claim: field(entry, "claim"),
+    // The claim is content (D-100): a withheld row carries none at all, rather
+    // than a string the page would have to remember not to print.
+    claim: withheld === null ? field(entry, "claim") : "",
+    withheld,
     tier: stored.sidecar.effective_tier,
     last_confirmed: field(entry, "last_confirmed"),
     expires_at: typeof expires === "string" ? expires : null,
     stale: entry["stale"] === true,
   };
+}
+
+// ---------------------------------------------------------------------------
+// The release window (decision D-100)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who is reading, for the one question the window asks, resolved once per
+ * request by the gatherer that needs it.
+ *
+ * A refusal from the key gate is read here as "not a paid reader" and the page
+ * is drawn free: these routes meter nothing, charge nothing and issue no
+ * receipt, so a cap that a reader met at the API doors is not a page's to
+ * enforce, and the free view shows strictly less than the one they asked for. A
+ * refusal never opens anything — the only thing a bad key or a bad signature can
+ * buy on a page is the withheld view.
+ */
+async function readerOf(
+  request: Request,
+  env: Env,
+  db: D1Like,
+  now: Date,
+): Promise<ReaderAccess> {
+  const answer = await readerAccess(request, env, db, now);
+  return answer.ok ? answer.reader : { kind: "free" };
+}
+
+/**
+ * What this reader is told about one entry's content: null when it is theirs to
+ * read, and the release date when it is not.
+ *
+ * One rule and src/release.ts's own: the entry's release date is its covering
+ * seal's `sealed_at` through the window, an unsealed entry is not released at
+ * all, and a keyed or operator reader is never withheld from. `sealedAt` is null
+ * both when nothing covers the entry yet and when the caller could not read a
+ * seal for it, which are the same fact for this question.
+ */
+function withheldFor(
+  reader: ReaderAccess,
+  sealedAt: string | null,
+  now: Date,
+): WithheldView | null {
+  if (reader.kind !== "free") return null;
+  if (isReleased(sealedAt, now)) return null;
+  return { releaseDate: sealedAt === null ? null : releaseDateOf(sealedAt) };
+}
+
+/**
+ * The seals covering a page of rows: one read over the span the page actually
+ * holds, rather than one read per row.
+ *
+ * Seals are disjoint and contiguous, so every row's covering seal is in the
+ * range between the lowest and the highest position on the page, and a listing
+ * of fifty entries costs the same one query a listing of one does.
+ */
+async function sealsCovering(
+  db: D1Like,
+  rows: readonly StoredEntry[],
+): Promise<Seal[]> {
+  if (rows.length === 0) return [];
+  let first = rows[0]!.submittedSeq;
+  let last = first;
+  for (const stored of rows) {
+    if (stored.submittedSeq < first) first = stored.submittedSeq;
+    if (stored.submittedSeq > last) last = stored.submittedSeq;
+  }
+  return sealsBetween(db, first, last);
+}
+
+/** The `sealed_at` of the seal covering one position, or null when none does. */
+function sealedAtOf(seals: readonly Seal[], position: number): string | null {
+  const covering = seals.find(
+    (seal) => seal.first_seq <= position && position <= seal.last_seq,
+  );
+  return covering === undefined ? null : covering.sealed_at;
 }
 
 /**
@@ -296,9 +388,12 @@ async function landing(db: D1Like, ctx: PageContext): Promise<Response> {
  * because a seal covers events and not a domain, and the page says so.
  */
 async function home(
+  request: Request,
+  env: Env,
   db: D1Like,
   ctx: PageContext,
   url: URL,
+  now: Date,
 ): Promise<Response> {
   const asked = url.searchParams.get("domain");
   if (asked !== null && !ENTRY_DOMAINS.includes(asked)) {
@@ -321,6 +416,11 @@ async function home(
     ...narrowed,
     limit: HOME_LATEST_ENTRIES,
   });
+  // The window (D-100): who is asking, once, and the seals covering exactly the
+  // rows this page holds, so a row that is not this reader's to read yet shows
+  // its release date instead of its claim.
+  const reader = await readerOf(request, env, db, now);
+  const covering = await sealsCovering(db, latest);
 
   return htmlResponse(
     renderHome(ctx, {
@@ -334,15 +434,23 @@ async function home(
         witnesses: seal === null ? null : seal.witnesses.length,
         seals,
       },
-      latest: latest.map(toRow),
+      latest: latest.map((stored) =>
+        toRow(
+          stored,
+          withheldFor(reader, sealedAtOf(covering, stored.submittedSeq), now),
+        ),
+      ),
     }),
   );
 }
 
 async function entries(
+  request: Request,
+  env: Env,
   db: D1Like,
   ctx: PageContext,
   url: URL,
+  now: Date,
 ): Promise<Response> {
   const parsed = parseEntriesQuery(url.searchParams);
   if (!parsed.ok) {
@@ -382,7 +490,16 @@ async function entries(
       ? page
       : page.filter((stored) => stored.sidecar.source.class === filter.source);
 
-  const rows = kept.map(toRow);
+  // The window (D-100), over the rows the filters left: one reader and one read
+  // of the seals covering this page's own span of positions.
+  const reader = await readerOf(request, env, db, now);
+  const covering = await sealsCovering(db, kept);
+  const rows = kept.map((stored) =>
+    toRow(
+      stored,
+      withheldFor(reader, sealedAtOf(covering, stored.submittedSeq), now),
+    ),
+  );
   // The cursor is the last row *read*, not the last row kept: a page whose
   // source filter dropped everything still advances, so the pager cannot stall
   // on a run of entries the reader filtered out.
@@ -406,6 +523,8 @@ async function entries(
  * is what lets the page show a reader where in the log a decision sits.
  */
 async function entry(
+  request: Request,
+  env: Env,
   db: D1Like,
   ctx: PageContext,
   id: string,
@@ -414,9 +533,38 @@ async function entry(
   const stored = await getEntry(db, id);
   if (stored === null) return htmlResponse(renderNotFound(ctx), 404);
 
-  const record = stored.entry as unknown as Record<string, unknown>;
   const events = await eventsForEntry(db, id);
   const seal = await sealCovering(db, stored.submittedSeq);
+  // The window (D-100). The reader is resolved once, and when the content is
+  // not theirs yet the record this page is built from is `withholdEntry`'s
+  // proof — every content field null, every proof field untouched — so nothing
+  // below this line can print what was not served. Only the proof is taken from
+  // it: the date the page shows is `withheld`, which is null for an entry no
+  // seal covers, and `withholdEntry`'s own `release_date` is the served
+  // envelope's field rather than a page's.
+  const reader = await readerOf(request, env, db, now);
+  const withheld = withheldFor(
+    reader,
+    seal === null ? null : seal.sealed_at,
+    now,
+  );
+  // The hash travels with the withheld view and with nothing else: on a full
+  // view the reader holds the core the hash is over and can take it themselves,
+  // and before release they cannot, so the page prints it where the content
+  // would have been. It is `withholdEntry`'s, taken over the whole core.
+  let record: Record<string, unknown>;
+  let view: WithheldView | null = withheld;
+  if (withheld === null) {
+    record = stored.entry as unknown as Record<string, unknown>;
+  } else {
+    const held = await withholdEntry(
+      stored.entry,
+      stored.sidecar,
+      withheld.releaseDate ?? "",
+    );
+    record = held.proof as unknown as Record<string, unknown>;
+    view = { releaseDate: withheld.releaseDate, entryHash: held.entry_hash };
+  }
   const superseders = await supersedersOf(db, id, LIST_PAGE_LIMIT);
   const ledger = await ledgerRowsForEntry(db, id, LIST_PAGE_LIMIT);
   // Section 9's money rows for this entry: everything the ledger holds about it
@@ -549,6 +697,7 @@ async function entry(
     renderEntry(ctx, {
       entry: record,
       sidecar: stored.sidecar,
+      withheld: view,
       position: stored.submittedSeq,
       events,
       seal,
@@ -1104,19 +1253,19 @@ async function route(
     const apex = env.APEX_HOST;
     return apex !== undefined && apex !== "" && apex === url.hostname
       ? landing(db, ctx)
-      : home(db, ctx, url);
+      : home(request, env, db, ctx, url, now);
   }
 
   if (path === "/landing") return landing(db, ctx);
 
   // The listing has no JSON twin, so it answers whatever the Accept header says.
-  if (path === "/entries") return entries(db, ctx, url);
+  if (path === "/entries") return entries(request, env, db, ctx, url, now);
 
   const entryId = segmentAfter(path, "/entries/");
   if (entryId !== null) {
     if (!wants) return null;
     return ENTRY_ID_PATTERN.test(entryId)
-      ? entry(db, ctx, entryId, now)
+      ? entry(request, env, db, ctx, entryId, now)
       : htmlResponse(renderNotFound(ctx), 404);
   }
 

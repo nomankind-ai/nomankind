@@ -63,6 +63,7 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
   type TestAgent,
 } from "./helpers/registry.js";
@@ -481,7 +482,12 @@ describe("a small pool, under the ten-operator switch", () => {
     it("serves the verified entry at its own URL, exactly as it answered", async () => {
       const created = await send(
         world,
-        get(`/entries/${verified["id"] as string}`),
+        // Signed by a registered operator's agent: the entry is minutes old and
+        // the release window has not opened on it (decision D-100).
+        await signedGet(world.parties[0]!.agent, {
+          path: `/entries/${verified["id"] as string}`,
+          timestamp: AT,
+        }),
       );
       const body = (await created.json()) as Record<string, unknown>;
 

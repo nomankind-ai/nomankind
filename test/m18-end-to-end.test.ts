@@ -69,6 +69,7 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
   type TestAgent,
 } from "./helpers/registry.js";
@@ -216,8 +217,19 @@ function send(
   return handleRequest(request, env, { ...world.deps, now });
 }
 
-function get(path: string): Request {
-  return new Request(`${TEST_ORIGIN}${path}`);
+/**
+ * One GET, signed by an agent bound to a registered operator.
+ *
+ * Every seal in this file is minutes old, so the release window (decision
+ * D-100) has not opened on any of it and a free reader's page would stop at a
+ * released head that does not exist yet. What is under test here is the stream
+ * itself — the order, the proofs, the receipt and the count — so the reads are
+ * made the way an entitled client makes them, with the M2 signature the door
+ * already asks for, rather than by asking the door for less. The free reader's
+ * own cut is tested in test/m24d-doors.test.ts.
+ */
+function get(path: string, now: Date = NOW): Promise<Request> {
+  return signedGet(k1.agent, { path, timestamp: now.toISOString() });
 }
 
 async function read(
@@ -225,7 +237,7 @@ async function read(
   now: Date = NOW,
   env: Env = world.env,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await send(get(path), now, env);
+  const response = await send(await get(path, now), now, env);
   expect(response.headers.get("cache-control")).toBe("no-store");
   return {
     status: response.status,

@@ -50,6 +50,7 @@ import {
   TEST_ORIGIN,
   attestFor,
   makeAgent,
+  signedGet,
   signedPost,
   type TestAgent,
 } from "./helpers/registry.js";
@@ -69,6 +70,8 @@ const AT = NOW.toISOString();
 
 /** The operator a registered agent joins as, and a reference the mock passes. */
 const OPERATOR = "kestrel-watch.example";
+/** The operator whose agent signs this file's reads (decision D-100). */
+const READER_OPERATOR = "reader.example";
 const VERIFIED_REFERENCE = "mock-verified-m13";
 
 // ---------------------------------------------------------------------------
@@ -130,6 +133,17 @@ let alice: TestAgent;
 let bob: TestAgent;
 let carol: TestAgent;
 let maintainer: TestAgent;
+/**
+ * An agent bound to a registered operator, which is all this file's reads need.
+ *
+ * Every entry here is read at the instant it was submitted, long inside the
+ * release window (decision D-100), so a free read would be handed the proof and
+ * a release date rather than the entry. These tests are about what the submit
+ * door stores and serves, so they read as an entitled client does — with the M2
+ * signature the disclosure gate already asks for. The free reader's own answers
+ * are tested in test/m24d-doors.test.ts.
+ */
+let reader: TestAgent;
 let env: Env;
 let deps: RequestDeps;
 let fetcher: FixtureFetcher;
@@ -142,7 +156,8 @@ let statementHash: string;
 
 beforeAll(async () => {
   store = await openTestDatabase();
-  [alice, bob, carol, maintainer] = await Promise.all([
+  [alice, bob, carol, maintainer, reader] = await Promise.all([
+    makeAgent(),
     makeAgent(),
     makeAgent(),
     makeAgent(),
@@ -159,7 +174,10 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     fetcher,
-    dns: new FixtureResolver({ [txtRecordName(OPERATOR)]: [carol.agentId] }),
+    dns: new FixtureResolver({
+      [txtRecordName(OPERATOR)]: [carol.agentId],
+      [txtRecordName(READER_OPERATOR)]: [reader.agentId],
+    }),
     payout: new MockPayoutAdapter(),
   };
 
@@ -168,6 +186,20 @@ beforeAll(async () => {
   finalHash = await pageHash(FINAL);
   limitsHash = await pageHash(LIMITS);
   statementHash = await pageHash(STATEMENT);
+
+  // The operator this file's reads are signed by (decision D-100). Registered
+  // through the door, exactly as an outsider would, so nothing here is granted
+  // by a row a test wrote behind the Worker's back.
+  const registration = await signedPost(reader, {
+    path: "/operators",
+    body: {
+      operator: READER_OPERATOR,
+      attestation: await attestFor(reader, READER_OPERATOR, AT),
+      payout: { reference: VERIFIED_REFERENCE },
+    },
+    timestamp: AT,
+  });
+  expect((await send(registration)).status).toBe(201);
 }, 60_000);
 
 // getPlatformProxy runs a child process; vitest would hold the run open
@@ -180,8 +212,8 @@ afterAll(async () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function get(path: string): Request {
-  return new Request(`${TEST_ORIGIN}${path}`);
+function get(path: string): Promise<Request> {
+  return signedGet(reader, { path, timestamp: AT });
 }
 
 async function send(
@@ -295,13 +327,13 @@ describe("a stated entry citing an HTML page", () => {
   });
 
   it("serves the entry back at its own URL", async () => {
-    const response = await send(get(`/entries/${core["id"] as string}`));
+    const response = await send(await get(`/entries/${core["id"] as string}`));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(created);
   });
 
   it("serves the capture at the entry's snapshot hash", async () => {
-    const response = await send(get(`/captures/${htmlHash}`));
+    const response = await send(await get(`/captures/${htmlHash}`));
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("text/html");
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -314,7 +346,7 @@ describe("a stated entry citing an HTML page", () => {
   it("serves that capture inert, so an archived page cannot run at our origin", async () => {
     // Anyone can submit with a bare key, and what they cite is archived raw:
     // this HTML is a stranger's bytes served from demo.nomankind.ai.
-    const response = await send(get(`/captures/${htmlHash}`));
+    const response = await send(await get(`/captures/${htmlHash}`));
     const archiveHash = await archiveAddress(bytesOf(HTML));
 
     expect(response.headers.get("content-disposition")).toBe(
@@ -327,7 +359,7 @@ describe("a stated entry citing an HTML page", () => {
   });
 
   it("records the fetch in the sidecar beside it", async () => {
-    const response = await send(get(`/captures/${htmlHash}/sidecar`));
+    const response = await send(await get(`/captures/${htmlHash}/sidecar`));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       final_url: HTML_URL,
@@ -357,7 +389,7 @@ describe("other citations", () => {
     );
     expect((await send(await submission(alice, { core }))).status).toBe(201);
 
-    const response = await send(get(`/captures/${jsonHash}`));
+    const response = await send(await get(`/captures/${jsonHash}`));
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(await response.text()).toBe(JSON_PAGE.body);
@@ -374,7 +406,7 @@ describe("other citations", () => {
     );
     expect((await send(await submission(alice, { core }))).status).toBe(201);
 
-    const response = await send(get(`/captures/${finalHash}/sidecar`));
+    const response = await send(await get(`/captures/${finalHash}/sidecar`));
     expect(await response.json()).toMatchObject({
       final_url: FINAL_URL,
       status: 200,
@@ -728,7 +760,7 @@ describe("a behavior entry, whose snapshot is its frozen transcript", () => {
 
   it("archives the canonical artifact at the entry's snapshot hash", async () => {
     const response = await send(
-      get(`/captures/${core["snapshot_hash"] as string}`),
+      await get(`/captures/${core["snapshot_hash"] as string}`),
     );
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/json");
@@ -737,7 +769,7 @@ describe("a behavior entry, whose snapshot is its frozen transcript", () => {
 
   it("says nobody fetched it, rather than inventing a provenance", async () => {
     const response = await send(
-      get(`/captures/${core["snapshot_hash"] as string}/sidecar`),
+      await get(`/captures/${core["snapshot_hash"] as string}/sidecar`),
     );
     expect(await response.json()).toEqual({
       final_url: null,
@@ -816,7 +848,7 @@ describe("a behavior entry whose provider statement is a page", () => {
   });
 
   it("serves the statement's raw bytes at its own hash", async () => {
-    const response = await send(get(`/captures/${statementHash}`));
+    const response = await send(await get(`/captures/${statementHash}`));
     expect(response.status).toBe(200);
     expect(response.headers.get("x-nomankind-archive-hash")).toBe(
       await archiveAddress(bytesOf(STATEMENT)),
@@ -827,7 +859,7 @@ describe("a behavior entry whose provider statement is a page", () => {
   });
 
   it("says who fetched the statement, and when, and from where", async () => {
-    const response = await send(get(`/captures/${statementHash}/sidecar`));
+    const response = await send(await get(`/captures/${statementHash}/sidecar`));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       final_url: STATEMENT_URL,
@@ -907,12 +939,12 @@ describe("an observed entry, whose measurement is receipted", () => {
     expect(response.status).toBe(201);
     expect(validateEntry(await response.json()).ok).toBe(true);
 
-    const page = await send(get(`/captures/${limitsHash}`));
+    const page = await send(await get(`/captures/${limitsHash}`));
     expect(page.status).toBe(200);
     expect(new Uint8Array(await page.arrayBuffer())).toEqual(bytesOf(LIMITS));
 
     const observation = core["observation"] as { receipt_hash: string };
-    const stored = await send(get(`/captures/${observation.receipt_hash}`));
+    const stored = await send(await get(`/captures/${observation.receipt_hash}`));
     expect(stored.status).toBe(200);
     expect(await stored.text()).toBe(canonicalize(receipt));
   });
@@ -938,26 +970,26 @@ describe("an observed entry, whose measurement is receipted", () => {
 
 describe("the reads", () => {
   it("refuses an id that is not an entry id, before it asks the database", async () => {
-    const response = await send(get("/entries/not-an-id"));
+    const response = await send(await get("/entries/not-an-id"));
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "bad_id" });
   });
 
   it("answers 404 for an entry that was never submitted", async () => {
-    const response = await send(get("/entries/nmk_11111111111111111111111111111111"));
+    const response = await send(await get("/entries/nmk_11111111111111111111111111111111"));
     expect(response.status).toBe(404);
   });
 
   it("refuses a capture address that is not a hash", async () => {
-    const response = await send(get("/captures/sha256:nope"));
+    const response = await send(await get("/captures/sha256:nope"));
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "bad_hash" });
   });
 
   it("answers 404 for a hash nothing was captured under", async () => {
-    const response = await send(get(`/captures/sha256:${"0f".repeat(32)}`));
+    const response = await send(await get(`/captures/sha256:${"0f".repeat(32)}`));
     expect(response.status).toBe(404);
-    const sidecar = await send(get(`/captures/sha256:${"0f".repeat(32)}/sidecar`));
+    const sidecar = await send(await get(`/captures/sha256:${"0f".repeat(32)}/sidecar`));
     expect(sidecar.status).toBe(404);
   });
 

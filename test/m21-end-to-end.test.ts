@@ -221,11 +221,16 @@ async function read(
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const response = await send(
     new Request(`${TEST_ORIGIN}${path}`, {
-      // Only the reading doors: the rest of the paths here are the log's own
-      // and are free to everyone, key or no key.
-      headers: path.startsWith("/read")
-        ? { authorization: `Bearer ${readerSecret}` }
-        : {},
+      // The reading doors, and the entry door beside them: the rest of the
+      // paths here are the log's own and are free to everyone, key or no key.
+      // The entry door joined the list with the release window (decision
+      // D-100) — every entry in this file is read at the instant it was
+      // written, and a free reader inside the window is handed the proof and a
+      // release date rather than the entry.
+      headers:
+        path.startsWith("/read") || path.startsWith("/entries")
+          ? { authorization: `Bearer ${readerSecret}` }
+          : {},
     }),
     now,
   );

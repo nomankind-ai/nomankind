@@ -48,13 +48,25 @@
  * reconcile their payout against the log" and a summary would be a number to
  * take on trust.
  *
+ * Decision D-100, the release window: an entry's content — the claim, what it
+ * changed from and to, when it took effect, the citation, the evidence, the
+ * observation, and the words each validator wrote — is served to a free reader
+ * only once the seal covering its submission is older than
+ * RELEASE_WINDOW_DAYS. Until then the route hands this page the proof and
+ * nothing else (`data.withheld` is set and `data.entry` is `withholdEntry`'s
+ * result), and the page prints one line saying when it opens and where to buy a
+ * key. Everything a reader needs to prove the entry exists, in that order, at
+ * that instant — every hash, the seal, the inclusion proof, the events and the
+ * two offline commands — is shown either way, because proof is never withheld.
+ *
  * Neutral tone throughout: the page prints what the record says and never
  * characterises it. Pure: no clock, no storage, no derivation.
  */
 
 import { CORE_KEYS, type CoreKey } from "../../core.js";
 import { duplicateOf, parseDuplicateReason } from "../../duplicate-reason.js";
-import { DEFAULT_DOMAIN } from "../../policy.js";
+import { DEFAULT_DOMAIN, RELEASE_WINDOW_DAYS } from "../../policy.js";
+import { CONTENT_CORE_KEYS } from "../../release.js";
 import {
   badge,
   fmtDate,
@@ -68,7 +80,12 @@ import {
   statusClass,
   type Safe,
 } from "../html.js";
-import type { ApproverRow, EntryData, PageContext } from "../types.js";
+import type {
+  ApproverRow,
+  EntryData,
+  PageContext,
+  WithheldView,
+} from "../types.js";
 
 /** The derived field names, in the order the schema declares them. */
 const DERIVED_KEYS = [
@@ -85,6 +102,9 @@ const DERIVED_KEYS = [
 
 /** An em dash, for a field with no value. */
 const EM_DASH = "—";
+
+/** What a decision's reason reads as before the window is up (decision D-100). */
+const WITHHELD_REASON = html`<span class="dim">withheld until release</span>`;
 
 type Record_ = Record<string, unknown>;
 
@@ -197,17 +217,74 @@ function disclosureNote(disclosure: EntryData["disclosure"]): Safe {
   </span>`;
 }
 
-/** The frozen core: every CORE_KEYS name, in the schema's order, with its value. */
+/**
+ * The one line that stands where the content was, before the window is up
+ * (decision D-100).
+ *
+ * "Released on <date>. Read it now with a key." — the date is the covering
+ * seal's `sealed_at` through RELEASE_WINDOW_DAYS, computed by the route from
+ * src/policy.ts, and the key link goes to the API page's own keys section, which
+ * is where a reader who does not want to wait actually buys one. An entry
+ * nothing has sealed yet has no date to print, so the line names the rule
+ * instead — and the number in it is policy's, never a numeral typed here.
+ */
+function releaseLine(withheld: WithheldView): Safe {
+  const buy = html`<a href="/api#keys">a key</a>`;
+  if (withheld.releaseDate === null) {
+    return html`Released ${RELEASE_WINDOW_DAYS} days after the seal that covers
+    it. Read it now with ${buy}.`;
+  }
+  return html`Released on ${fmtDate(withheld.releaseDate)}. Read it now with
+  ${buy}.`;
+}
+
+/**
+ * The entry hash, on the withheld view, standing where the content stood.
+ *
+ * A reader holding the whole core can digest it themselves; a reader holding a
+ * nulled one cannot, and would have no way to say which record the proof around
+ * it belongs to. So the number the log sealed is printed in full, in the same
+ * block the seven content rows left, beside the signature it goes with — and it
+ * is the same hash the door serves under `entry_hash` and the mirror's index
+ * row carries, so a reader can hold all three against each other.
+ */
+function entryHashField(withheld: WithheldView): Safe {
+  const hash = withheld.entryHash;
+  if (hash === undefined) return raw("");
+  return html`<div class="field">
+    <span class="field-name">entry_hash</span>
+    <span class="field-value break">${hash}</span>
+  </div>`;
+}
+
+/**
+ * The frozen core: every CORE_KEYS name, in the schema's order, with its value.
+ *
+ * On a withheld view the seven content keys are not rows with dashes in them:
+ * they are gone, and the release line stands in their place. A dash would say
+ * the entry carried nothing there, which is a claim about the record rather than
+ * about what this reader was served — and the eleven proof keys, the signature
+ * among them, are shown exactly as they always are.
+ */
 function core(data: EntryData): Safe {
   const author = text(data.entry, "author") ?? EM_DASH;
+  const withheld = data.withheld;
+  const keys =
+    withheld === null
+      ? CORE_KEYS
+      : CORE_KEYS.filter((key) => !CONTENT_CORE_KEYS.includes(key));
   return html`<section class="panel">
     <div class="panel-head">
       <h2>Frozen core</h2>
       <span class="panel-label">signed by ${author}</span>
     </div>
     <div class="panel-body">
+      ${withheld === null
+        ? raw("")
+        : html`<p class="note">${releaseLine(withheld)}</p>
+            ${entryHashField(withheld)}`}
       <dl class="kv">
-        ${CORE_KEYS.map(
+        ${keys.map(
           (key) =>
             html`<dt>${key}</dt>
               <dd>
@@ -495,7 +572,11 @@ function operatorCell(operator: string, trusted: boolean | null): Safe {
  * string does not give them — somewhere to go. A reason that does not hold the
  * form, and the same form on an approval, render as the text that was signed.
  */
-function reasonCell(approver: ApproverRow): Safe {
+function reasonCell(approver: ApproverRow, withheld: WithheldView | null): Safe {
+  // The words a validator wrote are content and travel with the claim
+  // (D-100): before release the cell says so rather than showing a dash, which
+  // would read as a decision signed with no reason at all.
+  if (withheld !== null) return WITHHELD_REASON;
   const duplicated =
     approver.decision === "reject"
       ? parseDuplicateReason(approver.reason)
@@ -504,14 +585,14 @@ function reasonCell(approver: ApproverRow): Safe {
   return html`duplicate of ${entryLink(duplicated)}`;
 }
 
-function approverRow(approver: ApproverRow): Safe {
+function approverRow(approver: ApproverRow, withheld: WithheldView | null): Safe {
   const decisionClass = approver.decision === "approve" ? "accent" : "danger";
   const hash = approver.snapshot_hash;
   return html`<tr class="row">
     <td class="break">${approver.agent}</td>
     <td>${operatorCell(approver.operator, approver.operatorTrusted)}</td>
     <td class="${decisionClass}">${approver.decision}</td>
-    <td class="prose">${reasonCell(approver)}</td>
+    <td class="prose">${reasonCell(approver, withheld)}</td>
     <td class="muted" title="${hash ?? ""}">
       ${hash === null ? EM_DASH : shortHash(hash)}
     </td>
@@ -556,7 +637,7 @@ function approvers(data: EntryData): Safe {
           </tr>
         </thead>
         <tbody>
-          ${data.approvers.map(approverRow)}
+          ${data.approvers.map((each) => approverRow(each, data.withheld))}
         </tbody>
       </table>
     </div>
@@ -1167,9 +1248,16 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
   const claimedTier = text(data.entry, "evidence_tier");
   const effective = data.sidecar.effective_tier;
 
+  const withheld = data.withheld;
   return layout(ctx, {
     title: id,
-    description: text(data.entry, "claim") ?? undefined,
+    // The description is the claim, which is content: a withheld page describes
+    // itself by the rule it is standing under instead, because a meta
+    // description is served to anybody who asks for the page at all.
+    description:
+      withheld === null
+        ? (text(data.entry, "claim") ?? undefined)
+        : `The proof of this entry is public; its content is released ${RELEASE_WINDOW_DAYS} days after the seal that covers it.`,
     body: html`
       <div class="crumbs mono">
         <a href="/entries">Entries</a><span>/</span><span>${id}</span>
@@ -1180,7 +1268,10 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
         ${badge("", text(data.entry, "category") ?? EM_DASH)}
         <span class="dim">${text(data.entry, "subject")}</span>
       </div>
-      <h1 class="claim-head">${text(data.entry, "claim")}</h1>
+      ${withheld === null
+        ? html`<h1 class="claim-head">${text(data.entry, "claim")}</h1>`
+        : html`<h1 class="claim-head">${text(data.entry, "subject")}</h1>
+            <p class="lede">${releaseLine(withheld)}</p>`}
       ${freshness(data)}
       <p class="note">
         tier shown is the sidecar's effective_tier${effective === null
