@@ -26,6 +26,7 @@
  */
 
 import {
+  APEX_URL,
   fmtInstant,
   html,
   shortHash,
@@ -253,7 +254,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
   <body class="landing">
     <div class="sheet">
       <header class="topbar row">
-        <span class="wordmark mono">NOMANKIND</span>
+        <a class="wordmark mono" href="${APEX_URL}">NOMANKIND</a>
         <nav class="topnav">
           <a href="/how-it-works">How it works</a>
           <a href="${PAPER_URL}" rel="noopener">Whitepaper</a>
@@ -413,7 +414,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
         <div class="tiers-copy">
           <p class="eyebrow">PROOF FIRST, THEN USE</p>
           <h2 class="display tiers-title">
-            Quotations you can trace. <em>Measurements that held.</em>
+            Claims you can trace. <em>Truths that held.</em>
           </h2>
         </div>
         <p class="tiers-body">

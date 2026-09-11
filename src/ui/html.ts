@@ -240,6 +240,9 @@ export function versionedHref(path: string, content: string): string {
 /** The app stylesheet's link, computed once when this module loads. */
 export const APP_CSS_HREF = versionedHref("/static/app.css", APP_CSS);
 
+/** The front door. The same host from every environment, so it is fixed here. */
+export const APEX_URL = "https://nomankind.ai/";
+
 /** The repository and the paper, linked from the header and the footer. */
 const REPOSITORY_URL = "https://github.com/nomankind-ai/nomankind";
 const PAPER_URL =
@@ -322,7 +325,7 @@ export function layout(
   </head>
   <body>
     <header class="header">
-      <a class="wordmark" href="/">
+      <a class="wordmark" href="${APEX_URL}">
         ${WORDMARK_ICON}
         <span class="wordmark-text">nomankind</span>
       </a>
