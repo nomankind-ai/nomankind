@@ -171,6 +171,18 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
       </section>
 
       <section class="panel">
+        <h2 class="panel-title">Practice on demo first</h2>
+        <p class="note">
+          The three steps above and one validation can be rehearsed end to end on
+          demo before they are done where they count. The DNS check and the
+          attestation are the real ones there and the validate path is the
+          production path; payout onboarding is mocked, the witnesses are a
+          published mock pair, and nothing on demo is money.
+          <a href="/dry-run">The dry run page</a> walks it command by command.
+        </p>
+      </section>
+
+      <section class="panel">
         <h2 class="panel-title">The attestation, verbatim, per domain</h2>
         <p class="note">
           One attestation per registered domain, each with its own version.

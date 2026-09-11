@@ -87,6 +87,7 @@ import {
 } from "../storage/repository.js";
 import { htmlResponse, cssResponse } from "../ui/html.js";
 import { renderApi } from "../ui/pages/api.js";
+import { renderDryRun } from "../ui/pages/dry-run.js";
 import { renderEntries } from "../ui/pages/entries.js";
 import { renderEntry } from "../ui/pages/entry.js";
 import {
@@ -1080,6 +1081,7 @@ async function route(
   }
 
   if (path === "/api") return htmlResponse(renderApi(ctx));
+  if (path === "/dry-run") return htmlResponse(renderDryRun(ctx));
   if (path === "/genesis") return genesis(db, ctx, env);
   if (path === "/how-it-works") return howItWorks(db, ctx, env);
 

@@ -620,7 +620,7 @@ describe("the policy endpoint", () => {
 
 describe("the documentation pages and the front door", () => {
   it("answers the API and genesis pages as HTML", async () => {
-    for (const path of ["/api", "/genesis"]) {
+    for (const path of ["/api", "/genesis", "/dry-run"]) {
       const answer = await page(path);
       expect([path, answer.status]).toEqual([path, 200]);
     }
