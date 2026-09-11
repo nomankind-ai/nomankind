@@ -835,9 +835,10 @@ function revalidations(data: EntryData): Safe {
  * The stakes this entry's disputes and revalidations put up.
  *
  * Every row is a ledger record derived from a sealed event, and an amount is
- * shown only where the record carries one: a reward has none, because pricing is
- * a later milestone's and a number invented here would be a policy nobody
- * decided.
+ * shown only where the record carries one. A reward carries none until the
+ * sweep's ledger step reaches the position it became owed at and prices it from
+ * the clawbacks of the same dispute; until then it reads as unpriced, which is
+ * what the log says about it.
  */
 function stakes(data: EntryData): Safe {
   if (data.ledger.length === 0) {
@@ -884,10 +885,12 @@ function stakes(data: EntryData): Safe {
       </table>
     </div>
     <p class="note">
-      No money moves on any of these rows. The amounts are the placeholders the
-      policy page publishes, and they stand until the milestone that prices them
-      is built; a row with no amount is a fact the log records without a number
-      attached.
+      A stake, a refund and a forfeit are in the unit they were put up in, and
+      the amounts are the placeholders the policy page publishes. A reward is in
+      micro-USD and is what the upheld dispute clawed back from the entry's
+      signers — nothing more, and zero where nothing was still held; a row with
+      no amount at all is one the ledger step has not reached yet, a fact the
+      log records without a number attached.
     </p>
   </section>`;
 }

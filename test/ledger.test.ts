@@ -26,6 +26,7 @@ import {
   bountyAccrualRow,
   buildReadCountPayload,
   clawbackRows,
+  disputeRewardRow,
   ledgerBalance,
   payoutPlan,
   payoutRow,
@@ -35,6 +36,7 @@ import {
   type Event,
   type LedgerRow,
   type ReadCountRow,
+  type StakeRecord,
 } from "../src/index.js";
 
 const ENTRY = "nmk_01M21LEDGER";
@@ -390,6 +392,106 @@ describe("clawbackRows", () => {
   });
 });
 
+describe("disputeRewardRow", () => {
+  const CHALLENGER = "1F916:Y2hhbGxlbmdlcg";
+
+  /** The unpriced row the dispute door writes at the outcome. */
+  function owed(overrides: Partial<StakeRecord> = {}): StakeRecord {
+    return {
+      kind: "dispute_reward",
+      entry_id: ENTRY,
+      correction_entry_id: "nmk_01M21CORRECTION",
+      request_seq: null,
+      agent: CHALLENGER,
+      operator: null,
+      unit: null,
+      amount: null,
+      seq: 99,
+      at: "2026-09-10T00:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  async function clawed(): Promise<LedgerRow[]> {
+    const first = await readCount([{ entry_id: ENTRY, count: READS }]);
+    const later = await readCount(
+      [{ entry_id: ENTRY, count: READS }],
+      "2026-09-09",
+      "2026-09-09T12:00:00.000Z",
+    );
+    const held = [
+      ...readShareRows(first, () => state()),
+      ...readShareRows(later, () => state()),
+    ];
+    const log = await appendEvent([], {
+      at: "2026-09-10T00:00:00.000Z",
+      type: "dispute_upheld",
+      entry_id: ENTRY,
+      payload: { correction_entry_id: "nmk_01M21CORRECTION" },
+    });
+    return clawbackRows(log[0] as Event<"dispute_upheld">, held);
+  }
+
+  it("pays the challenger exactly what the entry lost", async () => {
+    const clawbacks = await clawed();
+    const row = disputeRewardRow(owed(), clawbacks);
+
+    // Section 6 in one row: what the approvers lost is what the challenger is
+    // paid, and the clawbacks are written negative because they negate shares.
+    const lost = clawbacks.reduce((sum, each) => sum + each.amount, 0);
+    expect(row.amount).toBe(-lost);
+    expect(row.amount).toBeGreaterThan(0);
+    expect(row.unit).toBe("micros");
+    // The row the door wrote, at the position it became owed.
+    expect([row.id, row.seq, row.at]).toEqual([
+      "dispute_reward:99",
+      99,
+      "2026-09-10T00:00:00.000Z",
+    ]);
+    // It leaves when the last clawed-back share would have.
+    expect(row.available_at).toBe(releaseOf("2026-09-09"));
+    expect(
+      clawbacks.every((each) => (each.available_at as string) <= row.available_at!),
+    ).toBe(true);
+    // The record it was written as, and the rows the price was read off.
+    expect(row.ref).toMatchObject({
+      agent: CHALLENGER,
+      amount: null,
+      clawed_back: lost,
+      clawbacks: clawbacks.map((each) => each.id),
+    });
+  });
+
+  it("prices a reward at zero, explicitly, when nothing was still held", () => {
+    // Section 9: "A dispute upheld later claws back nothing." The reward is
+    // that nothing, written down, and never a null left for a later reader.
+    const row = disputeRewardRow(owed(), []);
+    expect([row.amount, row.unit, row.available_at]).toEqual([0, "micros", null]);
+    expect(row.ref).toMatchObject({ clawed_back: 0, clawbacks: [] });
+  });
+
+  it("accrues to the key when the challenger is a bare one, and to the operator otherwise", async () => {
+    const clawbacks = await clawed();
+    // Section 6: "A bare-key challenger's reward accrues to the key and holds."
+    const bare = disputeRewardRow(owed(), clawbacks);
+    expect(bare.operator).toBeNull();
+    expect(bare.ref["agent"]).toBe(CHALLENGER);
+
+    const verified = disputeRewardRow(owed({ operator: SUBMITTER }), clawbacks);
+    expect(verified.operator).toBe(SUBMITTER);
+    expect(verified.amount).toBe(bare.amount);
+  });
+
+  it("counts the clawbacks and nothing else beside them", async () => {
+    const clawbacks = await clawed();
+    const share = clawbacks[0]!;
+    const stray: LedgerRow = { ...share, id: "read_share:stray", kind: "read_share" };
+    expect(disputeRewardRow(owed(), [...clawbacks, stray]).amount).toBe(
+      disputeRewardRow(owed(), clawbacks).amount,
+    );
+  });
+});
+
 describe("bountyAccrualRow", () => {
   async function reconfirmation(at: string): Promise<Event<"reconfirmation">> {
     const log = await appendEvent([], {
@@ -556,6 +658,54 @@ describe("payoutPlan and payoutRow", () => {
     expect(plan.rows).toHaveLength(1);
   });
 
+  /** The reward of an upheld challenge, in the shape the ledger step prices it. */
+  function reward(overrides: Partial<LedgerRow> = {}): LedgerRow {
+    return row({
+      id: "dispute_reward:99",
+      kind: "dispute_reward",
+      role: null,
+      date: null,
+      reads: null,
+      seq: 99,
+      ...overrides,
+    });
+  }
+
+  it("pays a priced reward at its own release", () => {
+    // Section 6: an upheld challenge "returns the stake, pays the challenger",
+    // and what it pays is money, released when the last clawed-back share would
+    // have been. A reward the payout step never selected could never be paid.
+    const plan = payoutPlan(SUBMITTER, [reward()], NOW);
+    expect(plan.amount).toBe(PAYOUT_MINIMUM_MICROS);
+    expect(plan.rows).toEqual(["dispute_reward:99"]);
+  });
+
+  it("never counts a reward the ledger step has not priced", () => {
+    // The dispute door writes the row with no unit and no amount, and it reads
+    // back through the columns as zero in standing with no release instant.
+    const unpriced = reward({ id: "unpriced", unit: "standing", amount: 0, available_at: null });
+    // The same row with a release instant on it anyway: `micros` is what says
+    // the step has passed the position and the number is real, so the unit
+    // alone keeps an unpriced row out of the cycle.
+    const stray = reward({ id: "stray", unit: "standing" });
+    const plan = payoutPlan(SUBMITTER, [row({}), unpriced, stray], NOW);
+    expect(plan.rows).toEqual([row({}).id]);
+    expect(plan.amount).toBe(PAYOUT_MINIMUM_MICROS);
+  });
+
+  it("never selects a bare key's reward, which has no operator", () => {
+    // Section 6: the reward accrues to the key and holds, and turning it into
+    // dollars means verifying as an operator. The row carries no operator, so
+    // no operator's cycle can select it and nobody is ever paid it.
+    const bare = reward({ operator: null });
+    expect(payoutPlan(SUBMITTER, [bare], NOW)).toEqual({
+      operator: SUBMITTER,
+      amount: 0,
+      rows: [],
+      carried_forward: 0,
+    });
+  });
+
   it("records the transfer that took the money out", () => {
     const plan = payoutPlan(SUBMITTER, [row({})], NOW);
     const paid = payoutRow(plan, 42, NOW, "mock-verified-sub");
@@ -704,6 +854,67 @@ describe("ledgerBalance", () => {
       held: 0,
       released: 0,
       clawed_back: -share.amount,
+      paid: 0,
+      carried_forward: 0,
+    });
+  });
+
+  it("carries a priced reward at its release, and ignores an unpriced one", () => {
+    // The challenger's side of the same event: the reward is money accrued to
+    // the challenger, held until the last clawed-back share would have left.
+    // The row as the door wrote it — a fact with no number — counts for
+    // nothing, exactly as a bounty accrual does before its pricing.
+    const base = {
+      entry_id: ENTRY,
+      operator: SUBMITTER,
+      role: null,
+      date: null,
+      reads: null,
+      at: AT,
+      ref: {},
+    } as const;
+    const release = "2026-10-08T00:00:00.000Z";
+    const priced: LedgerRow = {
+      ...base,
+      id: "dispute_reward:99",
+      kind: "dispute_reward",
+      unit: "micros",
+      amount: 4_000,
+      available_at: release,
+      seq: 99,
+    };
+    const unpriced: LedgerRow = {
+      ...base,
+      id: "dispute_reward:100",
+      kind: "dispute_reward",
+      unit: "standing",
+      amount: 0,
+      available_at: null,
+      seq: 100,
+    };
+
+    expect(ledgerBalance([priced, unpriced], "2026-09-09T00:00:00.000Z")).toEqual({
+      accrued: 4_000,
+      held: 4_000,
+      released: 0,
+      clawed_back: 0,
+      paid: 0,
+      carried_forward: 0,
+    });
+    expect(ledgerBalance([priced, unpriced], release)).toEqual({
+      accrued: 4_000,
+      held: 0,
+      released: 4_000,
+      clawed_back: 0,
+      paid: 0,
+      carried_forward: 4_000,
+    });
+    // On its own the unpriced row moves nothing at all.
+    expect(ledgerBalance([unpriced], release)).toEqual({
+      accrued: 0,
+      held: 0,
+      released: 0,
+      clawed_back: 0,
       paid: 0,
       carried_forward: 0,
     });

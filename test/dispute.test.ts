@@ -234,8 +234,10 @@ describe("lockedStanding", () => {
       // A bare key's filing fee is money, not standing: two units are never
       // added together.
       stakeRow({ unit: "cents", amount: 500, operator: null }),
-      // A reward carries no amount at all.
+      // A reward is not a stake: unpriced it carries no amount at all, and
+      // priced it is micros — what the overturned entry lost.
       stakeRow({ kind: "dispute_reward", unit: null, amount: null }),
+      stakeRow({ kind: "dispute_reward", unit: "micros", amount: 750_000 }),
     ];
     expect(lockedStanding(rows)).toBe(
       DISPUTE_STAKE_STANDING + REVALIDATION_REQUEST_STAKE_STANDING,

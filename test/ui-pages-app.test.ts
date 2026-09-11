@@ -192,6 +192,20 @@ const ledger: StakeRecord[] = [
     seq: 42,
     at: "2026-09-10T18:00:00.000Z",
   },
+  // A second dispute, whose reward the ledger step has already priced: what
+  // the entry's signers lost, in micro-USD, accruing to the key that won it.
+  {
+    kind: "dispute_reward",
+    entry_id: ENTRY_ID,
+    correction_entry_id: CORRECTION_ID,
+    request_seq: null,
+    agent: "1F916:k4",
+    operator: null,
+    unit: "micros",
+    amount: 1_250,
+    seq: 43,
+    at: "2026-09-10T19:00:00.000Z",
+  },
 ];
 
 /**
@@ -1317,8 +1331,13 @@ describe("the entry page's disputes, reports, revalidations and stakes", () => {
     expect(document).toContain(`<span class="dim">unpriced</span>`);
     expect(document).toContain("<td class=\"dim\">41</td>");
     expect(document).toContain("<td class=\"dim\">42</td>");
-    // The sentence about the placeholders spells no number of its own.
-    expect(document).toContain("No money moves on any of these rows.");
+    // A reward the ledger step has priced shows the price, in its own unit.
+    expect(document).toContain("1250 micros");
+    expect(document).toContain("<td class=\"dim\">43</td>");
+    // The sentence below the table spells no number of its own.
+    expect(document).toContain(
+      "micro-USD and is what the upheld dispute clawed back from the entry",
+    );
   });
 
   it("shows every money row the entry earned, and prices none of them", () => {

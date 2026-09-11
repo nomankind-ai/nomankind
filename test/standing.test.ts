@@ -24,6 +24,7 @@ import {
   STANDING_ATTESTATION_SCORED,
   STANDING_DISPUTE_UPHELD,
   STANDING_OVERTURNED_SIGNER,
+  STANDING_REVALIDATION_CHANGED,
   STANDING_SUBMISSION_VERIFIED,
   STANDING_TRUSTED_ENTRY,
   STANDING_VALIDATION_ASSIGNED,
@@ -694,6 +695,36 @@ describe("revalidation requests", () => {
     }
   });
 
+  it("pays the requester the changed reward, in standing (D-095)", async () => {
+    // Section 6: "If the check finds the fact changed, the requester gets the
+    // stake back plus a challenger-style reward." The stake was standing, so
+    // the reward is standing.
+    const open = await requested();
+    const before = standingOf(open, CHALLENGER, HEAD);
+    const requestSeq = open[open.length - 1]!.seq;
+    const events = await resolve(open, requestSeq, "changed");
+
+    const after = standingOf(events, CHALLENGER, HEAD);
+    expect(after.earned - before.earned).toBe(STANDING_REVALIDATION_CHANGED);
+    expect(after.counts.revalidations_changed).toBe(1);
+    // Smaller than an upheld dispute: a request carries no citation.
+    expect(STANDING_REVALIDATION_CHANGED).toBeLessThan(STANDING_DISPUTE_UPHELD);
+  });
+
+  it("pays the requester nothing when the entry held or the request was upgraded", async () => {
+    // An upgraded request is paid by the dispute it becomes, not twice here.
+    for (const outcome of ["held", "upgraded"] as const) {
+      const open = await requested();
+      const before = standingOf(open, CHALLENGER, HEAD);
+      const requestSeq = open[open.length - 1]!.seq;
+      const events = await resolve(open, requestSeq, outcome);
+
+      const after = standingOf(events, CHALLENGER, HEAD);
+      expect(after.earned).toBe(before.earned);
+      expect(after.counts.revalidations_changed).toBe(0);
+    }
+  });
+
   it("locks nothing for a check nomankind opened at its own expense", async () => {
     let events = await verified();
     events = await seal(events, {
@@ -824,6 +855,7 @@ describe("STANDING_FORMULA", () => {
       "STANDING_ATTESTATION_SCORED",
       "STANDING_SUBMISSION_VERIFIED",
       "STANDING_DISPUTE_UPHELD",
+      "STANDING_REVALIDATION_CHANGED",
       "STANDING_OVERTURNED_SIGNER",
       "STANDING_ASSIGNMENT_MISSED",
       "DISPUTE_STAKE_STANDING",

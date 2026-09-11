@@ -48,13 +48,19 @@ import {
   DISPUTE_STAKE_STANDING,
   LIST_PAGE_LIMIT,
   REVALIDATION_REQUEST_STAKE_STANDING,
+  STANDING_REVALIDATION_CHANGED,
 } from "../src/policy.js";
 import { signRecord } from "../src/records.js";
+import { standingOf, type Standing } from "../src/standing.js";
 import { txtRecordName } from "../src/registry.js";
 import type { StakeRecord } from "../src/stake.js";
 import {
+  entryLedgerRows,
+  eventsAfter,
   eventsForEntry,
   ledgerRowsForEntry,
+  ledgerRowsForOperator,
+  releasedUnpaidRows,
   setOperatorStanding,
 } from "../src/storage/repository.js";
 import type { SubmissionProposal } from "../src/submit.js";
@@ -217,6 +223,17 @@ async function entry(id: string): Promise<Record<string, unknown>> {
   const answer = await read(`/entries/${id}`);
   expect(answer.status).toBe(200);
   return answer.body;
+}
+
+/**
+ * One operator's standing at the head, folded from the sealed log itself rather
+ * than read out of the column the sweep writes: Section 9 says anyone can
+ * recompute it, and this is the test doing exactly that.
+ */
+async function standingNow(operator: string): Promise<Standing> {
+  const events = await eventsAfter(world.store.db, -1, 100_000);
+  const head = events[events.length - 1]?.seq ?? 0;
+  return standingOf(events, operator, head);
 }
 
 /** The stake rows one entry produced, oldest first. */
@@ -607,8 +624,15 @@ describe("a challenge by a bare key", () => {
       }),
     );
     expect(rows[1]!.amount).toBe(DISPUTE_FILING_FEE_CENTS);
-    // Section 9's pricing is M21's, so a reward is a fact with no number yet.
+    // The reward is owed at this position and priced by the sweep's ledger
+    // step, from the clawbacks of this same event: nothing has swept yet, so
+    // the row is the fact without the number.
     expect([rows[2]!.unit, rows[2]!.amount]).toEqual([null, null]);
+    // A bare-key challenger's reward accrues to the key, which the row names.
+    expect([rows[2]!.operator, rows[2]!.agent]).toEqual([
+      null,
+      challenger.agentId,
+    ]);
   }, 120_000);
 
   it("refuses a second challenge while one is open", async () => {
@@ -778,6 +802,7 @@ describe("a staked revalidation request", () => {
 
   it("refunds and rewards a check that found the fact changed", async () => {
     const id = checkedEntry["id"] as string;
+    const before = await standingNow(k4.operator);
 
     // A different operator, so the per-operator cap has room again.
     const opened = await post(
@@ -804,15 +829,25 @@ describe("a staked revalidation request", () => {
     expect(answered.body["status"]).toBe("verified");
 
     const rows = await stakes(id);
+    // The stake back and no money beside it: money moves on a dispute because a
+    // dispute claws money back, and a check that found the fact changed claws
+    // nothing back. The reward it does earn is standing, asserted below.
     expect(rows.map((row) => row.kind)).toEqual([
       "revalidation_stake",
       "revalidation_forfeit",
       "revalidation_stake",
       "revalidation_refund",
-      "revalidation_reward",
     ]);
     expect(rows[3]!.amount).toBe(REVALIDATION_REQUEST_STAKE_STANDING);
-    expect([rows[4]!.unit, rows[4]!.amount]).toEqual([null, null]);
+
+    // The reward is standing, not money (D-095): the stake was standing, so
+    // the "challenger-style reward" Section 6 promises is paid in the same
+    // currency, and the log the requester's standing is folded from says so.
+    const after = await standingNow(k4.operator);
+    expect(after.standing - before.standing).toBe(STANDING_REVALIDATION_CHANGED);
+    expect(after.counts.revalidations_changed).toBe(
+      before.counts.revalidations_changed + 1,
+    );
   }, 240_000);
 
   it("redraws the check when the drawn checker lets the window run out", async () => {
@@ -1090,6 +1125,57 @@ describe("the overturned entry", () => {
     const entryOf = unlearn[0]!["entry"] as Record<string, unknown>;
     expect(entryOf["status"]).toBe("overturned");
     expect(entryOf["overturned_by"]).toBe(upheldCorrectionId);
+  }, 240_000);
+
+  it("prices the challenger's reward at zero, because nothing was held", async () => {
+    // Section 6 pays the challenger what the entry's approvers lost, and this
+    // entry was never read, so it lost nothing. The sweeps above have carried
+    // the ledger step past the outcome, and a row it has passed is priced —
+    // explicitly zero, never a null left to read as an amount still to come.
+    const rows = await stakes(overturnedEntry["id"] as string);
+    const reward = rows.find((row) => row.kind === "dispute_reward")!;
+    expect([reward.unit, reward.amount]).toEqual(["micros", 0]);
+    // Still the key's, and still at the position it became owed.
+    expect([reward.operator, reward.agent]).toEqual([null, challenger.agentId]);
+    expect(
+      (await entryLedgerRows(
+        world.store.db,
+        overturnedEntry["id"] as string,
+        LIST_PAGE_LIMIT,
+      )).filter((row) => row.kind === "clawback"),
+    ).toEqual([]);
+  }, 240_000);
+
+  it("accrues that reward to the key, and pays it to no operator", async () => {
+    // Section 6: a bare-key challenger's reward "accrues to the key and holds",
+    // and turning it into dollars means verifying as an operator. The row
+    // carries no operator, and every read the payout cycle makes selects by
+    // one — so the reward is on the ledger, and no operator can be paid it.
+    const rows = await entryLedgerRows(
+      world.store.db,
+      overturnedEntry["id"] as string,
+      LIST_PAGE_LIMIT,
+    );
+    const reward = rows.find((row) => row.kind === "dispute_reward")!;
+    expect(reward.operator).toBeNull();
+
+    const late = hour(24 * 60).toISOString();
+    for (const party of parties) {
+      expect(
+        (await releasedUnpaidRows(world.store.db, party.operator, late)).map(
+          (row) => row.id,
+        ),
+      ).not.toContain(reward.id);
+      expect(
+        (
+          await ledgerRowsForOperator(
+            world.store.db,
+            party.operator,
+            LIST_PAGE_LIMIT,
+          )
+        ).map((row) => row.id),
+      ).not.toContain(reward.id);
+    }
   }, 240_000);
 
   it("verifies offline from its own export bundle", async () => {
