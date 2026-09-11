@@ -63,6 +63,15 @@ import {
   renderLanding,
 } from "../src/ui/pages/landing.js";
 import { renderPolicy } from "../src/ui/pages/policy.js";
+import { DOC_GROUPS, renderDocs } from "../src/ui/pages/docs.js";
+import {
+  FORK_DOCUMENT,
+  SUMMARY_DOCUMENT,
+  WHITEPAPER_DOCUMENT,
+  WHITEPAPER_VERSION,
+  renderDocument,
+} from "../src/ui/pages/document.js";
+import { headings, sections } from "../src/ui/markdown.js";
 import type {
   DomainsData,
   GenesisData,
@@ -2153,7 +2162,10 @@ describe("renderLanding", () => {
   });
 
   it("links the paper, the code, the mirror and the registry", () => {
-    expect(page).toContain(
+    // D-104: the paper is a page of this site now, so the top bar's Whitepaper
+    // link is relative exactly as Domains is, and the GitHub blob URL is gone.
+    expect(page).toContain(`<a href="/docs/whitepaper">Whitepaper</a>`);
+    expect(page).not.toContain(
       "https://github.com/nomankind-ai/nomankind/blob/main/paper/WHITEPAPER.md",
     );
     expect(page).toContain(`href="https://github.com/nomankind-ai/nomankind"`);
@@ -2184,6 +2196,9 @@ describe("renderLanding", () => {
     expect(nav.indexOf("/how-it-works")).toBeLessThan(nav.indexOf("/domains"));
     expect(nav.indexOf("/domains")).toBeLessThan(nav.indexOf("Whitepaper"));
     expect(nav).not.toMatch(/<a href="\/domains"[^>]*rel=/);
+    // The whitepaper joined them: it is served from this origin too (D-104),
+    // so it is the third same-origin link and carries no rel either.
+    expect(nav).not.toMatch(/<a href="\/docs\/whitepaper"[^>]*rel=/);
     // And it is a link out of the page, not a script or a style that the
     // content-security-policy would drop on the floor.
     expect(page).not.toContain("<script");
@@ -2515,5 +2530,261 @@ describe("the release window, as the pages publish it", () => {
       expect(document).not.toContain("<script");
       expect(document).not.toContain(' style="');
     }
+  });
+});
+
+/**
+ * The documentation hub and the three documents it serves (D-104).
+ *
+ * Before this page the answer to "where is this written down" was a list
+ * somebody had to know, and two of the documents were only on GitHub. The hub
+ * is that list, and the assertions below are the mockup the maintainer
+ * approved: three groups, eleven cards, every card a page this Worker serves.
+ */
+describe("renderDocs", () => {
+  const docsCtx: PageContext = { ...ctx, path: "/docs" };
+  const page = renderDocs(docsCtx);
+  const flat = page.replace(/\s+/g, " ");
+
+  it("heads the page with the versions it is a reading of, from policy", () => {
+    expect(page).toContain("<h1>Docs</h1>");
+    expect(flat).toContain(
+      `whitepaper ${WHITEPAPER_VERSION} with labeled changes · schema ` +
+        `${SCHEMA_VERSION} · ${POLICY.NORM_VERSION}`,
+    );
+    // One constant, named in src/ui/pages/document.ts beside the document it is
+    // the version of: the hub's head line, its whitepaper card, the document
+    // page's note and the how-it-works head line all read it.
+    expect(WHITEPAPER_VERSION).toBe("v1.5");
+    expect(WHITEPAPER_DOCUMENT.note).toContain(WHITEPAPER_VERSION);
+  });
+
+  it("carries the lede the decision wrote", () => {
+    expect(flat).toContain(
+      "Everything written about the record, in one place. The pages under Read " +
+        "the record describe what the log is; Join is how an operator gets in; " +
+        "Take it with you is how anyone leaves with the whole thing. The " +
+        "whitepaper and the summary are served here too, so nothing about the " +
+        "design lives only on GitHub.",
+    );
+  });
+
+  it("groups the eleven cards in three panels, each with its own line", () => {
+    expect(DOC_GROUPS.map((each) => each.title)).toEqual([
+      "Read the record",
+      "Join",
+      "Take it with you",
+    ]);
+    expect(DOC_GROUPS.flatMap((each) => each.cards)).toHaveLength(11);
+    expect(flat).toContain(
+      `<span class="stage-num">01</span>Read the record </h2> ` +
+        `<span class="note">What the log is and how to read it.</span>`,
+    );
+    expect(flat).toContain(
+      `<span class="stage-num">02</span>Join </h2> ` +
+        `<span class="note">How an operator gets in, and how to practise first.</span>`,
+    );
+    expect(flat).toContain(
+      `<span class="stage-num">03</span>Take it with you </h2> ` +
+        `<span class="note">The exit is a copy, not a promise.</span>`,
+    );
+  });
+
+  it("draws every card as a link with its one line", () => {
+    const expected: readonly (readonly [string, string, string])[] = [
+      [
+        "/how-it-works",
+        "How it works",
+        "The pipeline in ten stages, each linked into this environment's own log.",
+      ],
+      [
+        "/domains",
+        "Domains",
+        "The three registered domains: what each records, who reads it, who validates it.",
+      ],
+      [
+        "/policy",
+        "Policy",
+        "Every published number, list, and sentence the rules run on, from the policy module.",
+      ],
+      [
+        "/api",
+        "API",
+        "Every door: reading with receipts, syncing the delta, keys and tiers, the refusals, the release window.",
+      ],
+      [
+        "/genesis",
+        "Genesis",
+        "The three joining steps, the attestation, and the dry-run table read from the log.",
+      ],
+      [
+        "/dry-run",
+        "Dry run",
+        "Practise the joining steps and one validation on demo, command by command.",
+      ],
+      [
+        "/operators",
+        "Operators",
+        "The directory: who is trusted, in which domains, with what standing.",
+      ],
+      [
+        "/docs/fork",
+        "Fork guide",
+        "What to clone, how to verify a mirror, how to keep going without nomankind, and the release window.",
+      ],
+      [
+        "/mirror/latest",
+        "Mirror",
+        "The daily export of the sealed log under CC0, and the pointer to today's.",
+      ],
+      [
+        "/docs/whitepaper",
+        "Whitepaper",
+        `The specification, with every change since ${WHITEPAPER_VERSION} labeled in place.`,
+      ],
+      ["/docs/summary", "Summary", "The whitepaper in one page."],
+    ];
+    expect(DOC_GROUPS.flatMap((each) => each.cards).map((each) => [each.href, each.title, each.line])).toEqual(
+      expected.map((each) => [...each]),
+    );
+    for (const [href, title, line] of expected) {
+      expect(flat).toContain(
+        `<a class="step" href="${href}" ><span class="step-t">${title}</span> ` +
+          `<span class="note">${escapeHtml(line)}</span></a >`,
+      );
+    }
+  });
+
+  it("marks Docs active and carries no script and no inline style", () => {
+    expect(page).toContain(`<a class="nav nav-active" href="/docs">Docs</a>`);
+    expect(page).not.toContain("<script");
+    expect(page).not.toContain(' style="');
+  });
+});
+
+describe("renderDocument", () => {
+  const documents = [
+    { path: "/docs/fork", data: FORK_DOCUMENT },
+    { path: "/docs/whitepaper", data: WHITEPAPER_DOCUMENT },
+    { path: "/docs/summary", data: SUMMARY_DOCUMENT },
+  ];
+
+  it("titles the three documents as the decision names them", () => {
+    expect(documents.map((each) => each.data.title)).toEqual([
+      "Forking nomankind",
+      "Whitepaper",
+      "Summary",
+    ]);
+  });
+
+  for (const document of documents) {
+    const page = renderDocument({ ...ctx, path: document.path }, document.data);
+    const flat = page.replace(/\s+/g, " ");
+
+    it(`crumbs, heads and names the source of ${document.path}`, () => {
+      expect(flat).toContain(
+        `<div class="crumbs mono"> <a href="/docs">Docs</a><span>/</span>` +
+          `<span>${escapeHtml(document.data.title)}</span> </div>`,
+      );
+      expect(page).toContain(`<h1>${escapeHtml(document.data.title)}</h1>`);
+      expect(flat).toContain(
+        `${document.data.note} · <span class="mono">${document.data.sourcePath}</span>`,
+      );
+    });
+
+    it(`strips every top-level section of ${document.path} as an anchor`, () => {
+      const top = sections(document.data.markdown);
+      expect(top.length).toBeGreaterThan(2);
+      // Auto-fit columns, as the Domains strip does: five sections and thirteen
+      // both lay out, which a fixed column count could not do for both.
+      expect(page).toContain(`<div class="counters">`);
+      top.forEach((heading, index) => {
+        const number = String(index + 1).padStart(2, "0");
+        expect(flat).toContain(
+          `<a class="step" href="#${heading.id}" ><span class="step-n">${number}</span ` +
+            `><span class="step-t">${escapeHtml(heading.text)}</span></a >`,
+        );
+        expect(page).toContain(`id="${heading.id}"`);
+      });
+      // And nothing else: the strip is the document's sections, not a second
+      // copy of its table of contents.
+      expect(page.match(/<a class="step"/g)).toHaveLength(top.length);
+    });
+
+    it(`prints one h1 on ${document.path}, and the document's headings under it`, () => {
+      // The page has a title of its own, so the document's opening title is
+      // dropped and everything under it is one level down.
+      expect(page.match(/<h1/g)).toHaveLength(1);
+      expect(page).toContain(`<h1>${escapeHtml(document.data.title)}</h1>`);
+      const first = headings(document.data.markdown)[0];
+      expect(first?.level).toBe(1);
+      expect(page).not.toContain(`<h1 id="${first?.id}"`);
+      // The fork guide's own title is the page's, so it is printed once: the
+      // page's <h1> and nothing under it saying the same thing again.
+      if (first?.text === document.data.title) {
+        expect(page).not.toContain(`id="${first.id}"`);
+        const body = page.slice(page.indexOf(`class="panel-body document"`));
+        expect(body).not.toContain(escapeHtml(first.text));
+      }
+      for (const section of sections(document.data.markdown)) {
+        // One level down from what the source writes: the whitepaper's level-1
+        // sections are h2 here, the fork guide's and the summary's level-2
+        // sections are h3.
+        const tag = section.level === 1 ? "h2" : "h3";
+        expect(page, `${section.id} is not an ${tag}`).toContain(
+          `<${tag} id="${section.id}">`,
+        );
+      }
+    });
+
+    it(`renders ${document.path} inside one panel, under the policy`, () => {
+      expect(flat).toContain(
+        `<section class="panel"> <div class="panel-body document">`,
+      );
+      expect(page).not.toContain("<script");
+      expect(page).not.toContain(' style="');
+      expect(page).toContain(`<a class="nav nav-active" href="/docs">Docs</a>`);
+    });
+  }
+
+  it("strips the whitepaper's own thirteen sections, not its subsections", () => {
+    // The paper writes its sections at level one under a level-one title, so a
+    // strip of its level-2 headings would list fifteen subsections and none of
+    // the sections a reader is looking for.
+    const top = sections(WHITEPAPER_DOCUMENT.markdown);
+    expect(top).toHaveLength(13);
+    expect(top.map((each) => each.text)).toEqual([
+      "Introduction",
+      "Goals and non-goals",
+      "The log",
+      "Evidence",
+      "Identity and operators",
+      "Lifecycle of an entry",
+      "Freshness and decay",
+      "The training path",
+      "Incentives",
+      "Governance and legal posture",
+      "Deployment and status",
+      "Limitations",
+      "Conclusion",
+    ]);
+    const flat = renderDocument(
+      { ...ctx, path: "/docs/whitepaper" },
+      WHITEPAPER_DOCUMENT,
+    ).replace(/\s+/g, " ");
+    expect(flat).toContain(
+      `<span class="step-n">01</span ><span class="step-t">Introduction</span>`,
+    );
+    expect(flat).toContain(
+      `<span class="step-n">13</span ><span class="step-t">Conclusion</span>`,
+    );
+  });
+
+  it("strips the fork guide's level-2 sections, its title being its only level-1", () => {
+    const top = sections(FORK_DOCUMENT.markdown);
+    expect(top.every((each) => each.level === 2)).toBe(true);
+    expect(top).toEqual(
+      headings(FORK_DOCUMENT.markdown).filter((each) => each.level === 2),
+    );
   });
 });

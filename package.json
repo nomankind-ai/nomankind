@@ -13,6 +13,7 @@
     "dev": "wrangler dev",
     "dispute": "npm run build --silent && node dist/cli/dispute.js",
     "export": "npm run build --silent && node dist/cli/export.js",
+    "gen:docs": "npm run build --silent && node dist/cli/gen-docs.js",
     "gen:validator": "npm run build --silent && node dist/cli/gen-validator.js",
     "import-mirror": "npm run build --silent && node dist/cli/import-mirror.js",
     "keygen": "npm run build --silent && node dist/cli/keygen.js",

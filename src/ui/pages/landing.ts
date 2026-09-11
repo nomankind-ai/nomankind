@@ -36,9 +36,13 @@ import {
 } from "../html.js";
 import type { LandingData, PageContext } from "../types.js";
 
-/** Where the top bar points. External every one of them: the record lives in git. */
-const PAPER_URL =
-  "https://github.com/nomankind-ai/nomankind/blob/main/paper/WHITEPAPER.md";
+/**
+ * Where the top bar points. The first three are this site's own pages — the
+ * whitepaper is served from the repository's bytes at /docs/whitepaper now
+ * (D-104), so it is a relative path exactly as Domains is — and the rest are
+ * external, because the code and the log live in git.
+ */
+const PAPER_PATH = "/docs/whitepaper";
 const CODE_URL = "https://github.com/nomankind-ai/nomankind";
 const LOG_URL = "https://github.com/nomankind-ai/log";
 const REGISTRY_URL = "https://1f916.org";
@@ -259,7 +263,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
         <nav class="topnav">
           <a href="/how-it-works">How it works</a>
           <a href="/domains">Domains</a>
-          <a href="${PAPER_URL}" rel="noopener">Whitepaper</a>
+          <a href="${PAPER_PATH}">Whitepaper</a>
           <a href="${CODE_URL}" rel="noopener">Code</a>
           <a href="${LOG_URL}" rel="noopener">Log mirror</a>
           <a href="${REGISTRY_URL}" rel="noopener">Built on 1F916</a>

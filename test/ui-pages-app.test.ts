@@ -2426,3 +2426,95 @@ describe("an entry whose content has not been released", () => {
     expect(listing).toContain("unsealed");
   });
 });
+
+/**
+ * The docs hub and the three documents it serves, as routes (D-104).
+ *
+ * Documentation pages like /api and /dry-run: HTML to any GET, because there is
+ * no JSON twin of a whitepaper for a request to have meant instead, and a HEAD
+ * that answers the GET's own headers with no body. Nothing here touches the
+ * database — the documents are constants compiled into the Worker — so a store
+ * that refused every query would not change one of these answers.
+ */
+describe("the Docs routes", () => {
+  /** A database nothing on these routes reads, and that would fail if they did. */
+  function refusingDatabase(): D1Like {
+    const statement = {
+      bind: () => statement,
+      first: () => Promise.reject(new Error("no page under /docs reads storage")),
+      all: () => Promise.reject(new Error("no page under /docs reads storage")),
+      run: () => Promise.reject(new Error("no page under /docs reads storage")),
+    } as unknown as D1LikeStatement;
+    return {
+      prepare: () => statement,
+      batch: () => Promise.resolve([]),
+      exec: () => Promise.resolve({ count: 0, duration: 0 }),
+    };
+  }
+
+  function docsEnv(): Env {
+    return {
+      DB: refusingDatabase(),
+      CAPTURES: {},
+      ENVIRONMENT: "local",
+      MAINTAINER_AGENT_ID: "",
+    } as unknown as Env;
+  }
+
+  const NOW = new Date("2026-09-11T00:00:00.000Z");
+
+  function fetchPage(path: string, method = "GET"): Promise<Response | null> {
+    return handlePages(
+      new Request(`https://app.nomankind.ai${path}`, {
+        method,
+        headers: { accept: "text/html" },
+      }),
+      docsEnv(),
+      { now: NOW },
+    ) as Promise<Response | null>;
+  }
+
+  const routes: readonly (readonly [string, string])[] = [
+    ["/docs", "<h1>Docs</h1>"],
+    ["/docs/fork", "<h1>Forking nomankind</h1>"],
+    ["/docs/whitepaper", "<h1>Whitepaper</h1>"],
+    ["/docs/summary", "<h1>Summary</h1>"],
+  ];
+
+  for (const [path, heading] of routes) {
+    it(`answers GET ${path} with the page`, async () => {
+      const response = await fetchPage(path);
+      expect(response).not.toBeNull();
+      expect(response!.status).toBe(200);
+      expect(response!.headers.get("content-type")).toBe(
+        "text/html; charset=utf-8",
+      );
+      const page = await response!.text();
+      expect(page).toContain(heading);
+      expect(page).toContain(`<a class="nav nav-active" href="/docs">Docs</a>`);
+      expect(page).not.toContain("<script");
+      expect(page).not.toContain(' style="');
+    });
+
+    it(`answers a HEAD on ${path} like the GET, without the body`, async () => {
+      const response = await fetchPage(path, "HEAD");
+      expect(response!.status).toBe(200);
+      expect(response!.headers.get("content-type")).toBe(
+        "text/html; charset=utf-8",
+      );
+      expect(response!.body).toBeNull();
+    });
+  }
+
+  it("serves the document a reader asked for, from the repository's own bytes", async () => {
+    const page = await (await fetchPage("/docs/summary"))!.text();
+    expect(page).toContain("paper/SUMMARY.md");
+    expect(page).toContain("nomankind in one page");
+    // And the cross-reference in it stays on this site.
+    expect(page).toContain(`<a href="/docs/whitepaper">WHITEPAPER.md</a>`);
+  });
+
+  it("does not answer a path under /docs that is not one of the three", async () => {
+    expect(await fetchPage("/docs/nothing")).toBeNull();
+  });
+});

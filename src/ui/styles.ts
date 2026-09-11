@@ -493,6 +493,37 @@ p.prose,
 }
 p.prose a { color: var(--text); border-bottom: 1px solid var(--accent-edge); }
 
+/* --- a rendered document ----------------------------------------------- */
+/* The markdown renderer emits a document's lists, quotes, rules and deepest
+   headings as the plain elements they are, and a plain element takes the
+   browser's defaults: 14px near-white text, a 40px indent, 1em margins and no
+   width cap — brighter and wider than the p.prose it sits between, which made a
+   paragraph and the list under it read as two different documents. Scoped to
+   .document, the class the document page puts on the panel body, so nothing
+   else in this UI is touched. */
+.document ul,
+.document ol {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 820px;
+  margin: 0;
+  padding-left: 20px;
+}
+.document li + li { margin-top: 6px; }
+.document blockquote {
+  border-left: 1px solid var(--border);
+  margin: 0;
+  padding-left: 16px;
+}
+.document blockquote p { font-size: 13px; color: var(--muted); }
+.document hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 0;
+}
+.document h4 { font-size: 13px; font-weight: 500; }
+
 /* --- the degraded band ------------------------------------------------- */
 /* Drawn only when a stage is failing or needs attention, above the counters:
    the one place in this UI that says something is wrong, so it is bordered in

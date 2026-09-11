@@ -58,17 +58,7 @@ import {
   type Safe,
 } from "../html.js";
 import type { HowItWorksData, PageContext } from "../types.js";
-
-/**
- * The version of the paper this page describes.
- *
- * Not a policy number and not in POLICY: policy is what the record runs on, and
- * this is the version of the document the ten panels are a reading of. It
- * lives beside the two links to that document (src/ui/html.ts) in spirit, and it
- * is named once here rather than written into the head line, so the page and the
- * paper move together.
- */
-const WHITEPAPER_VERSION = "v1.5";
+import { WHITEPAPER_VERSION } from "./document.js";
 
 /**
  * The fork documentation, in the code repository beside the code it describes.
