@@ -29,12 +29,15 @@ import {
   STATUS_FAILING_AFTER_MINUTES,
   SWEEP_INTERVAL_MINUTES,
 } from "../src/policy.js";
+import { buildAnchor, type Anchor } from "../src/anchor.js";
 import { txtRecordName } from "../src/registry.js";
 import type { Stage } from "../src/status.js";
 import type { D1Like, D1LikeStatement } from "../src/storage/d1.js";
 import {
   countOperators,
   countTrustedOperators,
+  putAnchor,
+  setAnchorExternal,
   sweepSteps,
 } from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
@@ -360,6 +363,55 @@ describe("a healthy world", () => {
     )!;
     expect(registration.last).toContain("third.example");
   }, 60_000);
+});
+
+/**
+ * The anchoring row, once something outside has finished timestamping a day.
+ *
+ * Every seal in this world was made today, so the anchoring stage is idle —
+ * which is exactly the state that used to say nothing at all about the chain
+ * the anchors go to. A calendar folds a commitment into a block on its own
+ * schedule, so the newest finished proof is almost never yesterday's, and a
+ * board that only ever spoke about yesterday could not tell a chain that has
+ * never completed a timestamp from one that completed on Monday.
+ */
+describe("a proof that reached a block", () => {
+  const DAY = "2026-09-08";
+  const BLOCK = 966_287;
+
+  it("names the day and the block on the anchoring row, through the endpoint", async () => {
+    const built = await buildAnchor(
+      [{ seq: 1, root: `sha256:${DAY}`, sealed_at: `${DAY}T12:00:00.000Z` }],
+      DAY,
+    );
+    expect(built.ok).toBe(true);
+    await putAnchor(store.db, (built as { ok: true; anchor: Anchor }).anchor);
+    await setAnchorExternal(store.db, DAY, {
+      kind: "opentimestamps",
+      calendar: "https://alice.btc.calendar.opentimestamps.org",
+      submitted_at: `${DAY}T00:10:00.000Z`,
+      proof: "AE9wZW5UaW1lc3RhbXBz",
+      upgraded: {
+        proof: "AE9wZW5UaW1lc3RhbXBzAAEC",
+        block_height: BLOCK,
+        upgraded_at: `${DAY}T09:00:00.000Z`,
+      },
+    });
+
+    const body = await status(settled);
+    const anchoring = (body["stages"] as Stage[]).find(
+      (one) => one.stage === "anchoring",
+    )!;
+    // A pending proof is not a fault and a finished one is not a repair: the
+    // line grows, the light does not move.
+    expect(anchoring.state).toBe("idle");
+    const yesterday = new Date(settled.getTime() - 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    expect(anchoring.last).toBe(
+      `${yesterday} · no seal that day · newest upgrade ${DAY} · block ${BLOCK}`,
+    );
+  }, 240_000);
 });
 
 describe("a clock that moved on without the sweep", () => {

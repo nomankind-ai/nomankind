@@ -100,6 +100,18 @@ export interface AnchorFact {
   readonly upgraded?: boolean;
 }
 
+/**
+ * The newest anchor whose OpenTimestamps proof has been upgraded: the day it
+ * covers, the Bitcoin block the commitment reached, and when the sweep recorded
+ * it. Structural, like every other fact here, so nothing is imported from the
+ * store.
+ */
+export interface UpgradedAnchorFact {
+  readonly date: string;
+  readonly block_height: number;
+  readonly upgraded_at: string;
+}
+
 /** The newest daily reconciliation the ledger wrote. */
 export interface ReconciliationFact {
   readonly date: string;
@@ -167,6 +179,18 @@ export interface StatusInput {
     readonly earliest_receipt_day: string | null;
   };
   readonly anchor: AnchorFact | null;
+  /**
+   * The newest anchor whose external proof has reached a Bitcoin block, newest
+   * by day, or null when none has.
+   *
+   * Beside `anchor` rather than inside it because it answers a different
+   * question. `anchor` is yesterday's, and yesterday's proof is pending on most
+   * days — a calendar folds commitments into a block on its own schedule. A
+   * reader who saw only yesterday could not tell a chain that has never
+   * completed a timestamp from one that completed the day before, so the page
+   * names the newest finished proof and the block that holds it.
+   */
+  readonly upgraded_anchor: UpgradedAnchorFact | null;
   /** How many seals were sealed yesterday: whether an anchor was owed at all. */
   readonly seals_yesterday: number;
   readonly reconciliation: ReconciliationFact | null;
@@ -698,9 +722,27 @@ function witnessing(input: StatusInput, now: string): Stage {
 
 const PRODUCTION_ENVIRONMENT = "production";
 
+/**
+ * The newest finished proof, as one segment of the anchoring line, or "" when
+ * nothing has been upgraded yet.
+ *
+ * Every state of the stage carries it, idle included: a day with no seal to
+ * anchor says nothing about whether the chain the anchors go to is working, and
+ * the block height is the one number in this stage a reader can check against
+ * something that is not ours. It changes no state — a pending proof is still
+ * not a fault — so it is a reading appended to whatever the state's own line
+ * already said.
+ */
+function upgradeNote(input: StatusInput): string {
+  const upgrade = input.upgraded_anchor;
+  if (upgrade === null) return "";
+  return `newest upgrade ${upgrade.date} · block ${upgrade.block_height}`;
+}
+
 function anchoring(input: StatusInput, now: string): Stage {
   const rule = "yesterday's anchor exists; posted to OpenTimestamps on production";
   const yesterday = yesterdayOf(now);
+  const upgrade = upgradeNote(input);
   const evidence = [
     { label: `/anchors/${yesterday}`, href: `/anchors/${yesterday}` },
   ];
@@ -708,7 +750,7 @@ function anchoring(input: StatusInput, now: string): Stage {
     return {
       stage: "anchoring",
       state: "idle",
-      last: line(yesterday, "no seal that day"),
+      last: line(yesterday, "no seal that day", upgrade),
       rule,
       evidence,
     };
@@ -723,7 +765,7 @@ function anchoring(input: StatusInput, now: string): Stage {
     return {
       stage: "anchoring",
       state: ranToday ? "attention" : "ok",
-      last: line(yesterday, "not anchored"),
+      last: line(yesterday, "not anchored", upgrade),
       rule,
       evidence,
     };
@@ -745,6 +787,10 @@ function anchoring(input: StatusInput, now: string): Stage {
       // and a board that showed both as "opentimestamps" would hide it. Not a
       // state change — a pending proof is not a fault, only unfinished.
       anchor.external !== null && anchor.upgraded === true ? "upgraded" : "",
+      // Even when the upgraded one is yesterday's own: "upgraded" says which
+      // anchor finished and the segment says which block it reached, and a
+      // reader who saw only the word would have nothing to check.
+      upgrade,
     ),
     rule,
     evidence,

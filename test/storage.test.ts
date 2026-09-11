@@ -143,6 +143,7 @@ import {
   putReadReceipt,
   putSyncReceipt,
   putSeal,
+  newestUpgradedAnchor,
   nextReadCounter,
   readCandidates,
   readCountsOn,
@@ -734,6 +735,113 @@ describe("anchors", () => {
     expect(await getAnchor(test.db, day)).toEqual(anchor);
     expect(await latestAnchor(test.db)).toEqual(anchor);
     expect(await getAnchor(test.db, "2020-01-01")).toBeNull();
+  });
+});
+
+/**
+ * The newest finished timestamp, in its own database.
+ *
+ * The status page names the newest anchor whose proof reached a block, and the
+ * whole point of asking the store for it is that the answer is one row: a log
+ * with years of days behind it must not be read through to find the last one
+ * that upgraded. So the questions here are the three the page can meet — no
+ * anchors at all, anchors whose receipts are still pending, and more than one
+ * finished proof, where only the newest day is the answer.
+ */
+describe("the newest upgraded anchor", () => {
+  let anchors: TestDatabase;
+
+  /** A day's anchor over one made-up seal, so no world is needed to have one. */
+  async function anchorOn(date: string): Promise<Anchor> {
+    const built = await buildAnchor(
+      [{ seq: 1, root: `sha256:${date}`, sealed_at: `${date}T12:00:00.000Z` }],
+      date,
+    );
+    expect(built.ok).toBe(true);
+    return (built as { ok: true; anchor: Anchor }).anchor;
+  }
+
+  /** The receipt a calendar hands back, pending or folded into a block. */
+  function receipt(
+    submitted: string,
+    upgraded: { block_height: number; upgraded_at: string } | null,
+  ): NonNullable<Anchor["external"]> {
+    return {
+      kind: "opentimestamps",
+      calendar: "https://alice.btc.calendar.opentimestamps.org",
+      submitted_at: submitted,
+      proof: "AE9wZW5UaW1lc3RhbXBz",
+      upgraded:
+        upgraded === null
+          ? null
+          : { proof: "AE9wZW5UaW1lc3RhbXBzAAEC", ...upgraded },
+    };
+  }
+
+  beforeAll(async () => {
+    anchors = await openTestDatabase();
+  });
+
+  afterAll(async () => {
+    await anchors?.dispose();
+  });
+
+  it("answers null with no anchor at all", async () => {
+    expect(await newestUpgradedAnchor(anchors.db)).toBeNull();
+  });
+
+  it("answers null while every receipt is still pending", async () => {
+    // One day never posted anywhere and one posted and waiting: neither is a
+    // proof that stands on its own, so neither is an answer.
+    await putAnchor(anchors.db, await anchorOn("2026-09-05"));
+    const waiting = await anchorOn("2026-09-06");
+    await putAnchor(anchors.db, waiting);
+    await setAnchorExternal(
+      anchors.db,
+      waiting.date,
+      receipt("2026-09-07T00:10:00.000Z", null),
+    );
+
+    expect(await newestUpgradedAnchor(anchors.db)).toBeNull();
+  });
+
+  it("answers the newest of two finished proofs, and only what the page says", async () => {
+    for (const [date, block] of [
+      ["2026-09-07", 966_101],
+      ["2026-09-08", 966_287],
+    ] as const) {
+      const anchor = await anchorOn(date);
+      await putAnchor(anchors.db, anchor);
+      await setAnchorExternal(
+        anchors.db,
+        date,
+        receipt(`${date}T00:10:00.000Z`, {
+          block_height: block,
+          upgraded_at: `${date}T09:00:00.000Z`,
+        }),
+      );
+    }
+
+    // The later day wins, and the roots and the .ots proof stay in the column:
+    // the page says a day, a height and an instant, so that is all that is read.
+    expect(await newestUpgradedAnchor(anchors.db)).toEqual({
+      date: "2026-09-08",
+      block_height: 966_287,
+      upgraded_at: "2026-09-08T09:00:00.000Z",
+    });
+    // And a still newer day whose receipt is pending does not take the answer
+    // off it: the newest anchor and the newest finished proof are two different
+    // rows, which is the whole reason the page names the second one.
+    const pending = await anchorOn("2026-09-09");
+    await putAnchor(anchors.db, pending);
+    await setAnchorExternal(
+      anchors.db,
+      pending.date,
+      receipt("2026-09-10T00:10:00.000Z", null),
+    );
+
+    expect((await latestAnchor(anchors.db))!.date).toBe("2026-09-09");
+    expect((await newestUpgradedAnchor(anchors.db))!.date).toBe("2026-09-08");
   });
 });
 

@@ -504,6 +504,9 @@ function anchoringRow(anchor: AnchorFact): Stage {
     entries: 0,
     read_counts: { newest: null, earliest_receipt_day: null },
     anchor,
+    // The newest finished proof is a different question from yesterday's, and
+    // this fixture asks only about yesterday's wording.
+    upgraded_anchor: null,
     seals_yesterday: 1,
     reconciliation: null,
     standing_position: null,
