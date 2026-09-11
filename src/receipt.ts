@@ -54,14 +54,81 @@ export interface ReadReceipt {
   counter: number;
   /** The signing agent's 1F916 id (D-014: an agent id is its public key). */
   issuer: string;
+  /**
+   * The key this read was served to, or null on the free tier (M24).
+   *
+   * The key's id and never its secret: a receipt is a thing its holder shows to
+   * somebody else, and a receipt that carried the credential would be a
+   * credential handed to whoever was shown the receipt.
+   *
+   * Optional at the type level, and only at the type level: every receipt the
+   * doors issue from now on carries it, and the field is absent exactly on the
+   * receipts issued before M24. A receipt without the property signs and
+   * verifies as it always did, so every stored receipt still checks out.
+   */
+  key?: string | null;
+  /**
+   * The key's own running counter, or null on the free tier.
+   *
+   * Beside the log-wide `counter` rather than instead of it, because they
+   * answer different questions: the log-wide one places the read in everything
+   * nomankind served, and this one places it in what this key was served, which
+   * is the number a holder checks their own bill against.
+   */
+  key_counter?: number | null;
   /** Unpadded base64url, the encoding every other kernel signature uses. */
   signature: string;
 }
 
-/** A receipt before it is signed: the five fields the signature covers. */
+/** A receipt before it is signed: the fields the signature covers. */
 export type ReadReceiptFields = Omit<ReadReceipt, "signature">;
 
 const encoder = new TextEncoder();
+
+/**
+ * The two paid-access fields, when the receipt has them, and nothing when it
+ * does not.
+ *
+ * The `key` property is the switch and not its value: a receipt issued before
+ * M24 has no property at all, and its signing bytes must stay exactly what they
+ * were or every receipt anybody kept would stop verifying. A free read issued
+ * after M24 does carry the property, with null in it, which is a different
+ * statement — "this was served on the free tier" — and is signed as one.
+ */
+function paidFields(
+  fields: ReadReceiptFields | SyncReceiptFields,
+): Record<string, unknown> {
+  if (!("key" in fields)) return {};
+  return {
+    key: fields.key ?? null,
+    key_counter: fields.key_counter ?? null,
+  };
+}
+
+/**
+ * Whether the two paid-access fields on a receipt are readable as themselves.
+ *
+ * A receipt that carries the property has to carry both halves in the shapes
+ * the doors write: a key is its id or null, and a counter is a safe integer or
+ * null. Anything else is a receipt whose signing bytes cannot be rebuilt, and a
+ * verdict of false is the honest answer.
+ */
+function paidFieldsHold(receipt: Record<string, unknown>): boolean {
+  if (!("key" in receipt)) return true;
+  const key = receipt["key"];
+  if (key !== null && typeof key !== "string") return false;
+  const counter = receipt["key_counter"];
+  return counter === null || Number.isSafeInteger(counter);
+}
+
+/** The two fields as a verifier passes them back into the signing bytes. */
+function paidOf(receipt: Record<string, unknown>): Record<string, unknown> {
+  if (!("key" in receipt)) return {};
+  return {
+    key: receipt["key"] as string | null,
+    key_counter: receipt["key_counter"] as number | null,
+  };
+}
 
 /**
  * The exact bytes an issuer signs: the tag, a newline, and the canonical JSON
@@ -76,6 +143,7 @@ export function readReceiptSigningBytes(fields: ReadReceiptFields): Uint8Array {
     read_at: fields.read_at,
     counter: fields.counter,
     issuer: fields.issuer,
+    ...paidFields(fields),
   });
   return encoder.encode(`${HASH_TAG_READ_RECEIPT}\n${canonical}`);
 }
@@ -120,6 +188,7 @@ export async function verifyReadReceipt(receipt: unknown): Promise<boolean> {
       return false;
     }
     if (!Number.isSafeInteger(counter)) return false;
+    if (!paidFieldsHold(receipt)) return false;
     return await verifyBytes(
       publicKeyFromAgentId(issuer),
       readReceiptSigningBytes({
@@ -128,6 +197,7 @@ export async function verifyReadReceipt(receipt: unknown): Promise<boolean> {
         read_at,
         counter: counter as number,
         issuer,
+        ...paidOf(receipt),
       }),
       base64urlDecode(signature),
     );
@@ -181,11 +251,15 @@ export interface SyncReceipt {
   counter: number;
   /** The signing agent's 1F916 id (D-014: an agent id is its public key). */
   issuer: string;
+  /** The key this page was served to, or null on the free tier (M24). */
+  key?: string | null;
+  /** The key's own running counter, or null on the free tier. */
+  key_counter?: number | null;
   /** Unpadded base64url, the encoding every other kernel signature uses. */
   signature: string;
 }
 
-/** A receipt before it is signed: the seven fields the signature covers. */
+/** A receipt before it is signed: the fields the signature covers. */
 export type SyncReceiptFields = Omit<SyncReceipt, "signature">;
 
 /**
@@ -210,6 +284,7 @@ export function syncReceiptSigningBytes(fields: SyncReceiptFields): Uint8Array {
     issued_at: fields.issued_at,
     counter: fields.counter,
     issuer: fields.issuer,
+    ...paidFields(fields),
   });
   return encoder.encode(`${HASH_TAG_SYNC_RECEIPT}\n${canonical}`);
 }
@@ -271,6 +346,7 @@ export async function verifySyncReceipt(receipt: unknown): Promise<boolean> {
     if (!Array.isArray(entries) || !entries.every(isSyncReceiptEntry)) {
       return false;
     }
+    if (!paidFieldsHold(receipt)) return false;
     return await verifyBytes(
       publicKeyFromAgentId(issuer),
       syncReceiptSigningBytes({
@@ -281,6 +357,7 @@ export async function verifySyncReceipt(receipt: unknown): Promise<boolean> {
         issued_at,
         counter: counter as number,
         issuer,
+        ...paidOf(receipt),
       }),
       base64urlDecode(signature),
     );
@@ -324,11 +401,68 @@ function isCalendarDate(date: unknown): date is string {
  * true thing to publish, and it is the day with no counters, so both bounds are
  * null.
  */
+export interface PaidReadCounts {
+  /** The keyed reads per entry, under the same rules the day's rows follow. */
+  readonly reads: readonly ReadCountRow[];
+  /** The same reads per key. The two add up to the same total by construction. */
+  readonly keys: Readonly<Record<string, number>>;
+}
+
+/**
+ * The `paid` block of a day's payload, sorted into its canonical order.
+ *
+ * Whitepaper Section 9, Money: "A read is one verified entry returned by the
+ * paid API, or one verified entry delivered in a paid sync." The day's `reads`
+ * count every reader, free and paid alike, because the published count is what
+ * a reader holding a receipt checks their own read against and a free reader
+ * holds a receipt too. This block is the half that was paid for, which is the
+ * half the ledger prices.
+ *
+ * Both halves are sorted here — the rows by entry_id, the keys by id — because
+ * the payload's canonical form is what the event hash is taken over, and a hash
+ * that depended on what order the store returned rows in would not be a hash of
+ * the day at all.
+ */
+function buildPaid(paid: PaidReadCounts): NonNullable<
+  EventPayloads["read_count"]["paid"]
+> {
+  const seen = new Set<string>();
+  let total = 0;
+  for (const row of paid.reads) {
+    if (seen.has(row.entry_id)) {
+      throw new RangeError(
+        `buildReadCountPayload: duplicate_entry_id: ${row.entry_id}`,
+      );
+    }
+    seen.add(row.entry_id);
+    if (!Number.isSafeInteger(row.count) || row.count < 1) {
+      throw new RangeError(
+        `buildReadCountPayload: bad_count: ${row.entry_id} has ${String(row.count)}`,
+      );
+    }
+    total += row.count;
+  }
+
+  const keys: Record<string, number> = {};
+  for (const id of Object.keys(paid.keys).sort()) {
+    keys[id] = paid.keys[id] as number;
+  }
+
+  return {
+    reads: paid.reads
+      .map((row) => ({ entry_id: row.entry_id, count: row.count }))
+      .sort((left, right) => (left.entry_id < right.entry_id ? -1 : 1)),
+    total,
+    keys,
+  };
+}
+
 export function buildReadCountPayload(
   date: string,
   rows: readonly ReadCountRow[],
   counterFirst: number | null,
   counterLast: number | null,
+  paid?: PaidReadCounts,
 ): EventPayloads["read_count"] {
   if (!isCalendarDate(date)) {
     throw new RangeError(
@@ -363,5 +497,6 @@ export function buildReadCountPayload(
     total,
     counter_first: total === 0 ? null : counterFirst,
     counter_last: total === 0 ? null : counterLast,
+    ...(paid === undefined ? {} : { paid: buildPaid(paid) }),
   };
 }

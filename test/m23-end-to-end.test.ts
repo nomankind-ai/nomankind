@@ -578,6 +578,8 @@ describe("the step's place in the run", () => {
       "anchor",
       "mirror",
       "ledger",
+      "metering",
+      "alerts",
       "standing",
       "payout",
       "attestation",

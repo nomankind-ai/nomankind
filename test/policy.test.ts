@@ -20,6 +20,8 @@ import {
   FETCH_TIMEOUT_MS,
   HOLDBACK_DAYS,
   LIST_PAGE_LIMIT,
+  USAGE_DAYS_DEFAULT,
+  USAGE_DAYS_MAX,
   DEFAULT_DOMAIN,
   DOMAINS,
   excludedPartyDomains,
@@ -111,6 +113,14 @@ const EXPECTED_POLICY_KEYS = [
   "STANDING_TRUSTED_STAY",
   "STANDING_DECAY_PAUSED",
   "READ_PRICE_MICROS_PER_READ",
+  "RATE_TIERS",
+  "FREE_TIER",
+  "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
+  "STRIPE",
+  "ALERT_ENDPOINTS_PER_KEY",
+  "ALERT_TIMEOUT_MS",
+  "ALERT_RETRY_MINUTES",
+  "ALERT_KINDS",
   "PAYOUT_MINIMUM_MICROS",
   "PAYOUT_CYCLE",
   "MIRROR",
@@ -126,6 +136,8 @@ const EXPECTED_POLICY_KEYS = [
   "ATTESTATION_SCORERS",
   "ATTESTATION_WINDOW_HOURS",
   "LIST_PAGE_LIMIT",
+  "USAGE_DAYS_DEFAULT",
+  "USAGE_DAYS_MAX",
   "HOME_LATEST_ENTRIES",
   "LANDING_BAND_SEALS",
   "BEACON",
@@ -262,10 +274,20 @@ describe("policy numbers", () => {
     }
   });
 
-  it("holds the one page-size number", () => {
+  it("holds the page-size numbers", () => {
     expect(LIST_PAGE_LIMIT).toBe(100);
     expect(Number.isInteger(LIST_PAGE_LIMIT)).toBe(true);
     expect(LIST_PAGE_LIMIT).toBeGreaterThan(0);
+
+    // The usage window: a default a caller may raise, and a ceiling they may
+    // not. A default above the maximum would be a door refusing its own answer.
+    expect(USAGE_DAYS_DEFAULT).toBe(30);
+    expect(USAGE_DAYS_MAX).toBe(90);
+    for (const days of [USAGE_DAYS_DEFAULT, USAGE_DAYS_MAX]) {
+      expect(Number.isInteger(days)).toBe(true);
+      expect(days).toBeGreaterThan(0);
+    }
+    expect(USAGE_DAYS_DEFAULT).toBeLessThanOrEqual(USAGE_DAYS_MAX);
   });
 
   it("pins the drand chain the draw reads", () => {
@@ -444,13 +466,16 @@ describe("policy numbers", () => {
     }
   });
 
-  it("exports only numbers, three names, one flag, and frozen objects", () => {
+  it("exports only numbers, four names, one flag, and frozen objects", () => {
     for (const [key, value] of Object.entries(POLICY)) {
       expect(value).not.toBeNull();
       if (
         key === "NORM_VERSION" ||
         key === "PAYOUT_CYCLE" ||
-        key === "SCHEMA_VERSION"
+        key === "SCHEMA_VERSION" ||
+        // M24: the slug of the tier served without a key. A name, like the
+        // three above, and the fourth and last one.
+        key === "FREE_TIER"
       ) {
         expect(typeof value).toBe("string");
         continue;
@@ -489,6 +514,8 @@ describe("policy numbers", () => {
     expect(POLICY.REQUEST_CLOCK_SKEW_SECONDS).toBe(REQUEST_CLOCK_SKEW_SECONDS);
     expect(POLICY.NONCE_RETENTION_SECONDS).toBe(NONCE_RETENTION_SECONDS);
     expect(POLICY.LIST_PAGE_LIMIT).toBe(LIST_PAGE_LIMIT);
+    expect(POLICY.USAGE_DAYS_DEFAULT).toBe(USAGE_DAYS_DEFAULT);
+    expect(POLICY.USAGE_DAYS_MAX).toBe(USAGE_DAYS_MAX);
     expect(POLICY.BEACON).toBe(BEACON);
     expect(POLICY.WITNESSES_REQUIRED).toBe(WITNESSES_REQUIRED);
     expect(POLICY.SEAL_MAX_EVENTS).toBe(SEAL_MAX_EVENTS);

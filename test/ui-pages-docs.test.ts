@@ -16,6 +16,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { HASH_TAG_ALERT } from "../src/alerts.js";
 import { ANSWER_REFUSALS, SCORE_REFUSALS } from "../src/attest.js";
 import { CORE_KEYS } from "../src/core.js";
 import {
@@ -219,11 +220,61 @@ describe("renderPolicy", () => {
     expect(page).toContain("D-052");
   });
 
-  it("marks the numbers the paper names and nothing publishes yet", () => {
+  it("groups paid access, and reads every one of its numbers from POLICY", () => {
+    // Section 9, Money. The tiers, the contributor floor beside the share, the
+    // alert numbers and the payment provider's fixed strings, each read off the
+    // frozen object: a page that held any of them itself would be a second
+    // place a published amount lives.
+    expect(page).toContain(">Paid access</h2>");
+
+    for (const [slug, tier] of Object.entries(POLICY.RATE_TIERS)) {
+      expect(page, `RATE_TIERS.${slug} has no row`).toContain(
+        `<td class="mono">RATE_TIERS.${slug}</td>`,
+      );
+      expect(page).toContain(
+        `${tier.name} · ${tier.reads_per_day} reads per day · ${
+          tier.key ? "key" : "no key"
+        }`,
+      );
+    }
+
+    for (const [name, value] of [
+      ["FREE_TIER", POLICY.FREE_TIER],
+      [
+        "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
+        `${POLICY.CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent`,
+      ],
+      ["CONTRIBUTOR_SHARE_PERCENT", `${POLICY.CONTRIBUTOR_SHARE_PERCENT} percent`],
+      ["ALERT_ENDPOINTS_PER_KEY", String(POLICY.ALERT_ENDPOINTS_PER_KEY)],
+      ["ALERT_TIMEOUT_MS", `${POLICY.ALERT_TIMEOUT_MS} ms`],
+      ["ALERT_RETRY_MINUTES", POLICY.ALERT_RETRY_MINUTES.join(", ")],
+      ["ALERT_KINDS", POLICY.ALERT_KINDS.join(", ")],
+      ["STRIPE.api", POLICY.STRIPE.api],
+      ["STRIPE.meter_event_name", POLICY.STRIPE.meter_event_name],
+      ["STRIPE.price_lookup_prefix", POLICY.STRIPE.price_lookup_prefix],
+      ["STRIPE.currency", POLICY.STRIPE.currency],
+      [
+        "STRIPE.webhook_tolerance_seconds",
+        `${POLICY.STRIPE.webhook_tolerance_seconds} seconds`,
+      ],
+      ["STRIPE.webhook_path", POLICY.STRIPE.webhook_path],
+    ] as const) {
+      expect(page, `${name} has no row`).toContain(
+        `<td class="mono">${name}</td>`,
+      );
+      expect(page, `${name} does not show its value`).toContain(
+        `<td class="mono">${value}</td>`,
+      );
+    }
+  });
+
+  it("has no placeholder left: every number the paper names is published", () => {
     // M21 published the standing formula, the price, the payout minimum and the
-    // cycle, so the only placeholders left are M24's paid tiers.
-    expect(page).not.toContain("not yet published (M21)");
-    expect(page).toContain("not yet published (M24)");
+    // cycle; M24 published the tiers, the rate limits and the alert numbers, so
+    // the last placeholder row is gone. A row saying a number is unpublished
+    // while the code holds one would be the page disagreeing with the module it
+    // is read from, which is the one thing it exists to prevent.
+    expect(page).not.toContain("not yet published");
   });
 
   it("publishes the standing formula, every term of it, read from POLICY", () => {
@@ -463,6 +514,136 @@ describe("renderApi", () => {
     expect(page).toContain(`npm run standing -- ${ctx.origin} &lt;operator&gt;`);
   });
 
+  it("documents paid access: the tiers table, the header, and every key door", () => {
+    expect(page).toContain(">Paid access: tiers and keys</h2>");
+
+    // Every registered tier, by its slug, with the cap and whether it takes a
+    // key: a table that showed two of three would be documenting a ladder
+    // nobody could see the top of.
+    for (const [slug, tier] of Object.entries(POLICY.RATE_TIERS)) {
+      expect(page, `${slug} is not in the tiers table`).toContain(
+        `<td class="mono">${slug}</td>`,
+      );
+      expect(page).toContain(`<td class="mono">${tier.reads_per_day}</td>`);
+    }
+    expect(page).toContain(String(POLICY.READ_PRICE_MICROS_PER_READ));
+
+    expect(page).toContain("Authorization: Bearer nmk_");
+    for (const header of [
+      "x-nomankind-tier",
+      "x-nomankind-limit",
+      "x-nomankind-remaining",
+    ]) {
+      expect(page, `${header} is not documented`).toContain(header);
+    }
+
+    for (const door of [
+      "/keys/tiers",
+      "/keys/checkout",
+      "/keys/claim",
+      "/keys/me",
+      "/keys/me/usage",
+      "/keys/me/receipts",
+      "/keys/me/portal",
+    ]) {
+      expect(page, `${door} is not documented`).toContain(door);
+    }
+
+    // Every word the gate and the doors refuse in.
+    for (const refusal of [
+      "missing_key",
+      "bad_key",
+      "unknown_key",
+      "key_canceled",
+      "key_past_due",
+      "rate_limited",
+      "unknown_tier",
+      "free_tier_needs_no_key",
+      "missing_session",
+      "unknown_session",
+      "not_paid",
+      "already_claimed",
+      "payments_unavailable",
+      "provider_error",
+      "bad_response",
+    ]) {
+      expect(page, `${refusal} is not named`).toContain(refusal);
+    }
+
+    // The 429 body, whole, because a caller that cannot see resets_at has to
+    // guess when to come back. The cap in it is the standard tier's own number
+    // read from policy, so a decision that moves the cap moves the example with
+    // it and the docs cannot drift into documenting a cap nobody is held to.
+    const cap = POLICY.RATE_TIERS["standard"]!.reads_per_day;
+    expect(page).toContain(
+      `{ "error": "rate_limited", "tier": "standard", "limit": ${cap},`,
+    );
+    expect(page).toContain(`"used": ${cap}, "resets_at":`);
+    expect(page).toContain("resets_at");
+    expect(page).toContain("retry-after");
+
+    // And the claim page a browser lands on, which is the JSON's twin.
+    expect(page).toContain("success redirect lands a person on it");
+  });
+
+  it("documents what a paid read's receipt carries, and how it reconciles", () => {
+    expect(page).toContain(">Receipts for paid reads</h2>");
+    expect(page).toContain("key_counter");
+    expect(page).toContain("read_count");
+    expect(page).toContain("paid.keys");
+    // A receipt issued before the two fields existed still verifies: the page
+    // has to say so, or every M17 receipt looks broken.
+    expect(page).toContain("carries neither property at all");
+  });
+
+  it("documents the webhooks, their kinds, and the exact signature recipe", () => {
+    expect(page).toContain(">Webhooks and change alerts</h2>");
+
+    for (const door of [
+      "/keys/me/webhooks",
+      "/keys/me/webhooks/{id}",
+      "/keys/me/webhooks/{id}/deliveries",
+    ]) {
+      expect(page, `${door} is not documented`).toContain(door);
+    }
+    for (const refusal of ["bad_url", "unknown_kind", "unknown_domain", "endpoint_limit"]) {
+      expect(page, `${refusal} is not named`).toContain(refusal);
+    }
+
+    // Every kind, from POLICY.
+    expect(page).toContain(POLICY.ALERT_KINDS.join(", "));
+
+    // The four headers a delivery carries.
+    for (const header of [
+      "x-nomankind-alert",
+      "x-nomankind-kind",
+      "x-nomankind-signature",
+      "content-type: application/json",
+    ]) {
+      expect(page, `${header} is not documented`).toContain(header);
+    }
+
+    // The recipe, exactly: the bytes, the algorithm, and the bytes to verify
+    // against. A subscriber cannot check a signature from a description of one.
+    expect(page).toContain(HASH_TAG_ALERT);
+    expect(page).toContain("HMAC-SHA256");
+    expect(page).toContain("Verify against the bytes that arrived");
+
+    // The retry ladder and the timeout, both from POLICY.
+    expect(page).toContain(POLICY.ALERT_RETRY_MINUTES.join(", "));
+    expect(page).toContain(`${POLICY.ALERT_TIMEOUT_MS} ms`);
+    expect(page).toContain(String(POLICY.ALERT_ENDPOINTS_PER_KEY));
+  });
+
+  it("documents the provider's own webhook path and its two refusals", () => {
+    expect(page).toContain(POLICY.STRIPE.webhook_path);
+    expect(page).toContain("bad_signature");
+    expect(page).toContain("payments_unavailable");
+    expect(page).toContain(
+      `${POLICY.STRIPE.webhook_tolerance_seconds} seconds`,
+    );
+  });
+
   it("names the three units and what each one is", () => {
     expect(page).toContain(">Units</h2>");
     expect(page).toContain("a millionth of a dollar: 1,000,000 to the dollar");
@@ -513,7 +694,12 @@ describe("renderApi", () => {
   });
 
   it("names what is not built yet with its milestone", () => {
-    expect(page).toContain("M24");
+    expect(page).toContain("M25");
+    // M24 built the keys, the paid tiers, the webhooks and the rate limits, so
+    // the row is gone: a path that exists listed as unbuilt is the same lie as
+    // a documented path that answers 404.
+    expect(page).not.toContain("API keys, paid tiers, webhooks, rate limits");
+    expect(page).not.toContain(`<td class="mono">M24</td>`);
     // M23 built the mirror, so the row is gone: a path that exists listed as
     // unbuilt is the same lie as a documented path that answers 404.
     expect(page).not.toContain("The log mirror");

@@ -53,7 +53,7 @@ import {
 } from "./validator.js";
 
 const USAGE =
-  "usage: read <base-url> <entry-id> | read <base-url> --subject <subject> --category <category> [--domain <slug>] [--min-tier <tier>] [--max-age <days>]";
+  "usage: read <base-url> <entry-id> [--key <secret>] | read <base-url> --subject <subject> --category <category> [--domain <slug>] [--min-tier <tier>] [--max-age <days>] [--key <secret>]";
 
 /** The checks, in the order they are made. The order is the contract. */
 export const READ_CHECKS = [
@@ -75,6 +75,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * The key one invocation presents, or null when it reads on the free tier.
+ *
+ * Read out of the arguments and never out of the environment: a credential
+ * picked up from an ambient variable is a credential nobody knows was sent.
+ */
+export function readKey(args: readonly string[]): string | null {
+  const at = args.indexOf("--key");
+  if (at === -1) return null;
+  const value = args[at + 1];
+  if (value === undefined || value.startsWith("--")) return null;
+  return value;
+}
+
+/**
+ * The client one invocation reads through: the caller's own, or the caller's
+ * with the bearer header on every request it makes.
+ *
+ * A wrapper rather than a second fetch path, so the seal check's events read
+ * goes out the same way the read did — one client, one place the header is
+ * added, and nothing anywhere else in this file has to know about the key.
+ */
+export function withKey(http: HttpClient, key: string | null): HttpClient {
+  if (key === null) return http;
+  return {
+    async fetch(request: Request): Promise<Response> {
+      const headers = new Headers(request.headers);
+      headers.set("authorization", `Bearer ${key}`);
+      return http.fetch(new Request(request, { headers }));
+    },
+  };
+}
+
+/**
  * The path one invocation reads, or null when the arguments are not a read.
  *
  * Refuses rather than guesses: an unknown flag is refused because a reader who
@@ -89,8 +122,12 @@ export function readPath(args: readonly string[]): string | null {
 
   const first = rest[0];
   if (first !== undefined && !first.startsWith("--")) {
-    // The by-id form: one positional entry id and nothing else.
-    if (rest.length !== 1) return null;
+    // The by-id form: one positional entry id, and at most the key beside it.
+    const after = rest.slice(1);
+    if (after.length !== 0 && (after.length !== 2 || after[0] !== "--key")) {
+      return null;
+    }
+    if (after.length === 2 && after[1]!.startsWith("--")) return null;
     return `/read/${encodeURIComponent(first)}`;
   }
 
@@ -110,6 +147,9 @@ export function readPath(args: readonly string[]): string | null {
     "--domain",
     "--min-tier",
     "--max-age",
+    // The key is sent as a header, never as a query parameter: a credential in
+    // a URL is a credential in somebody's access log.
+    "--key",
   ];
   for (const flag of values.keys()) {
     if (!known.includes(flag)) return null;
@@ -208,8 +248,10 @@ export async function runRead(
     return BAD_ARGUMENTS;
   }
   const baseUrl = args[0] as string;
+  // Every request this run makes goes out on the same tier, the reader's own.
+  const client = withKey(http, readKey(args));
 
-  const answer = await getJson(http, baseUrl, path);
+  const answer = await getJson(client, baseUrl, path);
   if (answer.status !== 200) {
     const error = errorOf(answer.body) ?? "unknown";
     let line = `refused ${answer.status} ${error}`;
@@ -252,7 +294,7 @@ export async function runRead(
 
   const entrySeal = entry["seal"];
   const sealed = isRecord(entrySeal);
-  if (sealed && !(await sealHolds(http, baseUrl, entrySeal, body["seal"]))) {
+  if (sealed && !(await sealHolds(client, baseUrl, entrySeal, body["seal"]))) {
     return failed("seal");
   }
 
@@ -264,6 +306,12 @@ export async function runRead(
       `status ${typeof status === "string" ? status : "none"}`,
       `tier ${typeof tier === "string" ? tier : "none"}`,
       `counter ${String(receipt["counter"])}`,
+      // The key's own counter, printed only when the receipt carries one: a
+      // free read has none, and a line that said "none" would invite the reader
+      // to look for a number that was never owed.
+      ...(typeof receipt["key_counter"] === "number"
+        ? [`key_counter ${String(receipt["key_counter"])}`]
+        : []),
       `issuer ${String(receipt["issuer"])}`,
       `seal ${sealed ? "sealed" : "unsealed"}`,
     ].join(" "),

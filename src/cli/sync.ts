@@ -43,6 +43,7 @@ import { eventHash, type Event } from "../events.js";
 import { entryHash } from "../hash.js";
 import { decodeProof, verifyInclusion } from "../merkle.js";
 import { verifySyncReceipt } from "../receipt.js";
+import { readKey, withKey } from "./read.js";
 import {
   getJson,
   WebHttpClient,
@@ -51,7 +52,7 @@ import {
 } from "./validator.js";
 
 const USAGE =
-  "usage: sync <base-url> [--from <n>] [--limit <n>] [--domain <slug>] [--flatten] [--min-tier <tier>] [--twice]";
+  "usage: sync <base-url> [--from <n>] [--limit <n>] [--domain <slug>] [--flatten] [--min-tier <tier>] [--key <secret>] [--twice]";
 
 /** The checks, in the order they are made. The order is the contract. */
 export const SYNC_CHECKS = [
@@ -70,7 +71,15 @@ const FAILED = 1;
 const BAD_ARGUMENTS = 2;
 
 /** Flags that carry a value, and flags that are their own answer. */
-const VALUED_FLAGS = ["--from", "--limit", "--domain", "--min-tier"];
+const VALUED_FLAGS = [
+  "--from",
+  "--limit",
+  "--domain",
+  "--min-tier",
+  // The key is sent as a header, never as a query parameter: a credential in a
+  // URL is a credential in somebody's access log.
+  "--key",
+];
 const BARE_FLAGS = ["--flatten", "--twice"];
 
 /** A non-negative integer in plain decimal, as src/sync.ts reads one. */
@@ -406,8 +415,10 @@ export async function runSync(
     return BAD_ARGUMENTS;
   }
   const baseUrl = args[0] as string;
+  // Every request this run makes goes out on the same tier, the trainer's own.
+  const client = withKey(http, readKey(args));
 
-  const answer = await getJson(http, baseUrl, plan.path);
+  const answer = await getJson(client, baseUrl, plan.path);
   if (answer.status !== 200) {
     io.stderr(`refused ${answer.status} ${reasonOf(answer.body)}`);
     return FAILED;
@@ -431,7 +442,7 @@ export async function runSync(
   }
 
   if (!(await chainHolds(items))) return failed("chain");
-  if (!(await proofsHold(http, baseUrl, items, seals))) return failed("proofs");
+  if (!(await proofsHold(client, baseUrl, items, seals))) return failed("proofs");
 
   const delivered = await deliveredEntries(items);
   if (delivered === null) return failed("receipt_entries");
@@ -444,7 +455,7 @@ export async function runSync(
   }
 
   if (plan.twice) {
-    const again = await getJson(http, baseUrl, plan.path);
+    const again = await getJson(client, baseUrl, plan.path);
     if (again.status !== 200) return failed("identical");
     if (!samePage(body, again.body)) return failed("identical");
   }
@@ -461,6 +472,10 @@ export async function runSync(
       `delivered ${items.length}`,
       `entries ${delivered.length}`,
       `counter ${isRecord(receipt) ? String(receipt["counter"]) : "none"}`,
+      // The key's own counter, printed only when the receipt carries one.
+      ...(isRecord(receipt) && typeof receipt["key_counter"] === "number"
+        ? [`key_counter ${String(receipt["key_counter"])}`]
+        : []),
       `checks ${ran.join(",")}`,
     ].join(" "),
   );

@@ -80,6 +80,7 @@
 import type { BeaconReader } from "../adapters/beacon.js";
 import type { MirrorAdapter } from "../adapters/mirror.js";
 import type { PayoutAdapter } from "../adapters/payout.js";
+import type { PaymentsAdapter } from "../adapters/stripe.js";
 import type { EnvironmentWitnessAdapter } from "../adapters/witness.js";
 import {
   buildAnchor,
@@ -145,7 +146,7 @@ import {
   type MirrorOperator,
 } from "../mirror.js";
 import { entryHash } from "../hash.js";
-import { buildReadCountPayload } from "../receipt.js";
+import { buildReadCountPayload, type PaidReadCounts } from "../receipt.js";
 import { validateEntry, type Entry } from "../schema.js";
 import {
   buildSeal,
@@ -197,7 +198,9 @@ import {
   putSweepSteps,
   readCandidates,
   readCounterRangeOn,
-  readCountsSplitOn,
+  readCountsByKeyOn,
+  meterReported,
+  putMeterReport,
   recordAssignment,
   recordAssignmentMissed,
   recordAttestationExpired,
@@ -218,13 +221,16 @@ import {
   staleDue,
   unwitnessedSeals,
   type OperatorRecord,
-  type ReadCountSplitRow,
+  type ReadCountKeyCursor,
+  type ReadCountKeyRow,
   type StoredBountyRow,
   type SweepStepRow,
   type StoredEntry,
   type StoredEntryInput,
 } from "../storage/repository.js";
+import { keyById } from "../storage/keys.js";
 import { checkWitnesses, witnessedCount, type Witness } from "../witness.js";
+import { runAlertStep, type AlertStepReport } from "./alerts.js";
 import type { Env } from "./env.js";
 import { entryWorld, rederive, registryEvents, worldAt } from "./world.js";
 
@@ -281,6 +287,18 @@ export interface SweepDeps {
    * work whichever door called it.
    */
   readonly trigger?: SweepTrigger;
+  /**
+   * Where the day's paid reads are reported (M24, decision D-078). Optional
+   * like the payout and mirror adapters and for the same reason: a caller that
+   * asks for the sweep without one gets a metering step that counts
+   * `metering_unavailable` rather than one that pretends to have billed.
+   */
+  readonly payments?: PaymentsAdapter;
+  /**
+   * What the alert step delivers through. The platform's own fetch when a
+   * caller says nothing; a test injects its own so no alert leaves the process.
+   */
+  readonly alertFetch?: typeof fetch;
 }
 
 /** Which door ran the sweep. */
@@ -307,6 +325,8 @@ export const SWEEP_STEPS: readonly string[] = Object.freeze([
   "anchor",
   "mirror",
   "ledger",
+  "metering",
+  "alerts",
   "standing",
   "payout",
   "attestation",
@@ -488,6 +508,17 @@ export interface SweepReport {
     readonly ok: boolean;
   } | null;
   /**
+   * What this run told the payment provider: how many key-days it reported and
+   * how many reads those carried (M24).
+   *
+   * Zeros rather than null when nothing was owed, because a run that reported
+   * nothing did examine the question — and on a deployment with no provider at
+   * all the answer is in `skipped` under `metering_unavailable`.
+   */
+  readonly metered: { readonly keys: number; readonly reads: number };
+  /** What the alert step created, delivered, retried and gave up on (M24). */
+  readonly alerts: AlertStepReport;
+  /**
    * What the standing step recomputed, and what it changed about the trusted
    * pool. Null before the first seal, for the same reason.
    */
@@ -631,34 +662,71 @@ async function paidForGroup(db: D1Like, stored: StoredEntry): Promise<boolean> {
  * delivered as a second copy of a fact the trainer already has, and its sync
  * reads are dropped (decision D-085). An entry left with nothing is left out of
  * the payload entirely, exactly as an entry nobody read is.
+ *
+ * The rows come back split by key as well as by entry (M24), so the same fold
+ * produces the day's `paid` block beside its rows: the same reads over keyed
+ * receipts only, and the same reads per key. One pass, because the two must
+ * agree — a paid block computed from a second read of the day could disagree
+ * with the rows it is published beside, and Section 9 asks readers to check
+ * exactly that arithmetic.
  */
-async function readsOn(db: D1Like, date: string): Promise<ReadCountRow[]> {
-  const split: ReadCountSplitRow[] = [];
-  let afterEntryId: string | undefined;
+async function readsOn(
+  db: D1Like,
+  date: string,
+): Promise<{ rows: ReadCountRow[]; paid: PaidReadCounts }> {
+  const split: ReadCountKeyRow[] = [];
+  let after: ReadCountKeyCursor | undefined;
   for (;;) {
-    const page = await readCountsSplitOn(db, date, afterEntryId, LIST_PAGE_LIMIT);
+    const page = await readCountsByKeyOn(db, date, after, LIST_PAGE_LIMIT);
     if (page.length === 0) break;
     split.push(...page);
     if (page.length < LIST_PAGE_LIMIT) break;
-    afterEntryId = page[page.length - 1]!.entry_id;
+    const last = page[page.length - 1]!;
+    after = { entry_id: last.entry_id, key_id: last.key_id };
+  }
+
+  // One entry's rows sit together, because the page is ordered by entry first:
+  // the duplicate question is asked once per entry and answered for every key
+  // that read it, since it is a question about the entry and not about who read
+  // it. A reader who paid for a second copy of a fact paid for one fact.
+  const byEntry = new Map<string, ReadCountKeyRow[]>();
+  for (const row of split) {
+    const held = byEntry.get(row.entry_id);
+    if (held === undefined) byEntry.set(row.entry_id, [row]);
+    else held.push(row);
   }
 
   const rows: ReadCountRow[] = [];
-  for (const row of split) {
-    let count = row.read_reads + row.sync_reads;
-    if (row.sync_reads > 0) {
-      const stored = await getEntry(db, row.entry_id);
-      if (
+  const paidRows: ReadCountRow[] = [];
+  const keys: Record<string, number> = {};
+
+  for (const [entryId, entryRows] of byEntry) {
+    const syncReads = entryRows.reduce((sum, row) => sum + row.sync_reads, 0);
+    let dropSync = false;
+    if (syncReads > 0) {
+      const stored = await getEntry(db, entryId);
+      dropSync =
         stored !== null &&
         stored.entry["status"] === "verified" &&
-        !(await paidForGroup(db, stored))
-      ) {
-        count -= row.sync_reads;
-      }
+        !(await paidForGroup(db, stored));
     }
-    if (count > 0) rows.push({ entry_id: row.entry_id, count });
+
+    let count = 0;
+    let paidCount = 0;
+    for (const row of entryRows) {
+      const reads = row.read_reads + (dropSync ? 0 : row.sync_reads);
+      if (reads <= 0) continue;
+      count += reads;
+      if (row.key_id === null) continue;
+      paidCount += reads;
+      keys[row.key_id] = (keys[row.key_id] ?? 0) + reads;
+    }
+
+    if (count > 0) rows.push({ entry_id: entryId, count });
+    if (paidCount > 0) paidRows.push({ entry_id: entryId, count: paidCount });
   }
-  return rows;
+
+  return { rows, paid: { reads: paidRows, keys } };
 }
 
 /**
@@ -735,13 +803,14 @@ async function publishStep(
 
   const published: { date: string; total: number; seq: number }[] = [];
   for (const date of days) {
-    const rows = await readsOn(db, date);
+    const counted = await readsOn(db, date);
     const range = await readCounterRangeOn(db, date);
     const payload = buildReadCountPayload(
       date,
-      rows,
+      counted.rows,
       range.counter_first,
       range.counter_last,
+      counted.paid,
     );
 
     // The chain rule, through the one door that enforces it: the event is built
@@ -1750,6 +1819,136 @@ async function ledgerStep(
   };
 }
 
+// ---------------------------------------------------------------------------
+// (i2) The provider's meter: what the day's paid reads cost
+// ---------------------------------------------------------------------------
+
+/**
+ * The metering step's cursor, named in `ledger_state` by the step itself.
+ *
+ * Its own cursor and not the ledger's, because the two answer to different
+ * things: the ledger prices what the log published and can be replayed at will,
+ * and this tells a payment provider to bill somebody, which cannot. A cursor
+ * shared between them would mean a ledger replay re-billing every reader.
+ */
+export const METERING_CURSOR = "metering";
+
+/** How many seconds there are in a day, less one: the day's last second. */
+const LAST_SECOND_OF_DAY = 86_399;
+
+/**
+ * (i2) Report every published day of paid reads to the payment provider.
+ *
+ * Whitepaper Section 9, Money: "Read counts are published to the sealed log
+ * daily, so nomankind cannot quietly change the numbers later." The bill
+ * follows the published number and never a private one: this reads the sealed
+ * `read_count` events, takes `paid.keys` exactly as the log committed to it, and
+ * sends one meter event per key per day. A reader can therefore check their
+ * invoice against a number that was public before it was billed.
+ *
+ * Exactly once per key-day, guarded twice: the `meter_reports` row, which is
+ * written only after the provider said yes, and the identifier
+ * `<environment>:<date>:<key id>`, which is the provider's own idempotency key —
+ * so a run that wrote the row and died before it committed still cannot bill
+ * twice. The timestamp is the day's last second, because the usage belongs to
+ * the day it was read on and not to the morning it was reported.
+ *
+ * Refusals are counted, never repaired. An adapter that is not there at all
+ * stops the step (`metering_unavailable`): reporting half a day would leave the
+ * rest to a run that could not tell which half. Anything else refuses one
+ * key-day (`metering_failed`), leaves its row unwritten, and the next run tries
+ * it again, because the cursor only moves past events every key-day of which
+ * has a row.
+ */
+async function meteringStep(
+  db: D1Like,
+  environment: string,
+  payments: PaymentsAdapter | undefined,
+  sealedHead: number,
+  now: Date,
+  skip: Skip,
+): Promise<SweepReport["metered"]> {
+  const metered = { keys: 0, reads: 0 };
+  if (payments === undefined) {
+    skip("metering_unavailable");
+    return metered;
+  }
+
+  const cursor = (await ledgerCursor(db, METERING_CURSOR)) ?? -1;
+  if (cursor >= sealedHead) return metered;
+
+  // Bounded like every other step: the rest is the next run's.
+  const to = Math.min(cursor + LIST_PAGE_LIMIT, sealedHead);
+  const page = await eventsInRange(db, cursor + 1, to);
+
+  let through = cursor;
+  let stalled = false;
+  for (const event of page) {
+    if (stalled) break;
+    let complete = true;
+
+    if (isEvent(event, "read_count")) {
+      const paid = event.payload.paid;
+      const keys = paid === undefined ? {} : paid.keys;
+      for (const keyId of Object.keys(keys).sort()) {
+        const reads = keys[keyId] as number;
+        if (reads <= 0) continue;
+        if (await meterReported(db, keyId, event.payload.date)) continue;
+
+        const key = await keyById(db, keyId);
+        if (key === null) {
+          // A published key nobody holds: there is no customer to bill, so the
+          // key-day stays owed rather than being quietly dropped.
+          skip("metering_failed");
+          complete = false;
+          continue;
+        }
+
+        const identifier = `${environment}:${event.payload.date}:${keyId}`;
+        const reported = await payments.reportUsage({
+          customer: key.customer,
+          value: reads,
+          identifier,
+          timestamp: Math.floor(
+            Date.parse(`${event.payload.date}T00:00:00Z`) / 1000,
+          ) + LAST_SECOND_OF_DAY,
+        });
+        if (!reported.ok) {
+          if (reported.refusal === "payments_unavailable") {
+            skip("metering_unavailable");
+            complete = false;
+            stalled = true;
+            break;
+          }
+          skip("metering_failed");
+          complete = false;
+          continue;
+        }
+
+        await putMeterReport(db, {
+          key_id: keyId,
+          date: event.payload.date,
+          event_seq: event.seq,
+          reads,
+          identifier,
+          reported_at: now.toISOString(),
+        });
+        metered.keys += 1;
+        metered.reads += reads;
+      }
+    }
+
+    if (!complete) {
+      stalled = true;
+      continue;
+    }
+    through = event.seq;
+  }
+
+  if (through > cursor) await setLedgerCursor(db, METERING_CURSOR, through);
+  return metered;
+}
+
 /**
  * The whole sealed log, in pages, oldest first.
  *
@@ -2486,17 +2685,55 @@ export async function runSweep(
     let ledger: SweepReport["ledger"] = null;
     let standing: SweepReport["standing"] = null;
     let payouts: SweepReport["payouts"] = [];
+    let metered: SweepReport["metered"] = { keys: 0, reads: 0 };
+    let alerts: AlertStepReport = {
+      created: 0,
+      delivered: 0,
+      failed: 0,
+      retried: 0,
+    };
     const sealedHead = await latestSeal(db);
     inStep = "ledger";
     if (sealedHead === null) {
       skip("unsealed");
       skip("unsealed");
       skip("unsealed");
-      // The same three refusals the report counts, told apart by step.
+      // The same three refusals the report counts, told apart by step. The two
+      // M24 steps read the same sealed events, so they are behind the same wall
+      // and the board says so — without a fourth and fifth count, because the
+      // report's `unsealed` has meant "the three money steps" since M21.
       noteSkip("standing", "unsealed");
       noteSkip("payout", "unsealed");
+      noteSkip("metering", "unsealed");
+      noteSkip("alerts", "unsealed");
     } else {
       ledger = await ledgerStep(db, sealedHead.last_seq);
+      // (i2) The provider's meter, after the ledger and off the same sealed
+      // events: what the log published is what a reader is billed for.
+      inStep = "metering";
+      metered = await meteringStep(
+        db,
+        env.ENVIRONMENT,
+        deps.payments,
+        sealedHead.last_seq,
+        deps.now,
+        skip,
+      );
+      // (i3) The change alerts, after the meter and before the standing fold:
+      // an endpoint hears about a sealed change in the run that sealed it.
+      inStep = "alerts";
+      alerts = await runAlertStep(
+        db,
+        {
+          now: deps.now,
+          sealedHead: sealedHead.last_seq,
+          fetch: deps.alertFetch ?? globalThis.fetch.bind(globalThis),
+          // The bodies carry paths and the reader knows the host it subscribed
+          // to, so no origin is invented here (contract section 8.2).
+          origin: "",
+        },
+        skip,
+      );
       inStep = "standing";
       standing = await standingStep(db, sealedHead.last_seq, at, skip);
       inStep = "payout";
@@ -2519,6 +2756,8 @@ export async function runSweep(
       upgraded,
       mirror: mirrored.report,
       ledger,
+      metered,
+      alerts,
       standing,
       payouts,
       skipped,
@@ -2616,7 +2855,7 @@ interface Board {
 }
 
 /**
- * One run's fifteen step rows.
+ * One run's seventeen step rows.
  *
  * The details are each step's own slice of the report, plus the three facts no
  * report field carries and the status rules need: the round the beacon read (or
@@ -2687,6 +2926,8 @@ function stepRows(
               ? { date: null, detail: board.mirrorDetail }
               : { ...report.mirror },
           ledger: report.ledger === null ? { through: null } : { ...report.ledger },
+          metering: { ...report.metered },
+          alerts: { ...report.alerts },
           standing:
             report.standing === null
               ? { position: null }

@@ -188,6 +188,25 @@ function holdersOf(state: EntryShareState): ShareHolder[] {
  * The ids are deterministic and carry the event's position, so replaying a day
  * writes the same rows over the same ids rather than a second set beside them.
  */
+/**
+ * The rows of a published day that money is owed on.
+ *
+ * Section 9, Money: the contributor pool is a share of "paid-read revenue", so
+ * what is priced is the day's paid half — `payload.paid.reads` — and never the
+ * free reads beside it, which earned nobody anything because nobody was billed
+ * for them. A payload with no `paid` block at all is an event published before
+ * M24, when every read the log served went through the same door and the whole
+ * day was the paid half; those days are priced from `reads`, which is what they
+ * meant when they were sealed. Exported because the mirror recomputes the same
+ * fold off the same events and two readings of one day would be two answers.
+ */
+export function pricedReads(
+  event: Event<"read_count">,
+): readonly ReadCountRow[] {
+  const paid = event.payload.paid;
+  return paid === undefined ? event.payload.reads : paid.reads;
+}
+
 export function readShareRows(
   event: Event<"read_count">,
   stateOf: (entryId: string) => EntryShareState | null,
@@ -196,7 +215,7 @@ export function readShareRows(
   const availableAt = releaseFromDate(date);
   const rows: LedgerRow[] = [];
 
-  for (const read of event.payload.reads as readonly ReadCountRow[]) {
+  for (const read of pricedReads(event)) {
     if (read.count <= 0) continue;
     const state = stateOf(read.entry_id);
     if (state === null || !state.verified) continue;
@@ -495,7 +514,10 @@ export function reconciliationRow(
   let publishedTotal = 0;
   let accruedTotal = 0;
 
-  for (const read of event.payload.reads as readonly ReadCountRow[]) {
+  // The priced half of the day, for the same reason `readShareRows` prices it:
+  // a reconciliation of the whole day's traffic against rows that only ever
+  // cover the paid part would report a mismatch on every free read.
+  for (const read of pricedReads(event)) {
     publishedTotal += read.count;
     const priced = accrued.get(read.entry_id);
     if (priced === undefined) {

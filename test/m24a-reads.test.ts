@@ -568,6 +568,9 @@ describe("the day's read count, with duplicates inside it", () => {
     expect(payload.counter_first).toBe(1);
     expect(payload.counter_last).toBe(2);
 
+    // Nobody held a key here: the day's paid half is empty (M24).
+    expect(payload.paid).toEqual({ reads: [], total: 0, keys: {} });
+
     // Nothing about the payload is built anywhere but `buildReadCountPayload`.
     expect(payload).toEqual(
       buildReadCountPayload(
@@ -575,6 +578,9 @@ describe("the day's read count, with duplicates inside it", () => {
         payload.reads,
         payload.counter_first,
         payload.counter_last,
+        // Every read of this day was free, so the block is empty — and it is
+        // there, because a day that published no paid read published that fact.
+        payload.paid!,
       ),
     );
   });

@@ -586,3 +586,88 @@ describe("ledgerBalance", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// M24: only the paid half of a day earns
+// ---------------------------------------------------------------------------
+
+describe("a published day with a paid block", () => {
+  const KEY = "key_0123456789abcdef";
+
+  /** One day whose rows count every reader and whose block names the payers. */
+  async function paidDay(
+    rows: readonly ReadCountRow[],
+    paid: { reads: readonly ReadCountRow[]; keys: Record<string, number> },
+  ): Promise<Event<"read_count">> {
+    const log = await appendEvent([], {
+      at: AT,
+      type: "read_count",
+      entry_id: null,
+      payload: buildReadCountPayload(DAY, rows, 1, rows.length, paid),
+    });
+    return log[0] as Event<"read_count">;
+  }
+
+  it("prices the paid rows and never the free ones", async () => {
+    const event = await paidDay(
+      [
+        { entry_id: ENTRY, count: READS },
+        { entry_id: OTHER, count: 7 },
+      ],
+      { reads: [{ entry_id: ENTRY, count: 4 }], keys: { [KEY]: 4 } },
+    );
+    const rows = readShareRows(event, () => state());
+
+    // Four reads, not ten thousand and seven: the rest of the day was free.
+    expect(rows.every((row) => row.entry_id === ENTRY)).toBe(true);
+    expect(rows.every((row) => row.reads === 4)).toBe(true);
+    expect(rows[0]!.amount).toBe(share(READ_SHARE_SPLIT.submitter, 4));
+  });
+
+  it("reconciles against the paid rows, and says ok", async () => {
+    const event = await paidDay(
+      [
+        { entry_id: ENTRY, count: READS },
+        { entry_id: OTHER, count: 7 },
+      ],
+      { reads: [{ entry_id: ENTRY, count: 4 }], keys: { [KEY]: 4 } },
+    );
+    const rows = readShareRows(event, () => state());
+    const accrued = new Map<string, number>();
+    for (const row of rows) {
+      if (row.kind === "read_share" && row.entry_id !== null && row.reads !== null) {
+        accrued.set(row.entry_id, row.reads);
+      }
+    }
+    const row = reconciliationRow(event, accrued);
+    expect(row.ref).toEqual({
+      ok: true,
+      published_total: 4,
+      accrued_total: 4,
+      mismatches: [],
+      unpriced: [],
+    });
+  });
+
+  it("prices nothing at all on a day nobody paid for", async () => {
+    const event = await paidDay([{ entry_id: ENTRY, count: 3 }], {
+      reads: [],
+      keys: {},
+    });
+    expect(readShareRows(event, () => state())).toEqual([]);
+    expect(reconciliationRow(event, new Map()).ref).toMatchObject({
+      ok: true,
+      published_total: 0,
+      accrued_total: 0,
+    });
+  });
+
+  it("prices an event with no block from its rows, as it always did", async () => {
+    // The M21 shape: a payload sealed before paid access existed.
+    const event = await readCount([{ entry_id: ENTRY, count: READS }]);
+    expect("paid" in event.payload).toBe(false);
+    const rows = readShareRows(event, () => state());
+    expect(rows).toHaveLength(1 + SLOT_COUNT);
+    expect(rows[0]!.reads).toBe(READS);
+  });
+});

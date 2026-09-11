@@ -60,6 +60,13 @@ import {
   sealCovering,
   type StoredEntry,
 } from "../storage/repository.js";
+import {
+  accessHeaders,
+  chargeReads,
+  nextKeyCounter,
+  resolveAccess,
+  type Access,
+} from "./access.js";
 import type { Env } from "./env.js";
 import {
   StorageUnreachable,
@@ -170,14 +177,22 @@ async function issueReceipt(
   db: D1Like,
   entry: Entry,
   signer: ReceiptSigner,
+  access: Access,
   now: Date,
 ): Promise<ReadReceipt | null> {
   const entryId = field(entry, "id");
   const hash = await entryHash(extractCore(entry));
   const readAt = now.toISOString();
+  const key = access.key;
 
   for (let attempt = 0; attempt < RECEIPT_ATTEMPTS; attempt += 1) {
     const counter = await nextReadCounter(db);
+    // Both counters inside the loop: the key's number is in the signed bytes
+    // beside the log's, so a receipt signed again for a lost log counter is
+    // signed again for a fresh key counter too. The key's own sequence keeps a
+    // hole where the lost attempt was, which is what the log-wide one does and
+    // means the same thing — a number drawn and never handed over.
+    const keyCounter = key === null ? null : await nextKeyCounter(db, key.id);
     const receipt = await signReadReceipt(
       {
         entry_id: entryId,
@@ -185,11 +200,19 @@ async function issueReceipt(
         read_at: readAt,
         counter,
         issuer: signer.issuer,
+        key: key === null ? null : key.id,
+        key_counter: keyCounter,
       },
       signer.key,
     );
     try {
-      await putReadReceipt(db, { entryId, createdAt: readAt, receipt });
+      await putReadReceipt(db, {
+        entryId,
+        createdAt: readAt,
+        receipt,
+        keyId: key === null ? null : key.id,
+        keyCounter,
+      });
       return receipt;
     } catch (error) {
       if (error instanceof ReceiptConflictError) continue;
@@ -210,15 +233,19 @@ async function serve(
   db: D1Like,
   stored: StoredEntry,
   env: Env,
+  access: Access,
   now: Date,
 ): Promise<Response> {
   const signer = await signerFor(env.SEALING_AGENT_KEY);
   if (signer === null) return refuse(503, "receipts_not_configured");
 
-  const receipt = await issueReceipt(db, stored.entry, signer, now);
+  const receipt = await issueReceipt(db, stored.entry, signer, access, now);
   if (receipt === null) return refuse(503, "receipt_conflict");
 
   const seal = await sealCovering(db, stored.submittedSeq);
+  // Charged after the read was served and never before it: a reader pays for
+  // what they got, so a refusal above this line costs them nothing.
+  await chargeReads(db, access, 1);
   return json(
     {
       entry: stored.entry,
@@ -227,6 +254,7 @@ async function serve(
       receipt,
     },
     200,
+    accessHeaders(access, access.limit - access.used - 1),
   );
 }
 
@@ -241,6 +269,7 @@ async function byId(
   db: D1Like,
   id: string,
   env: Env,
+  access: Access,
   now: Date,
 ): Promise<Response> {
   if (!ENTRY_ID_PATTERN.test(id)) return refuse(400, "bad_id");
@@ -260,7 +289,7 @@ async function byId(
     );
   }
 
-  return serve(db, stored, env, now);
+  return serve(db, stored, env, access, now);
 }
 
 /**
@@ -276,6 +305,7 @@ async function bySubject(
   db: D1Like,
   query: Extract<ReadQuery, { by: "subject" }>,
   env: Env,
+  access: Access,
   now: Date,
 ): Promise<Response> {
   let beforeSubmittedSeq: number | undefined;
@@ -300,7 +330,7 @@ async function bySubject(
     if (chosen !== null) {
       const id = field(chosen.entry, "id");
       const stored = page.find((row) => field(row.entry, "id") === id);
-      if (stored !== undefined) return serve(db, stored, env, now);
+      if (stored !== undefined) return serve(db, stored, env, access, now);
     }
 
     if (page.length < LIST_PAGE_LIMIT) break;
@@ -323,6 +353,33 @@ function idAfterPrefix(path: string): string | null {
   }
 }
 
+/**
+ * The tier gate, in the words the door answers with.
+ *
+ * Nothing is decided here: `resolveAccess` decides, and this only turns its
+ * refusal into the response — the status it named, the body it built, and
+ * `retry-after` on the one refusal that has a number of seconds to give.
+ */
+async function gate(
+  db: D1Like,
+  request: Request,
+  now: Date,
+): Promise<{ ok: true; access: Access } | { ok: false; response: Response }> {
+  const granted = await resolveAccess(db, request, now);
+  if (granted.ok) return { ok: true, access: granted.access };
+  const { refusal } = granted;
+  return {
+    ok: false,
+    response: json(
+      refusal.body,
+      refusal.status,
+      refusal.retryAfter === undefined
+        ? undefined
+        : { "retry-after": String(refusal.retryAfter) },
+    ),
+  };
+}
+
 async function route(
   request: Request,
   env: Env,
@@ -335,7 +392,9 @@ async function route(
   const id = idAfterPrefix(path);
   if (id !== null) {
     if (request.method !== "GET") return methodNotAllowed("GET");
-    return byId(db, id, env, now);
+    const granted = await gate(db, request, now);
+    if (!granted.ok) return granted.response;
+    return byId(db, id, env, granted.access, now);
   }
 
   if (path === "/read") {
@@ -344,9 +403,14 @@ async function route(
     // The refusal goes out in the kernel's own word, so a reader who mistyped
     // `min_tier` is told which rule refused them rather than "bad request".
     if (!parsed.ok) return refuse(400, parsed.reason);
+    // After the query is read and before anything else, `receipts_not_configured`
+    // included: a key that is over its cap or whose bill did not clear is told
+    // so even on a deployment that could not have signed the receipt anyway.
+    const granted = await gate(db, request, now);
+    if (!granted.ok) return granted.response;
     return parsed.query.by === "entry"
-      ? byId(db, parsed.query.entry_id, env, now)
-      : bySubject(db, parsed.query, env, now);
+      ? byId(db, parsed.query.entry_id, env, granted.access, now)
+      : bySubject(db, parsed.query, env, granted.access, now);
   }
 
   return null;

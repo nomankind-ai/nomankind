@@ -869,6 +869,7 @@ describe("migrations", () => {
       "0012_domains.sql",
       "0013_status.sql",
       "0014_mirror.sql",
+      "0015_paid_access.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -1016,6 +1017,7 @@ describe("migrations", () => {
       "0012_domains.sql",
       "0013_status.sql",
       "0014_mirror.sql",
+      "0015_paid_access.sql",
     ]);
   });
 });

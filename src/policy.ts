@@ -910,6 +910,21 @@ export const ATTESTATION_WINDOW_HOURS = 72;
 export const LIST_PAGE_LIMIT = 100;
 
 /**
+ * How many days of their own usage a key holder is shown when they name none,
+ * and the most one response will show at all. Page sizes of the
+ * `/keys/me/usage` window in the sense LIST_PAGE_LIMIT is: they say how much of
+ * a reader's own history one response carries, never what anything costs or
+ * what anybody is allowed.
+ *
+ * Not a whitepaper number. The maintainer's published policy; it moves only by
+ * a later decision. Here rather than beside the door because every published
+ * amount is here, and a page size the door kept to itself would be the one
+ * number a reader could not check against `GET /policy`.
+ */
+export const USAGE_DAYS_DEFAULT = 30;
+export const USAGE_DAYS_MAX = 90;
+
+/**
  * How many entries the home page's "latest sealed entries" row shows. A page
  * size, so it lives here beside LIST_PAGE_LIMIT rather than inside the page that
  * renders it: src/ui/ holds no numbers of this kind and src/storage/ holds no
@@ -986,6 +1001,122 @@ export const STANDING_DECAY_PAUSED = true;
  * only by a later decision.
  */
 export const READ_PRICE_MICROS_PER_READ = 500;
+
+/**
+ * Incentives / Money: "The log is free to read at low volume, forever. Revenue
+ * comes from high-rate API access, structured feeds and webhooks, change
+ * alerts."
+ *
+ * A tier is a daily cap and nothing else. The free tier is the paper's "free to
+ * read at low volume, forever", so it carries no key and is counted per client;
+ * the paid tiers carry a key and are counted per key. Every paid read is priced
+ * at READ_PRICE_MICROS_PER_READ, one number per read whatever tier bought it
+ * (D-087), so a tier buys throughput and never a discount.
+ *
+ * The paper names the free tier and states no cap and no ladder, so all three
+ * rows are the maintainer's own placeholders (M24, the retrospective's M2 rule)
+ * and move only by a later decision.
+ */
+export interface RateTier {
+  /** The display name: what the tiers table and the checkout page show. */
+  readonly name: string;
+  /** The cap per UTC day, per key on a paid tier and per client on the free one. */
+  readonly reads_per_day: number;
+  /** False: served without a key at all. */
+  readonly key: boolean;
+}
+
+export const RATE_TIERS: Readonly<Record<string, RateTier>> = Object.freeze({
+  free: Object.freeze({ name: "Free", reads_per_day: 1_000, key: false }),
+  standard: Object.freeze({
+    name: "Standard",
+    reads_per_day: 100_000,
+    key: true,
+  }),
+  high: Object.freeze({ name: "High", reads_per_day: 1_000_000, key: true }),
+});
+
+/** The slug of the tier a reader gets without asking for anything. */
+export const FREE_TIER = "free";
+
+/** Whether a slug names a registered tier that a key is bought for. */
+export function isPaidTier(slug: unknown): slug is string {
+  if (typeof slug !== "string") return false;
+  const tier = RATE_TIERS[slug];
+  return tier !== undefined && tier.key;
+}
+
+/**
+ * Incentives / Money: "The contributor share is a floor that only rises."
+ *
+ * So the floor is a published number of its own rather than a comment on
+ * CONTRIBUTOR_SHARE_PERCENT: a share that may only rise needs something to be
+ * checked against, and test/policy.test.ts checks it — the share is at or above
+ * the floor, and it is exactly the split it is made of.
+ */
+export const CONTRIBUTOR_SHARE_FLOOR_PERCENT = 30;
+
+/**
+ * Decision D-078: the paid loop runs over Stripe in test mode from the start,
+ * spoken to over its REST API with `fetch` and signed webhooks, with no SDK.
+ *
+ * The provider's fixed strings, held here for the reason MIRROR and REGISTRY
+ * are: an address the system depends on is a published choice, not an adapter's
+ * private detail. No number here is a price and nothing here is a secret — the
+ * key and the webhook signing secret are Worker secrets (D-016) and never
+ * appear in this repository.
+ */
+export const STRIPE: Readonly<{
+  api: "https://api.stripe.com";
+  meter_event_name: "nomankind_read";
+  price_lookup_prefix: "nomankind-";
+  currency: "usd";
+  webhook_tolerance_seconds: 300;
+  webhook_path: "/stripe/webhook";
+}> = Object.freeze({
+  api: "https://api.stripe.com",
+  meter_event_name: "nomankind_read",
+  /** A price's lookup_key is `${prefix}${environment}-${tier}`. */
+  price_lookup_prefix: "nomankind-",
+  currency: "usd",
+  /** How far a webhook's own timestamp may sit from now before it is stale. */
+  webhook_tolerance_seconds: 300,
+  webhook_path: "/stripe/webhook",
+} as const);
+
+/**
+ * Incentives / Money: change alerts are a paid feature. How many endpoints one
+ * key may hold, how long a delivery may take, and when a failed delivery is
+ * tried again.
+ *
+ * None of the four is in the paper, which names the feature and no amount: the
+ * maintainer's published policy (M24), moving only by a later decision. The
+ * retry ladder is minutes from the attempt that failed — attempt n (1-based)
+ * schedules the next at now + ALERT_RETRY_MINUTES[n - 1], and past the last
+ * entry the delivery is failed rather than retried forever.
+ */
+export const ALERT_ENDPOINTS_PER_KEY = 5;
+export const ALERT_TIMEOUT_MS = 10_000;
+export const ALERT_RETRY_MINUTES: readonly number[] = Object.freeze([
+  5, 30, 120, 720, 1440,
+]);
+
+/**
+ * What a change alert can be about: the six moments in an entry's life a
+ * subscriber is told about. Every one of them is an event already in the sealed
+ * log, so an alert is a notification of something public and never a fact of
+ * its own.
+ */
+export const ALERT_KINDS = Object.freeze([
+  "submitted",
+  "verified",
+  "rejected",
+  "reconfirmed",
+  "superseded",
+  "overturned",
+] as const);
+
+export type AlertKind = (typeof ALERT_KINDS)[number];
 
 /**
  * Incentives / Money, as amended by decision D-053: payouts are batched per
@@ -1081,6 +1212,14 @@ export const POLICY = Object.freeze({
   STANDING_TRUSTED_STAY,
   STANDING_DECAY_PAUSED,
   READ_PRICE_MICROS_PER_READ,
+  RATE_TIERS,
+  FREE_TIER,
+  CONTRIBUTOR_SHARE_FLOOR_PERCENT,
+  STRIPE,
+  ALERT_ENDPOINTS_PER_KEY,
+  ALERT_TIMEOUT_MS,
+  ALERT_RETRY_MINUTES,
+  ALERT_KINDS,
   PAYOUT_MINIMUM_MICROS,
   PAYOUT_CYCLE,
   MIRROR,
@@ -1096,6 +1235,8 @@ export const POLICY = Object.freeze({
   ATTESTATION_SCORERS,
   ATTESTATION_WINDOW_HOURS,
   LIST_PAGE_LIMIT,
+  USAGE_DAYS_DEFAULT,
+  USAGE_DAYS_MAX,
   HOME_LATEST_ENTRIES,
   LANDING_BAND_SEALS,
   BEACON,
