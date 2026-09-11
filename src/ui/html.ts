@@ -243,6 +243,9 @@ export const APP_CSS_HREF = versionedHref("/static/app.css", APP_CSS);
 /** The front door. The same host from every environment, so it is fixed here. */
 export const APEX_URL = "https://nomankind.ai/";
 
+/** The way to reach a person, free and needing no account (D-085). */
+export const CONTACT_EMAIL = "hello@nomankind.ai";
+
 /** The repository and the paper, linked from the header and the footer. */
 const REPOSITORY_URL = "https://github.com/nomankind-ai/nomankind";
 const PAPER_URL =
@@ -339,6 +342,7 @@ export function layout(
         ${link(REPOSITORY_URL, "Repository", true)}
         <a href="${MIRROR_PATH}">Mirror</a>
         ${link(PAPER_URL, "Whitepaper", true)}
+        <a href="mailto:${CONTACT_EMAIL}">Contact</a>
       </span>
     </footer>
   </body>

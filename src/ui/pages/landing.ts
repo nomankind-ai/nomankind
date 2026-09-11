@@ -27,6 +27,7 @@
 
 import {
   APEX_URL,
+  CONTACT_EMAIL,
   fmtInstant,
   html,
   shortHash,
@@ -261,6 +262,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
           <a href="${CODE_URL}" rel="noopener">Code</a>
           <a href="${LOG_URL}" rel="noopener">Log mirror</a>
           <a href="${REGISTRY_URL}" rel="noopener">Built on 1F916</a>
+          <a href="mailto:${CONTACT_EMAIL}">Contact</a>
         </nav>
         <div class="topcta">
           <a class="btn-primary" href="${appHref(ctx)}">Open the app</a>
@@ -428,7 +430,10 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
 
       <footer class="landing-footer row mono">
         <span>CODE APACHE-2.0 · DATA CC0 · TRAINING ON THE FEED IS FREE</span>
-        <span>NOMANKIND.AI</span>
+        <span
+          >NOMANKIND.AI ·
+          <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL.toUpperCase()}</a></span
+        >
       </footer>
     </div>
   </body>

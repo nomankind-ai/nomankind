@@ -37,7 +37,7 @@ import { SYNC_QUERY_REFUSALS } from "../src/sync.js";
 import { renderApi } from "../src/ui/pages/api.js";
 import { VALIDATION_REFUSALS } from "../src/validate.js";
 import { renderGenesis } from "../src/ui/pages/genesis.js";
-import { APEX_URL, shortHash } from "../src/ui/html.js";
+import { APEX_URL, CONTACT_EMAIL, shortHash } from "../src/ui/html.js";
 import {
   LANDING_CSS,
   LANDING_CSS_HREF,
@@ -1286,6 +1286,35 @@ describe("renderLanding", () => {
       `<a class="wordmark mono" href="${APEX_URL}">NOMANKIND</a>`,
     );
     expect(page).not.toContain(`<span class="wordmark mono">`);
+  });
+
+  /**
+   * D-085: one free way to reach a person, with no account and no form — the
+   * last link in the top bar, and again in the footer beside the wordmark. A
+   * mailto, so there is nothing to sign up for and nothing to host; the href
+   * keeps the address as it is typed and the footer prints it in the page's own
+   * mono uppercase.
+   */
+  it("offers a contact address in the top bar and in the footer", () => {
+    expect(CONTACT_EMAIL).toBe("hello@nomankind.ai");
+    const nav = page.slice(
+      page.indexOf(`<nav class="topnav">`),
+      page.indexOf("</nav>"),
+    );
+    expect(nav).toContain(`<a href="mailto:${CONTACT_EMAIL}">Contact</a>`);
+    expect(nav.indexOf("Built on 1F916")).toBeLessThan(nav.indexOf(">Contact<"));
+    expect(nav.lastIndexOf("<a ")).toBe(nav.indexOf(`<a href="mailto:`));
+    expect(nav.slice(nav.indexOf(`<a href="mailto:`))).not.toContain("rel=");
+
+    const footer = page.slice(page.indexOf(`<footer class="landing-footer`));
+    expect(footer).toContain("NOMANKIND.AI ·");
+    expect(footer).toContain(
+      `<a href="mailto:${CONTACT_EMAIL}">HELLO@NOMANKIND.AI</a>`,
+    );
+    // Still the page the CSP can serve whole: a mailto is a navigation, not a
+    // load, so nothing here is script and nothing here is an inline style.
+    expect(page).not.toContain("<script");
+    expect(page).not.toContain("style=");
   });
 
   it("escapes a seal hash that is markup", () => {

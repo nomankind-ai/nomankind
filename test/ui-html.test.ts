@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   APEX_URL,
   APP_CSS_HREF,
+  CONTACT_EMAIL,
   CONTENT_SECURITY_POLICY,
   badge,
   cssResponse,
@@ -222,7 +223,7 @@ describe("layout", () => {
     expect(document).not.toContain(" onclick=");
   });
 
-  it("links the repository, the mirror and the paper in the footer", () => {
+  it("links the repository, the mirror, the paper and a way to write in the footer", () => {
     expect(document).toContain("https://github.com/nomankind-ai/nomankind");
     expect(document).toContain(
       "https://github.com/nomankind-ai/nomankind/blob/main/paper/WHITEPAPER.md",
@@ -235,6 +236,18 @@ describe("layout", () => {
     const footer = document.slice(document.indexOf("<footer"));
     expect(footer.indexOf("Repository")).toBeLessThan(footer.indexOf(">Mirror<"));
     expect(footer.indexOf(">Mirror<")).toBeLessThan(footer.indexOf("Whitepaper"));
+    // D-085: a free way to reach a person, on every app page of every
+    // environment. A mailto is neither http nor somebody else's URL, so it is a
+    // plain anchor: no new tab, and no rel to protect a referrer nobody sends.
+    expect(CONTACT_EMAIL).toBe("hello@nomankind.ai");
+    expect(footer).toContain(`<a href="mailto:${CONTACT_EMAIL}">Contact</a>`);
+    expect(footer.indexOf("Whitepaper")).toBeLessThan(footer.indexOf(">Contact<"));
+    const contact = footer.slice(
+      footer.indexOf(`<a href="mailto:`),
+      footer.indexOf("</a>", footer.indexOf(`<a href="mailto:`)),
+    );
+    expect(contact).not.toContain("rel=");
+    expect(contact).not.toContain("target=");
   });
 
   it("starts with a doctype and declares the language", () => {
