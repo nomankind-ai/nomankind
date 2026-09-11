@@ -3508,6 +3508,49 @@ export async function pendingAnchorsAfter(
 }
 
 /**
+ * The newest anchor whose receipt has reached a block, or null when none has.
+ *
+ * The three fields the status page says out loud rather than the whole anchor:
+ * the roots and the completed .ots proof are the biggest thing in the table and
+ * the page names none of them, so the query extracts the day, the block height
+ * and the instant and leaves the rest in the column. Newest by day, and days
+ * are "YYYY-MM-DD" in UTC, so the primary key's own descending order is
+ * chronological order — one row read, whatever the log's age.
+ *
+ * `json_extract` over the receipt is the same filter `pendingAnchorsAfter`
+ * reads by, inverted: that one wants the receipts still waiting, this one wants
+ * the newest that is not.
+ */
+export interface UpgradedAnchorRow {
+  readonly date: string;
+  readonly block_height: number;
+  readonly upgraded_at: string;
+}
+
+export async function newestUpgradedAnchor(
+  db: D1Like,
+): Promise<UpgradedAnchorRow | null> {
+  const row = await db
+    .prepare(
+      `SELECT "date",
+              json_extract(external, '$.upgraded.block_height') AS block_height,
+              json_extract(external, '$.upgraded.upgraded_at') AS upgraded_at
+         FROM anchors
+        WHERE external IS NOT NULL
+          AND json_extract(external, '$.kind') = 'opentimestamps'
+          AND json_extract(external, '$.upgraded') IS NOT NULL
+        ORDER BY "date" DESC ${ONE_ROW}`,
+    )
+    .first<Row>();
+  if (row === null) return null;
+  return {
+    date: readText(row, "date"),
+    block_height: readInteger(row, "block_height"),
+    upgraded_at: readText(row, "upgraded_at"),
+  };
+}
+
+/**
  * Record the external timestamp receipt for one day.
  *
  * Only the receipt moves. The anchor hash covers the date and the roots and

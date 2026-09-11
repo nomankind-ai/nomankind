@@ -54,6 +54,7 @@ import {
   latestMirror,
   latestReceipt,
   latestSeal,
+  newestUpgradedAnchor,
   payoutRows,
   reconciliationRows,
   sweepSteps,
@@ -207,6 +208,10 @@ export async function statusInput(
             external: anchor.external === null ? null : anchor.external.kind,
             upgraded: anchor.external !== null && anchor.external.upgraded !== null,
           },
+    // Not yesterday's, and not a page of anchors read to find it: one row, the
+    // newest day whose proof reached a block. The stage names it in every state
+    // it can be in, so it is gathered whether or not yesterday was anchored.
+    upgraded_anchor: await newestUpgradedAnchor(db),
     seals_yesterday: await countSealsSealedOn(db, yesterday),
     reconciliation:
       priced === null || priced.date === null

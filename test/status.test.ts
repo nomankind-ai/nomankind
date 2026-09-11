@@ -82,6 +82,7 @@ function empty(): StatusInput {
     entries: 0,
     read_counts: { newest: null, earliest_receipt_day: null },
     anchor: null,
+    upgraded_anchor: null,
     seals_yesterday: 0,
     reconciliation: null,
     standing_position: null,
@@ -520,8 +521,81 @@ describe("8. witnessing", () => {
 });
 
 describe("9. anchoring", () => {
+  /** The newest proof that reached a block, two days before this instant. */
+  const UPGRADE = {
+    date: "2026-09-07",
+    block_height: 966_287,
+    upgraded_at: "2026-09-08T03:14:00.000Z",
+  };
+
   it("is idle when no seal was made yesterday", () => {
     expect(stateOf(swept(), "anchoring")).toBe("idle");
+  });
+
+  it("names the newest finished proof even on a day with no seal", () => {
+    // A calendar folds a commitment into a block on its own schedule, so the
+    // newest upgrade is almost never yesterday's. A stage that only ever spoke
+    // about yesterday could not tell a chain that has never completed a
+    // timestamp from one that completed on Monday — so the block height is said
+    // in every state, idle included, and changes none of them.
+    const input = swept({ upgraded_anchor: UPGRADE });
+    expect(stateOf(input, "anchoring")).toBe("idle");
+    expect(rowOf(input, "anchoring").last).toBe(
+      `${YESTERDAY} · no seal that day · newest upgrade 2026-09-07 · block 966287`,
+    );
+  });
+
+  it("says nothing about upgrades when nothing has been upgraded", () => {
+    const input = swept({
+      environment: "production",
+      seals_yesterday: 4,
+      anchor: { date: YESTERDAY, external: "opentimestamps" },
+      upgraded_anchor: null,
+    });
+    expect(rowOf(input, "anchoring").last).toBe(`${YESTERDAY} · opentimestamps`);
+    expect(rowOf(input, "anchoring").last).not.toContain("newest upgrade");
+  });
+
+  it("says the block height even when yesterday's own anchor is the upgraded one", () => {
+    // The word and the segment are two different readings: "upgraded" says this
+    // anchor finished, the segment says which block holds it. A reader given
+    // only the word has nothing to check against the chain.
+    const input = swept({
+      environment: "production",
+      seals_yesterday: 4,
+      anchor: { date: YESTERDAY, external: "opentimestamps", upgraded: true },
+      upgraded_anchor: {
+        date: YESTERDAY,
+        block_height: 966_287,
+        upgraded_at: "2026-09-10T03:14:00.000Z",
+      },
+    });
+    expect(stateOf(input, "anchoring")).toBe("ok");
+    expect(rowOf(input, "anchoring").last).toBe(
+      `${YESTERDAY} · opentimestamps · upgraded · newest upgrade ${YESTERDAY} · block 966287`,
+    );
+  });
+
+  it("carries the segment without moving the state a pending proof leaves", () => {
+    // A pending receipt is unfinished, not faulty, and an older day's upgrade
+    // does not make it finished. The line grows; the light does not move.
+    const pending = swept({
+      environment: "production",
+      seals_yesterday: 4,
+      anchor: { date: YESTERDAY, external: "opentimestamps" },
+      upgraded_anchor: UPGRADE,
+    });
+    expect(stateOf(pending, "anchoring")).toBe("ok");
+    expect(rowOf(pending, "anchoring").last).toBe(
+      `${YESTERDAY} · opentimestamps · newest upgrade 2026-09-07 · block 966287`,
+    );
+
+    // And on the two states where nothing was anchored at all.
+    const missing = swept({ seals_yesterday: 4, upgraded_anchor: UPGRADE });
+    expect(stateOf(missing, "anchoring")).toBe("attention");
+    expect(rowOf(missing, "anchoring").last).toBe(
+      `${YESTERDAY} · not anchored · newest upgrade 2026-09-07 · block 966287`,
+    );
   });
 
   it("is ok when yesterday's roots are anchored", () => {
