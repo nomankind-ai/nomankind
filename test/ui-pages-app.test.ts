@@ -26,6 +26,7 @@ import { ledgerBalance, type LedgerRow } from "../src/ledger.js";
 import {
   attestationFor,
   DEFAULT_DOMAIN,
+  DOMAIN_SLUGS,
   LIST_PAGE_LIMIT,
   TRUSTED_POOL_SWITCH,
 } from "../src/policy.js";
@@ -38,6 +39,9 @@ import { renderHome } from "../src/ui/pages/home.js";
 import { renderOperator } from "../src/ui/pages/operator.js";
 import { renderOperators } from "../src/ui/pages/operators.js";
 import { SOURCE_CLASSES } from "../src/sources.js";
+import type { D1Like, D1LikeStatement } from "../src/storage/d1.js";
+import type { Env } from "../src/worker/env.js";
+import { handlePages } from "../src/worker/pages.js";
 import { ENTRIES_QUERY_PARAMETERS, ENTRY_DOMAINS } from "../src/ui/query.js";
 import {
   APP_CSS_HREF,
@@ -2039,5 +2043,129 @@ describe("APP_CSS below the breakpoint", () => {
     const wide = APP_CSS.slice(0, APP_CSS.indexOf("@media (max-width: 900px)"));
     expect(wide).toContain("min-width: 640px;");
     expect(wide).toContain("white-space: nowrap;");
+  });
+});
+
+/**
+ * The nav, and the route the nav points at.
+ *
+ * The header is built once for every page (src/ui/html.ts), so the order and the
+ * active item are properties of the layout rather than of any page, and that is
+ * what the first two assertions hold. The route below is the other half: a
+ * documentation page answers HTML to any GET, and this one reads the log for
+ * two counts per registered domain, so it is checked over a database that
+ * answers counts and nothing else — the page is a pure function and has its own
+ * file above; what is checked here is that the path exists, on the app host and
+ * on the apex, and that a HEAD is answered exactly like the GET without a body.
+ */
+describe("the Domains route and its place in the nav", () => {
+  /** How many of everything the stub database says there are. */
+  const COUNTED = 5;
+
+  /** A database that answers every count with the same number. */
+  function countingDatabase(): D1Like {
+    const statement = {
+      bind: () => statement,
+      first: () => Promise.resolve({ n: COUNTED }),
+      all: () => Promise.resolve({ results: [], success: true }),
+      run: () => Promise.resolve({ results: [], success: true }),
+    } as unknown as D1LikeStatement;
+    return {
+      prepare: () => statement,
+      batch: () => Promise.resolve([]),
+      exec: () => Promise.resolve({ count: 0, duration: 0 }),
+    };
+  }
+
+  /** The Worker's env, with nothing in it but the database the route reads. */
+  function envWith(apexHost?: string): Env {
+    return {
+      DB: countingDatabase(),
+      CAPTURES: {},
+      ENVIRONMENT: "local",
+      MAINTAINER_AGENT_ID: "",
+      ...(apexHost === undefined ? {} : { APEX_HOST: apexHost }),
+    } as unknown as Env;
+  }
+
+  const NOW = new Date("2026-09-11T00:00:00.000Z");
+
+  function get(url: string, env: Env, method = "GET"): Promise<Response | null> {
+    return handlePages(
+      new Request(url, { method, headers: { accept: "text/html" } }),
+      env,
+      { now: NOW },
+    );
+  }
+
+  it("carries Domains in the nav, right after Entries", () => {
+    const page = layout(ctx, { title: "Entries", body: html`` });
+    const nav = page.slice(
+      page.indexOf(`<nav class="nav-list">`),
+      page.indexOf("</nav>"),
+    );
+    expect(nav).toContain(`<a class="nav" href="/domains">Domains</a>`);
+    expect(nav.indexOf("/domains")).toBeGreaterThan(nav.indexOf("/entries"));
+    expect(nav.indexOf("/domains")).toBeLessThan(nav.indexOf("/operators"));
+  });
+
+  it("marks Domains active on /domains, and nothing else", () => {
+    const page = layout(
+      { ...ctx, path: "/domains" },
+      { title: "Domains", body: html`` },
+    );
+    expect(page).toContain(`<a class="nav nav-active" href="/domains">`);
+    expect(page).toContain(`<a class="nav" href="/entries">`);
+    expect(page).toContain(`<a class="nav" href="/operators">`);
+  });
+
+  it("answers GET /domains with the page, and the log's own counts", async () => {
+    const response = await get("https://app.nomankind.ai/domains", envWith());
+    expect(response).not.toBeNull();
+    expect(response!.status).toBe(200);
+    expect(response!.headers.get("content-type")).toBe(
+      "text/html; charset=utf-8",
+    );
+    const page = await response!.text();
+    expect(page).toContain("<h1>Domains</h1>");
+    for (const slug of DOMAIN_SLUGS) {
+      expect(page).toContain(`<section class="panel" id="${slug}">`);
+    }
+    expect(page).toContain(`${COUNTED} entries`);
+    expect(page).toContain(`${COUNTED} trusted operators`);
+  });
+
+  it("answers a GET that asked for no HTML with the page all the same", async () => {
+    const response = await handlePages(
+      new Request("https://app.nomankind.ai/domains"),
+      envWith(),
+      { now: NOW },
+    );
+    expect(response!.status).toBe(200);
+    expect(response!.headers.get("content-type")).toBe(
+      "text/html; charset=utf-8",
+    );
+  });
+
+  it("answers a HEAD like the GET, without the body", async () => {
+    const response = await get(
+      "https://app.nomankind.ai/domains",
+      envWith(),
+      "HEAD",
+    );
+    expect(response!.status).toBe(200);
+    expect(response!.headers.get("content-type")).toBe(
+      "text/html; charset=utf-8",
+    );
+    expect(response!.body).toBeNull();
+  });
+
+  it("answers on the apex, where every path but / is the app", async () => {
+    const response = await get(
+      "https://nomankind.ai/domains",
+      envWith("nomankind.ai"),
+    );
+    expect(response!.status).toBe(200);
+    expect(await response!.text()).toContain("<h1>Domains</h1>");
   });
 });

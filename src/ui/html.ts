@@ -267,6 +267,7 @@ const MIRROR_PATH = "/mirror/latest";
 const NAV: readonly { readonly href: string; readonly label: string; readonly external?: boolean }[] =
   [
     { href: "/entries", label: "Entries" },
+    { href: "/domains", label: "Domains" },
     { href: "/operators", label: "Operators" },
     { href: "/policy", label: "Policy" },
     { href: "/api", label: "API" },
