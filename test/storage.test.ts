@@ -24,6 +24,7 @@ import {
   LIST_PAGE_LIMIT,
   buildReadCountPayload,
   clawbackRows,
+  disputeRewardRow,
   payoutPlan,
   payoutRow,
   readShareRows,
@@ -119,7 +120,8 @@ import {
   standingByOperator,
   operatorStanding,
   standingForOperators,
-  priceBountyRow,
+  priceLedgerRow,
+  unpricedStakeRow,
   openRevalidationAssignment,
   openStakeRowsForOperator,
   overturnedCountsByOperator,
@@ -3631,6 +3633,64 @@ describe("dispute and revalidation writes", () => {
     ]);
   });
 
+  /**
+   * What the sweep's ledger step does to the reward the outcome left unpriced:
+   * Section 6 pays the challenger what the entry's approvers lost, so the row
+   * is priced from the clawbacks of its own event and read back priced.
+   */
+  it("prices the reward the outcome left unpriced, once", async () => {
+    const written = await ledgerRowsForEntry(store.db, targetId, 10);
+    const upheldSeq = written.find((row) => row.kind === "dispute_reward")!.seq;
+    const owed = await unpricedStakeRow(store.db, `dispute_reward:${upheldSeq}`);
+    expect(owed).not.toBeNull();
+    expect([owed!.unit, owed!.amount]).toEqual([null, null]);
+
+    const clawback: LedgerRow = {
+      id: `clawback:${upheldSeq}:read_share:1:${targetId}:submitter:${AUTHOR_OPERATOR}`,
+      kind: "clawback",
+      entry_id: targetId,
+      operator: AUTHOR_OPERATOR,
+      role: "submitter",
+      date: "2026-09-08",
+      reads: 10,
+      unit: "micros",
+      amount: -750,
+      available_at: "2026-10-08T00:00:00.000Z",
+      seq: upheldSeq,
+      at: AT,
+      ref: { claws_back: "read_share:1" },
+    };
+    const priced = disputeRewardRow(owed!, [clawback]);
+    await priceLedgerRow(store.db, priced.id, priced);
+
+    // One row still, under the same id, carrying the price: the stake reader
+    // presents it as the record it was written as, with the amount it now has.
+    const rows = await ledgerRowsForEntry(store.db, targetId, 10);
+    expect(rows.map((row) => row.kind)).toEqual([
+      "dispute_stake",
+      "dispute_refund",
+      "dispute_reward",
+    ]);
+    expect(rows[2]).toEqual({
+      ...(priced.ref as unknown as StakeRecord),
+      unit: "micros",
+      amount: 750,
+    });
+    expect(rows[2]!.agent).toBe(CHALLENGER);
+
+    // And the ledger's own reader gives the whole row back verbatim.
+    expect(
+      (await entryLedgerRows(store.db, targetId, 10)).filter(
+        (row) => row.kind === "dispute_reward",
+      ),
+    ).toEqual([priced]);
+
+    // Priced is priced: a replayed cursor finds nothing left to do.
+    expect(
+      await unpricedStakeRow(store.db, `dispute_reward:${upheldSeq}`),
+    ).toBeNull();
+  });
+
   it("runs a revalidation: request, draw, miss, and resolution", async () => {
     const request = await recordRevalidationRequest(store.db, {
       event: {
@@ -4142,6 +4202,63 @@ describe("the ledger", () => {
     expect(stored[0]!.ref).toMatchObject({ ok: true });
   });
 
+  it("skips a legacy revalidation reward an older log may still hold", async () => {
+    // D-095: a changed check pays the requester in standing, the currency the
+    // stake was in, so no door writes `revalidation_reward` any more and the
+    // mirror's fold never recomputes one. A log written before that decision
+    // can still carry the row, and a kind nothing prices and nothing pays would
+    // read on a page as money still owed — so the readers here skip it, and no
+    // page has to know the kind ever existed. Written by hand for exactly that
+    // reason: nothing in the source can produce one.
+    await store.db
+      .prepare(
+        `INSERT INTO ledger (id, kind, operator_id, entry_id, seq, created_at, payload_json, amount, unit)
+         VALUES (?, 'revalidation_reward', ?, ?, ?, ?, ?, ?, 'standing')`,
+      )
+      .bind(
+        "revalidation_reward:7",
+        LEDGER_OPERATOR,
+        LEDGER_ENTRY,
+        7,
+        "2026-06-01T00:00:00.000Z",
+        JSON.stringify({
+          kind: "revalidation_reward",
+          entry_id: LEDGER_ENTRY,
+          correction_entry_id: null,
+          request_seq: 6,
+          agent: "1F916:bGVnYWN5",
+          operator: LEDGER_OPERATOR,
+          unit: "standing",
+          amount: 3,
+          seq: 7,
+          at: "2026-06-01T00:00:00.000Z",
+        }),
+        3,
+      )
+      .run();
+
+    // It is in the table…
+    const stored = await store.db
+      .prepare(`SELECT kind FROM ledger WHERE id = ?`)
+      .bind("revalidation_reward:7")
+      .first<Record<string, unknown>>();
+    expect(stored?.["kind"]).toBe("revalidation_reward");
+
+    // …and in nothing any page or cycle reads.
+    for (const rows of [
+      await ledgerRowsForOperator(store.db, LEDGER_OPERATOR, LIST_PAGE_LIMIT),
+      await entryLedgerRows(store.db, LEDGER_ENTRY, LIST_PAGE_LIMIT),
+      await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE),
+    ]) {
+      expect(rows.map((row) => row.kind)).not.toContain("revalidation_reward");
+    }
+    expect(
+      (await ledgerRowsForEntry(store.db, LEDGER_ENTRY, LIST_PAGE_LIMIT)).map(
+        (row) => row.kind,
+      ),
+    ).not.toContain("revalidation_reward");
+  });
+
   it("remembers how far a step has read, and forgets nothing else", async () => {
     expect(await ledgerCursor(store.db, "read_share")).toBeNull();
     await setLedgerCursor(store.db, "read_share", 12);
@@ -4442,7 +4559,7 @@ describe("bounty pricing", () => {
     expect(before[0]!.stale_from).toBe("2026-06-01");
     expect(before[0]!.amount_micros).toBeNull();
 
-    await priceBountyRow(store.db, UNPRICED_ID, priced);
+    await priceLedgerRow(store.db, UNPRICED_ID, priced);
 
     // One row still, under the same id, and now the ledger's own shape.
     const after = await bountiesForEntry(store.db, BOUNTY_ENTRY, LIST_PAGE_LIMIT);
@@ -4457,7 +4574,7 @@ describe("bounty pricing", () => {
   it("reprices nothing and deletes nothing on a replayed cursor", async () => {
     // A row that has already been priced is not `amount IS NULL`, so the delete
     // passes over it, and the insert is ignored by id.
-    await priceBountyRow(store.db, UNPRICED_ID, { ...priced, amount: 999 });
+    await priceLedgerRow(store.db, UNPRICED_ID, { ...priced, amount: 999 });
 
     expect(await bountiesForEntry(store.db, BOUNTY_ENTRY, LIST_PAGE_LIMIT)).toEqual(
       [priced],

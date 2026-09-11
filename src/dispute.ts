@@ -212,8 +212,9 @@ export function checkStakeCover(cover: StakeCover): StakeCoverVerdict {
  *
  * Only the rows whose unit is standing: a bare key's dispute stake is a filing
  * fee in cents (Section 6), it is nobody's standing, and adding it to this total
- * would be adding two units together. A row with no amount is not a stake — a
- * reward carries none — and counts as nothing.
+ * would be adding two units together. A reward is neither — unpriced it carries
+ * no amount, and priced it is micros, what the overturned entry lost — so it
+ * counts as nothing here whichever it is.
  */
 export function lockedStanding(rows: readonly StakeRecord[]): number {
   let locked = 0;

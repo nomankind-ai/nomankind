@@ -4,9 +4,9 @@
  * Whitepaper Section 6, "Dispute": "A verified operator stakes standing, a bare
  * key stakes a refundable filing fee ... An upheld challenge returns the stake,
  * pays the challenger ... A failed challenge forfeits the stake." And
- * "Revalidate": "If the check finds the fact changed, the requester gets the
- * stake back plus a challenger-style reward. If the entry holds, the requester
- * loses the stake."
+ * "Revalidate": "If the entry holds, the requester loses the stake", and a
+ * request that turns up a citation "can be upgraded into a dispute" — so a
+ * check earns no reward of its own, and the only reward here is the dispute's.
  *
  * Every amount is read from src/policy.ts; a literal here would put a policy
  * number in a second place. Every field is read out of a sealed event, which is
@@ -132,7 +132,9 @@ describe("disputeOutcomeStakes", () => {
     // The refund is exactly what was staked.
     expect(rows[0]!.unit).toBe("standing");
     expect(rows[0]!.amount).toBe(DISPUTE_STAKE_STANDING);
-    // Section 9's pricing is M21's, so the reward is owed and not priced.
+    // The reward is owed here and priced by the ledger step, from the
+    // clawbacks of this same event: a number invented here would be a second
+    // answer to what the entry lost.
     expect(rows[1]!.unit).toBeNull();
     expect(rows[1]!.amount).toBeNull();
     // Both rows sit at the outcome's position, not the filing's.
@@ -197,17 +199,15 @@ describe("revalidationOutcomeStakes", () => {
     expect(rows[0]!.seq).toBe(30);
   });
 
-  it("returns the stake and owes a reward when the fact changed", () => {
+  it("returns the stake and nothing beside it when the fact changed", () => {
+    // The request staked for a check and got one. Section 6 pays a reward on a
+    // dispute, and a check that turns up a citation is upgraded into one.
     const rows = revalidationOutcomeStakes(
       requested("operator"),
       resolved("changed"),
     );
-    expect(rows.map((row) => row.kind)).toEqual([
-      "revalidation_refund",
-      "revalidation_reward",
-    ]);
+    expect(rows.map((row) => row.kind)).toEqual(["revalidation_refund"]);
     expect(rows[0]!.amount).toBe(REVALIDATION_REQUEST_STAKE_STANDING);
-    expect(rows[1]!.amount).toBeNull();
   });
 
   it("returns the stake alone when the request is upgraded to a dispute", () => {

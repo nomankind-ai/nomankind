@@ -348,6 +348,11 @@ describe("renderPolicy", () => {
         `${POLICY.STANDING_SUBMISSION_VERIFIED} standing`,
       ],
       ["STANDING_DISPUTE_UPHELD", `${POLICY.STANDING_DISPUTE_UPHELD} standing`],
+      // D-095: the reward on a check that found the fact changed, in standing.
+      [
+        "STANDING_REVALIDATION_CHANGED",
+        `${POLICY.STANDING_REVALIDATION_CHANGED} standing`,
+      ],
       [
         "STANDING_OVERTURNED_SIGNER",
         `${POLICY.STANDING_OVERTURNED_SIGNER} standing`,
@@ -1054,14 +1059,18 @@ describe("renderApi", () => {
     ]);
   });
 
-  it("says in words what each mechanism is, and that stakes are placeholders", () => {
+  it("says in words what each mechanism is, and how a reward is priced", () => {
     expect(page).toContain("A dispute is a challenge to a verified entry");
     expect(page).toContain("A revalidation request is an operator asking");
     expect(page).toContain("A failure report is a signed report");
     expect(page).toContain("distinct registered\n          operators");
     expect(page).toContain("drawn from the trusted pool by the public randomness");
-    expect(page).toContain("ledger records and nothing else");
-    expect(page).toContain("No\n          money moves on any of them today.");
+    expect(page).toContain("ledger records in the unit they were put up in");
+    // The reward is the one stake row with a number of its own, and the page
+    // says where the number comes from: the entry the challenge overturned.
+    expect(page).toContain("ledger step prices it at exactly what the clawbacks");
+    expect(page).toContain("prices the reward at zero");
+    expect(page).toContain("A revalidation request\n          has no reward of its own");
   });
 
   it("gives the three 409 conflicts and never a status of its own", () => {
@@ -2031,6 +2040,28 @@ describe("the paper and the README carry observed pays more (D-087)", () => {
     expect(whitepaper).toContain(
       "earns it beside the assigned or volunteered amount",
     );
+  });
+
+  it("labels the changed-check reward in Section 6, beside the promise (D-095)", () => {
+    const promise = whitepaper.indexOf("plus a challenger-style reward.");
+    const labeled = whitepaper.indexOf(
+      "[Spec change 2026-09-11, D-095] The reward is paid in standing",
+    );
+    expect(promise).toBeGreaterThan(-1);
+    expect(labeled).toBeGreaterThan(promise);
+    expect(whitepaper).toContain("STANDING_REVALIDATION_CHANGED");
+    expect(whitepaper).toContain("the currency the stake was in");
+    expect(whitepaper).toContain(
+      "a dispute's reward is money because a dispute claws money back",
+    );
+    // The README says it too, in the section that names the stake.
+    const section = readme.indexOf("## Standing and the ledger");
+    const rule = readme.indexOf("**A changed check pays standing**");
+    const next = readme.indexOf("## Attesting a model");
+    expect(section).toBeGreaterThan(-1);
+    expect(rule).toBeGreaterThan(section);
+    expect(rule).toBeLessThan(next);
+    expect(readme).toContain("`STANDING_REVALIDATION_CHANGED`");
   });
 
   it("names the rule in the README, in the section about the ledger", () => {

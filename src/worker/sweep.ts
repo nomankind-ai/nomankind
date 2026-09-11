@@ -127,6 +127,7 @@ import {
 import {
   bountyAccrualRow,
   clawbackRows,
+  disputeRewardRow,
   payoutPlan,
   payoutRow,
   readShareRows,
@@ -193,7 +194,7 @@ import {
   openRevalidationAssignment,
   operatorDomains,
   payoutRows,
-  priceBountyRow,
+  priceLedgerRow,
   pendingAnchorsAfter,
   putAnchor,
   putEntry,
@@ -223,6 +224,7 @@ import {
   setSealRegistry,
   setSealWitnesses,
   staleDue,
+  unpricedStakeRow,
   unwitnessedSeals,
   type OperatorRecord,
   type ReadCountKeyCursor,
@@ -1815,6 +1817,11 @@ async function priceBounty(
  * `read_count`, `dispute_upheld`, `reconfirmation` — and this reads them in log
  * order and writes what src/ledger.ts says they are worth.
  *
+ * An upheld dispute is worth two things at once, and the second is the price of
+ * the first: Section 6 "pays the challenger" and "claws back what the approvers
+ * earned on it", so the clawbacks are written and the `dispute_reward` row the
+ * dispute door left unpriced at that position is priced at what they come to.
+ *
  * Only sealed events, ever: a price computed off an event the log has not
  * committed to could be recomputed differently later, and Section 9's promise
  * that an operator can reconcile a payout against the log would be worth
@@ -1851,9 +1858,19 @@ async function ledgerStep(
         if (entryId === null) continue;
         const held = await heldReadShareRows(db, entryId, event.at);
         const rows = clawbackRows(event, held);
-        if (rows.length === 0) continue;
-        await putLedgerRows(db, rows);
-        clawbacks += rows.length;
+        if (rows.length > 0) {
+          await putLedgerRows(db, rows);
+          clawbacks += rows.length;
+        }
+        // Section 6: the same sentence that claws back "what the approvers
+        // earned on it" pays the challenger, so the clawbacks are the price of
+        // the reward the dispute door wrote unpriced at this position. An entry
+        // that had nothing held is priced at zero rather than left null: the
+        // step has passed the row, and what it found was nothing.
+        const owed = await unpricedStakeRow(db, `dispute_reward:${event.seq}`);
+        if (owed === null) continue;
+        const priced = disputeRewardRow(owed, rows);
+        await priceLedgerRow(db, priced.id, priced);
         continue;
       }
 
@@ -1865,7 +1882,7 @@ async function ledgerStep(
         // The unpriced accrual out and the priced row in, in one batch: the
         // delete is the only record that the bounty was ever owed, so it must
         // not be able to land without the price.
-        await priceBountyRow(db, row.id, row);
+        await priceLedgerRow(db, row.id, row);
         bounties += 1;
       }
     }
@@ -2106,6 +2123,12 @@ async function standingStep(
  * Decision D-053: at most one payout batch per operator per cycle, above a
  * published minimum. Below it nothing is claimed and nothing is marked, so the
  * rows carry forward whole to the next cycle (src/ledger.ts, `payoutPlan`).
+ *
+ * Both halves select by operator — `releasedUnpaidRows` on the `operator_id`
+ * column, `payoutPlan` on the row's own operator — so a row with no operator is
+ * never selected and never paid. That is the whole mechanism behind Section 6's
+ * bare-key reward: it accrues to the key and holds, and turning it into dollars
+ * means verifying as an operator, which gives the row an operator to pay.
  */
 async function payOperator(
   db: D1Like,

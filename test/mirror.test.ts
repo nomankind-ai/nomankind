@@ -68,6 +68,7 @@ import {
 } from "../src/storage/repository.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
+  CHALLENGER_OPERATOR,
   CORRECTION_ENTRY_ID,
   OUTSIDE_OPERATORS,
   VERIFIED_ENTRY_ID,
@@ -813,8 +814,14 @@ describe("attestations, standing and the ledger", () => {
     expect(stake.entry_id).toBe(VERIFIED_ENTRY_ID);
     expect(stake.id).toBe(`dispute_stake:${stake.seq}`);
 
-    // No payout is ever derivable, so none is ever written.
+    // No payout is ever derivable, so none is ever written. Nor the legacy
+    // `revalidation_reward`: D-095 pays a changed check in standing, the
+    // currency its stake was in, so the kind is no longer a `StakeKind` and
+    // this fold cannot produce one — which is why the storage readers skip a
+    // row an older log may still hold, rather than showing what no clone can
+    // recompute.
     expect(kinds).not.toContain("payout");
+    expect(kinds).not.toContain("revalidation_reward");
   });
 
   it("counts all three families in the manifest", () => {
@@ -831,6 +838,111 @@ describe("attestations, standing and the ledger", () => {
 
   it("builds the same bytes twice with all three families in it", () => {
     expect(buildMirror(richInput())).toEqual(files);
+  });
+});
+
+/**
+ * The reward an upheld dispute is paid, recomputed from the same events the
+ * sweep's ledger step prices it from.
+ *
+ * Whitepaper Section 6: an upheld challenge "returns the stake, pays the
+ * challenger, overturns the entry, and claws back what the approvers earned on
+ * it (Section 9)" — one sentence, and the last clause is the amount of the
+ * second. So the reward is a function of the log like every other row in the
+ * fold, and this is the property that makes verify-mirror's ledger check worth
+ * running: a clone recomputes the amount rather than believing it.
+ */
+describe("the ledger fold over an upheld dispute", () => {
+  const DAY = "2026-09-09";
+  const READS = 4_000;
+
+  /** The log with a day of reads before the overturn: money still in holdback. */
+  let withShares: Event[] = [];
+  /** The same overturn with no day of reads at all: nothing was ever held. */
+  let withoutShares: Event[] = [];
+
+  function rowsOf(events: readonly Event[]): LedgerRow[] {
+    return mirrorLedgerRows(events, "2026-09-12T00:00:00.000Z");
+  }
+
+  function upheld(events: readonly Event[], at: string): Promise<Event[]> {
+    return appendEvent(events, {
+      at,
+      type: "dispute_upheld",
+      entry_id: VERIFIED_ENTRY_ID,
+      payload: { correction_entry_id: CORRECTION_ENTRY_ID },
+    });
+  }
+
+  beforeAll(async () => {
+    const one = await buildVerifyWorld({ withDispute: "outsider" });
+    withoutShares = await upheld(one.bundle.events, "2026-09-10T12:00:00.000Z");
+
+    const day = await appendEvent(one.bundle.events, {
+      at: "2026-09-10T00:20:00.000Z",
+      type: "read_count",
+      entry_id: null,
+      payload: {
+        date: DAY,
+        reads: [{ entry_id: VERIFIED_ENTRY_ID, count: READS }],
+        total: READS,
+        counter_first: 1,
+        counter_last: READS,
+      },
+    });
+    withShares = await upheld(day, "2026-09-10T12:00:00.000Z");
+  }, 120_000);
+
+  it("prices the reward at what the entry's signers lost", () => {
+    const rows = rowsOf(withShares);
+    const clawbacks = rows.filter((row) => row.kind === "clawback");
+    expect(clawbacks.length).toBeGreaterThan(0);
+
+    const reward = rows.find((row) => row.kind === "dispute_reward")!;
+    expect(reward.unit).toBe("micros");
+    expect(reward.amount).toBe(
+      -clawbacks.reduce((sum, row) => sum + row.amount, 0),
+    );
+    expect(reward.amount).toBeGreaterThan(0);
+    // It leaves when the last clawed-back share would have.
+    expect(reward.available_at).toBe(
+      clawbacks.map((row) => row.available_at).sort().at(-1),
+    );
+    // The row the dispute door wrote, at the position it became owed, with the
+    // record it was written as and the rows the price was read off under ref.
+    const outcome = withShares.find((event) => event.type === "dispute_upheld")!;
+    expect([reward.id, reward.seq, reward.at]).toEqual([
+      `dispute_reward:${outcome.seq}`,
+      outcome.seq,
+      outcome.at,
+    ]);
+    expect(reward.ref).toMatchObject({
+      operator: CHALLENGER_OPERATOR,
+      amount: null,
+      clawbacks: clawbacks.map((row) => row.id),
+    });
+    expect(reward.operator).toBe(CHALLENGER_OPERATOR);
+
+    // And the refund beside it is untouched: the stake back, in standing.
+    const refund = rows.find((row) => row.kind === "dispute_refund")!;
+    expect([refund.unit, refund.seq]).toEqual(["standing", outcome.seq]);
+  });
+
+  it("prices it at zero when the entry had accrued nothing", () => {
+    const rows = rowsOf(withoutShares);
+    expect(rows.filter((row) => row.kind === "clawback")).toEqual([]);
+    const reward = rows.find((row) => row.kind === "dispute_reward")!;
+    expect([reward.unit, reward.amount, reward.available_at]).toEqual([
+      "micros",
+      0,
+      null,
+    ]);
+  });
+
+  it("recomputes the same row twice from the same events", () => {
+    // The property verify-mirror's ledger check rests on: the fold is a
+    // function, so a clone and the ledger it is a copy of cannot disagree.
+    expect(rowsOf(withShares)).toEqual(rowsOf(withShares));
   });
 });
 

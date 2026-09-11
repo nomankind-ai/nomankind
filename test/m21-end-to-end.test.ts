@@ -48,7 +48,8 @@ import {
   generateKeypair,
 } from "../src/identity.js";
 import { mintKey } from "../src/keys.js";
-import type { LedgerRow } from "../src/ledger.js";
+import { payoutPlan, type LedgerRow } from "../src/ledger.js";
+import { mirrorLedgerRows } from "../src/mirror.js";
 import {
   DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
@@ -67,10 +68,13 @@ import { signCore } from "../src/sign.js";
 import { buildSubmittedCore, type SubmissionProposal } from "../src/submit.js";
 import {
   entryLedgerRows,
+  eventsAfter,
   getOperator,
+  latestSeal,
   payoutRows,
   putLedgerRows,
   putOperator,
+  releasedUnpaidRows,
   setOperatorStanding,
 } from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
@@ -984,6 +988,23 @@ describe("a dispute upheld inside the holdback", () => {
       held.map((row) => row.available_at),
     );
 
+    // Section 6's same sentence pays the challenger: the reward the dispute
+    // door wrote unpriced is priced here at exactly what came back, and leaves
+    // when the last of those shares would have.
+    const rewards = await rowsOfKind(id, "dispute_reward");
+    expect(rewards).toHaveLength(1);
+    const reward = rewards[0]!;
+    expect([reward.unit, reward.amount]).toEqual([
+      "micros",
+      -clawbacks.reduce((sum, row) => sum + row.amount, 0),
+    ]);
+    expect(reward.available_at).toBe(
+      clawbacks.map((row) => row.available_at).sort().at(-1),
+    );
+    expect(reward.ref["clawbacks"]).toEqual(clawbacks.map((row) => row.id));
+    // The row it was written as is still under `ref`, naming the challenger.
+    expect(reward.ref["agent"]).toBe(n1.agent.agentId);
+
     // An operator that held a share on this entry and nowhere else: everything
     // it accrued came back.
     const ledger = await ledgerOf(k5.operator, at);
@@ -1001,6 +1022,80 @@ describe("a dispute upheld inside the holdback", () => {
     expect(
       (reconfirmer["counts"] as Record<string, number>)["overturned"],
     ).toBe(1);
+  }, 600_000);
+
+  it("holds the challenger's reward, then releases it to their operator", async () => {
+    // Section 6 pays the challenger, and Section 9 holds what it pays for as
+    // long as the shares it was priced off: the reward waits with them and
+    // comes out with them, on the challenger's operator's own balance.
+    const id = heldEntry["id"] as string;
+    const reward = (await rowsOfKind(id, "dispute_reward"))[0]!;
+    expect([reward.operator, reward.unit]).toEqual([n1.operator, "micros"]);
+    expect(reward.amount).toBeGreaterThan(0);
+
+    // An hour inside the holdback: held, and no cycle can reach it.
+    const inside = new Date(new Date(reward.available_at!).getTime() - HOUR_MS);
+    const held = (await ledgerOf(n1.operator, inside)).balance;
+    expect([held["accrued"], held["held"], held["released"]]).toEqual([
+      reward.amount,
+      reward.amount,
+      0,
+    ]);
+    expect(
+      (
+        await releasedUnpaidRows(world.store.db, n1.operator, inside.toISOString())
+      ).map((row) => row.id),
+    ).not.toContain(reward.id);
+
+    // At its release it is what the payout cycle reads: released, unpaid, and
+    // either paid this cycle or carried whole to the next.
+    const out = new Date(reward.available_at!);
+    const released = await releasedUnpaidRows(
+      world.store.db,
+      n1.operator,
+      out.toISOString(),
+    );
+    expect(released.map((row) => row.id)).toContain(reward.id);
+    const plan = payoutPlan(n1.operator, released, out.toISOString());
+    expect(plan.amount + plan.carried_forward).toBe(reward.amount);
+
+    const balance = (await ledgerOf(n1.operator, out)).balance;
+    expect([balance["released"], balance["paid"], balance["carried_forward"]]).toEqual(
+      [reward.amount, 0, reward.amount],
+    );
+  }, 600_000);
+
+  it("stores the reward the mirror recomputes, field for field", async () => {
+    // The property verify-mirror's ledger check rests on: a clone recomputes
+    // the reward from the sealed events rather than believing the number, so a
+    // stored row and a recomputed one cannot disagree about what an upheld
+    // challenge is owed.
+    const id = heldEntry["id"] as string;
+    const stored = (await rowsOfKind(id, "dispute_reward"))[0]!;
+
+    const sealed = (await latestSeal(world.store.db))!;
+    const events = await eventsAfter(world.store.db, -1, LIST_PAGE_LIMIT * 20);
+    const recomputed = mirrorLedgerRows(events, sealed.sealed_at).filter(
+      (row) => row.kind === "dispute_reward" && row.entry_id === id,
+    );
+    expect(recomputed).toHaveLength(1);
+    expect(recomputed[0]).toEqual(stored);
+    // Named field by field as well, so a failure says which one moved.
+    expect([
+      recomputed[0]!.id,
+      recomputed[0]!.amount,
+      recomputed[0]!.unit,
+      recomputed[0]!.available_at,
+      recomputed[0]!.operator,
+      recomputed[0]!.ref,
+    ]).toEqual([
+      stored.id,
+      stored.amount,
+      stored.unit,
+      stored.available_at,
+      stored.operator,
+      stored.ref,
+    ]);
   }, 600_000);
 
   it("moves the trusted pool, and the next run's snapshot says so", async () => {

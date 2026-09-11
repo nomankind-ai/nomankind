@@ -1758,7 +1758,6 @@ const STAKE_KINDS: readonly StakeRecord["kind"][] = Object.freeze([
   "revalidation_stake",
   "revalidation_refund",
   "revalidation_forfeit",
-  "revalidation_reward",
 ] as const);
 
 const STAKE_KINDS_IN = `kind IN (${STAKE_KINDS.map(() => "?").join(", ")})`;
@@ -1876,7 +1875,7 @@ export async function recordReconfirmation(
  *
  * M15's door writes the unpriced `BountyAccrual` the moment a reconfirmation
  * lands, and M21's sweep replaces it under the same id with src/ledger.ts's
- * priced `LedgerRow` (`priceBountyRow`). So the same entry's bounties can come
+ * priced `LedgerRow` (`priceLedgerRow`). So the same entry's bounties can come
  * back as either, depending on whether the sweep has run since, and a caller
  * has to ask which it is holding rather than assume. The accrual's three window
  * fields are what tells them apart: a priced row has none of them, which is
@@ -2333,12 +2332,39 @@ export async function correctionEntriesFor(
 }
 
 /**
+ * One stake row, as src/stake.ts wrote it.
+ *
+ * A row the ledger step has priced carries a whole `LedgerRow` in
+ * `payload_json` — the dispute reward, priced from the clawbacks of its own
+ * event — and the record it was written as is under `ref`. So the record comes
+ * back from there, carrying the price the row now holds, and a reader of this
+ * list sees one shape whether the step has passed the row's position or not.
+ */
+function toStakeRecord(row: Row): StakeRecord {
+  const payload = readJson<Record<string, unknown>>(row, "payload_json");
+  const ref = payload["ref"];
+  if (typeof ref !== "object" || ref === null) {
+    return payload as unknown as StakeRecord;
+  }
+  return {
+    ...(ref as unknown as StakeRecord),
+    unit: payload["unit"] as StakeRecord["unit"],
+    amount: payload["amount"] as StakeRecord["amount"],
+  };
+}
+
+/**
  * The stake rows one entry's disputes and revalidations produced, oldest first.
  *
  * Read through 0009's `entry_id` column rather than `json_extract`, unlike
  * `bountiesForEntry`: a stake is looked up per entry on every entry page that
  * has ever been disputed, which is a seek and not a scan. Filtered to the stake
  * kinds so the return type is honest when M21 fills the rest of this table.
+ *
+ * That filter is also what skips the legacy `revalidation_reward`
+ * (`LEGACY_KIND_SKIPPED`): the kind is no longer a `StakeKind`, so it is not in
+ * `STAKE_KINDS` and an old log's row is left out of the entry page's stakes
+ * panel exactly as `ledgerRowsForOperator` leaves it out of the operator's.
  */
 export async function ledgerRowsForEntry(
   db: D1Like,
@@ -2352,7 +2378,28 @@ export async function ledgerRowsForEntry(
     )
     .bind(entryId, ...STAKE_KINDS, limit)
     .all<Row>();
-  return rows.results.map((row) => readJson<StakeRecord>(row, "payload_json"));
+  return rows.results.map(toStakeRecord);
+}
+
+/**
+ * One stake row by its id, or null when there is none or it has been priced
+ * already.
+ *
+ * The ledger step's read: it prices the `dispute_reward` row the dispute door
+ * wrote at the outcome, and `amount IS NULL` is what says the row is still the
+ * fact without the number. A row that has been priced comes back null, so a
+ * replayed cursor reprices nothing — the same guard `priceLedgerRow`'s delete
+ * applies, asked before the work rather than after it.
+ */
+export async function unpricedStakeRow(
+  db: D1Like,
+  id: string,
+): Promise<StakeRecord | null> {
+  const row = await db
+    .prepare(`SELECT payload_json FROM ledger WHERE id = ? AND amount IS NULL`)
+    .bind(id)
+    .first<Row>();
+  return row === null ? null : readJson<StakeRecord>(row, "payload_json");
 }
 
 /** What a filing puts up: the only two kinds that can still be in flight. */
@@ -2522,11 +2569,27 @@ const LEDGER_ROW_COLUMNS =
 
 /**
  * The kinds that carry money to or from an operator and wait out the holdback:
- * the accruals, and the clawbacks that negate them. A clawback carries the
- * release instant of the share it cancels, so all three are read by one
- * `available_at` test.
+ * the accruals, the clawbacks that negate them, and the reward an upheld
+ * challenge is paid. A clawback carries the release instant of the share it
+ * cancels and a reward the latest of those, so all four are read by one
+ * `available_at` test — and an unpriced reward, which has no release instant at
+ * all until the ledger step prices it, fails that test and is never selected.
+ * src/ledger.ts's `isBalanceKind` is the same list.
  */
-const BALANCE_KINDS = `('read_share', 'bounty_accrual', 'clawback')`;
+const BALANCE_KINDS =
+  `('read_share', 'bounty_accrual', 'clawback', 'dispute_reward')`;
+
+/**
+ * A kind no door writes any more: a revalidation check that found the fact
+ * changed used to pay a reward of its own, and D-095 pays the requester in
+ * standing instead — the currency the stake was in — leaving the money reward to
+ * the dispute an upgraded check becomes. A log written before that decision can
+ * still hold one of these rows, so every reader in this module skips it: the
+ * mirror's fold never recomputes one, and a kind nothing prices and nothing pays
+ * would read on a page as money still owed. Skipped here so no page has to know
+ * the kind ever existed.
+ */
+const LEGACY_KIND_SKIPPED = `kind <> 'revalidation_reward'`;
 
 /**
  * One row, as src/ledger.ts built it.
@@ -2604,21 +2667,24 @@ export async function putLedgerRows(
 }
 
 /**
- * Replace M15's unpriced accrual with the priced row, atomically.
+ * Replace an unpriced row with the priced one, atomically.
  *
- * The door writes the accrual the moment a reconfirmation lands, with no amount
- * (src/bounty.ts: pricing is M21's), and src/ledger.ts builds the priced row
- * under exactly the same id — so one of the two has to go or the insert is
- * ignored and the bounty stays unpriced forever. Two statements would leave a
- * window where the sweep has deleted the accrual and not yet written the price:
- * a crash there loses the bounty, because the delete is the only record that it
- * was ever owed. One batch makes that window impossible.
+ * Two rows are written by a door with no amount and priced by the sweep's
+ * ledger step afterwards: M15's bounty accrual, and the `dispute_reward` an
+ * upheld challenge is owed, whose price is the clawbacks of its own event. Both
+ * are priced under exactly the same id the door wrote — so one of the two has to
+ * go or the insert is ignored and the row stays unpriced forever. Two
+ * statements would leave a window where the sweep has deleted the unpriced row
+ * and not yet written the price: a crash there loses it, because the deleted
+ * row is the only record that anything was ever owed. One batch makes that
+ * window impossible.
  *
  * The `amount IS NULL` clause is what keeps a replayed cursor safe: a row that
  * has already been priced is never deleted, and the insert that follows is
- * ignored by id, so a rerun reprices nothing and removes nothing.
+ * ignored by id, so a rerun reprices nothing and removes nothing. A reward
+ * priced at zero is priced: zero is not null, and the row is left alone.
  */
-export async function priceBountyRow(
+export async function priceLedgerRow(
   db: D1Like,
   unpricedId: string,
   row: LedgerRow,
@@ -2637,6 +2703,10 @@ export async function priceBountyRow(
  * Newest first because that is the question an operator page asks — what
  * happened to my money lately — and because a payout cycle reads through
  * `releasedUnpaidRows` and not through this.
+ *
+ * The legacy `revalidation_reward` kind is skipped (`LEGACY_KIND_SKIPPED`), so
+ * the operator page's ledger panel shows what the mirror can recompute and
+ * nothing else.
  */
 export async function ledgerRowsForOperator(
   db: D1Like,
@@ -2649,14 +2719,16 @@ export async function ledgerRowsForOperator(
       ? await db
           .prepare(
             `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
-             WHERE operator_id = ? ORDER BY seq DESC LIMIT ?`,
+             WHERE operator_id = ? AND ${LEGACY_KIND_SKIPPED}
+             ORDER BY seq DESC LIMIT ?`,
           )
           .bind(operator, limit)
           .all<Row>()
       : await db
           .prepare(
             `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
-             WHERE operator_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`,
+             WHERE operator_id = ? AND seq < ? AND ${LEGACY_KIND_SKIPPED}
+             ORDER BY seq DESC LIMIT ?`,
           )
           .bind(operator, beforeSeq, limit)
           .all<Row>();
@@ -2751,6 +2823,12 @@ export async function bountyPoolRows(
  * else: the two are released in the same instant, and a share can never be paid
  * out from under a clawback that is still held. src/ledger.ts's `payoutPlan`
  * applies the same rule again to what comes back.
+ *
+ * A priced `dispute_reward` comes back here too, at its own release. Selected by
+ * `operator_id`, so a bare key's reward — a row with no operator — is never
+ * selected by anyone and can never be paid: Section 6 has it accrue to the key
+ * and hold, and "turning it into dollars means verifying as an operator". An
+ * unpriced reward has no `available_at` yet and fails the release test.
  */
 export async function releasedUnpaidRows(
   db: D1Like,
@@ -2889,6 +2967,10 @@ export async function payoutRows(
  * behind the entry page's money panel. `ledgerRowsForEntry` keeps its stake
  * filter, because the dispute panel asks a narrower question and its answer is
  * a `StakeRecord`.
+ *
+ * Whatever its kind but one: the legacy `revalidation_reward`
+ * (`LEGACY_KIND_SKIPPED`) is skipped here as it is everywhere else, so the two
+ * panels of one entry page cannot disagree about whether it exists.
  */
 export async function entryLedgerRows(
   db: D1Like,
@@ -2898,7 +2980,7 @@ export async function entryLedgerRows(
   const rows = await db
     .prepare(
       `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
-       WHERE entry_id = ? ORDER BY seq LIMIT ?`,
+       WHERE entry_id = ? AND ${LEGACY_KIND_SKIPPED} ORDER BY seq LIMIT ?`,
     )
     .bind(entryId, limit)
     .all<Row>();

@@ -18,7 +18,9 @@
  * nothing else in the log moves standing. A drift attestation's score is a
  * completed validation of that list and a scorer that let the window run out
  * missed an assignment of it, which is why Section 8's two events are in the
- * fold beside Section 6's.
+ * fold beside Section 6's. A revalidation request whose check found the fact
+ * changed earns Section 6's "challenger-style reward" of that same list, in
+ * standing because the stake was standing (decision D-095).
  *
  * "It decays when the work it came from stops being read or was never used ...
  * Decay is paused until the paid loop starts." So there is no decay term here at
@@ -49,6 +51,7 @@ import {
   STANDING_ATTESTATION_SCORED,
   STANDING_DISPUTE_UPHELD,
   STANDING_OVERTURNED_SIGNER,
+  STANDING_REVALIDATION_CHANGED,
   STANDING_SUBMISSION_VERIFIED,
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
@@ -81,6 +84,12 @@ export interface StandingCounts {
   readonly attestations_scored: number;
   readonly submissions_verified: number;
   readonly disputes_upheld: number;
+  /**
+   * Revalidation requests this operator staked whose check found the fact
+   * changed (decision D-095). Counted apart from the disputes because it is a
+   * smaller move: a request carries no citation, it only asks for a check.
+   */
+  readonly revalidations_changed: number;
   readonly overturned: number;
   readonly missed: number;
   readonly forfeits: number;
@@ -121,6 +130,7 @@ interface Accumulator {
   attestations_scored: number;
   submissions_verified: number;
   disputes_upheld: number;
+  revalidations_changed: number;
   overturned: number;
   missed: number;
   forfeits: number;
@@ -142,6 +152,7 @@ export const STANDING_FORMULA: readonly string[] = Object.freeze([
   "STANDING_ATTESTATION_SCORED",
   "STANDING_SUBMISSION_VERIFIED",
   "STANDING_DISPUTE_UPHELD",
+  "STANDING_REVALIDATION_CHANGED",
   "STANDING_OVERTURNED_SIGNER",
   "STANDING_ASSIGNMENT_MISSED",
   "DISPUTE_STAKE_STANDING",
@@ -172,6 +183,7 @@ function empty(operator: string): Accumulator {
     attestations_scored: 0,
     submissions_verified: 0,
     disputes_upheld: 0,
+    revalidations_changed: 0,
     overturned: 0,
     missed: 0,
     forfeits: 0,
@@ -194,6 +206,7 @@ function freeze(accumulator: Accumulator, position: number): Standing {
       attestations_scored: accumulator.attestations_scored,
       submissions_verified: accumulator.submissions_verified,
       disputes_upheld: accumulator.disputes_upheld,
+      revalidations_changed: accumulator.revalidations_changed,
       overturned: accumulator.overturned,
       missed: accumulator.missed,
       forfeits: accumulator.forfeits,
@@ -479,6 +492,15 @@ export function standingAt(
           // "If the entry holds, the requester loses the stake."
           record.burned += REVALIDATION_REQUEST_STAKE_STANDING;
           record.forfeits += 1;
+        } else if (event.payload.outcome === "changed") {
+          // "If the check finds the fact changed, the requester gets the stake
+          // back plus a challenger-style reward" (decision D-095). The stake was
+          // standing, so the reward is standing: a dispute pays money because a
+          // dispute claws money back, and a check that found the fact changed
+          // claws back nothing. An upgraded request earns nothing here, because
+          // the dispute it became is what pays it.
+          record.earned += STANDING_REVALIDATION_CHANGED;
+          record.revalidations_changed += 1;
         }
       }
 

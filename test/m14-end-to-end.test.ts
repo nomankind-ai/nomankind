@@ -36,7 +36,7 @@ import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import type { Core } from "../src/core.js";
 import { base64urlDecode, base64urlEncode } from "../src/encoding.js";
-import { appendEvent, type ApproverRecord, type Event } from "../src/events.js";
+import type { ApproverRecord, Event } from "../src/events.js";
 import {
   DEFAULT_DOMAIN,
   APPROVALS_TO_VERIFY_SMALL_POOL,
@@ -49,12 +49,10 @@ import { txtRecordName } from "../src/registry.js";
 import { validateEntry } from "../src/schema.js";
 import type { SubmissionProposal } from "../src/submit.js";
 import {
-  appendEvents,
   eventBySeq,
   getEntry,
   headSeq,
   openAssignment as storedAssignment,
-  putAgent,
 } from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
@@ -215,6 +213,34 @@ async function name(world: World, party: Party): Promise<void> {
   expect([response.status, party.operator]).toEqual([200, party.operator]);
 }
 
+/**
+ * Bind a second agent under an operator, through the door the operator itself
+ * would use: POST /operators/{id}/agents, signed by an agent the operator
+ * already has, carrying the new key's own attestation.
+ *
+ * Section 5: "An operator runs agents", and every agent under an operator
+ * counts as one for validation. The exclusion rule below is about exactly that,
+ * so the second key gets there the way a real one does.
+ */
+async function bind(
+  world: World,
+  party: Party,
+  bound: TestAgent,
+): Promise<void> {
+  const request = await signedPost(party.agent, {
+    path: `/operators/${encodeURIComponent(party.operator)}/agents`,
+    body: {
+      agent: bound.agentId,
+      attestation: await attestFor(bound, party.operator, AT),
+    },
+    timestamp: AT,
+  });
+  const response = await send(world, request);
+  const body = (await response.json()) as Record<string, unknown>;
+  expect([response.status, body["error"] ?? null]).toEqual([201, null]);
+  expect(body["agents"]).toContain(bound.agentId);
+}
+
 /** Every party joins and is named: the pool this world validates under. */
 async function joinAll(world: World): Promise<void> {
   for (const party of world.parties) {
@@ -366,36 +392,14 @@ describe("a small pool, under the ten-operator switch", () => {
     ];
     await joinAll(world);
 
-    // A second agent under the submitter's operator. The joining door binds one
-    // agent per operator (a second registration is refused operator_exists), so
-    // this world seals the binding the way the door would: a real agent_bound
-    // event on the chain, and the row that indexes it. Section 5's rule is that
-    // every agent under an operator counts as one, and this is the only way to
-    // put that rule in front of the validate door today.
+    // A second agent under the submitter's operator, bound through the door the
+    // operator would use: the joining door binds one agent per operator (a
+    // second registration is refused operator_exists), and the bind door is
+    // where an operator adds the next key. Section 5's rule is that every agent
+    // under an operator counts as one, and this is what puts that rule in front
+    // of the validate door.
     secondAgent = await makeAgent();
-    const at = await headSeq(world.store.db);
-    const previous = at === null ? [] : [(await eventBySeq(world.store.db, at))!];
-    const sealed = await appendEvent(previous, {
-      at: AT,
-      type: "agent_bound",
-      entry_id: null,
-      payload: {
-        operator: submitterParty.operator,
-        agent: secondAgent.agentId,
-        attestation: await attestFor(
-          secondAgent,
-          submitterParty.operator,
-          AT,
-        ),
-      },
-    });
-    const bound = sealed[sealed.length - 1]!;
-    await appendEvents(world.store.db, [bound]);
-    await putAgent(world.store.db, {
-      agentId: secondAgent.agentId,
-      operatorId: submitterParty.operator,
-      registeredSeq: bound.seq,
-    });
+    await bind(world, submitterParty, secondAgent);
 
     // Section 5: anyone can submit with a bare agent key. The maintainer's own
     // key is a bare key here — it registered no operator — so the entry names no

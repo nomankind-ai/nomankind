@@ -10,9 +10,11 @@
  * disputes are for evidence."
  *
  * Section 6, "Revalidate": "Any operator can also request revalidation of an
- * entry inside its window by staking a small amount of standing ... If the check
- * finds the fact changed, the requester gets the stake back plus a
- * challenger-style reward. If the entry holds, the requester loses the stake."
+ * entry inside its window by staking a small amount of standing ... If the entry
+ * holds, the requester loses the stake." A request puts up a stake and wins no
+ * reward of its own: a check that turns up a citation "can be upgraded into a
+ * dispute", and the reward on that is the dispute's, priced from what the
+ * overturned entry lost.
  *
  * This module is pure, exactly as src/bounty.ts is: no I/O, no clock, and no
  * policy number of its own beyond the four it reads from src/policy.ts. Every
@@ -21,12 +23,13 @@
  * stake row and the same records come back by replaying the log; a row that
  * disagrees with the log is wrong, and the log is right.
  *
- * Nothing here moves money. Decision D-064: a stake is a ledger row and nothing
- * else until M21 builds the money side, and the amounts in src/policy.ts are
- * placeholders the maintainer sets. A reward's `amount` is null for the same
- * reason src/bounty.ts leaves `amount_cents` null: Section 9's pricing is M21's,
- * and freezing a number into a stored record a milestone early would be
- * inventing a policy that does not exist yet.
+ * One row here is priced elsewhere. `dispute_reward` is written at the outcome
+ * with no amount — the fact that a reward is owed, at the position it became
+ * owed — and the sweep's ledger step prices it when it writes the overturned
+ * entry's clawbacks, because the price IS those clawbacks (src/ledger.ts's
+ * `disputeRewardRow`). This module never sees them: the clawbacks are a fact
+ * about the money side of the same event, and a number invented here would be a
+ * second answer to a question src/ledger.ts already answers.
  */
 
 import type { Event } from "./events.js";
@@ -39,10 +42,14 @@ import {
 /**
  * What a row says happened to a stake.
  *
- * Four moves per mechanism, and the same four for both: the stake goes up, and
- * then it comes back (refund), is lost (forfeit), or comes back with a reward
- * beside it. A reward is its own row rather than a larger refund so the ledger
- * never has to be read backwards to see what was staked and what was won.
+ * The stake goes up, and then it comes back (refund) or is lost (forfeit). A
+ * dispute has a fourth move, the reward an upheld challenge is paid, and it is
+ * its own row rather than a larger refund so the ledger never has to be read
+ * backwards to see what was staked and what was won.
+ *
+ * A revalidation request has no reward of its own: Section 6 upgrades a check
+ * that turns up a citation into a dispute, and the reward on that is the
+ * dispute's — one reward per doubt, priced from the entry it overturned.
  */
 export type StakeKind =
   | "dispute_stake"
@@ -51,8 +58,7 @@ export type StakeKind =
   | "dispute_reward"
   | "revalidation_stake"
   | "revalidation_refund"
-  | "revalidation_forfeit"
-  | "revalidation_reward";
+  | "revalidation_forfeit";
 
 /**
  * One ledger row.
@@ -62,10 +68,12 @@ export type StakeKind =
  * `correction_entry_id` names the correction entry when there is one, and
  * `request_seq` the `revalidation_requested` event when there is one.
  *
- * `unit` and `amount` are null together on a reward: Section 9's pricing is
- * M21's, and until it exists a reward is a fact with no number attached. They
+ * `unit` and `amount` are null together on a reward as this module writes one: a
+ * reward is a fact with no number attached until the ledger step reaches the
+ * position it was owed at and prices it from the clawbacks, in `micros`. They
  * are never null on a stake, a refund or a forfeit, which are all the same
- * amount as what was put up.
+ * amount as what was put up, and are never `micros` on any of the three:
+ * standing for an operator, cents for a bare key's filing fee.
  *
  * `seq` and `at` are the position and instant of the event that produced the
  * row, so a reader can find the event a row came from without searching.
@@ -79,7 +87,7 @@ export interface StakeRecord {
   readonly agent: string | null;
   /** The operator that staked, or null for a bare key (and for nomankind's own check). */
   readonly operator: string | null;
-  readonly unit: "standing" | "cents" | null;
+  readonly unit: "standing" | "cents" | "micros" | null;
   readonly amount: number | null;
   readonly seq: number;
   readonly at: string;
@@ -120,10 +128,10 @@ export function disputeStake(event: Event<"dispute_filed">): StakeRecord {
  * What the dispute's outcome does to that stake.
  *
  * Section 6: an upheld challenge "returns the stake, pays the challenger", so
- * two rows — the refund of exactly what was staked, and the reward, whose amount
- * M21 prices. A failed challenge "forfeits the stake", so one row, for exactly
- * what was staked. The standing a failed challenge also costs is not a ledger
- * amount and is not invented here.
+ * two rows — the refund of exactly what was staked, and the reward, which the
+ * ledger step prices from the clawbacks of the same event. A failed challenge
+ * "forfeits the stake", so one row, for exactly what was staked. The standing a
+ * failed challenge also costs is not a ledger amount and is not invented here.
  *
  * The rows carry the OUTCOME event's seq and instant, not the filing's: they
  * happened when the dispute resolved.
@@ -150,8 +158,9 @@ export function disputeOutcomeStakes(
   }
   return [
     { ...base, kind: "dispute_refund", unit: staked.unit, amount: staked.amount },
-    // Section 9's pricing is M21's. A reward with a made-up number would be a
-    // policy nobody decided, so the row records that one is owed and no more.
+    // What the reward is worth is what the overturned entry lost, and that is
+    // not known until the clawbacks are written. The row records that one is
+    // owed, at the position it became owed; src/ledger.ts prices it there.
     { ...base, kind: "dispute_reward", unit: null, amount: null },
   ];
 }
@@ -186,14 +195,20 @@ export function revalidationStake(
 /**
  * What the check's outcome does to that stake.
  *
- * Section 6: "If the check finds the fact changed, the requester gets the stake
- * back plus a challenger-style reward. If the entry holds, the requester loses
- * the stake." An upgrade is neither: the request becomes a dispute, so the
- * request's own stake comes back and the dispute's stake (`disputeStake`) takes
- * over from there — the requester is never made to stake twice for one doubt.
+ * Section 6: "If the entry holds, the requester loses the stake", so one forfeit
+ * row for exactly what was put up. A check that found the fact changed gets the
+ * stake back and no more: the request staked for a check and got one, and the
+ * reward Section 6 pays is the dispute's — "a request that turns up a citation
+ * can be upgraded into a dispute", and that dispute files its own stake and
+ * earns its own reward, priced from the entry it overturns.
+ *
+ * An upgrade is the same refund for the same reason: the request becomes a
+ * dispute, so the request's own stake comes back and the dispute's stake
+ * (`disputeStake`) takes over from there — the requester is never made to stake
+ * twice for one doubt.
  *
  * Empty when the request was auto-opened by failure reports: nothing was staked,
- * so nothing is refunded, forfeited or rewarded.
+ * so nothing is refunded and nothing is forfeited.
  */
 export function revalidationOutcomeStakes(
   requested: Event<"revalidation_requested">,
@@ -222,13 +237,13 @@ export function revalidationOutcomeStakes(
       },
     ];
   }
-  const refund: StakeRecord = {
-    ...base,
-    kind: "revalidation_refund",
-    unit: staked.unit,
-    amount: staked.amount,
-  };
-  if (resolved.payload.outcome === "upgraded") return [refund];
-  // "changed": the stake back plus a challenger-style reward, priced by M21.
-  return [refund, { ...base, kind: "revalidation_reward", unit: null, amount: null }];
+  // "changed" and "upgraded" alike: the stake back, and nothing beside it.
+  return [
+    {
+      ...base,
+      kind: "revalidation_refund",
+      unit: staked.unit,
+      amount: staked.amount,
+    },
+  ];
 }

@@ -571,6 +571,12 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         "Earned by the challenger when a dispute is upheld, on top of the stake coming back.",
     },
     {
+      name: "STANDING_REVALIDATION_CHANGED",
+      value: `${policy.STANDING_REVALIDATION_CHANGED} standing`,
+      means:
+        "Earned by the requester when a revalidation check finds the fact changed, on top of the stake coming back. Paid in standing because the stake was standing, and smaller than an upheld dispute because a request carries no citation — it only asks for a check.",
+    },
+    {
       name: "STANDING_OVERTURNED_SIGNER",
       value: `${policy.STANDING_OVERTURNED_SIGNER} standing`,
       means:
@@ -625,7 +631,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "REVALIDATION_REQUEST_STAKE_STANDING",
       value: `${policy.REVALIDATION_REQUEST_STAKE_STANDING} standing`,
       means:
-        "What an operator stakes to ask for a check of an entry inside its freshness window. Returned with a reward if the fact changed, lost if the entry holds.",
+        "What an operator stakes to ask for a check of an entry inside its freshness window. Returned if the fact changed or the request is upgraded into a dispute, lost if the entry holds.",
     },
     {
       name: "REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW",

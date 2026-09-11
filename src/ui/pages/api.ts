@@ -260,7 +260,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/operators/{id}/ledger",
     parameters: "—",
     answers:
-      `One operator's money: operator, balance (accrued, held, released, clawed_back, paid, carried_forward, all in micro-USD), and rows — the newest ${LIST_PAGE_LIMIT} ledger rows, newest first, each with id, kind, entry_id, operator, role, date, reads, unit, amount, available_at, seq, at, ref. A read_share row's ref carries price_micros_per_read, share_percent, stale, the entry's evidence tier as tier, and on a slot holder's row measured — whether that holder's own signed record carried a passing measurement, which is what decides between the two validator rates.`,
+      `One operator's money: operator, balance (accrued, held, released, clawed_back, paid, carried_forward, all in micro-USD), and rows — the newest ${LIST_PAGE_LIMIT} ledger rows, newest first, each with id, kind, entry_id, operator, role, date, reads, unit, amount, available_at, seq, at, ref. A read_share row's ref carries price_micros_per_read, share_percent, stale, the entry's evidence tier as tier, and on a slot holder's row measured — whether that holder's own signed record carried a passing measurement, which is what decides between the two validator rates. A dispute_reward row's ref carries the stake record it was written as, the ids of the clawbacks its amount was read off as clawbacks, and their sum as clawed_back.`,
     refusals: "404 not_found.",
   },
   {
@@ -771,10 +771,22 @@ POST
         <p class="note">
           Filing takes a stake, so burner keys cannot dispute for free: a
           registered operator stakes standing and a bare key a refundable filing
-          fee, both published on the policy page. A stake, a refund, a forfeit
-          and a reward are ledger records and nothing else, and the amounts on
-          them are placeholders until the milestone that prices them is built. No
-          money moves on any of them today.
+          fee, both published on the policy page. A stake, a refund and a
+          forfeit are ledger records in the unit they were put up in, and the
+          amounts on them are the placeholders the policy page publishes.
+        </p>
+        <p class="note">
+          The reward an upheld challenge is paid is priced from the entry it
+          overturned: the row is written at the outcome with no amount, and the
+          ledger step prices it at exactly what the clawbacks came to — the
+          shares the entry's signers had accrued inside the holdback and lost —
+          in micro-USD, released when the last of those shares would have been.
+          An entry that had nothing still held prices the reward at zero. A
+          bare-key challenger's row names the key and no operator: the reward
+          accrues to the key and holds, and turning it into dollars means
+          verifying as an operator, whenever they choose. A revalidation request
+          has no reward of its own; a check that turns up a citation is upgraded
+          into a dispute, and the reward on that is the one above.
         </p>
       </section>
 
@@ -1128,7 +1140,8 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
           <dt class="mono">micros</dt>
           <dd>
             Micro-USD, a millionth of a dollar: 1,000,000 to the dollar. Every
-            read share, bounty, clawback and payout is an integer count of them,
+            read share, bounty, clawback, dispute reward and payout is an
+            integer count of them,
             because one read's submitter share is a fraction of a cent and a
             ledger that rounded to cents would pay the long tail nothing. The
             price per read is on the policy page and nowhere else.

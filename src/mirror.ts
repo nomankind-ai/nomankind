@@ -60,6 +60,7 @@ import { recordMeasured } from "./evidence.js";
 import {
   bountyAccrualRow,
   clawbackRows,
+  disputeRewardRow,
   readShareRows,
   reconciliationRow,
   type EntryShareState,
@@ -533,9 +534,12 @@ function revalidationRequest(
  *
  * A stake predates `LedgerRow` (decision D-064: a stake was a ledger row before
  * there was any money), so this is the same presentation `toLedgerRow` makes of
- * a stake row read back out of storage — including a reward, whose amount
- * Section 9's pricing never gave, reading as zero with the null it actually
- * carries under `ref`.
+ * a stake row read back out of storage: the amount and the unit the record
+ * carries, and the record itself under `ref`.
+ *
+ * Not the dispute reward, which the ledger step prices from the clawbacks of
+ * its own event: that one is `disputeRewardRow`'s, here as in the sweep, so the
+ * two readings of one log are one row.
  */
 function stakeLedgerRow(record: StakeRecord): LedgerRow {
   return {
@@ -571,7 +575,9 @@ function stakeLedgerRow(record: StakeRecord): LedgerRow {
  * Two smaller consequences of the same fact are worth saying out loud. A
  * clawback is computed against every read share this fold has already emitted
  * for the entry, because "already paid out" is a fact about a payout and not
- * about the log.
+ * about the log. And the reward of an upheld dispute is priced from those
+ * clawbacks here exactly as the ledger step prices it there, so a row the sweep
+ * stored and a row this recomputed are the same row down to its `ref`.
  *
  * A day is priced at its own position in the log, and not at the head. The
  * sweep prices a day in the run that published it, so the entry it read is the
@@ -692,16 +698,8 @@ export function mirrorLedgerRows(
     }
 
     if (isType(event, "dispute_upheld")) {
-      const filed = disputeFiling(
-        ordered,
-        event.entry_id,
-        event.payload.correction_entry_id,
-      );
-      if (filed !== null) {
-        for (const stake of disputeOutcomeStakes(filed, event)) {
-          rows.push(stakeLedgerRow(stake));
-        }
-      }
+      // The clawbacks first, because the reward is what they come to: the same
+      // order the sweep's ledger step writes them in, for the same reason.
       const held = rows.filter(
         (row) =>
           row.kind === "read_share" &&
@@ -709,7 +707,22 @@ export function mirrorLedgerRows(
           row.available_at !== null &&
           row.available_at > event.at,
       );
-      rows.push(...clawbackRows(event, held));
+      const clawed = clawbackRows(event, held);
+      const filed = disputeFiling(
+        ordered,
+        event.entry_id,
+        event.payload.correction_entry_id,
+      );
+      if (filed !== null) {
+        for (const stake of disputeOutcomeStakes(filed, event)) {
+          rows.push(
+            stake.kind === "dispute_reward"
+              ? disputeRewardRow(stake, clawed)
+              : stakeLedgerRow(stake),
+          );
+        }
+      }
+      rows.push(...clawed);
       continue;
     }
 

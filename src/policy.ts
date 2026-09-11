@@ -1022,6 +1022,21 @@ export const STANDING_VALIDATION_REPRODUCED = 2;
 export const STANDING_ATTESTATION_SCORED = 1;
 
 /**
+ * Incentives / Standing (decision D-095): Section 6's revalidation request —
+ * "If the check finds the fact changed, the requester gets the stake back plus a
+ * challenger-style reward" — is what this pays, and it pays it in standing,
+ * because the stake was standing. A dispute's reward is money because a dispute
+ * claws money back; a check that found the fact changed overturns nothing and
+ * claws nothing back, so the reward is paid in the currency the stake was in.
+ *
+ * Less than STANDING_DISPUTE_UPHELD because a request carries no citation: it
+ * only asks for a check, where a challenge argues the case and brings the
+ * evidence. Not a whitepaper number: the maintainer's own placeholder, moving
+ * only by a later decision, exactly as the eight above it.
+ */
+export const STANDING_REVALIDATION_CHANGED = 3;
+
+/**
  * Incentives / Standing: standing "gates everything discretionary, from entry to
  * and stay in the trusted pool". Two numbers rather than one, because a single
  * threshold would flap: an operator sitting exactly at the bar would be trusted
@@ -1273,6 +1288,7 @@ export const POLICY = Object.freeze({
   STANDING_ASSIGNMENT_MISSED,
   STANDING_VALIDATION_REPRODUCED,
   STANDING_ATTESTATION_SCORED,
+  STANDING_REVALIDATION_CHANGED,
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
   STANDING_DECAY_PAUSED,

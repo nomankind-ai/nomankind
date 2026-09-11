@@ -46,6 +46,7 @@ import {
   STANDING_DECAY_PAUSED,
   STANDING_DISPUTE_UPHELD,
   STANDING_OVERTURNED_SIGNER,
+  STANDING_REVALIDATION_CHANGED,
   STANDING_SUBMISSION_VERIFIED,
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
@@ -115,6 +116,7 @@ const EXPECTED_POLICY_KEYS = [
   "STANDING_ASSIGNMENT_MISSED",
   "STANDING_VALIDATION_REPRODUCED",
   "STANDING_ATTESTATION_SCORED",
+  "STANDING_REVALIDATION_CHANGED",
   "STANDING_TRUSTED_ENTRY",
   "STANDING_TRUSTED_STAY",
   "STANDING_DECAY_PAUSED",
@@ -222,6 +224,19 @@ describe("policy numbers", () => {
     );
     for (const key of Object.keys(POLICY)) {
       expect(key).not.toMatch(/ATTESTATION_MISSED/);
+    }
+  });
+
+  it("pays a changed revalidation check in standing (D-095)", () => {
+    // Section 6's "challenger-style reward" on a request whose check found the
+    // fact changed: a placeholder, positive, and less than an upheld dispute
+    // because a request carries no citation. Standing rather than money,
+    // because the stake it is paid beside was standing.
+    expect(STANDING_REVALIDATION_CHANGED).toBe(3);
+    expect(STANDING_REVALIDATION_CHANGED).toBeGreaterThan(0);
+    expect(STANDING_REVALIDATION_CHANGED).toBeLessThan(STANDING_DISPUTE_UPHELD);
+    for (const key of Object.keys(POLICY)) {
+      expect(key).not.toMatch(/REVALIDATION_CHANGED_CENTS/);
     }
   });
 
@@ -473,6 +488,7 @@ describe("policy numbers", () => {
       STANDING_ASSIGNMENT_MISSED,
       STANDING_VALIDATION_REPRODUCED,
       STANDING_ATTESTATION_SCORED,
+      STANDING_REVALIDATION_CHANGED,
       STANDING_TRUSTED_ENTRY,
     ]) {
       expect(Number.isInteger(value)).toBe(true);
@@ -571,6 +587,9 @@ describe("policy numbers", () => {
     expect(POLICY.CONTRIBUTOR_SHARE_PERCENT).toBe(CONTRIBUTOR_SHARE_PERCENT);
     expect(POLICY.STANDING_ATTESTATION_SCORED).toBe(
       STANDING_ATTESTATION_SCORED,
+    );
+    expect(POLICY.STANDING_REVALIDATION_CHANGED).toBe(
+      STANDING_REVALIDATION_CHANGED,
     );
     expect(POLICY.STANDING_VALIDATION_REPRODUCED).toBe(
       STANDING_VALIDATION_REPRODUCED,

@@ -33,7 +33,7 @@
 import type { EvidenceTier } from "./evidence.js";
 import type { Event, ReadCountRow } from "./events.js";
 import type { BountyAccrual } from "./bounty.js";
-import type { StakeKind } from "./stake.js";
+import type { StakeKind, StakeRecord } from "./stake.js";
 import {
   HOLDBACK_DAYS,
   PAYOUT_MINIMUM_MICROS,
@@ -390,6 +390,72 @@ export function clawbackRows(
 }
 
 /**
+ * Price the reward an upheld challenge is paid: what the entry it overturned
+ * lost.
+ *
+ * Section 6: an upheld challenge "returns the stake, pays the challenger,
+ * overturns the entry, and claws back what the approvers earned on it (Section
+ * 9)". One sentence, and the last clause is the amount of the second: the
+ * reward is exactly the sum of the clawbacks that same event wrote — the shares
+ * the signers had accrued inside the holdback and lost. So it is a function of
+ * the log like every other row here, and nobody has to decide a number.
+ *
+ * `owed` is the row src/stake.ts wrote at the outcome — the fact that a reward
+ * was owed, at the position it became owed — and it keeps that position, that
+ * instant and that id: this prices the row, it does not write a second one. Its
+ * operator is the challenger's, or null for a bare key, and the record goes
+ * under `ref` unchanged, so `ref.agent` still names the key a bare-key
+ * challenger's reward accrues to and holds for.
+ *
+ * `available_at` is the latest release instant among those clawbacks: the reward
+ * leaves when the last clawed-back share would have, because it is that money
+ * and is owed no earlier than the moment the money would have left.
+ *
+ * An entry that had accrued nothing inside the holdback prices at zero,
+ * explicitly, and not at null: Section 9 pays nothing back out of a share that
+ * had already released ("a dispute upheld later claws back nothing and burns
+ * standing only"), and a row left unpriced after the step has passed its
+ * position would read as an amount still to come.
+ */
+export function disputeRewardRow(
+  owed: StakeRecord,
+  clawbacks: readonly LedgerRow[],
+): LedgerRow {
+  let clawedBack = 0;
+  let availableAt: string | null = null;
+  const claws: string[] = [];
+  for (const row of clawbacks) {
+    if (row.kind !== "clawback") continue;
+    clawedBack += row.amount;
+    claws.push(row.id);
+    if (row.available_at !== null && (availableAt === null || row.available_at > availableAt)) {
+      availableAt = row.available_at;
+    }
+  }
+  return {
+    id: `${owed.kind}:${owed.seq}`,
+    kind: "dispute_reward",
+    entry_id: owed.entry_id,
+    operator: owed.operator,
+    role: null,
+    date: null,
+    reads: null,
+    unit: "micros",
+    // The clawbacks are written negative, because they negate the shares they
+    // claw back. What the challenger is paid is the positive of that sum,
+    // subtracted rather than negated so a reward of nothing is zero and never
+    // the negative zero a negation would write into a stored row.
+    amount: 0 - clawedBack,
+    available_at: availableAt,
+    seq: owed.seq,
+    at: owed.at,
+    // The record the row was written as, and the rows the price was read off:
+    // the arithmetic is checkable from the row without rederiving the entry.
+    ref: { ...owed, clawed_back: clawedBack, clawbacks: claws },
+  };
+}
+
+/**
  * Price a reconfirmation's bounty: the halves the entry withheld while it was
  * stale, paid to whoever made it fresh again.
  *
@@ -453,9 +519,41 @@ export interface PayoutPlan {
   readonly carried_forward: number;
 }
 
-/** The kinds that carry an amount to or from an operator and wait out the holdback. */
+/**
+ * The kinds that carry an amount to or from an operator and wait out the
+ * holdback.
+ *
+ * `dispute_reward` is one of them. Section 6's upheld challenge "returns the
+ * stake, pays the challenger", and what it pays is money in micros, held until
+ * the last clawed-back share would have left (`disputeRewardRow`): a reward
+ * that never entered a balance would be a payment nobody could ever be paid.
+ * The other stake kinds are not here — standing and a bare key's filing fee are
+ * their own units, and no query ever sums two units together.
+ */
 function isBalanceKind(kind: LedgerKind): boolean {
-  return kind === "read_share" || kind === "bounty_accrual" || kind === "clawback";
+  return (
+    kind === "read_share" ||
+    kind === "bounty_accrual" ||
+    kind === "clawback" ||
+    kind === "dispute_reward"
+  );
+}
+
+/**
+ * Whether a row counts toward a balance at all: a balance kind, and priced.
+ *
+ * A `dispute_reward` is written at the outcome as a fact with no number — unit
+ * and amount null together (src/stake.ts) — and priced here when the sweep's
+ * ledger step reaches that position. Unpriced it counts for nothing, exactly as
+ * a bounty accrual does before its pricing: such a row reads back through the
+ * columns as zero in `standing` (src/storage/repository.ts, `toLedgerRow`) and
+ * the mirror recomputes it the same way, so `micros` is what says the step has
+ * passed it and the amount is a real number. Every other balance kind is
+ * written priced and always counts.
+ */
+function countsTowardBalance(row: LedgerRow): boolean {
+  if (!isBalanceKind(row.kind)) return false;
+  return row.kind !== "dispute_reward" || row.unit === "micros";
 }
 
 /**
@@ -465,10 +563,11 @@ function isBalanceKind(kind: LedgerKind): boolean {
  * carries the release instant of the share it negates: the two are released in
  * the same instant, so a share can never be paid out from under a clawback that
  * is still held, and a clawback can never be taken out of a cycle before the
- * share it cancels was payable.
+ * share it cancels was payable. A priced reward carries the latest of those
+ * instants, so it leaves with the last share it was priced off and never before.
  */
 function isReleased(row: LedgerRow, now: string): boolean {
-  if (!isBalanceKind(row.kind)) return false;
+  if (!countsTowardBalance(row)) return false;
   return row.available_at !== null && row.available_at <= now;
 }
 
@@ -486,7 +585,8 @@ function isReleased(row: LedgerRow, now: string): boolean {
  * is applied again here rather than trusted from the query, and a clawback is
  * counted by its own `available_at` — which is the release instant of the share
  * it negates — so an operator can never be paid a share whose clawback is still
- * held, and never be charged a clawback before that share was payable.
+ * held, and never be charged a clawback before that share was payable. A priced
+ * `dispute_reward` is paid like any other released row, at its own release.
  */
 export function payoutPlan(
   operator: string,
@@ -496,6 +596,13 @@ export function payoutPlan(
   let amount = 0;
   const rows: string[] = [];
   for (const row of released) {
+    // Selected by operator, which is what leaves a bare key's reward where it
+    // is: that row carries no operator at all, so a null can never equal the
+    // operator being paid and the row is simply never selected here. Section 6:
+    // the reward accrues to the key and holds, and "turning it into dollars
+    // means verifying as an operator". `releasedUnpaidRows` selects on
+    // `operator_id = ?` for the same reason, so such a row never even reaches
+    // this loop.
     if (row.operator !== operator) continue;
     if (!isReleased(row, now)) continue;
     amount += row.amount;
@@ -646,6 +753,11 @@ export interface LedgerBalance {
  * than a debt that is not owed yet, and `carried_forward` — what is released and
  * not yet paid — is zero as well. `clawed_back` is the clawbacks as written,
  * held or released, because it answers what came back and not when.
+ *
+ * A priced `dispute_reward` accrues to the challenger like any other accrual and
+ * is placed by its own release, which is the last of those clawbacks': the same
+ * money, leaving at the same instant, on the other side of the dispute. An
+ * unpriced one is not counted at all (`countsTowardBalance`).
  */
 export function ledgerBalance(
   rows: readonly LedgerRow[],
@@ -658,7 +770,7 @@ export function ledgerBalance(
   let paid = 0;
 
   for (const row of rows) {
-    if (isBalanceKind(row.kind)) {
+    if (countsTowardBalance(row)) {
       if (row.kind === "clawback") clawedBack += row.amount;
       else accrued += row.amount;
       if (row.available_at !== null && row.available_at > now) {
