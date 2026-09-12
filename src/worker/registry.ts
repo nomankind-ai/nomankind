@@ -56,6 +56,7 @@ import type {
 } from "../storage/d1.js";
 import { D1NonceStore } from "../storage/nonces.js";
 import {
+  EventAppendError,
   agentsForOperator,
   eventBySeq,
   getOperator,
@@ -273,6 +274,121 @@ export function guardDatabase(db: D1Like): D1Like {
 }
 
 // ---------------------------------------------------------------------------
+// The chain boundary
+// ---------------------------------------------------------------------------
+
+/**
+ * How many times a write door rebuilds its batch onto a head that moved under
+ * it. A retry budget, not a policy number: it bounds a loop whose every
+ * iteration is a real conflict, and the answer when it runs out is a refusal
+ * rather than a signed request quietly dropped.
+ */
+const CHAIN_ATTEMPTS = 3;
+
+/**
+ * Three writes in a row lost the race for the next position in the log.
+ *
+ * The chain is single-file by design: an event's seq is the head's plus one and
+ * its `prev_hash` is the head's hash, so two writes that land in one tick — a
+ * validation while the sweep is sealing, two operators registering together —
+ * cannot both be written, and the loser's whole batch is refused by the unique
+ * index on events.seq. That is not a storage failure and must not be answered
+ * as one: the database is healthy and the request is good, so the door rebuilds
+ * onto the new head and writes again. This is what it means when even that ran
+ * out, and it is its own refusal (`chain_conflict`) so a caller can tell "try
+ * again in a moment" from "the database is not answering".
+ */
+export class ChainConflict extends Error {
+  constructor(reason: unknown) {
+    super(reason instanceof Error ? reason.message : String(reason));
+    this.name = "ChainConflict";
+  }
+}
+
+/**
+ * The database refusing a second event at one position, in the words SQLite
+ * uses for it. Anchored on the column, so a unique violation anywhere else in
+ * the same batch — an operator name, a receipt counter — is not read as this.
+ */
+const SEQ_TAKEN = /UNIQUE constraint failed:[^\n]*\bevents\.seq\b/;
+
+/**
+ * Whether a failed write lost the chain rather than the database.
+ *
+ * Two failures and only two mean it. `EventAppendError` is the chain rule
+ * refusing a run built on a head somebody has already replaced, and its two
+ * reasons are the whole of that rule: a seq that is not head + 1, and a
+ * prev_hash that is not the head's. The other is the unique index on
+ * events.seq, which is the same race lost one layer down — both writers passed
+ * the rule against the head they read, and the database refused the second
+ * insert.
+ *
+ * Everything else is somebody else's failure and keeps its own name. In
+ * particular a transient D1 error is not turned into a conflict by another
+ * writer happening to move the head in the same moment: the head moving is not
+ * evidence about why *this* write failed, and a database that is not answering
+ * must stay `storage_unreachable` or a real outage would be reported to every
+ * caller as a race they should try again.
+ */
+function lostTheChain(error: unknown): boolean {
+  if (error instanceof EventAppendError) {
+    return error.reason === "bad_seq" || error.reason === "bad_prev_hash";
+  }
+  if (error instanceof StorageUnreachable) return SEQ_TAKEN.test(error.message);
+  return false;
+}
+
+/**
+ * Run one write of the log, rebuilding it from the door's own derivation when
+ * another writer takes the position first.
+ *
+ * `write` is the whole of a door's derivation and its batch, not the batch
+ * alone: every event's seq and `prev_hash` — and so its hash, and so the hash
+ * of everything chained after it — are functions of the head, so a rebuild that
+ * started from the failed statements would write the same doomed bytes again.
+ * Handed the closure instead, this re-reads nothing itself and simply lets the
+ * door do its own work over, which is why the doors that re-check a duplicate
+ * inside their closure answer 409 to a racing twin rather than retrying into
+ * the same wall.
+ *
+ * One helper and not one per door: seven copies of a retry rule would be seven
+ * chances for a door to give up sooner, or to answer a conflict as an outage.
+ */
+export async function withChainRetry<T>(write: () => Promise<T>): Promise<T> {
+  let last: unknown = null;
+  for (let attempt = 0; attempt < CHAIN_ATTEMPTS; attempt += 1) {
+    try {
+      return await write();
+    } catch (error) {
+      if (!lostTheChain(error)) throw error;
+      last = error;
+    }
+  }
+  throw new ChainConflict(last);
+}
+
+/**
+ * The 503 a door owes for a write it could not make, or null when the failure
+ * is not one of those and belongs to the platform.
+ *
+ * The two cases a caller has to be able to tell apart: the database did not
+ * answer, and the log's next position kept going to somebody else. One place
+ * decides which, so a door cannot grow a weaker boundary of its own, and the
+ * message alone reaches the log — no binding contents, no request data.
+ */
+export function unavailable(error: unknown, route: string): Response | null {
+  if (error instanceof ChainConflict) {
+    console.error(`${route}: chain conflict: ${error.message}`);
+    return refuse(503, "chain_conflict");
+  }
+  if (error instanceof StorageUnreachable) {
+    console.error(`${route}: storage unreachable: ${error.message}`);
+    return refuse(503, "storage_unreachable");
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Reading and authenticating a write
 // ---------------------------------------------------------------------------
 
@@ -445,63 +561,88 @@ async function register(
   // Every check has passed, so now the binding is sealed into the log. The two
   // events and the two rows go down in one atomic batch (registerOperator), so
   // a registration is either fully in the log and visible or not there at all.
-  const at = deps.now.toISOString();
-  const previous = await tail(env);
-  const withOperator = await appendEvent(previous, {
-    at,
-    type: "operator_registered",
-    entry_id: null,
-    // The domain the check settled on, written into the event rather than left
-    // to the row: an offline reader folds `operatorDomainsAt` out of the log
-    // alone, so the first domain has to be in the log alone (decision D-071).
-    payload: { operator, maintainer: check.maintainer, domain: check.domain },
-  });
-  const withBinding = await appendEvent(withOperator, {
-    at,
-    type: "agent_bound",
-    entry_id: null,
-    payload: { operator, agent, attestation: attestationOf(attestation) },
-  });
-  const events = withBinding.slice(previous.length);
-  const registered = events[0];
-  const bound = events[1];
+  //
+  // The whole of it is inside the retry, derivation included: another write
+  // landing in this same tick takes the next position in the log and this batch
+  // is refused whole, and events rebuilt from a head that moved are different
+  // events. The store reads the check rests on are inside it for the same
+  // reason — a twin registering the same name is exactly the race that moves
+  // the head, and on the second pass the name is taken and the honest answer is
+  // the 409 it always was, not a 503.
+  const seal = async (): Promise<Response> => {
+    const settled = await checkRegistration({
+      operator,
+      agent,
+      domain,
+      attestation,
+      maintainerAgentId: maintainerOf(env),
+      operatorExists: (await getOperator(env.DB, operator)) !== null,
+      agentOperator: await operatorForAgent(env.DB, agent),
+    });
+    if (!settled.ok) {
+      return refuse(REGISTRATION_STATUS[settled.reason], settled.reason);
+    }
 
-  const record: OperatorRecord = {
-    id: operator,
-    maintainer: check.maintainer,
-    // Nobody registers as a provider: checkRegistration refuses the domain, so
-    // the column exists for a later decision and is false at every door today.
-    provider: false,
-    registeredSeq: registered.seq,
-    details: {
-      registered_by: agent,
-      attestation: attestationOf(attestation),
-      // Trust is granted by an event and never at registration, even for the
-      // maintainer's own operator (Section 11).
-      trusted: false,
-      trusted_seq: null,
-      payout_status: payoutStatus,
-      // The connected account id the body carried, and nothing else about the
-      // account (D-053): a payout cycle has to know where an operator's money
-      // leaves through, and without it the payout step has no reference to
-      // transfer against and skips the operator entirely. The `agent_bound`
-      // event is unchanged — this is the Worker's index, not the public log.
-      payout_reference: payout.reference,
-    },
-  };
-  const agentRecord: AgentRecord = {
-    agentId: agent,
-    operatorId: operator,
-    registeredSeq: bound.seq,
-  };
-  await registerOperator(env.DB, {
-    events,
-    operator: record,
-    agent: agentRecord,
-    domain: { domain: check.domain, attestation: attestationOf(attestation) },
-  });
+    const at = deps.now.toISOString();
+    const previous = await tail(env);
+    const withOperator = await appendEvent(previous, {
+      at,
+      type: "operator_registered",
+      entry_id: null,
+      // The domain the check settled on, written into the event rather than left
+      // to the row: an offline reader folds `operatorDomainsAt` out of the log
+      // alone, so the first domain has to be in the log alone (decision D-071).
+      payload: { operator, maintainer: settled.maintainer, domain: settled.domain },
+    });
+    const withBinding = await appendEvent(withOperator, {
+      at,
+      type: "agent_bound",
+      entry_id: null,
+      payload: { operator, agent, attestation: attestationOf(attestation) },
+    });
+    const events = withBinding.slice(previous.length);
+    const registered = events[0];
+    const bound = events[1];
 
-  return json({ ...record, agents: [agent], domains: [check.domain] }, 201);
+    const record: OperatorRecord = {
+      id: operator,
+      maintainer: settled.maintainer,
+      // Nobody registers as a provider: checkRegistration refuses the domain, so
+      // the column exists for a later decision and is false at every door today.
+      provider: false,
+      registeredSeq: registered.seq,
+      details: {
+        registered_by: agent,
+        attestation: attestationOf(attestation),
+        // Trust is granted by an event and never at registration, even for the
+        // maintainer's own operator (Section 11).
+        trusted: false,
+        trusted_seq: null,
+        payout_status: payoutStatus,
+        // The connected account id the body carried, and nothing else about the
+        // account (D-053): a payout cycle has to know where an operator's money
+        // leaves through, and without it the payout step has no reference to
+        // transfer against and skips the operator entirely. The `agent_bound`
+        // event is unchanged — this is the Worker's index, not the public log.
+        payout_reference: payout.reference,
+      },
+    };
+    const agentRecord: AgentRecord = {
+      agentId: agent,
+      operatorId: operator,
+      registeredSeq: bound.seq,
+    };
+    await registerOperator(env.DB, {
+      events,
+      operator: record,
+      agent: agentRecord,
+      domain: { domain: settled.domain, attestation: attestationOf(attestation) },
+    });
+
+    return json({ ...record, agents: [agent], domains: [settled.domain] }, 201);
+  };
+
+  return await withChainRetry(seal);
 }
 
 // ---------------------------------------------------------------------------
@@ -556,17 +697,19 @@ async function joinDomain(
   // The event is the record and the row is the index into it, written in one
   // batch (recordDomainJoin), so a join is either fully in the log and visible
   // to the next draw or not there at all.
-  const joined = await recordDomainJoin(env.DB, {
-    at: deps.now.toISOString(),
-    type: "operator_joined_domain",
-    entry_id: null,
-    payload: {
-      operator,
-      agent: auth.agent,
-      domain,
-      attestation: attestationOf(attestation),
-    },
-  });
+  const joined = await withChainRetry(() =>
+    recordDomainJoin(env.DB, {
+      at: deps.now.toISOString(),
+      type: "operator_joined_domain",
+      entry_id: null,
+      payload: {
+        operator,
+        agent: auth.agent,
+        domain,
+        attestation: attestationOf(attestation),
+      },
+    }),
+  );
 
   const agents = await agentsForOperator(env.DB, operator, LIST_PAGE_LIMIT);
   return json(
@@ -649,12 +792,14 @@ async function bindAgent(
   // The event is the record and the row is the index into it, written in one
   // batch (recordAgentBind), so the binding is either fully in the log and
   // resolvable by the next validation or not there at all.
-  const bound = await recordAgentBind(env.DB, {
-    at: deps.now.toISOString(),
-    type: "agent_bound",
-    entry_id: null,
-    payload: { operator, agent, attestation: attestationOf(attestation) },
-  });
+  const bound = await withChainRetry(() =>
+    recordAgentBind(env.DB, {
+      at: deps.now.toISOString(),
+      type: "agent_bound",
+      entry_id: null,
+      payload: { operator, agent, attestation: attestationOf(attestation) },
+    }),
+  );
 
   return json(
     {
@@ -704,29 +849,34 @@ async function genesis(
     );
   }
 
-  const previous = await tail(env);
-  const appended = await appendEvent(previous, {
-    at: deps.now.toISOString(),
-    type: "operator_trusted",
-    entry_id: null,
-    payload: { operator },
+  // The naming and its row, rebuilt from the head on every attempt: the event's
+  // position and hash are the head's, so a write that lost the position has to
+  // be sealed again rather than sent again.
+  return await withChainRetry(async (): Promise<Response> => {
+    const previous = await tail(env);
+    const appended = await appendEvent(previous, {
+      at: deps.now.toISOString(),
+      type: "operator_trusted",
+      entry_id: null,
+      payload: { operator },
+    });
+    const event = appended[appended.length - 1];
+
+    // The event grants the trust; the row is the index into it, and it names the
+    // key that did the naming so the public can check who exercised the power.
+    const updated: OperatorRecord = {
+      ...record,
+      details: {
+        ...record.details,
+        trusted: true,
+        trusted_seq: event.seq,
+        named_by: auth.agent,
+      },
+    };
+    await trustOperator(env.DB, { event, operator: updated });
+
+    return json(updated, 200);
   });
-  const event = appended[appended.length - 1];
-
-  // The event grants the trust; the row is the index into it, and it names the
-  // key that did the naming so the public can check who exercised the power.
-  const updated: OperatorRecord = {
-    ...record,
-    details: {
-      ...record.details,
-      trusted: true,
-      trusted_seq: event.seq,
-      named_by: auth.agent,
-    },
-  };
-  await trustOperator(env.DB, { event, operator: updated });
-
-  return json(updated, 200);
 }
 
 // ---------------------------------------------------------------------------
@@ -831,11 +981,9 @@ export async function handleRegistry(
   try {
     return await route(request, { ...env, DB: guardDatabase(env.DB) }, deps);
   } catch (error) {
-    if (error instanceof StorageUnreachable) {
-      // The message only: no binding contents, no request data.
-      console.error(`registry: storage unreachable: ${error.message}`);
-      return refuse(503, "storage_unreachable");
-    }
+    // The message only: no binding contents, no request data.
+    const answer = unavailable(error, "registry");
+    if (answer !== null) return answer;
     throw error;
   }
 }

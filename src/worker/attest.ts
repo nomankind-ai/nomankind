@@ -95,7 +95,8 @@ import {
 } from "../storage/repository.js";
 import type { Env } from "./env.js";
 import {
-  StorageUnreachable,
+  unavailable,
+  withChainRetry,
   authenticate,
   guardDatabase,
   json,
@@ -335,31 +336,36 @@ async function request_(
   }
 
   const at = deps.now.toISOString();
-  const event = await recordAttestationRequest(db, {
-    event: {
-      at,
-      type: "attestation_requested",
-      // An attestation is about a model, not about any one of the entries it
-      // asks about, so it is scoped to no entry.
-      entry_id: null,
-      payload: {
-        attestation: id,
-        domain,
-        model: auth.agent,
-        model_operator: modelOperator,
-        probes: probes.probes,
-        probe_hash: probes.probe_hash,
-        probe_count: probes.probes.length,
-        pool_snapshot_seq: pool.seq,
-        beacon_round: beacon.round,
-        beacon_randomness: beacon.randomness,
-        scorers,
-        deadline: attestationDeadline(at),
+  // Retried from the derivation: an event's position and hash are the head's,
+  // so a write that lost the next position in the log is sealed again onto the
+  // head that moved rather than sent again.
+  const event = await withChainRetry(() =>
+    recordAttestationRequest(db, {
+      event: {
+        at,
+        type: "attestation_requested",
+        // An attestation is about a model, not about any one of the entries it
+        // asks about, so it is scoped to no entry.
+        entry_id: null,
+        payload: {
+          attestation: id,
+          domain,
+          model: auth.agent,
+          model_operator: modelOperator,
+          probes: probes.probes,
+          probe_hash: probes.probe_hash,
+          probe_count: probes.probes.length,
+          pool_snapshot_seq: pool.seq,
+          beacon_round: beacon.round,
+          beacon_randomness: beacon.randomness,
+          scorers,
+          deadline: attestationDeadline(at),
+        },
       },
-    },
-    row: (sealed) => deriveAttestation([sealed], clockOf(deps)),
-    scorers,
-  });
+      row: (sealed) => deriveAttestation([sealed], clockOf(deps)),
+      scorers,
+    }),
+  );
 
   return json(deriveAttestation([event], clockOf(deps)), 201);
 }
@@ -434,17 +440,22 @@ async function answer(
   const given = answersOf(answers);
 
   const at = deps.now.toISOString();
-  const event = await recordAttestationAnswers(db, {
-    event: {
-      at,
-      type: "attestation_answered",
-      entry_id: null,
-      payload: { attestation: id, answers_hash: await answersHash(given) },
-    },
-    id,
-    answers: given,
-    attestation: (sealed) => deriveAttestation([...events, sealed], clockOf(deps)),
-  });
+  // Retried from the derivation: an event's position and hash are the head's,
+  // so a write that lost the next position in the log is sealed again onto the
+  // head that moved rather than sent again.
+  const event = await withChainRetry(async () =>
+    recordAttestationAnswers(db, {
+      event: {
+        at,
+        type: "attestation_answered",
+        entry_id: null,
+        payload: { attestation: id, answers_hash: await answersHash(given) },
+      },
+      id,
+      answers: given,
+      attestation: (sealed) => deriveAttestation([...events, sealed], clockOf(deps)),
+    }),
+  );
 
   return json(deriveAttestation([...events, event], clockOf(deps)), 200);
 }
@@ -572,20 +583,25 @@ async function score(
 
   const stored = await getAttestation(db, id);
   const at = deps.now.toISOString();
-  const event = await recordAttestationScore(db, {
-    event: {
-      at,
-      type: "attestation_scored",
-      entry_id: null,
-      payload: { attestation: id, record, signature: body.signature },
-    },
-    id,
-    operator: record.operator,
-    // Carried through unchanged: a rewrite of the row must not lose what the
-    // model said.
-    answers: stored?.answers ?? null,
-    attestation: (sealed) => deriveAttestation([...events, sealed], clockOf(deps)),
-  });
+  // Retried from the derivation: an event's position and hash are the head's,
+  // so a write that lost the next position in the log is sealed again onto the
+  // head that moved rather than sent again.
+  const event = await withChainRetry(() =>
+    recordAttestationScore(db, {
+      event: {
+        at,
+        type: "attestation_scored",
+        entry_id: null,
+        payload: { attestation: id, record, signature: body.signature },
+      },
+      id,
+      operator: record.operator,
+      // Carried through unchanged: a rewrite of the row must not lose what the
+      // model said.
+      answers: stored?.answers ?? null,
+      attestation: (sealed) => deriveAttestation([...events, sealed], clockOf(deps)),
+    }),
+  );
 
   return json(deriveAttestation([...events, event], clockOf(deps)), 201);
 }
@@ -760,11 +776,9 @@ export async function handleAttest(
   try {
     return await route(request, guarded, deps);
   } catch (error) {
-    if (error instanceof StorageUnreachable) {
-      // The message only: no binding contents, no request data.
-      console.error(`attest: storage unreachable: ${error.message}`);
-      return refuse(503, "storage_unreachable");
-    }
+    // The message only: no binding contents, no request data.
+    const answer = unavailable(error, "attest");
+    if (answer !== null) return answer;
     throw error;
   }
 }

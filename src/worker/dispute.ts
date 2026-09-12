@@ -65,7 +65,8 @@ import {
 } from "../storage/repository.js";
 import type { Env } from "./env.js";
 import {
-  StorageUnreachable,
+  unavailable,
+  withChainRetry,
   authenticate,
   guardDatabase,
   json,
@@ -421,87 +422,96 @@ async function file(
   let correctionEntry: Record<string, unknown> | null = null;
   let targetEntry: Record<string, unknown> | null = null;
   try {
-    await recordDisputeFiling(env.DB, {
-      correction: {
-        event: {
-          at,
-          type: "entry_submitted",
-          entry_id: prepared.id,
-          payload: prepared.event.payload as Event<"entry_submitted">["payload"],
+    // Retried from the derivation: an event's position and hash are the head's,
+    // so a write that lost the next position in the log is built again onto the
+    // head that moved rather than sent again. The derived row is cleared with it,
+    // because a row derived at last attempt's position would be stored at a seq
+    // the log never gave it.
+    await withChainRetry(async () => {
+      correctionEntry = null;
+      targetEntry = null;
+      await recordDisputeFiling(env.DB, {
+        correction: {
+          event: {
+            at,
+            type: "entry_submitted",
+            entry_id: prepared.id,
+            payload: prepared.event.payload as Event<"entry_submitted">["payload"],
+          },
+          // The correction derives over its own events alone: `dispute_filed` is
+          // scoped to the target, so it changes nothing about the challenge, and
+          // the pipeline already derived and schema-checked exactly this entry.
+          stored: (submitted): StoredEntryInput => {
+            correctionEntry = prepared.derived.entry as Record<string, unknown>;
+            return {
+              entry: prepared.derived.entry,
+              sidecar: prepared.derived.sidecar,
+              derivedThroughSeq: submitted.seq,
+            };
+          },
+          captures: prepared.captureRows,
         },
-        // The correction derives over its own events alone: `dispute_filed` is
-        // scoped to the target, so it changes nothing about the challenge, and
-        // the pipeline already derived and schema-checked exactly this entry.
-        stored: (submitted): StoredEntryInput => {
-          correctionEntry = prepared.derived.entry as Record<string, unknown>;
+        // The challenge, on the target, naming the correction the log has just
+        // seen. `citation` and `snapshot_hash` are copied off the correction's own
+        // core so a reader folding the target's events alone can fill the schema's
+        // disputes[] item without fetching another entry.
+        filed: (submitted): EventInput<"dispute_filed"> => ({
+          at,
+          type: "dispute_filed",
+          entry_id: id,
+          payload: {
+            correction_entry_id: submitted.payload.core["id"] as string,
+            challenger: auth.agent,
+            operator: challengerOperator,
+            citation: prepared.core["citation"] as string,
+            snapshot_hash: prepared.core["snapshot_hash"] as string,
+            from_report_seq: body.fromReportSeq,
+            from_revalidation_seq: body.fromRevalidationSeq,
+          },
+        }),
+        // Section 6: "A request that turns up a citation can be upgraded into a
+        // dispute." The request closes as `upgraded` in the same batch, so its
+        // stake comes back and the dispute's own takes over from there.
+        also: (submitted): readonly EventInput[] =>
+          upgraded === null
+            ? []
+            : [
+                {
+                  at,
+                  type: "revalidation_resolved",
+                  entry_id: id,
+                  payload: {
+                    request_seq: upgraded.seq,
+                    outcome: "upgraded",
+                    checker: null,
+                    operator: null,
+                    snapshot_hash: null,
+                    correction_entry_id: submitted.payload.core["id"] as string,
+                  },
+                } satisfies EventInput<"revalidation_resolved">,
+              ],
+        target: (_submitted, filed, also): StoredEntryInput => {
+          const extra = [filed as Event, ...also];
+          const derived = rederive(targetWorld, id, deps.now, extra);
+          const result = validateEntry(derived.entry);
+          if (!result.ok) throw new SchemaInvalid(result.errors);
+          targetEntry = derived.entry as Record<string, unknown>;
           return {
-            entry: prepared.derived.entry,
-            sidecar: prepared.derived.sidecar,
-            derivedThroughSeq: submitted.seq,
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: extra[extra.length - 1]!.seq,
           };
         },
-        captures: prepared.captureRows,
-      },
-      // The challenge, on the target, naming the correction the log has just
-      // seen. `citation` and `snapshot_hash` are copied off the correction's own
-      // core so a reader folding the target's events alone can fill the schema's
-      // disputes[] item without fetching another entry.
-      filed: (submitted): EventInput<"dispute_filed"> => ({
-        at,
-        type: "dispute_filed",
-        entry_id: id,
-        payload: {
-          correction_entry_id: submitted.payload.core["id"] as string,
-          challenger: auth.agent,
-          operator: challengerOperator,
-          citation: prepared.core["citation"] as string,
-          snapshot_hash: prepared.core["snapshot_hash"] as string,
-          from_report_seq: body.fromReportSeq,
-          from_revalidation_seq: body.fromRevalidationSeq,
+        stake: (filed) => disputeStake(filed),
+        ledger: (_filed, also) => {
+          if (upgraded === null || also.length === 0) return [];
+          return revalidationOutcomeStakes(
+            upgraded,
+            also[0] as Event<"revalidation_resolved">,
+          );
         },
-      }),
-      // Section 6: "A request that turns up a citation can be upgraded into a
-      // dispute." The request closes as `upgraded` in the same batch, so its
-      // stake comes back and the dispute's own takes over from there.
-      also: (submitted): readonly EventInput[] =>
-        upgraded === null
-          ? []
-          : [
-              {
-                at,
-                type: "revalidation_resolved",
-                entry_id: id,
-                payload: {
-                  request_seq: upgraded.seq,
-                  outcome: "upgraded",
-                  checker: null,
-                  operator: null,
-                  snapshot_hash: null,
-                  correction_entry_id: submitted.payload.core["id"] as string,
-                },
-              } satisfies EventInput<"revalidation_resolved">,
-            ],
-      target: (_submitted, filed, also): StoredEntryInput => {
-        const extra = [filed as Event, ...also];
-        const derived = rederive(targetWorld, id, deps.now, extra);
-        const result = validateEntry(derived.entry);
-        if (!result.ok) throw new SchemaInvalid(result.errors);
-        targetEntry = derived.entry as Record<string, unknown>;
-        return {
-          entry: derived.entry,
-          sidecar: derived.sidecar,
-          derivedThroughSeq: extra[extra.length - 1]!.seq,
-        };
-      },
-      stake: (filed) => disputeStake(filed),
-      ledger: (_filed, also) => {
-        if (upgraded === null || also.length === 0) return [];
-        return revalidationOutcomeStakes(
-          upgraded,
-          also[0] as Event<"revalidation_resolved">,
-        );
-      },
-      answeredAssignmentSeq: openCheck === null ? null : openCheck.seq,
+        answeredAssignmentSeq: openCheck === null ? null : openCheck.seq,
+      });
     });
   } catch (error) {
     if (error instanceof SchemaInvalid) {
@@ -566,11 +576,9 @@ export async function handleDispute(
       id,
     );
   } catch (error) {
-    if (error instanceof StorageUnreachable) {
-      // The message only: no binding contents, no request data.
-      console.error(`dispute: storage unreachable: ${error.message}`);
-      return refuse(503, "storage_unreachable");
-    }
+    // The message only: no binding contents, no request data.
+    const answer = unavailable(error, "dispute");
+    if (answer !== null) return answer;
     if (error instanceof ArchiveUnreachable) {
       console.error(`dispute: archive unreachable: ${error.message}`);
       return refuse(503, "archive_unreachable");

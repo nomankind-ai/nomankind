@@ -29,10 +29,10 @@
  * The receipt is persisted before the response is sent, so a receipt in a
  * reader's hands always has a row behind it: a counter a reader holds and the
  * log cannot account for would be exactly the hole Section 9 asks readers to
- * look for. The counter is the database's to hand out — two isolates asking at
- * the same instant read the same number and the unique index refuses the second
- * — so a conflict is answered by signing again for the next number, at most
- * three attempts, and then 503 rather than a receipt whose number is a guess.
+ * look for. The counter is the database's to hand out, in one statement its
+ * single writer serializes (migrations/0016_receipt_counter.sql): two isolates
+ * asking at the same instant are handed two numbers, so the signature goes over
+ * the number once and there is nothing to sign again.
  *
  * An entry that is not verified never issues a receipt and never moves the
  * counter: it was not served, so nobody read it.
@@ -55,7 +55,7 @@ import type { D1Like } from "../storage/d1.js";
 import {
   ReceiptConflictError,
   getEntry,
-  nextReadCounter,
+  allocateReadCounter,
   putReadReceipt,
   readCandidates,
   sealCovering,
@@ -82,14 +82,6 @@ import {
 
 /** The ids nomankind mints, exactly as src/read.ts narrows the schema's pattern. */
 const ENTRY_ID_PATTERN = /^nmk_[0-9a-f]{32}$/;
-
-/**
- * How many times a reader's receipt may be signed again for a counter another
- * isolate took first. A retry budget, not a policy number: it bounds a loop
- * whose every iteration is a real conflict, and the answer when it runs out is a
- * refusal rather than an unnumbered receipt.
- */
-const RECEIPT_ATTEMPTS = 3;
 
 /**
  * The key that signs receipts, and the agent id it belongs to.
@@ -197,10 +189,20 @@ function nullableField(entry: Entry, name: string): string | null {
 }
 
 /**
- * Sign and store one receipt, or null when every attempt lost the counter.
+ * Sign and store one receipt, or null when the guard refused the row.
  *
- * The counter is inside the signed bytes, so a conflict cannot be repaired by
- * editing the row: the receipt is signed again, from a freshly read counter.
+ * The counter is drawn first and is drawn once: `allocateReadCounter` hands out
+ * a number in a single statement D1's writer serializes, so no other isolate
+ * holds it and the signature goes over it exactly once. There is no loop here —
+ * the loop this replaced signed the receipt again for the next number whenever
+ * two readers arrived together, and under real parallelism it ran out and
+ * refused a reader who had done nothing wrong.
+ *
+ * Null is the unique index having refused the insert anyway, which means the
+ * counter row and the receipts table have fallen out of step. The receipt is
+ * not signed again for another number: the door refuses, and the index has
+ * stopped two receipts from claiming one position in the stream.
+ *
  * `created_at` is the receipt's own `read_at`, so the day a receipt belongs to
  * and the day it is counted on are the same day by construction.
  */
@@ -216,41 +218,35 @@ async function issueReceipt(
   const readAt = now.toISOString();
   const key = access.key;
 
-  for (let attempt = 0; attempt < RECEIPT_ATTEMPTS; attempt += 1) {
-    const counter = await nextReadCounter(db);
-    // Both counters inside the loop: the key's number is in the signed bytes
-    // beside the log's, so a receipt signed again for a lost log counter is
-    // signed again for a fresh key counter too. The key's own sequence keeps a
-    // hole where the lost attempt was, which is what the log-wide one does and
-    // means the same thing — a number drawn and never handed over.
-    const keyCounter = key === null ? null : await nextKeyCounter(db, key.id);
-    const receipt = await signReadReceipt(
-      {
-        entry_id: entryId,
-        entry_hash: hash,
-        read_at: readAt,
-        counter,
-        issuer: signer.issuer,
-        key: key === null ? null : key.id,
-        key_counter: keyCounter,
-      },
-      signer.key,
-    );
-    try {
-      await putReadReceipt(db, {
-        entryId,
-        createdAt: readAt,
-        receipt,
-        keyId: key === null ? null : key.id,
-        keyCounter,
-      });
-      return receipt;
-    } catch (error) {
-      if (error instanceof ReceiptConflictError) continue;
-      throw error;
-    }
+  const counter = await allocateReadCounter(db);
+  // The key's number is in the signed bytes beside the log's, and is drawn the
+  // same way: one statement, and the number is the drawer's own.
+  const keyCounter = key === null ? null : await nextKeyCounter(db, key.id);
+  const receipt = await signReadReceipt(
+    {
+      entry_id: entryId,
+      entry_hash: hash,
+      read_at: readAt,
+      counter,
+      issuer: signer.issuer,
+      key: key === null ? null : key.id,
+      key_counter: keyCounter,
+    },
+    signer.key,
+  );
+  try {
+    await putReadReceipt(db, {
+      entryId,
+      createdAt: readAt,
+      receipt,
+      keyId: key === null ? null : key.id,
+      keyCounter,
+    });
+  } catch (error) {
+    if (error instanceof ReceiptConflictError) return null;
+    throw error;
   }
-  return null;
+  return receipt;
 }
 
 /**

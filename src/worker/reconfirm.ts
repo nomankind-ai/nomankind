@@ -63,7 +63,8 @@ import {
 } from "../storage/repository.js";
 import type { Env } from "./env.js";
 import {
-  StorageUnreachable,
+  unavailable,
+  withChainRetry,
   authenticate,
   guardDatabase,
   json,
@@ -287,36 +288,44 @@ async function reconfirm(
   const at = deps.now.toISOString();
   let derivedEntry: Record<string, unknown> | null = null;
   try {
-    await recordReconfirmation(env.DB, {
-      event: {
-        at,
-        type: "reconfirmation",
-        entry_id: id,
-        payload: { record, signature: body.signature },
-      },
-      // Called with the event already sealed onto the head and before anything
-      // is written, so the entry stored is derived from a log that holds this
-      // attestation, and a schema refusal here leaves the log exactly as it was.
-      stored: (event) => {
-        const derived = rederive(world, id, deps.now, [event]);
-        const result = validateEntry(derived.entry);
-        if (!result.ok) throw new SchemaInvalid(result.errors);
-        derivedEntry = derived.entry as Record<string, unknown>;
-        return {
-          entry: derived.entry,
-          sidecar: derived.sidecar,
-          derivedThroughSeq: event.seq,
-        };
-      },
-      // Section 7: the withheld half is paid to whoever makes the entry fresh
-      // again. Measured against the entry as it stood *before* this attestation,
-      // because deriving after the fact would find the window already reopened
-      // and would never see a bounty at all.
-      bounty: (event) =>
-        bountyAccrual(
-          { expires_at: before.derived.expires_at, stale: before.derived.stale },
-          event,
-        ),
+    // Retried from the derivation: an event's position and hash are the head's,
+    // so a write that lost the next position in the log is built again onto the
+    // head that moved rather than sent again. The derived row is cleared with it,
+    // because a row derived at last attempt's position would be stored at a seq
+    // the log never gave it.
+    await withChainRetry(async () => {
+      derivedEntry = null;
+      await recordReconfirmation(env.DB, {
+        event: {
+          at,
+          type: "reconfirmation",
+          entry_id: id,
+          payload: { record, signature: body.signature },
+        },
+        // Called with the event already sealed onto the head and before anything
+        // is written, so the entry stored is derived from a log that holds this
+        // attestation, and a schema refusal here leaves the log exactly as it was.
+        stored: (event) => {
+          const derived = rederive(world, id, deps.now, [event]);
+          const result = validateEntry(derived.entry);
+          if (!result.ok) throw new SchemaInvalid(result.errors);
+          derivedEntry = derived.entry as Record<string, unknown>;
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: event.seq,
+          };
+        },
+        // Section 7: the withheld half is paid to whoever makes the entry fresh
+        // again. Measured against the entry as it stood *before* this attestation,
+        // because deriving after the fact would find the window already reopened
+        // and would never see a bounty at all.
+        bounty: (event) =>
+          bountyAccrual(
+            { expires_at: before.derived.expires_at, stale: before.derived.stale },
+            event,
+          ),
+      });
     });
   } catch (error) {
     if (error instanceof SchemaInvalid) {
@@ -380,11 +389,9 @@ export async function handleReconfirm(
       id,
     );
   } catch (error) {
-    if (error instanceof StorageUnreachable) {
-      // The message only: no binding contents, no request data.
-      console.error(`reconfirm: storage unreachable: ${error.message}`);
-      return refuse(503, "storage_unreachable");
-    }
+    // The message only: no binding contents, no request data.
+    const answer = unavailable(error, "reconfirm");
+    if (answer !== null) return answer;
     throw error;
   }
 }

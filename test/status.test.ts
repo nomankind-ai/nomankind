@@ -200,10 +200,10 @@ describe("1. sweep timer", () => {
     const late = STATUS_ATTENTION_AFTER_INTERVALS * SWEEP_INTERVAL_MINUTES + 1;
     const input = {
       ...empty(),
-      steps: [step("sweep", { last_run_at: minutesAgo(late), trigger: "cron" })],
+      steps: [step("sweep", { last_run_at: minutesAgo(late), trigger: "alarm" })],
     };
     expect(stateOf(input, "sweep timer")).toBe("attention");
-    expect(rowOf(input, "sweep timer").last).toContain("cron");
+    expect(rowOf(input, "sweep timer").last).toContain("alarm");
   });
 
   it("is failing past the failing threshold", () => {

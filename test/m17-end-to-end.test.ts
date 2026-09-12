@@ -765,6 +765,10 @@ describe("the day's read count, published to the sealed log", () => {
       total: 0,
       counter_first: null,
       counter_last: null,
+      // No receipt rows either, said as a number rather than left out: the
+      // count of rows is what the counter range is held against, and a day
+      // that published nothing published that too.
+      receipts: 0,
       // A day nobody read is also a day nobody paid for, and both halves are
       // published rather than left out (M24).
       paid: { reads: [], total: 0, keys: {} },

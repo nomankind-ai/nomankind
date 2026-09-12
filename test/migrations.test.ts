@@ -161,6 +161,7 @@ describe("wrangler d1 migrations apply", () => {
         "0013_status.sql",
         "0014_mirror.sql",
         "0015_paid_access.sql",
+        "0016_receipt_counter.sql",
       ]);
       expect(oursApplied.results.map((row) => row.name)).toEqual(
         applied.results.map((row) => row.name),

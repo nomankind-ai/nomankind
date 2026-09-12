@@ -60,7 +60,6 @@
 import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
 import { DohResolver, type DnsResolver } from "../adapters/dns.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
-import { mirrorAdapterFor } from "../adapters/mirror.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import {
   paymentsAdapterFor,
@@ -86,10 +85,9 @@ import { handleStanding } from "./standing.js";
 import { handleStatus } from "./status.js";
 import { handleStripeWebhook } from "./stripe.js";
 import { handleSubmit } from "./submit.js";
-import { runSweep } from "./sweep.js";
 import {
+  armSweeper,
   ensureSweeper,
-  sweepDepsFor,
   type ExecutionContextLike,
 } from "./sweeper.js";
 import { handleSync } from "./sync.js";
@@ -333,15 +331,15 @@ export interface ScheduledContext {
  * whose chain of alarms was ever broken is repaired by the next visitor. It
  * never throws and the response never waits on it.
  *
- * `scheduled` is the cron trigger's door (wrangler.jsonc names the cadence). It
- * reads the instant off the controller, which is the platform's own clock for
- * this run and is read exactly once, and constructs the real drand reader: the
- * fixture beacon in src/adapters/beacon.ts is for tests and is never reachable
- * from here (decision D-013 as amended). The witness and anchor adapters are
- * built the same way, by `sweepDepsFor`, so the cron door and the Durable
- * Object's alarm sweep against exactly the same world. The sweep is awaited
- * rather than passed to `waitUntil`, so a run that fails is a failed run the
- * platform can see.
+ * `scheduled` is the cron trigger's door (wrangler.jsonc names the cadence),
+ * and it no longer sweeps: it arms the Sweeper's alarm and nothing else. The
+ * sweep runs on one timer — the alarm in src/worker/sweeper.ts — and this door
+ * is the watchdog over it, for the one failure that timer cannot repair on its
+ * own: a run killed mid-flight (a CPU limit, say) sets no next alarm, and
+ * without a visitor the chain stays stopped. Arming is idempotent, so a Sweeper
+ * whose alarm is already set is read and left alone, with nothing written. It
+ * is awaited rather than deferred, because a scheduled invocation has nothing
+ * else to wait on.
  */
 export default {
   fetch: (
@@ -353,32 +351,10 @@ export default {
     return handleRequest(request, env);
   },
   scheduled: async (
-    controller: ScheduledController,
+    _controller: ScheduledController,
     env: Env,
     _ctx: ScheduledContext,
   ): Promise<void> => {
-    await runSweep(
-      env,
-      {
-        ...(await sweepDepsFor(env, () => controller.scheduledTime, {
-          beacon: new DrandReader(),
-        })),
-        // The payout adapter this environment runs (decision D-013 as amended,
-        // D-053): a mock on demo and local, the stub that refuses on
-        // production, and never a fixture — the same rule the beacon follows.
-        payout: payoutAdapterFor(env.ENVIRONMENT),
-        // Where the day's export goes (M23), built the same way and for the
-        // same reason: the cron door and the alarm mirror to one repository.
-        mirror: mirrorAdapterFor(env),
-        // Where the day's paid reads are reported (M24, D-078), built the same
-        // way and for the same reason: the cron door and the alarm bill through
-        // one provider, and production without a key meters nothing at all.
-        payments: paymentsAdapterFor(env),
-        // Which door ran it, for the status board's own row (D-076). The Sweeper
-        // Durable Object says nothing and is read as `alarm`, which is what it
-        // is: the sweep's own timer, with this cron trigger as the repair.
-        trigger: "cron",
-      },
-    );
+    await armSweeper(env);
   },
 };

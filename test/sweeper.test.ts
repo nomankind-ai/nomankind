@@ -23,9 +23,10 @@ import {
 } from "../src/adapters/payout.js";
 import { SWEEP_INTERVAL_MINUTES } from "../src/policy.js";
 import type { D1Like, D1LikeStatement } from "../src/storage/d1.js";
-import { eventBySeq, headSeq } from "../src/storage/repository.js";
+import { eventBySeq, headSeq, sweepSteps } from "../src/storage/repository.js";
 import type { R2Like } from "../src/storage/r2.js";
 import type { Env } from "../src/worker/env.js";
+import handler from "../src/worker/index.js";
 import {
   SWEEPER_INSTANCE,
   Sweeper,
@@ -340,10 +341,10 @@ describe("arming the timer from a request", () => {
  * The payout adapter the timer's own deps carry (M21, decision D-053).
  *
  * `sweepDepsFor` is the one place a run's adapters are built, and the alarm is a
- * sweep like any other: a cycle that pays through the cron door and skips
+ * sweep like any other: a cycle that pays through `/run` and skips
  * `payout_unconfigured` through the alarm would be two different sweeps of the
- * same log, and which one an operator was paid by would depend on which timer
- * happened to fire.
+ * same log, and which one an operator was paid by would depend on which door
+ * happened to be used.
  */
 describe("the payout adapter the timer runs with", () => {
   it("is the one this environment runs, and never a fixture", async () => {
@@ -380,5 +381,95 @@ describe("the payout adapter the timer runs with", () => {
     expect(report.sealed).not.toBeNull();
     expect(report.skipped["payout_unconfigured"]).toBeUndefined();
     expect(report.payouts).toEqual([]);
+  });
+});
+
+/**
+ * The cron trigger, which is the watchdog over this timer and not a second one.
+ *
+ * The scheduled handler in src/worker/index.ts arms the alarm and nothing else,
+ * so a chain of alarms broken by a run the platform killed mid-flight — the
+ * case where neither the re-arm nor anything else in the object runs — heals
+ * within five minutes without waiting for a visitor, and an interval never
+ * carries two sweeps of the same log.
+ */
+describe("the cron watchdog", () => {
+  /** A namespace over one real Sweeper, so `/ensure` reaches the real object. */
+  function namespaceOver(sweeper: Sweeper): SweeperNamespace & {
+    readonly urls: string[];
+  } {
+    const urls: string[] = [];
+    const stub = {
+      fetch: (input: string | Request): Promise<Response> => {
+        const url = typeof input === "string" ? input : input.url;
+        urls.push(url);
+        return sweeper.fetch(new Request(url));
+      },
+    };
+    return { urls, idFromName: (name: string) => name, get: () => stub };
+  }
+
+  const controller = { scheduledTime: NOW, cron: "*/5 * * * *" };
+  const ctx = { waitUntil: () => undefined };
+
+  it("arms an unarmed Sweeper, and sweeps nothing at all", async () => {
+    const store = await database();
+    const state = fakeState();
+    const sweeper = new Sweeper(
+      state,
+      envFor(store),
+      await sweeperDeps(await makeWitness("sweeper-witness.example")),
+    );
+    const namespace = namespaceOver(sweeper);
+
+    await handler.scheduled(
+      controller,
+      { ...envFor(store), SWEEPER: namespace },
+      ctx,
+    );
+
+    // The alarm is set, one interval out, by the same `/ensure` a visitor uses.
+    expect(namespace.urls).toEqual(["https://sweeper/ensure"]);
+    expect(state.armedAt()).toBe(NOW + INTERVAL_MS);
+    // And no sweep happened: no event appended and no board written, so the
+    // interval carries exactly the one run the alarm itself will make.
+    expect(await headSeq(store.db)).toBeNull();
+    expect(await sweepSteps(store.db)).toEqual([]);
+  });
+
+  it("does nothing, and writes nothing, when the alarm is already armed", async () => {
+    const store = await database();
+    const state = fakeState();
+    const sweeper = new Sweeper(
+      state,
+      envFor(store),
+      await sweeperDeps(await makeWitness("sweeper-witness.example")),
+    );
+    const namespace = namespaceOver(sweeper);
+    await sweeper.fetch(new Request("https://sweeper/ensure"));
+    const armed = state.armedAt();
+
+    await handler.scheduled(
+      controller,
+      { ...envFor(store), SWEEPER: namespace },
+      ctx,
+    );
+
+    // The object read its own alarm and left it alone: the same instant, and
+    // still nothing in the log or on the board.
+    expect(state.armedAt()).toBe(armed);
+    expect(await headSeq(store.db)).toBeNull();
+    expect(await sweepSteps(store.db)).toEqual([]);
+  });
+
+  it("never throws when the Worker holds no Sweeper binding", async () => {
+    const store = await database();
+
+    // The bindings-only platform proxy is this case, and a watchdog that threw
+    // would be a scheduled invocation the platform reports as a failure.
+    await expect(
+      handler.scheduled(controller, envFor(store), ctx),
+    ).resolves.toBeUndefined();
+    expect(await headSeq(store.db)).toBeNull();
   });
 });

@@ -73,7 +73,8 @@ import {
 } from "../storage/repository.js";
 import type { Env } from "./env.js";
 import {
-  StorageUnreachable,
+  unavailable,
+  withChainRetry,
   authenticate,
   guardDatabase,
   json,
@@ -227,29 +228,37 @@ async function request_(
   const at = deps.now.toISOString();
   let derivedEntry: Record<string, unknown> | null = null;
   try {
-    await recordRevalidationRequest(env.DB, {
-      event: {
-        at,
-        type: "revalidation_requested",
-        entry_id: id,
-        payload: { requester: auth.agent, operator, source: "operator" },
-      },
-      stored: (event) => {
-        const derived = rederive(world, id, deps.now, [event]);
-        const result = validateEntry(derived.entry);
-        if (!result.ok) throw new SchemaInvalid(result.errors);
-        derivedEntry = derived.entry as Record<string, unknown>;
-        return {
-          entry: derived.entry,
-          sidecar: derived.sidecar,
-          derivedThroughSeq: event.seq,
-        };
-      },
-      // Section 6: the request is made "by staking a small amount of standing".
-      ledger: (event) => {
-        const staked = revalidationStake(event);
-        return staked === null ? [] : [staked];
-      },
+    // Retried from the derivation: an event's position and hash are the head's,
+    // so a write that lost the next position in the log is built again onto the
+    // head that moved rather than sent again. The derived row is cleared with it,
+    // because a row derived at last attempt's position would be stored at a seq
+    // the log never gave it.
+    await withChainRetry(async () => {
+      derivedEntry = null;
+      await recordRevalidationRequest(env.DB, {
+        event: {
+          at,
+          type: "revalidation_requested",
+          entry_id: id,
+          payload: { requester: auth.agent, operator, source: "operator" },
+        },
+        stored: (event) => {
+          const derived = rederive(world, id, deps.now, [event]);
+          const result = validateEntry(derived.entry);
+          if (!result.ok) throw new SchemaInvalid(result.errors);
+          derivedEntry = derived.entry as Record<string, unknown>;
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: event.seq,
+          };
+        },
+        // Section 6: the request is made "by staking a small amount of standing".
+        ledger: (event) => {
+          const staked = revalidationStake(event);
+          return staked === null ? [] : [staked];
+        },
+      });
     });
   } catch (error) {
     if (error instanceof SchemaInvalid) {
@@ -385,35 +394,43 @@ async function resolve(
   const at = deps.now.toISOString();
   let derivedEntry: Record<string, unknown> | null = null;
   try {
-    await recordRevalidationResolution(env.DB, {
-      event: {
-        at,
-        type: "revalidation_resolved",
-        entry_id: id,
-        payload: {
-          request_seq: open.seq,
-          // "If the check finds the fact changed ... If the entry holds ..."
-          outcome: body.held ? "held" : "changed",
-          checker: record.agent,
-          operator: record.operator,
-          snapshot_hash: record.snapshot_hash,
-          // An upgrade names a correction; a check does not make one.
-          correction_entry_id: null,
+    // Retried from the derivation: an event's position and hash are the head's,
+    // so a write that lost the next position in the log is built again onto the
+    // head that moved rather than sent again. The derived row is cleared with it,
+    // because a row derived at last attempt's position would be stored at a seq
+    // the log never gave it.
+    await withChainRetry(async () => {
+      derivedEntry = null;
+      await recordRevalidationResolution(env.DB, {
+        event: {
+          at,
+          type: "revalidation_resolved",
+          entry_id: id,
+          payload: {
+            request_seq: open.seq,
+            // "If the check finds the fact changed ... If the entry holds ..."
+            outcome: body.held ? "held" : "changed",
+            checker: record.agent,
+            operator: record.operator,
+            snapshot_hash: record.snapshot_hash,
+            // An upgrade names a correction; a check does not make one.
+            correction_entry_id: null,
+          },
         },
-      },
-      stored: (event) => {
-        const derived = rederive(world, id, deps.now, [event]);
-        const result = validateEntry(derived.entry);
-        if (!result.ok) throw new SchemaInvalid(result.errors);
-        derivedEntry = derived.entry as Record<string, unknown>;
-        return {
-          entry: derived.entry,
-          sidecar: derived.sidecar,
-          derivedThroughSeq: event.seq,
-        };
-      },
-      ledger: (event) => revalidationOutcomeStakes(open, event),
-      answeredAssignmentSeq: assignment.seq,
+        stored: (event) => {
+          const derived = rederive(world, id, deps.now, [event]);
+          const result = validateEntry(derived.entry);
+          if (!result.ok) throw new SchemaInvalid(result.errors);
+          derivedEntry = derived.entry as Record<string, unknown>;
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: event.seq,
+          };
+        },
+        ledger: (event) => revalidationOutcomeStakes(open, event),
+        answeredAssignmentSeq: assignment.seq,
+      });
     });
   } catch (error) {
     if (error instanceof SchemaInvalid) {
@@ -472,11 +489,9 @@ export async function handleRevalidate(
       ? await resolve(request, guarded, deps, path, resolveId)
       : await request_(request, guarded, deps, path, requestId as string);
   } catch (error) {
-    if (error instanceof StorageUnreachable) {
-      // The message only: no binding contents, no request data.
-      console.error(`revalidate: storage unreachable: ${error.message}`);
-      return refuse(503, "storage_unreachable");
-    }
+    // The message only: no binding contents, no request data.
+    const answer = unavailable(error, "revalidate");
+    if (answer !== null) return answer;
     throw error;
   }
 }

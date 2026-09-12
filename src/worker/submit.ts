@@ -60,7 +60,6 @@ import { validateEntry } from "../schema.js";
 import { verifyEntrySignature } from "../sign.js";
 import type { D1Like } from "../storage/d1.js";
 import {
-  EventAppendError,
   capturesForHash,
   eventBySeq,
   eventsForEntry,
@@ -85,7 +84,8 @@ import { readerAccess, type ReaderAccess } from "./access.js";
 import type { Env } from "./env.js";
 import { entryRelease, refusalResponse } from "./read.js";
 import {
-  StorageUnreachable,
+  unavailable,
+  withChainRetry,
   authenticate,
   guardDatabase,
   json,
@@ -600,6 +600,38 @@ async function tail(db: D1Like): Promise<Event[]> {
 }
 
 /**
+ * The would-be submission event, sealed onto the head as it stands, and the
+ * entry derived from it.
+ *
+ * This door's own derivation step, in one place because it runs twice: once
+ * before anything is written, so the entry is validated exactly as it will be
+ * stored, and again on every rebuild when another write took the position
+ * first. The event's seq and `prev_hash` are the head's and the entry is
+ * derived through that seq, so a batch that lost the position cannot be sent
+ * again as it was — it has to be sealed again from here.
+ */
+async function sealSubmission(
+  db: D1Like,
+  input: {
+    readonly at: string;
+    readonly id: string;
+    readonly core: Core;
+    readonly signature: string;
+  },
+): Promise<{ readonly event: Event; readonly derived: DerivedEntry }> {
+  const previous = await tail(db);
+  const appended = await appendEvent(previous, {
+    at: input.at,
+    type: "entry_submitted",
+    entry_id: input.id,
+    payload: { core: input.core, signature: input.signature },
+  });
+  const event = appended[appended.length - 1]!;
+  const events = [...(await eventsForEntry(db, input.id)), event];
+  return { event, derived: deriveEntry(events, input.id, { now: input.at }) };
+}
+
+/**
  * One submission that has passed every check, ready to be archived and written.
  *
  * `event` is the `entry_submitted` sealed onto the head this request read, not
@@ -873,16 +905,12 @@ export async function prepareSubmission(
 
   // The would-be event, built on the current head but not yet written, so the
   // entry can be derived and validated exactly as it will be stored.
-  const previous = await tail(env.DB);
-  const appended = await appendEvent(previous, {
+  const { event, derived } = await sealSubmission(env.DB, {
     at,
-    type: "entry_submitted",
-    entry_id: id,
-    payload: { core, signature: body.entry["signature"] as string },
+    id,
+    core,
+    signature: body.entry["signature"] as string,
   });
-  const event = appended[appended.length - 1]!;
-  const events = [...(await eventsForEntry(env.DB, id)), event];
-  const derived = deriveEntry(events, id, { now: at });
 
   // The whole object, against the schema, before any write. An entry that does
   // not validate is not stored and its capture is not archived.
@@ -956,22 +984,27 @@ async function submit(
   // event, the entry row and the capture rows in one atomic batch.
   await archivePrepared(env, prepared);
 
-  try {
+  await withChainRetry(async () => {
+    // Sealed again on every attempt: the event's position and hash are the
+    // head's and the entry is derived through that position, so a submission
+    // that lost the race is built onto the head that moved rather than sent
+    // again as bytes the chain has already refused. Three losses is 503
+    // chain_conflict from the one boundary that answers for every door, so
+    // there is no refusal of this door's own left to make here.
+    const sealed = await sealSubmission(env.DB, {
+      at: prepared.at,
+      id: prepared.id,
+      core: prepared.core,
+      signature: (prepared.event as Event<"entry_submitted">).payload.signature,
+    });
     await submitEntry(env.DB, {
-      events: [prepared.event],
-      entry: prepared.derived.entry,
-      sidecar: prepared.derived.sidecar,
-      derivedThroughSeq: prepared.event.seq,
+      events: [sealed.event],
+      entry: sealed.derived.entry,
+      sidecar: sealed.derived.sidecar,
+      derivedThroughSeq: sealed.event.seq,
       captures: prepared.captureRows,
     });
-  } catch (error) {
-    if (error instanceof EventAppendError) {
-      // Another request appended between the head we read and this write. The
-      // submission is not refused on its merits and can be sent again.
-      return refuse(409, "chain_moved");
-    }
-    throw error;
-  }
+  });
 
   return json(prepared.derived.entry, 201, {
     location: `/entries/${prepared.id}`,
@@ -1220,11 +1253,9 @@ export async function handleSubmit(
   try {
     return await route(request, { ...env, DB: guardDatabase(env.DB) }, deps);
   } catch (error) {
-    if (error instanceof StorageUnreachable) {
-      // The message only: no binding contents, no request data.
-      console.error(`submit: storage unreachable: ${error.message}`);
-      return refuse(503, "storage_unreachable");
-    }
+    // The message only: no binding contents, no request data.
+    const answer = unavailable(error, "submit");
+    if (answer !== null) return answer;
     if (error instanceof ArchiveUnreachable) {
       console.error(`submit: archive unreachable: ${error.message}`);
       return refuse(503, "archive_unreachable");

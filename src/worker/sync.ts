@@ -48,7 +48,7 @@ import {
   ReceiptConflictError,
   eventsInRange,
   latestSeal,
-  nextReadCounter,
+  allocateReadCounter,
   putSyncReceipt,
   sealCovering,
   sealsBetween,
@@ -81,14 +81,6 @@ import {
 } from "./registry.js";
 import { buildInclusionProof } from "./seals.js";
 import { entryWorld, rederive, worldAt } from "./world.js";
-
-/**
- * How many times a receipt may be signed again for a counter another isolate
- * took first. The read door's own budget, spelled the same way and for the same
- * reason: it bounds a loop whose every iteration is a real conflict, and the
- * answer when it runs out is a refusal rather than an unnumbered receipt.
- */
-const RECEIPT_ATTEMPTS = 3;
 
 /** One entry as it stood at the sealed head: the record, and what filters ask. */
 interface EntryState {
@@ -245,11 +237,15 @@ function emptyPage(
 }
 
 /**
- * Sign and store one receipt covering the whole response, or null when every
- * attempt lost the counter.
+ * Sign and store one receipt covering the whole response, or null when the
+ * guard refused the row.
  *
- * The counter is inside the signed bytes, so a conflict cannot be repaired by
- * editing the row: the receipt is signed again from a freshly read counter.
+ * The read door's own shape, for the read door's own reason: the counter is
+ * drawn once, in the single statement D1's writer serializes, so no other
+ * isolate holds it and the signature goes over it once. There is no loop and
+ * nothing is signed again — null is the unique index refusing an insert at a
+ * number the table already stands at, which is the counter row and the receipts
+ * table out of step, and the door refuses rather than guessing another number.
  * `created_at` is the receipt's own `issued_at`, so the day a receipt belongs to
  * and the day it is counted on are the same day by construction — which is what
  * lets `readCountsOn` fold a sync's verified entries into that day's published
@@ -277,40 +273,36 @@ async function issueReceipt(
   const issuedAt = now.toISOString();
   const key = access.key;
 
-  for (let attempt = 0; attempt < RECEIPT_ATTEMPTS; attempt += 1) {
-    const counter = await nextReadCounter(db);
-    // Drawn inside the loop beside the log-wide counter, exactly as the read
-    // door draws it: both numbers are in the signed bytes, so a receipt signed
-    // again is signed again for both.
-    const keyCounter = key === null ? null : await nextKeyCounter(db, key.id);
-    const receipt = await signSyncReceipt(
-      {
-        from: fields.from,
-        head: fields.head,
-        entries,
-        event_count: fields.delivered.length,
-        issued_at: issuedAt,
-        counter,
-        issuer: signer.issuer,
-        key: key === null ? null : key.id,
-        key_counter: keyCounter,
-      },
-      signer.key,
-    );
-    try {
-      await putSyncReceipt(db, {
-        createdAt: issuedAt,
-        receipt,
-        keyId: key === null ? null : key.id,
-        keyCounter,
-      });
-      return receipt;
-    } catch (error) {
-      if (error instanceof ReceiptConflictError) continue;
-      throw error;
-    }
+  const counter = await allocateReadCounter(db);
+  // Drawn beside the log-wide counter, exactly as the read door draws it: both
+  // numbers are in the signed bytes, and both are the drawer's own.
+  const keyCounter = key === null ? null : await nextKeyCounter(db, key.id);
+  const receipt = await signSyncReceipt(
+    {
+      from: fields.from,
+      head: fields.head,
+      entries,
+      event_count: fields.delivered.length,
+      issued_at: issuedAt,
+      counter,
+      issuer: signer.issuer,
+      key: key === null ? null : key.id,
+      key_counter: keyCounter,
+    },
+    signer.key,
+  );
+  try {
+    await putSyncReceipt(db, {
+      createdAt: issuedAt,
+      receipt,
+      keyId: key === null ? null : key.id,
+      keyCounter,
+    });
+  } catch (error) {
+    if (error instanceof ReceiptConflictError) return null;
+    throw error;
   }
-  return null;
+  return receipt;
 }
 
 /**

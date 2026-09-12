@@ -3494,8 +3494,11 @@ async function entriesSubmittedIn(
  * them claiming a seal nobody can find.
  *
  * A plain INSERT, with no ON CONFLICT: unlike `putSeal`, which exists so a test
- * or a rebuild can restate a seal, this is the live path, and a second timer
- * arriving at the same range is a race to refuse rather than a row to overwrite.
+ * or a rebuild can restate a seal, this is the live path, and a second run
+ * arriving at the same range is a race to refuse rather than a row to
+ * overwrite. One timer runs the sweep — the alarm — and the watchdog that keeps
+ * it wound never sweeps itself, so the second run is an alarm overlapping the
+ * one before it rather than a second kind of door.
  *
  * The range is bounded by the seal, so the entries read needs no page size: a
  * batch covers the events since the last seal and nothing more.
@@ -3870,13 +3873,14 @@ export function readReceiptId(counter: number): string {
 /**
  * A counter that was already taken.
  *
- * `nextReadCounter` reads the largest counter issued and adds one, and two
- * isolates asking at the same instant get the same answer — an isolate cannot
- * see what another is halfway through inserting. The guard is the unique index
- * on (kind, seq) in migrations/0007_receipts.sql, not the read: the second
- * insert fails, and this is what that failure means. The caller re-reads the
- * counter and signs a fresh receipt for the next number, because the counter is
- * inside the signed bytes and cannot be edited afterwards.
+ * The guard, and now only the guard. A door draws its number from
+ * `allocateReadCounter`, which hands out a number no other isolate holds, so
+ * this is what it means when a receipt row nonetheless stands at that number:
+ * the counter row and the receipts table have fallen out of step, and the
+ * unique index in migrations/0007_receipts.sql and 0008_sync.sql refused the
+ * insert rather than let two receipts claim one position in the stream. The
+ * door refuses too — the counter is inside the signed bytes and cannot be
+ * edited afterwards, and a receipt whose number is a guess is worth nothing.
  */
 export class ReceiptConflictError extends Error {
   override readonly name = "ReceiptConflictError";
@@ -3889,20 +3893,88 @@ export class ReceiptConflictError extends Error {
 }
 
 /**
- * The next running counter: one past the largest issued, and 1 on an empty
- * table.
+ * The one counter row read and sync receipts share
+ * (migrations/0016_receipt_counter.sql).
+ */
+const RECEIPT_COUNTER_ROW = "reads";
+
+/** Hand out the next number, in one statement. */
+const ALLOCATE_COUNTER = `UPDATE receipt_counter SET counter = counter + 1 WHERE id = ? RETURNING counter`;
+
+/**
+ * Carry the counter up to a number a caller wrote a receipt at without drawing
+ * it here, and never down. Paired with every receipt insert, so the high-water
+ * mark is a fact about the table rather than a second place the same number is
+ * kept.
+ */
+const CATCH_UP_COUNTER = `UPDATE receipt_counter SET counter = ? WHERE id = ? AND counter < ?`;
+
+/**
+ * The next running counter: one past the last number handed out, and 1 before
+ * any has been.
  *
  * Whitepaper Section 8: the receipt names "a running counter". It runs across
  * every read, not per entry, so a reader can place their receipt in the whole
  * stream of reads nomankind served rather than only in one entry's.
+ *
+ * A read and nothing more — it is what the next reader will be handed, asked by
+ * a caller that wants to know rather than to be served. The door draws its own
+ * number with `allocateReadCounter`, because reading this and then inserting at
+ * it is exactly the race migration 0016 exists to end.
  */
 export async function nextReadCounter(db: D1Like): Promise<number> {
   const row = await db
-    .prepare(`SELECT MAX(seq) AS last FROM receipts WHERE ${COUNTED_KINDS_IN}`)
-    .bind(...COUNTED_RECEIPT_KINDS)
+    .prepare(`SELECT counter FROM receipt_counter WHERE id = ? ${ONE_ROW}`)
+    .bind(RECEIPT_COUNTER_ROW)
     .first<Row>();
-  const last = row === null ? null : readNullableInteger(row, "last");
+  const last = row === null ? null : readNullableInteger(row, "counter");
   return last === null ? 1 : last + 1;
+}
+
+/**
+ * Draw the next running counter, and hand it to nobody else.
+ *
+ * One statement, which D1's single writer serializes: two isolates serving two
+ * readers at the same instant are handed two numbers because the database hands
+ * them out, exactly as one key's own counter is drawn (src/worker/access.ts,
+ * `nextKeyCounter`). There is no read-then-insert here and so no retry loop
+ * above it — the number in a door's hand is the door's own, and the signature
+ * goes over it once.
+ *
+ * The number is drawn before the receipt is signed, so a request that dies in
+ * between leaves a gap rather than a reused number. The gap is visible, and it
+ * is `receipts` in the day's read_count payload that makes it so
+ * (`countReceiptsOn`): the payload's `total` is reads and not rows — one sync
+ * receipt can be six reads or none — so only the count of receipt rows can be
+ * held against the counter range. `counter_last - counter_first + 1 -
+ * receipts` is the number of numbers drawn and never handed over.
+ */
+export async function allocateReadCounter(db: D1Like): Promise<number> {
+  const row = await db
+    .prepare(ALLOCATE_COUNTER)
+    .bind(RECEIPT_COUNTER_ROW)
+    .first<Row>();
+  const counter = row === null ? null : readNullableInteger(row, "counter");
+  if (counter === null) {
+    throw new TypeError("allocateReadCounter: no receipt_counter row");
+  }
+  return counter;
+}
+
+/**
+ * The statement that carries the counter row up to a receipt being written, in
+ * the same batch as the insert.
+ *
+ * A door draws its number first and this is then a no-op, which is the ordinary
+ * case. It is here for the writer that does not draw — a test, an import, a
+ * repair — so that "the counter row is at least the largest receipt stored"
+ * holds however a receipt got in, and the next reader is never handed a number
+ * the table already stands at.
+ */
+function counterCatchUp(db: D1Like, counter: number): D1LikeStatement {
+  return db
+    .prepare(CATCH_UP_COUNTER)
+    .bind(counter, RECEIPT_COUNTER_ROW, counter);
 }
 
 /**
@@ -3955,21 +4027,23 @@ export async function putReadReceipt(
 ): Promise<void> {
   const counter = input.receipt.counter;
   try {
-    await db
-      .prepare(
-        `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        readReceiptId(counter),
-        READ_RECEIPT_KIND,
-        input.entryId,
-        counter,
-        input.createdAt,
-        writeJson(input.receipt),
-        input.keyId ?? null,
-        input.keyCounter ?? null,
-      )
-      .run();
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          readReceiptId(counter),
+          READ_RECEIPT_KIND,
+          input.entryId,
+          counter,
+          input.createdAt,
+          writeJson(input.receipt),
+          input.keyId ?? null,
+          input.keyCounter ?? null,
+        ),
+      counterCatchUp(db, counter),
+    ]);
   } catch (cause) {
     // Ask the table rather than read the driver's message: a receipt now
     // standing at this counter is what "conflict" means, and any other failure
@@ -4006,21 +4080,23 @@ export async function putSyncReceipt(
 ): Promise<void> {
   const counter = input.receipt.counter;
   try {
-    await db
-      .prepare(
-        `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        readReceiptId(counter),
-        SYNC_RECEIPT_KIND,
-        null,
-        counter,
-        input.createdAt,
-        writeJson(input.receipt),
-        input.keyId ?? null,
-        input.keyCounter ?? null,
-      )
-      .run();
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO receipts (${RECEIPT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          readReceiptId(counter),
+          SYNC_RECEIPT_KIND,
+          null,
+          counter,
+          input.createdAt,
+          writeJson(input.receipt),
+          input.keyId ?? null,
+          input.keyCounter ?? null,
+        ),
+      counterCatchUp(db, counter),
+    ]);
   } catch (cause) {
     if (await counterIsTaken(db, counter)) {
       throw new ReceiptConflictError(counter, { cause });
@@ -4432,6 +4508,39 @@ export async function readCounterRangeOn(
     counter_first: readNullableInteger(row, "first_seq"),
     counter_last: readNullableInteger(row, "last_seq"),
   };
+}
+
+/**
+ * How many receipts of either kind were issued on one UTC day.
+ *
+ * Rows, not reads. The day's `total` is what the entries earned — one per read
+ * receipt and one per verified entry a sync delivered — and it is not a count
+ * of receipts: a sync receipt covering six entries is one row and six reads,
+ * and a sync that delivered nothing verified is one row and none. So the total
+ * cannot be held against the counter range, and without this number a counter
+ * drawn and never handed over would be invisible in the published payload.
+ *
+ * With it, the arithmetic is exact: `counter_last - counter_first + 1 -
+ * receipts` is how many numbers the day drew and never issued a receipt for.
+ * The publish step puts it in the payload beside the range (src/receipt.ts,
+ * `buildReadCountPayload`).
+ *
+ * Both kinds, over the same half-open day range and the same index the range
+ * and the counts use.
+ */
+export async function countReceiptsOn(
+  db: D1Like,
+  date: string,
+): Promise<number> {
+  const [dayFrom, dayTo] = dayRange(date);
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS rows_issued FROM receipts
+       WHERE ${COUNTED_KINDS_IN} AND created_at >= ? AND created_at < ?`,
+    )
+    .bind(...COUNTED_RECEIPT_KINDS, dayFrom, dayTo)
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "rows_issued");
 }
 
 /**
@@ -5413,7 +5522,7 @@ export interface SweepStepRow {
   readonly last_skip_reason: string | null;
   readonly last_skip_at: string | null;
   readonly detail: Record<string, unknown>;
-  /** `alarm` or `cron`: which door ran the sweep this row is from. */
+  /** `alarm`: the one door that runs the sweep, named on the row it wrote. */
   readonly trigger: string;
 }
 
