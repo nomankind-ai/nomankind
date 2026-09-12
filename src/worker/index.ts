@@ -52,9 +52,25 @@
  * has to work before any migration has run, so it asks D1 the one question that
  * needs no schema.
  *
+ * Three rules live around the routing rather than inside it, because each is
+ * one rule and a door that had to remember it would be a door that could
+ * forget. The anonymous pages are served through the Cache API (the QA of
+ * 2026-09-12): Cloudflare does not cache a Worker's own response on a
+ * `cache-control` header alone, so the lookup and the write are made here, keyed
+ * by host, path, query and which of the two documents the path answers. A
+ * request carrying a key or an agent signature is never served from that cache
+ * and never stored in it, because what it is answered depends on who is asking
+ * (the release window, D-100), and no JSON door but `GET /policy` is cached at
+ * all. A path that answers HTML to a browser and JSON to everyone else carries
+ * `vary: Accept` on both variants and on its refusals. And a HEAD is a GET
+ * without the body: every read door answers it, and the body is dropped once,
+ * here.
+ *
  * No policy number lives here — nothing in this file is a policy number; the
- * bare integers are HTTP status codes. No environment-specific branch lives
- * here either: `ENVIRONMENT` is read from the binding and echoed back.
+ * bare integers are HTTP status codes, and the cache's two are
+ * PAGE_CACHE_SECONDS and PAGE_CACHE_STALE_SECONDS from src/policy.ts. No
+ * environment-specific branch lives here either: `ENVIRONMENT` is read from the
+ * binding and echoed back.
  */
 
 import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
@@ -65,6 +81,8 @@ import {
   paymentsAdapterFor,
   type PaymentsAdapter,
 } from "../adapters/stripe.js";
+import { PAGE_CACHE_SECONDS, PAGE_CACHE_STALE_SECONDS } from "../policy.js";
+import { HEADER_AGENT } from "../request.js";
 import { htmlResponse } from "../ui/html.js";
 import { renderNotFound } from "../ui/pages/errors.js";
 import type { Env } from "./env.js";
@@ -78,7 +96,7 @@ import { handleMirror } from "./mirror.js";
 import { forMethod, handlePages, wantsHtml } from "./pages.js";
 import { handleRead } from "./read.js";
 import { handleReconfirm } from "./reconfirm.js";
-import { handleRegistry, json } from "./registry.js";
+import { READ_METHODS, handleRegistry, isRead, json } from "./registry.js";
 import { handleRevalidate } from "./revalidate.js";
 import { handleSeals } from "./seals.js";
 import { handleStanding } from "./standing.js";
@@ -157,10 +175,255 @@ export interface RequestDeps {
    * network.
    */
   readonly payments?: PaymentsAdapter;
+  /**
+   * The edge cache the anonymous pages are served from (D-059 as amended). The
+   * deployed Worker passes `caches.default`; a test passes its own, and a
+   * caller that passes none — which is every existing test — renders every
+   * page as before, because a cache nobody handed us is a cache we do not use.
+   */
+  readonly cache?: CacheLike;
+  /** Where the cache write is deferred to: the platform's `ctx.waitUntil`. */
+  readonly waitUntil?: (promise: Promise<unknown>) => void;
 }
 
-/** The router. Exported by name so tests can call it without a fetch stack. */
+/**
+ * The Cache API, typed structurally rather than imported from a generated
+ * Worker types package, exactly as `Env` types its bindings (decision D-011).
+ */
+export interface CacheLike {
+  match(request: Request): Promise<Response | undefined>;
+  put(request: Request, response: Response): Promise<void>;
+}
+
+/**
+ * What a cached page says about itself. A minute at the edge, and five more in
+ * which a stale copy may be served while a fresh one is fetched; both numbers
+ * are src/policy.ts's and neither is spelt out here.
+ */
+const PAGE_CACHE_CONTROL =
+  `public, max-age=${PAGE_CACHE_SECONDS}, ` +
+  `stale-while-revalidate=${PAGE_CACHE_STALE_SECONDS}`;
+
+/**
+ * The paths whose 200 is a page: everything `handlePages` renders, plus the one
+ * JSON door that is cached with them — `GET /policy`, which is a frozen module
+ * constant and the same object for every caller. The listing, the entry, the
+ * operator directory and one operator are the prefixes below.
+ */
+const CACHEABLE_PATHS: ReadonlySet<string> = new Set([
+  "/",
+  "/landing",
+  "/entries",
+  "/operators",
+  "/policy",
+  "/api",
+  "/docs",
+  "/dry-run",
+  "/genesis",
+  "/how-it-works",
+  "/domains",
+  "/status",
+  "/mirror/latest",
+]);
+
+/**
+ * Whether a path is one of those, an id or a document under it included.
+ *
+ * Exported for the test that enumerates every path src/worker/pages.ts serves
+ * and asks this of each one: a page added there and forgotten here would be a
+ * page that went on costing the log a read per reader, quietly.
+ */
+export function cacheablePath(path: string): boolean {
+  return (
+    CACHEABLE_PATHS.has(path) ||
+    path.startsWith("/entries/") ||
+    path.startsWith("/operators/") ||
+    path.startsWith("/docs/")
+  );
+}
+
+/**
+ * The paths that answer HTML to a browser and JSON to everyone else.
+ *
+ * Every response on one of them carries `vary: Accept` — both variants, the
+ * refusals included — because a shared cache that keyed one of these paths
+ * without the header would hand an agent a web page. The HTML side gets it from
+ * `htmlResponse`; this is the other side.
+ */
+const NEGOTIATED_PATHS: ReadonlySet<string> = new Set([
+  "/policy",
+  "/operators",
+  "/status",
+  "/mirror/latest",
+  "/keys/claim",
+]);
+
+function negotiates(path: string): boolean {
+  return (
+    NEGOTIATED_PATHS.has(path) ||
+    path.startsWith("/entries/") ||
+    path.startsWith("/operators/")
+  );
+}
+
+/** `vary: Accept` on a negotiated path, on whichever variant answered. */
+function varyOnNegotiated(path: string, response: Response): Response {
+  if (!negotiates(path)) return response;
+  if (response.headers.get("vary") !== null) return response;
+  const headers = new Headers(response.headers);
+  headers.set("vary", "Accept");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/** The variant marker: the same path answers two documents, and both cache. */
+const VARIANT_PARAMETER = "__nmk_variant";
+
+/**
+ * The key one page is cached under: this host, this path, this query, and which
+ * of the two documents the path answers. The marker is what keeps the JSON twin
+ * of a shared path from ever being served to a browser, or the page to an agent.
+ * It is a key and never a URL anything fetches.
+ */
+function pageCacheKey(url: URL, html: boolean): Request {
+  const key = new URL(url.toString());
+  // Every copy a caller sent goes first. The marker is ours, and a request that
+  // arrived carrying `?__nmk_variant=html` would otherwise be keyed as though it
+  // were the HTML twin of itself — one query string aliasing another page's
+  // entry, chosen by whoever sent the link.
+  key.searchParams.delete(VARIANT_PARAMETER);
+  key.searchParams.set(VARIANT_PARAMETER, html ? "html" : "json");
+  return new Request(key.toString(), { method: "GET" });
+}
+
+/**
+ * Whether this request may be served from the edge at all.
+ *
+ * A GET only — a HEAD is answered from the same path without storing anything,
+ * and every other method is a write. And anonymous only: a request carrying a
+ * key or an agent signature is a request whose answer depends on who is asking
+ * (the release window, decision D-100), and an answer like that must never be
+ * handed to the next reader.
+ */
+function cacheable(request: Request, url: URL): boolean {
+  if (request.method !== "GET") return false;
+  if (request.headers.get("authorization") !== null) return false;
+  if (request.headers.get(HEADER_AGENT) !== null) return false;
+  return cacheablePath(url.pathname);
+}
+
+/** Whether the answer we rendered is one of the documents that may be stored. */
+function storable(path: string, response: Response): boolean {
+  if (response.status !== 200) return false;
+  const type = response.headers.get("content-type") ?? "";
+  return type.startsWith("text/html") || path === "/policy";
+}
+
+/**
+ * The two calls into the cache, and the one rule about them: a cache that fails
+ * is a cache that is not there.
+ *
+ * The Cache API is a service, and a service can be unavailable. Unguarded, a
+ * throwing `match` or `put` would turn every page of the site into a 500 — the
+ * log would go dark because an optimisation broke, which is the opposite of what
+ * an optimisation may cost. So a failed lookup is a miss and a failed write is a
+ * page that was served and not stored; the reason is logged once, with nothing
+ * from the request in it, and the reader gets their page.
+ */
+async function cached(
+  cache: CacheLike,
+  key: Request,
+): Promise<Response | undefined> {
+  try {
+    return await cache.match(key);
+  } catch (error) {
+    console.error(`cache: lookup failed: ${messageOf(error)}`);
+    return undefined;
+  }
+}
+
+async function store(
+  cache: CacheLike,
+  key: Request,
+  response: Response,
+): Promise<void> {
+  try {
+    await cache.put(key, response);
+  } catch (error) {
+    console.error(`cache: write failed: ${messageOf(error)}`);
+  }
+}
+
+/** The message only: no binding contents, no request data. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The same response, saying it may be held for a minute. */
+function forPageCache(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", PAGE_CACHE_CONTROL);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/**
+ * The router. Exported by name so tests can call it without a fetch stack.
+ *
+ * Three things happen around the dispatch below and nowhere else in the system:
+ * the anonymous pages are looked up in and written to the edge cache, a
+ * negotiated path's answer is given `vary: Accept` on whichever variant
+ * answered, and a HEAD is turned into its GET without a body. Each is one rule
+ * in one place, so no door can forget it.
+ */
 export async function handleRequest(
+  request: Request,
+  env: Env,
+  deps?: RequestDeps,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const cache = deps?.cache;
+  const key =
+    cache !== undefined && cacheable(request, url)
+      ? pageCacheKey(url, wantsHtml(request))
+      : null;
+  if (cache !== undefined && key !== null) {
+    const hit = await cached(cache, key);
+    // Served exactly as it was stored, headers and all: a page that was
+    // rewritten on the way out would not be the page that was checked.
+    if (hit !== undefined) return hit;
+  }
+
+  const answered = varyOnNegotiated(
+    url.pathname,
+    await dispatch(request, env, deps),
+  );
+
+  if (cache !== undefined && key !== null && storable(url.pathname, answered)) {
+    const stored = forPageCache(answered);
+    const write = store(cache, key, stored.clone());
+    // Deferred where the platform gave us somewhere to defer to, awaited
+    // otherwise, so the answer never waits on the write but a test can.
+    if (deps?.waitUntil === undefined) await write;
+    else deps.waitUntil(write);
+    return stored;
+  }
+
+  return forMethod(request, answered);
+}
+
+/**
+ * The routing itself: every door in the order it is mounted, and the final
+ * refusal under them. It answers the request and nothing more — the cache, the
+ * negotiation header and the HEAD are `handleRequest`'s, above.
+ */
+async function dispatch(
   request: Request,
   env: Env,
   deps?: RequestDeps,
@@ -168,8 +431,10 @@ export async function handleRequest(
   const { pathname } = new URL(request.url);
 
   if (pathname === "/health") {
-    if (request.method !== "GET") {
-      return json({ ok: false, error: "method_not_allowed" }, 405, { allow: "GET" });
+    if (!isRead(request)) {
+      return json({ ok: false, error: "method_not_allowed" }, 405, {
+        allow: READ_METHODS,
+      });
     }
     return health(env);
   }
@@ -348,7 +613,14 @@ export default {
     ctx: ExecutionContextLike,
   ): Promise<Response> => {
     ensureSweeper(env, ctx);
-    return handleRequest(request, env);
+    // The platform's own cache, read here and passed in, so the router has no
+    // global to reach for and a test can hand it another.
+    const shared = (globalThis as { caches?: { default?: CacheLike } }).caches;
+    const cache = shared?.default;
+    return handleRequest(request, env, {
+      ...(cache === undefined ? {} : { cache }),
+      waitUntil: (promise: Promise<unknown>) => ctx.waitUntil(promise),
+    });
   },
   scheduled: async (
     _controller: ScheduledController,

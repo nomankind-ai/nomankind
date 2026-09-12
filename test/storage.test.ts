@@ -874,6 +874,7 @@ describe("migrations", () => {
       "0015_paid_access.sql",
       "0016_receipt_counter.sql",
       "0017_standing_cursor.sql",
+      "0018_counters.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -1024,6 +1025,7 @@ describe("migrations", () => {
       "0015_paid_access.sql",
       "0016_receipt_counter.sql",
       "0017_standing_cursor.sql",
+      "0018_counters.sql",
     ]);
   });
 });

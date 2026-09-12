@@ -81,7 +81,7 @@ describe("worker against a real D1 binding", () => {
     );
 
     expect(response.status).toBe(405);
-    expect(response.headers.get("allow")).toBe("GET");
+    expect(response.headers.get("allow")).toBe("GET, HEAD");
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({
@@ -108,7 +108,7 @@ describe("worker against a real D1 binding", () => {
       env,
     );
     expect(posted.status).toBe(405);
-    expect(posted.headers.get("allow")).toBe("GET");
+    expect(posted.headers.get("allow")).toBe("GET, HEAD");
 
     for (const [path, status, error] of [
       ["/seals?limit=0", 400, "bad_query"],

@@ -128,7 +128,7 @@ describe("GET /keys/tiers", () => {
   it("takes a GET and nothing else", async () => {
     const response = await send(post("/keys/tiers", {}));
     expect(response.status).toBe(405);
-    expect(response.headers.get("allow")).toBe("GET");
+    expect(response.headers.get("allow")).toBe("GET, HEAD");
   }, 600_000);
 });
 

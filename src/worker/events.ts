@@ -32,6 +32,8 @@ import {
   StorageUnreachable,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -132,7 +134,7 @@ export async function handleEvents(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.pathname !== "/events") return null;
-  if (request.method !== "GET") return methodNotAllowed("GET");
+  if (!isRead(request)) return methodNotAllowed(READ_METHODS);
 
   try {
     const guarded: Env = { ...env, DB: guardDatabase(env.DB) };

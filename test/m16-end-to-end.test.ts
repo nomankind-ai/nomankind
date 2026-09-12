@@ -684,7 +684,7 @@ describe("the seal, proof and anchor routes", () => {
       new Request(`${TEST_ORIGIN}/seals`, { method: "POST" }),
     );
     expect(posted.status).toBe(405);
-    expect(posted.headers.get("allow")).toBe("GET");
+    expect(posted.headers.get("allow")).toBe("GET, HEAD");
   });
 
   it("refuses a proof for an event the log does not hold", async () => {

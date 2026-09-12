@@ -636,7 +636,7 @@ describe("the current answer about a subject", () => {
       new Request(`${TEST_ORIGIN}/read`, { method: "POST" }),
     );
     expect(posted.status).toBe(405);
-    expect(posted.headers.get("allow")).toBe("GET");
+    expect(posted.headers.get("allow")).toBe("GET, HEAD");
     expect(await posted.json()).toEqual({ error: "method_not_allowed" });
   });
 });

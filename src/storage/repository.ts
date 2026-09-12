@@ -978,19 +978,47 @@ function toOperator(row: Row): OperatorRecord {
 
 const OPERATOR_COLUMNS = `id, maintainer, provider, registered_seq, operator_json`;
 
-/** The upsert that stores one operator row. */
+/** What a write stores, which is the read's columns and the materialised one. */
+const OPERATOR_WRITE_COLUMNS = `${OPERATOR_COLUMNS}, trusted`;
+
+/**
+ * The `trusted` column's value for one operator's details (0018_counters.sql).
+ *
+ * Not a second source of truth and not a derivation: the `operator_trusted`
+ * event grants trust, the registry writes it into `operator_json`, and this is
+ * that same stored value in the column an index can seek. The truth taken is
+ * SQLite's own, so the column and a `json_extract` of the JSON beside it can
+ * never disagree: a stored `true` is trusted, a stored number is trusted when it
+ * is not zero, and a field that is absent, null or `false` is not.
+ */
+function trustedColumn(details: Record<string, unknown>): number {
+  const value = details["trusted"];
+  if (typeof value === "boolean") return writeBoolean(value);
+  if (typeof value === "number") return value === 0 ? 0 : 1;
+  return 0;
+}
+
+/**
+ * The upsert that stores one operator row.
+ *
+ * The one write every path goes through — `putOperator`, `registerOperator`,
+ * `trustOperator` and `recordTrustChange` all call it — which is what makes the
+ * `trusted` column safe: it is written in the same statement as the JSON it
+ * materialises, so no batch can land one without the other.
+ */
 function operatorStatement(
   db: D1Like,
   operator: OperatorRecord,
 ): D1LikeStatement {
   return db
     .prepare(
-      `INSERT INTO operators (${OPERATOR_COLUMNS}) VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO operators (${OPERATOR_WRITE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          maintainer = excluded.maintainer,
          provider = excluded.provider,
          registered_seq = excluded.registered_seq,
-         operator_json = excluded.operator_json`,
+         operator_json = excluded.operator_json,
+         trusted = excluded.trusted`,
     )
     .bind(
       operator.id,
@@ -998,6 +1026,7 @@ function operatorStatement(
       writeBoolean(operator.provider),
       operator.registeredSeq,
       writeJson(operator.details),
+      trustedColumn(operator.details),
     );
 }
 
@@ -3449,6 +3478,17 @@ function toSeal(row: Row): Seal {
   };
 }
 
+/**
+ * What a write stores, which is the read's columns and the materialised one.
+ *
+ * `witnessed` is whether the seal carries at least one countersignature: the
+ * same fact `witnesses_json` already holds, in the column an index can seek
+ * (0018_counters.sql). Every seal write binds it here — `putSeal`, `recordSeal`
+ * and `setSealWitnesses`, which are all of them — so no path can move the JSON
+ * without moving the column with it.
+ */
+const SEAL_WRITE_COLUMNS = `${SEAL_COLUMNS}, witnessed`;
+
 /** The bound values of a seal row, in SEAL_COLUMNS order. */
 function sealValues(seal: Seal): unknown[] {
   return [
@@ -3465,11 +3505,21 @@ function sealValues(seal: Seal): unknown[] {
   ];
 }
 
+/** The `witnessed` column's value: does this seal carry a countersignature. */
+function witnessedColumn(witnesses: readonly WitnessSignature[]): number {
+  return writeBoolean(witnesses.length > 0);
+}
+
+/** The bound values of a seal row, in SEAL_WRITE_COLUMNS order. */
+function sealWriteValues(seal: Seal): unknown[] {
+  return [...sealValues(seal), witnessedColumn(seal.witnesses)];
+}
+
 /** Store one seal, replacing whatever was there. */
 export async function putSeal(db: D1Like, seal: Seal): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO seals (${SEAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO seals (${SEAL_WRITE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (seq) DO UPDATE SET
          first_seq = excluded.first_seq,
          last_seq = excluded.last_seq,
@@ -3479,9 +3529,10 @@ export async function putSeal(db: D1Like, seal: Seal): Promise<void> {
          prev_hash = excluded.prev_hash,
          hash = excluded.hash,
          witnesses_json = excluded.witnesses_json,
-         registry_json = excluded.registry_json`,
+         registry_json = excluded.registry_json,
+         witnessed = excluded.witnessed`,
     )
-    .bind(...sealValues(seal))
+    .bind(...sealWriteValues(seal))
     .run();
 }
 
@@ -3589,6 +3640,11 @@ export async function sealsSealedOn(db: D1Like, date: string): Promise<Seal[]> {
  * countersignature has been attached yet, or the registry has not accepted the
  * fingerprint. This is the sweep's work queue, and a seal leaves it by being
  * finished rather than by being marked.
+ *
+ * The condition is written exactly as the partial index 0018 created states it,
+ * because SQLite uses a partial index only where the query's own WHERE implies
+ * the index's: so this reads the handful of seals still waiting rather than
+ * every seal the log has ever committed, which is what it did before.
  */
 export async function unwitnessedSeals(
   db: D1Like,
@@ -3597,7 +3653,7 @@ export async function unwitnessedSeals(
   const rows = await db
     .prepare(
       `SELECT ${SEAL_COLUMNS} FROM seals
-       WHERE witnesses_json = '[]' OR registry_json IS NULL
+       WHERE witnessed = 0 OR registry_json IS NULL
        ORDER BY seq LIMIT ?`,
     )
     .bind(limit)
@@ -3686,8 +3742,10 @@ export async function recordSeal(
   const covered = await entriesSubmittedIn(db, seal.first_seq, seal.last_seq);
   const statements = [
     db
-      .prepare(`INSERT INTO seals (${SEAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(...sealValues(seal)),
+      .prepare(
+        `INSERT INTO seals (${SEAL_WRITE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(...sealWriteValues(seal)),
   ];
   for (const { id, submittedSeq } of covered) {
     const stored = await rederive(id, seal, now);
@@ -3736,8 +3794,14 @@ export async function setSealWitnesses(
   const witnessed: Seal = { ...seal, witnesses: [...witnesses] };
   const statements = [
     db
-      .prepare(`UPDATE seals SET witnesses_json = ? WHERE seq = ?`)
-      .bind(writeJson(witnessed.witnesses), witnessed.seq),
+      .prepare(
+        `UPDATE seals SET witnesses_json = ?, witnessed = ? WHERE seq = ?`,
+      )
+      .bind(
+        writeJson(witnessed.witnesses),
+        witnessedColumn(witnessed.witnesses),
+        witnessed.seq,
+      ),
   ];
   const covered = await entriesSubmittedIn(db, seal.first_seq, seal.last_seq);
   for (const { id, submittedSeq } of covered) {
@@ -4872,11 +4936,14 @@ export async function latestEventOfType(
 /**
  * How many entries there are, optionally narrowed by status or staleness.
  *
- * The home counters and the listing's "n of m" line, and the only reads in this
- * module that return a number instead of rows. Both are index-only: status is a
- * column with its own index (0001_init) and `stale` is the column 0005 added
- * beside the JSON, so neither has to parse an entry to count it. Nothing here
- * computes staleness — derivation did, and this counts what it stored.
+ * The counters step's read and the listing's "n of m" line, and the only reads
+ * in this module that return a number instead of rows. Every filter is
+ * index-only: status is a column with its own index (0001_init), domain has the
+ * (domain, status, submitted_seq) index (0012), and `stale` is the column 0005
+ * added beside the JSON, which 0018 finally indexed on its own — 0005's index is
+ * (expires_at) WHERE stale = 0, which is the sweep's queue and not this
+ * question. Nothing here computes staleness — derivation did, and this counts
+ * what it stored.
  */
 export async function countEntries(
   db: D1Like,
@@ -4988,10 +5055,9 @@ export async function listEntriesPage(
  * Trust is granted by an `operator_trusted` event and recorded on the row by
  * whoever recomputed it (src/worker/registry.ts writes `trusted` into
  * `operator_json`), so this counts what the registry stored and derives nothing.
- * The condition is the JSON value's own truth rather than `= 1`, exactly as
- * 0005_freshness.sql reads a JSON boolean: a stored `true` extracts as truthy, a
- * stored `false` as false, and an operator whose row never carried the field at
- * all extracts as null and is not counted.
+ * The condition is the `trusted` column 0018 added beside the JSON, written by
+ * `operatorStatement` in the same statement as the JSON and by nothing else, so
+ * this is an index seek where it used to be a json_extract over every row.
  */
 export async function countTrustedOperators(
   db: D1Like,
@@ -4999,10 +5065,7 @@ export async function countTrustedOperators(
 ): Promise<number> {
   if (domain === undefined) {
     const row = await db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM operators
-         WHERE json_extract(operator_json, '$.trusted')`,
-      )
+      .prepare(`SELECT COUNT(*) AS n FROM operators WHERE trusted = 1`)
       .first<Row>();
     return row === null ? 0 : readInteger(row, "n");
   }
@@ -5012,7 +5075,7 @@ export async function countTrustedOperators(
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM operators
-        WHERE json_extract(operator_json, '$.trusted')
+        WHERE trusted = 1
           AND id IN (SELECT operator FROM operator_domains WHERE domain = ?)`,
     )
     .bind(domain)
@@ -5806,8 +5869,9 @@ export async function unsealedEvents(
  *
  * The same condition `countTrustedOperators` counts, returning the names: the
  * status page compares them against the operators the newest `pool_snapshot`
- * committed, and a count could not tell a swap from a match. The JSON value's
- * own truth rather than `= 1`, exactly as that count reads it.
+ * committed, and a count could not tell a swap from a match. The same `trusted`
+ * column too, and the (trusted, id) index 0018 created reads both halves of this
+ * answer without touching a row.
  */
 export async function trustedOperatorIds(
   db: D1Like,
@@ -5815,8 +5879,7 @@ export async function trustedOperatorIds(
 ): Promise<string[]> {
   const rows = await db
     .prepare(
-      `SELECT id FROM operators
-       WHERE json_extract(operator_json, '$.trusted') ORDER BY id LIMIT ?`,
+      `SELECT id FROM operators WHERE trusted = 1 ORDER BY id LIMIT ?`,
     )
     .bind(limit)
     .all<Row>();
@@ -5836,11 +5899,13 @@ export async function countOperators(db: D1Like): Promise<number> {
  *
  * The complement of `unwitnessedSeals`'s first clause, counted rather than
  * listed: the status page shows witnessed over total and never the seals
- * themselves.
+ * themselves. Off the `witnessed` column 0018 added, which is the same fact the
+ * JSON carries — `witnesses_json <> '[]'` is a comparison no index could serve,
+ * and this one is a seek.
  */
 export async function countWitnessedSeals(db: D1Like): Promise<number> {
   const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM seals WHERE witnesses_json <> '[]'`)
+    .prepare(`SELECT COUNT(*) AS n FROM seals WHERE witnessed = 1`)
     .first<Row>();
   return row === null ? 0 : readInteger(row, "n");
 }
@@ -5903,6 +5968,236 @@ export async function countAttestations(db: D1Like): Promise<number> {
     .prepare(`SELECT COUNT(*) AS n FROM attestations`)
     .first<Row>();
   return row === null ? 0 : readInteger(row, "n");
+}
+
+// ---------------------------------------------------------------------------
+// The counters the public pages read (M25)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every number the public pages show, as the sweep last counted them.
+ *
+ * Whitepaper Section 3: the log is the record and every number a page shows is
+ * a view of it. This is that view, taken once per run instead of once per
+ * reader — the QA of 2026-09-12 found the home, entries, domains and status
+ * pages counting whole tables on every view, which is a cost that grows with
+ * the log and is paid by whoever happens to be looking.
+ *
+ * `position` is the sealed head the run counted at, and `updated_at` is that
+ * run's own injected instant. Both are here so a reader can check the numbers:
+ * recount the log up to `position` and the same counts must come back. Nothing
+ * here is a source of truth and nothing here is derived — every field is a
+ * count of rows the log already wrote.
+ */
+export interface Counters {
+  readonly entries_total: number;
+  readonly entries_verified: number;
+  readonly entries_stale: number;
+  /** Per registered domain slug (decision D-071), in the order stored. */
+  readonly entries_by_domain: Record<
+    string,
+    { entries: number; trusted_operators: number }
+  >;
+  readonly operators_registered: number;
+  readonly operators_trusted: number;
+  readonly seals: number;
+  readonly seals_witnessed: number;
+  readonly attestations: number;
+  /** The newest seal's last covered event, or -1 with nothing sealed. */
+  readonly sealed_head: number;
+  /** The same position, as the row that carries every counter records it. */
+  readonly position: number;
+  readonly updated_at: string;
+}
+
+/** The counter names that are not per domain, spelled once. */
+const COUNTER_NAMES = {
+  entriesTotal: "entries_total",
+  entriesVerified: "entries_verified",
+  entriesStale: "entries_stale",
+  operatorsRegistered: "operators_registered",
+  operatorsTrusted: "operators_trusted",
+  seals: "seals",
+  sealsWitnessed: "seals_witnessed",
+  attestations: "attestations",
+  sealedHead: "sealed_head",
+} as const;
+
+/** The prefix a per-domain counter's name carries, and its two suffixes. */
+const DOMAIN_COUNTER = "domain:";
+const DOMAIN_ENTRIES = ":entries";
+const DOMAIN_TRUSTED = ":trusted";
+
+/**
+ * How many entries name each domain, grouped in one statement.
+ *
+ * One read for every domain rather than one per domain: the domains page asked
+ * this once per registered slug, and the answer is a single group-by served by
+ * the (domain, status, submitted_seq) index. A domain with no entries has no
+ * row here, which the caller reads as the zero it is.
+ */
+export async function entryCountsByDomain(
+  db: D1Like,
+): Promise<Record<string, number>> {
+  const rows = await db
+    .prepare(`SELECT domain, COUNT(*) AS n FROM entries GROUP BY domain`)
+    .all<Row>();
+  const counts: Record<string, number> = {};
+  for (const row of rows.results) {
+    counts[readText(row, "domain")] = readInteger(row, "n");
+  }
+  return counts;
+}
+
+/**
+ * How many trusted operators are attested in each domain, in one statement.
+ *
+ * The grouped form of `countTrustedOperators(db, domain)` and the same rule
+ * (decision D-071): trusted *and* attested there, because the pool is global and
+ * who may judge an entry is not. The join walks `operator_domains` by its own
+ * (domain, operator) index and looks each operator up by primary key, so no row
+ * is scanned and no JSON is parsed.
+ */
+export async function trustedOperatorCountsByDomain(
+  db: D1Like,
+): Promise<Record<string, number>> {
+  const rows = await db
+    .prepare(
+      `SELECT d.domain AS domain, COUNT(*) AS n
+         FROM operator_domains d
+         JOIN operators o ON o.id = d.operator
+        WHERE o.trusted = 1
+        GROUP BY d.domain`,
+    )
+    .all<Row>();
+  const counts: Record<string, number> = {};
+  for (const row of rows.results) {
+    counts[readText(row, "domain")] = readInteger(row, "n");
+  }
+  return counts;
+}
+
+/**
+ * The counters the last sweep wrote, or null before any sweep wrote them.
+ *
+ * Null and not zeros: a deployment whose first sweep has not run yet has no
+ * counts, and a page that showed it zeros would be stating a fact about the log
+ * rather than about itself. The caller decides what to show; this says only
+ * whether the row is there.
+ *
+ * One statement over a table with one row per counter, which is a dozen rows and
+ * two per registered domain.
+ */
+export async function readCounters(db: D1Like): Promise<Counters | null> {
+  const rows = await db
+    .prepare(`SELECT name, value, position, updated_at FROM counters`)
+    .all<Row>();
+  if (rows.results.length === 0) return null;
+
+  const values = new Map<string, number>();
+  let position = -1;
+  let updatedAt = "";
+  for (const row of rows.results) {
+    const name = readText(row, "name");
+    values.set(name, readInteger(row, "value"));
+    position = readInteger(row, "position");
+    updatedAt = readText(row, "updated_at");
+  }
+
+  const byDomain: Record<string, { entries: number; trusted_operators: number }> =
+    {};
+  const domainOf = (name: string, suffix: string): string | null =>
+    name.startsWith(DOMAIN_COUNTER) && name.endsWith(suffix)
+      ? name.slice(DOMAIN_COUNTER.length, name.length - suffix.length)
+      : null;
+  const slot = (
+    slug: string,
+  ): { entries: number; trusted_operators: number } => {
+    const existing = byDomain[slug];
+    if (existing !== undefined) return existing;
+    const fresh = { entries: 0, trusted_operators: 0 };
+    byDomain[slug] = fresh;
+    return fresh;
+  };
+  for (const [name, value] of values) {
+    const entries = domainOf(name, DOMAIN_ENTRIES);
+    if (entries !== null) {
+      slot(entries).entries = value;
+      continue;
+    }
+    const trusted = domainOf(name, DOMAIN_TRUSTED);
+    if (trusted !== null) slot(trusted).trusted_operators = value;
+  }
+
+  const at = (name: string): number => values.get(name) ?? 0;
+  return {
+    entries_total: at(COUNTER_NAMES.entriesTotal),
+    entries_verified: at(COUNTER_NAMES.entriesVerified),
+    entries_stale: at(COUNTER_NAMES.entriesStale),
+    entries_by_domain: byDomain,
+    operators_registered: at(COUNTER_NAMES.operatorsRegistered),
+    operators_trusted: at(COUNTER_NAMES.operatorsTrusted),
+    seals: at(COUNTER_NAMES.seals),
+    seals_witnessed: at(COUNTER_NAMES.sealsWitnessed),
+    attestations: at(COUNTER_NAMES.attestations),
+    sealed_head: at(COUNTER_NAMES.sealedHead),
+    position,
+    updated_at: updatedAt,
+  };
+}
+
+/**
+ * Replace the counters with what one run counted, in one batch.
+ *
+ * Whole and not in pieces: every row carries the run's own position and instant,
+ * and a reader that caught the table halfway through a rewrite would be shown
+ * two counters from two different positions — a log that never existed. The
+ * delete goes in the same batch as the insert, which is also how a domain
+ * dropped from the registry loses its rows rather than leaving a stale pair
+ * behind.
+ *
+ * `sealed_head` is stored as a counter as well as on every row's `position`,
+ * because it is one of the numbers a page shows and not only the position the
+ * others were taken at.
+ */
+export async function writeCounters(
+  db: D1Like,
+  counters: Counters,
+): Promise<void> {
+  const names: string[] = [];
+  const values: number[] = [];
+  const put = (name: string, value: number): void => {
+    names.push(name);
+    values.push(value);
+  };
+  put(COUNTER_NAMES.entriesTotal, counters.entries_total);
+  put(COUNTER_NAMES.entriesVerified, counters.entries_verified);
+  put(COUNTER_NAMES.entriesStale, counters.entries_stale);
+  put(COUNTER_NAMES.operatorsRegistered, counters.operators_registered);
+  put(COUNTER_NAMES.operatorsTrusted, counters.operators_trusted);
+  put(COUNTER_NAMES.seals, counters.seals);
+  put(COUNTER_NAMES.sealsWitnessed, counters.seals_witnessed);
+  put(COUNTER_NAMES.attestations, counters.attestations);
+  put(COUNTER_NAMES.sealedHead, counters.sealed_head);
+  for (const [slug, counts] of Object.entries(counters.entries_by_domain)) {
+    put(`${DOMAIN_COUNTER}${slug}${DOMAIN_ENTRIES}`, counts.entries);
+    put(`${DOMAIN_COUNTER}${slug}${DOMAIN_TRUSTED}`, counts.trusted_operators);
+  }
+
+  const tuples = names.map(() => "(?, ?, ?, ?)").join(", ");
+  const bindings: unknown[] = [];
+  for (const [index, name] of names.entries()) {
+    bindings.push(name, values[index]!, counters.position, counters.updated_at);
+  }
+
+  await db.batch([
+    db.prepare(`DELETE FROM counters`),
+    db
+      .prepare(
+        `INSERT INTO counters (name, value, position, updated_at) VALUES ${tuples}`,
+      )
+      .bind(...bindings),
+  ]);
 }
 
 // ---------------------------------------------------------------------------

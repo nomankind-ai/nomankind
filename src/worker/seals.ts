@@ -41,6 +41,8 @@ import {
   StorageUnreachable,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -244,30 +246,30 @@ async function route(
   const path = url.pathname;
 
   if (path === "/seals") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return seals(url, db);
   }
 
   const sealSeq = segmentAfter(path, "/seals/");
   if (sealSeq !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return seal(sealSeq, db);
   }
 
   const eventSeq = proofPathSeq(path);
   if (eventSeq !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return proof(eventSeq, db);
   }
 
   if (path === "/anchors") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return anchors(url, db);
   }
 
   const date = segmentAfter(path, "/anchors/");
   if (date !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return anchor(date, db);
   }
 

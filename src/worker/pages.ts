@@ -9,6 +9,12 @@
  * returns null for everything it does not own, so mounting it first costs the
  * other doors nothing.
  *
+ * A wrong method is refused here only on the paths this route owns outright
+ * (PAGE_ONLY_PATHS below): those get 405 with an `Allow` header and the
+ * handlers' own envelope, rather than falling through every door to the final
+ * not-found, which was two shapes for one mistake. Everything shared with a
+ * door returns null and is refused by the door that owns it.
+ *
  * Content negotiation is one function, `wantsHtml`: an Accept header naming
  * text/html. `/entries/{id}`, `/operators`, `/operators/{id}`, `/policy` and
  * `/mirror/latest` are
@@ -147,8 +153,16 @@ import type {
 } from "../ui/types.js";
 import { readerAccess, type ReaderAccess } from "./access.js";
 import type { Env } from "./env.js";
-import { StorageUnreachable, guardDatabase, json, refuse } from "./registry.js";
-import { statusInput } from "./status.js";
+import {
+  READ_METHODS,
+  StorageUnreachable,
+  guardDatabase,
+  isRead,
+  json,
+  methodNotAllowed,
+  refuse,
+} from "./registry.js";
+import { logCounters, statusInput } from "./status.js";
 
 /**
  * The ids nomankind mints, exactly as src/worker/read.ts narrows the schema's
@@ -156,6 +170,38 @@ import { statusInput } from "./status.js";
  * the browser gets the 404 page rather than a lookup.
  */
 const ENTRY_ID_PATTERN = /^nmk_[0-9a-f]{32}$/;
+
+/**
+ * The paths this route owns outright: a page, with no JSON door mounted under
+ * it that a wrong method could have been meant for.
+ *
+ * A wrong method on one of them is refused here, in the handlers' own envelope —
+ * `{"error":"method_not_allowed"}` with an `Allow` header — rather than falling
+ * through every door to the final not-found. A PUT to a page and a PUT to an
+ * endpoint are the same mistake, and a reader who made it was being told two
+ * different things in two different shapes.
+ *
+ * Everything shared is absent on purpose: `/entries` is the submit door's POST,
+ * `/entries/{id}` and `/operators` and `/operators/{id}` and `/genesis` and
+ * `/status` and `/mirror/latest` are read doors that answer their own 405 with
+ * their own Allow, and a page route that answered first would have taken that
+ * answer away from them.
+ */
+const PAGE_ONLY_PATHS: ReadonlySet<string> = new Set([
+  "/",
+  "/landing",
+  "/policy",
+  "/api",
+  "/docs",
+  "/docs/fork",
+  "/docs/whitepaper",
+  "/docs/summary",
+  "/dry-run",
+  "/how-it-works",
+  "/domains",
+  "/static/app.css",
+  "/static/landing.css",
+]);
 
 /** Does this request want a page, or a record? */
 export function wantsHtml(request: Request): boolean {
@@ -409,17 +455,28 @@ async function home(
   }
   const narrowed = asked === null ? {} : { domain: asked };
 
-  const verified = await countEntries(db, {
-    ...narrowed,
-    status: "verified",
-  });
-  const stale = await countEntries(db, { ...narrowed, stale: true });
+  // The whole log's numbers come from the counters the sweep folds (the QA of
+  // 2026-09-12): the home page cost four counts per reader, and a count over a
+  // growing table is the one page cost that cannot be indexed away. Narrowed to
+  // a domain, verified and stale are still counted — the stored counters carry
+  // a domain's entries and its trusted operators, not its statuses — and
+  // everything falls back to the counts when the row is not there at all, which
+  // is a deployment whose first sweep has not run yet.
+  const counters = await logCounters(db);
+  const verified =
+    asked === null
+      ? counters.entries_verified
+      : await countEntries(db, { ...narrowed, status: "verified" });
+  const stale =
+    asked === null
+      ? counters.entries_stale
+      : await countEntries(db, { ...narrowed, stale: true });
   const trusted =
     asked === null
-      ? await countTrustedOperators(db)
-      : await countTrustedOperators(db, asked);
+      ? counters.operators_trusted
+      : (counters.entries_by_domain[asked]?.trusted_operators ?? 0);
   const seal = await latestSeal(db);
-  const seals = await countSeals(db);
+  const seals = counters.seals;
   const latest = await listEntriesPage(db, {
     ...narrowed,
     limit: HOME_LATEST_ENTRIES,
@@ -481,10 +538,15 @@ async function entries(
   // the source filter is applied over the page below, and a total that counted
   // any of them would be a second query whose cost grows with the log for a
   // number nobody asked for.
-  const total = await countEntries(db, {
-    ...(filter.status === null ? {} : { status: filter.status }),
-    ...(filter.domain === null ? {} : { domain: filter.domain }),
-  });
+  // An unfiltered total is the counter the sweep folded; a filtered one is
+  // still counted, over the two indexed columns it narrows by.
+  const total =
+    filter.status === null && filter.domain === null
+      ? (await logCounters(db)).entries_total
+      : await countEntries(db, {
+          ...(filter.status === null ? {} : { status: filter.status }),
+          ...(filter.domain === null ? {} : { domain: filter.domain }),
+        });
 
   // The source filter (decision D-080) is applied here rather than in the SQL,
   // and for a reason the tier filter does not have: a sidecar stored before this
@@ -1162,11 +1224,17 @@ async function howItWorks(
  * the domain, and how many trusted operators are attested in it.
  */
 async function domains(db: D1Like, ctx: PageContext): Promise<Response> {
+  // Both numbers for every registered domain in one read of the sweep's
+  // counters, where it has written them: the page asked two counts per domain,
+  // and that is the cost that grew with the registry rather than with the log.
+  // A domain the counters carry no row for has none of either.
+  const counters = await logCounters(db);
   const counts: Record<string, DomainCounts> = {};
   for (const slug of DOMAIN_SLUGS) {
+    const folded = counters.entries_by_domain[slug];
     counts[slug] = {
-      entries: await countEntries(db, { domain: slug }),
-      trustedOperators: await countTrustedOperators(db, slug),
+      entries: folded?.entries ?? 0,
+      trustedOperators: folded?.trusted_operators ?? 0,
     };
   }
   const data: DomainsData = { counts };
@@ -1366,7 +1434,14 @@ export async function handlePages(
     });
   }
 
-  if (request.method !== "GET" && request.method !== "HEAD") return null;
+  // A wrong method on a path this route owns outright is refused here and in
+  // the handlers' own words; everything shared falls through to the door that
+  // owns it, which answers with its own Allow.
+  if (!isRead(request)) {
+    return PAGE_ONLY_PATHS.has(url.pathname)
+      ? methodNotAllowed(READ_METHODS)
+      : null;
+  }
 
   // Matched on the pathname, so both the plain path and the versioned form the
   // pages link (/static/app.css?v=<8 hex>, src/ui/html.ts) are this one route

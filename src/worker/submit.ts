@@ -89,6 +89,8 @@ import {
   authenticate,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -1278,7 +1280,7 @@ async function route(
 
   const entryId = segmentAfter(path, "/entries/");
   if (entryId !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     const granted = await reading(request, env, deps);
     if (!granted.ok) return granted.response;
     return entryById(env, deps, granted.reader, entryId);
@@ -1290,7 +1292,7 @@ async function route(
     const raw = sidecar ? rest.slice(0, -SIDECAR_PATH.length) : rest;
     const hash = segmentAfter(`/${raw}`, "/");
     if (hash !== null) {
-      if (request.method !== "GET") return methodNotAllowed("GET");
+      if (!isRead(request)) return methodNotAllowed(READ_METHODS);
       const granted = await reading(request, env, deps);
       if (!granted.ok) return granted.response;
       return sidecar

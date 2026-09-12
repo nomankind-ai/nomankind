@@ -80,6 +80,8 @@ import {
   StorageUnreachable,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -422,8 +424,8 @@ async function route(
   const path = url.pathname;
 
   if (path === "/keys/me/webhooks") {
-    if (request.method !== "POST" && request.method !== "GET") {
-      return methodNotAllowed("GET, POST");
+    if (request.method !== "POST" && !isRead(request)) {
+      return methodNotAllowed(`${READ_METHODS}, POST`);
     }
     const held = await keyOf(db, request);
     if (!held.ok) return held.response;
@@ -435,7 +437,7 @@ async function route(
   const member = endpointPath(path);
   if (member !== null) {
     if (member.deliveries) {
-      if (request.method !== "GET") return methodNotAllowed("GET");
+      if (!isRead(request)) return methodNotAllowed(READ_METHODS);
       const held = await keyOf(db, request);
       return held.ok
         ? deliveries(db, held.key, member.id, url)

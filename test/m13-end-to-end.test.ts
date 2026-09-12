@@ -998,7 +998,7 @@ describe("the reads", () => {
       new Request(`${TEST_ORIGIN}/captures/${htmlHash}`, { method: "POST" }),
     );
     expect(post.status).toBe(405);
-    expect(post.headers.get("allow")).toBe("GET");
+    expect(post.headers.get("allow")).toBe("GET, HEAD");
 
     const wrong = await send(new Request(`${TEST_ORIGIN}/entries`, { method: "DELETE" }));
     expect(wrong.status).toBe(405);

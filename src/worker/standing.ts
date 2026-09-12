@@ -63,6 +63,8 @@ import {
   StorageUnreachable,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -263,24 +265,24 @@ async function route(
   const { pathname } = new URL(request.url);
 
   if (pathname === "/standing") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return standing(db);
   }
 
   if (pathname === "/ledger") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return ledger(db);
   }
 
   const forStanding = operatorPath(pathname, "standing");
   if (forStanding !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return operatorStanding(db, forStanding);
   }
 
   const forLedger = operatorPath(pathname, "ledger");
   if (forLedger !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return operatorLedger(db, forLedger, deps.now);
   }
 

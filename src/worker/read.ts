@@ -76,6 +76,8 @@ import {
   StorageUnreachable,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -479,14 +481,14 @@ async function route(
 
   const id = idAfterPrefix(path);
   if (id !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     const granted = await gate(db, request, env, now);
     if (!granted.ok) return granted.response;
     return byId(db, id, env, granted.reader, granted.access, now);
   }
 
   if (path === "/read") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     const parsed = parseReadQuery(url.searchParams);
     // The refusal goes out in the kernel's own word, so a reader who mistyped
     // `min_tier` is told which rule refused them rather than "bad request".
