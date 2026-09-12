@@ -32,6 +32,15 @@
  * question in this system is asked at a position (M8): what an operator's
  * standing was when a decision was made must not change because the log grew
  * afterwards.
+ *
+ * The fold comes in two forms and they are one piece of code. `standingAt` runs
+ * it over the whole log, which is what a reader recomputing offline does and
+ * what the published formula means. `standingAfter` continues it from counts
+ * already folded at an earlier position, which is what lets the sweep pay for
+ * the events since its last run rather than for the log. Neither stores
+ * anything: what the sweep writes is a cache of what the first form would say,
+ * and the cache is checkable precisely because the second form cannot reach an
+ * answer the first one would not.
  */
 
 import type { ApproverRecord, Event, EventType } from "./events.js";
@@ -190,6 +199,17 @@ function empty(operator: string): Accumulator {
   };
 }
 
+/** The accumulator an operator's stored record continues from. */
+function resume(standing: Standing): Accumulator {
+  return {
+    operator: standing.operator,
+    earned: standing.earned,
+    burned: standing.burned,
+    locked: standing.locked,
+    ...standing.counts,
+  };
+}
+
 function freeze(accumulator: Accumulator, position: number): Standing {
   const standing = accumulator.earned - accumulator.burned;
   return {
@@ -294,19 +314,35 @@ function requestAt(
 }
 
 /**
- * Every operator's standing as of `position`, by the published formula.
+ * Every operator's standing at `position`, continued from what the fold already
+ * knew at `from`.
  *
- * The fold runs once over the events in seq order. Every registered operator has
- * a record whether or not it has ever moved, so an operator page never has to
- * tell "nothing yet" from "unknown", and so does every operator the fold touches
- * — a challenger, a checker, a signer of an overturned entry.
+ * The whole fold and the incremental one are the same code, because two folds
+ * of one formula are two chances to disagree and Section 9 promises that anyone
+ * recomputing gets the same number. `from` is the position `prior` covers, and
+ * -1 means nothing is carried: `standingAt` is this with an empty map at -1.
+ *
+ * `events` must hold every event with `from` < seq <= `position`. It may hold
+ * earlier ones, and when the caller is continuing a fold it must: an event's
+ * award depends only on itself, but two of the fold's bookkeeping answers are
+ * about an entry's whole history — whether its submission credit has been paid
+ * already, and which of its signers an earlier upheld dispute already burned.
+ * Those are replayed over every event the caller hands in, and only the events
+ * after `from` move a number. So a caller continuing at a cursor passes the
+ * events after it plus the registry and the histories of the entries those
+ * events name, and gets what the whole fold would have returned.
  */
-export function standingAt(
+export function standingAfter(
   events: readonly Event[],
+  prior: ReadonlyMap<string, Standing>,
+  from: number,
   position: number,
 ): Map<string, Standing> {
   const ordered = folded(events, position);
   const records = new Map<string, Accumulator>();
+  for (const [operator, standing] of prior) {
+    records.set(operator, resume(standing));
+  }
 
   const of = (operator: string): Accumulator => {
     const existing = records.get(operator);
@@ -327,32 +363,38 @@ export function standingAt(
   const burnedSigners = new Map<string, Set<string>>();
 
   for (const event of ordered) {
+    /** Whether this event's awards are this fold's to apply. */
+    const after = event.seq > from;
+
     if (isType(event, "validation")) {
       const record = event.payload.record as ApproverRecord;
-      const validator = of(record.operator);
-      if (record.assigned_random) {
-        validator.earned += STANDING_VALIDATION_ASSIGNED;
-        validator.validations_assigned += 1;
-      } else {
-        validator.earned += STANDING_VALIDATION_VOLUNTEERED;
-        validator.validations_volunteered += 1;
-      }
+      if (after) {
+        const validator = of(record.operator);
+        if (record.assigned_random) {
+          validator.earned += STANDING_VALIDATION_ASSIGNED;
+          validator.validations_assigned += 1;
+        } else {
+          validator.earned += STANDING_VALIDATION_VOLUNTEERED;
+          validator.validations_volunteered += 1;
+        }
 
-      // Section 4: "the operators who measure are paid more than the operators
-      // who copy" (D-087). The standing side of that rule: a record carrying a
-      // passing n-of-k measurement earns beside the credit for the decision
-      // itself, so the trusted pool tilts toward the operators who ran the
-      // test rather than the ones who accepted it.
-      if (recordMeasured(record)) {
-        validator.earned += STANDING_VALIDATION_REPRODUCED;
-        validator.validations_reproduced += 1;
+        // Section 4: "the operators who measure are paid more than the
+        // operators who copy" (D-087). The standing side of that rule: a record
+        // carrying a passing n-of-k measurement earns beside the credit for the
+        // decision itself, so the trusted pool tilts toward the operators who
+        // ran the test rather than the ones who accepted it.
+        if (recordMeasured(record)) {
+          validator.earned += STANDING_VALIDATION_REPRODUCED;
+          validator.validations_reproduced += 1;
+        }
       }
 
       // "Earned by approved submissions": the submitter's operator is paid the
       // first time the entry actually derives verified, which is a question
       // about the whole log up to here and not about this one decision. The
       // clock is the event's own instant, so the answer cannot depend on when
-      // anyone asked.
+      // anyone asked. Replayed for an event at or before `from` too, without
+      // paying: that is how a continued fold knows the credit is spent.
       const entryId = event.entry_id;
       if (entryId === null || credited.has(entryId)) continue;
       const derived = deriveEntry(
@@ -362,6 +404,7 @@ export function standingAt(
       );
       if (derived.derived.status !== "verified") continue;
       credited.add(entryId);
+      if (!after) continue;
       const author = derived.entry["author_operator"];
       if (typeof author !== "string") continue;
       const submitter = of(author);
@@ -371,6 +414,7 @@ export function standingAt(
     }
 
     if (isType(event, "reconfirmation")) {
+      if (!after) continue;
       // A reconfirmation is a volunteered check: nobody was drawn for it.
       const reconfirmer = of(event.payload.record.operator);
       reconfirmer.earned += STANDING_VALIDATION_VOLUNTEERED;
@@ -383,6 +427,7 @@ export function standingAt(
     }
 
     if (isType(event, "assignment_missed") || isType(event, "revalidation_missed")) {
+      if (!after) continue;
       const missed = of(event.payload.operator);
       missed.burned += STANDING_ASSIGNMENT_MISSED;
       missed.missed += 1;
@@ -390,6 +435,7 @@ export function standingAt(
     }
 
     if (isType(event, "attestation_scored")) {
+      if (!after) continue;
       // Section 8: "three operators from the trusted pool ... score its answers
       // against the log and sign the result." Completed work the beacon drew,
       // so Section 9's "completed validations" pays it — to the operator behind
@@ -402,6 +448,7 @@ export function standingAt(
     }
 
     if (isType(event, "attestation_expired")) {
+      if (!after) continue;
       // "Missed assignments" burn, and a drawn scorer that let the window run
       // out missed one: the expiry names every scorer that never answered, and
       // each is burned once, at the rate an unanswered assignment carries. The
@@ -415,6 +462,7 @@ export function standingAt(
     }
 
     if (isType(event, "dispute_filed")) {
+      if (!after) continue;
       // A bare key stakes a filing fee and no standing (Section 6), so there is
       // nothing to lock and no operator to lock it against.
       const operator = event.payload.operator;
@@ -424,17 +472,19 @@ export function standingAt(
     }
 
     if (isType(event, "dispute_upheld")) {
-      const filing = filingFor(
-        ordered,
-        event,
-        event.payload.correction_entry_id,
-      );
-      const challenger = filing?.payload.operator ?? null;
-      if (challenger !== null) {
-        const record = of(challenger);
-        record.locked -= DISPUTE_STAKE_STANDING;
-        record.earned += STANDING_DISPUTE_UPHELD;
-        record.disputes_upheld += 1;
+      if (after) {
+        const filing = filingFor(
+          ordered,
+          event,
+          event.payload.correction_entry_id,
+        );
+        const challenger = filing?.payload.operator ?? null;
+        if (challenger !== null) {
+          const record = of(challenger);
+          record.locked -= DISPUTE_STAKE_STANDING;
+          record.earned += STANDING_DISPUTE_UPHELD;
+          record.disputes_upheld += 1;
+        }
       }
 
       const entryId = event.entry_id;
@@ -447,6 +497,7 @@ export function standingAt(
       for (const signer of signersOf(ordered, entryId, event.seq)) {
         if (burned.has(signer)) continue;
         burned.add(signer);
+        if (!after) continue;
         const record = of(signer);
         record.burned += STANDING_OVERTURNED_SIGNER;
         record.overturned += 1;
@@ -455,6 +506,7 @@ export function standingAt(
     }
 
     if (isType(event, "dispute_failed")) {
+      if (!after) continue;
       const filing = filingFor(
         ordered,
         event,
@@ -470,6 +522,7 @@ export function standingAt(
     }
 
     if (isType(event, "revalidation_requested")) {
+      if (!after) continue;
       // Section 8: a check auto-opened by failure reports is at nomankind's
       // expense, so nobody staked and nothing is locked.
       if (event.payload.source !== "operator") continue;
@@ -480,6 +533,7 @@ export function standingAt(
     }
 
     if (isType(event, "revalidation_resolved")) {
+      if (!after) continue;
       const request = requestAt(ordered, event.payload.request_seq);
       const requester =
         request === null || request.payload.source !== "operator"
@@ -520,6 +574,25 @@ export function standingAt(
     standings.set(operator, freeze(accumulator, position));
   }
   return standings;
+}
+
+/**
+ * Every operator's standing as of `position`, by the published formula.
+ *
+ * The fold runs once over the events in seq order. Every registered operator has
+ * a record whether or not it has ever moved, so an operator page never has to
+ * tell "nothing yet" from "unknown", and so does every operator the fold touches
+ * — a challenger, a checker, a signer of an overturned entry.
+ *
+ * The reader's recompute: `npm run standing`, the mirror's standing.json and
+ * every offline check run this over the whole log, which is what makes the
+ * cursor the sweep keeps checkable rather than authoritative.
+ */
+export function standingAt(
+  events: readonly Event[],
+  position: number,
+): Map<string, Standing> {
+  return standingAfter(events, new Map(), -1, position);
 }
 
 /** One operator's standing as of `position`; the zero record when unknown. */
@@ -569,8 +642,12 @@ export interface TrustChanges {
 export function trustChangesAt(
   events: readonly Event[],
   position: number,
+  computed?: ReadonlyMap<string, Standing>,
 ): TrustChanges {
-  const standings = standingAt(events, position);
+  // The sweep has just folded these at this very position and hands them in, so
+  // the pool is moved by exactly the numbers that were stored. A caller with
+  // nothing to hand in gets the whole fold, which is the same answer.
+  const standings = computed ?? standingAt(events, position);
   const registered = registeredOperatorsAt(events, position);
   const trusted = trustedOperatorsAt(events, position);
   const domains = operatorDomainsAt(events, position);

@@ -247,7 +247,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/standing",
     parameters: "—",
     answers:
-      "Every operator's standing, recomputed over the sealed log rather than read from a column: position, formula (the policy names the fold applies, in the order it applies them), operators (each with operator, earned, burned, locked, standing, available, counts, position).",
+      "Every operator's standing as the sweep last folded it: position — the position the sweep folded to, at or behind the sealed head — formula (the policy names the fold applies, in the order it applies them), operators (each with operator, earned, burned, locked, standing, available, counts, position), which is every registered operator — one registered since the last fold is on the list at zero at that position rather than absent. The published number is the sweep's at its position, and the recompute is the command: npm run standing folds the log itself and is what settles a disagreement. Before the sweep has ever folded there is nothing stored and the log is folded here.",
     refusals: "405 with Allow: GET.",
   },
   {
@@ -255,7 +255,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/operators/{id}/standing",
     parameters: "—",
     answers:
-      "One operator's standing, recomputed the same way: operator, position, earned, burned, locked, standing, available, counts, formula, and stored — the cached { standing, seq } off the operator row, or null when the formula has never been run for it. stored is the number to check the recomputation against; the log is what decides if the two disagree.",
+      "One operator's standing from the same stored fold: operator, position, earned, burned, locked, standing, available, counts, formula, and stored — the cached { standing, seq } off the operator row, or null when the formula has never been run for it. What is served is the sweep's answer at its position, never a fold of the log per request; npm run standing is the recompute, and the log is what decides if the two disagree.",
     refusals: "404 not_found.",
   },
   {

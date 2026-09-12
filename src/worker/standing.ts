@@ -4,11 +4,16 @@
  * Whitepaper Section 9, "Standing": "Standing is not a score nomankind assigns.
  * It is derived from the sealed public events by a published formula, so anyone
  * can recompute anyone's standing from the log and get the same number." These
- * four routes are that sentence served over HTTP. Two of them recompute the
- * formula here and now, over the sealed log, and hand back the answer beside the
- * names of the terms it applied; the cached column is served next to it, marked
- * as a cache, so a reader who does not believe either can run src/standing.ts
- * over the events themselves and check both.
+ * four routes are that sentence served over HTTP. Two of them serve what the
+ * sweep's fold stored — the numbers and the position they are the answer at —
+ * beside the names of the terms the formula applied, because "anyone can
+ * recompute" is a promise about a published formula and not a promise to fold
+ * the log again for every anonymous request. What makes the published number
+ * checkable is that the recompute is a command: `npm run standing` folds the
+ * events themselves and compares, and a disagreement is the log's word against
+ * a column's, which the log wins. An environment whose sweep has never folded
+ * has nothing stored, and there the log is folded here, because a position
+ * nobody has computed is not an answer to serve.
  *
  * The other two are Money's: "any operator can reconcile their payout against
  * the log". An operator's ledger is its own rows and what they add up to, and
@@ -16,10 +21,11 @@
  * numbers a reader needs to check any of it — the price of a read, the payout
  * floor, the cycle, and the holdback.
  *
- * Reads only, and nothing derived is stored: every number here is recomputed
- * from what the log has sealed, so this Worker cannot serve a standing the log
- * does not support. Before the first seal there is nothing to recompute from and
- * the position is null rather than zero, which is a different thing to tell a
+ * Reads only, and nothing is written: every number here is one the sweep folded
+ * out of what the log has sealed, at a position that is served beside it, so
+ * this Worker cannot serve a standing the log does not support without saying
+ * where to check it. Before the first seal there is nothing to fold from and the
+ * position is null rather than zero, which is a different thing to tell a
  * reader.
  *
  * JSON only. These four never negotiate HTML: an operator page is
@@ -44,10 +50,13 @@ import type { D1Like } from "../storage/d1.js";
 import {
   getOperator,
   latestSeal,
+  listOperators,
   ledgerRowsForOperator,
   operatorStanding as storedStanding,
   payoutRows,
   reconciliationRows,
+  storedStandingOf,
+  storedStandings,
 } from "../storage/repository.js";
 import type { Env } from "./env.js";
 import {
@@ -71,12 +80,16 @@ async function sealedPosition(db: D1Like): Promise<number | null> {
 }
 
 /**
- * GET /standing: every operator's standing, recomputed now.
+ * GET /standing: every operator's standing, at the position the sweep folded to.
  *
  * The formula's own term names go out beside the numbers, because Section 9
  * promises a published formula and a formula whose terms are not named is not
- * published. Highest first, then by id, so the order is a fact about the
- * numbers rather than about how the log happened to be written.
+ * published. Every registered operator is on the list, including the ones
+ * registered since the sweep last folded: those stand at zero at the fold's own
+ * position, which is a different answer from being left off. `position` is what
+ * the answer is as of and is at or behind the sealed head — the sweep folds on its own timer and this route does not fold at
+ * all. Highest first, then by id, so the order is a fact about the numbers
+ * rather than about how the log happened to be written.
  */
 async function standing(db: D1Like): Promise<Response> {
   const position = await sealedPosition(db);
@@ -84,23 +97,64 @@ async function standing(db: D1Like): Promise<Response> {
     return json({ position: null, formula: STANDING_FORMULA, operators: [] }, 200);
   }
 
-  const standings = standingAt(await sealedLog(db, position), position);
-  const operators = [...standings.values()].sort(
+  // The sweep's answer at the sweep's position, not a fold of the log per
+  // anonymous request: the fold is published and the recompute is a command
+  // (`npm run standing`), so what this serves is the stored number and the
+  // position it is the answer at. Before the sweep has ever folded there is
+  // nothing stored and the log is the only answer there is.
+  const stored = await storedStandings(db);
+  const standings =
+    stored.position === null
+      ? standingAt(await sealedLog(db, position), position)
+      : stored.standings;
+  const at = stored.position ?? position;
+
+  // Every registered operator, including the ones registered since the sweep
+  // last folded: a name the registry holds has a standing of zero at the fold's
+  // position, and leaving it off the list would make "not folded yet" look like
+  // "not an operator". The zero record says which position it is zero at, so it
+  // is as checkable as every other row here.
+  const answered = new Map(standings);
+  let afterId: string | undefined;
+  for (;;) {
+    const page = await listOperators(
+      db,
+      afterId === undefined
+        ? { limit: LIST_PAGE_LIMIT }
+        : { limit: LIST_PAGE_LIMIT, afterId },
+    );
+    if (page.length === 0) break;
+    for (const record of page) {
+      if (!answered.has(record.id)) {
+        answered.set(record.id, zeroStanding(record.id, at));
+      }
+    }
+    if (page.length < LIST_PAGE_LIMIT) break;
+    afterId = page[page.length - 1]!.id;
+  }
+
+  const operators = [...answered.values()].sort(
     (left, right) =>
       right.standing - left.standing || left.operator.localeCompare(right.operator),
   );
-  return json({ position, formula: STANDING_FORMULA, operators }, 200);
+  return json({ position: at, formula: STANDING_FORMULA, operators }, 200);
 }
 
 /**
- * GET /operators/{id}/standing: one operator's standing, recomputed, with the
- * cached column beside it.
+ * GET /operators/{id}/standing: one operator's standing as the sweep folded it,
+ * with the cached column beside it.
  *
- * `stored` is the cache the sweep wrote and the position it wrote it at, or null
- * when standing has never been computed for this operator — null is "not
- * computed yet" and never "zero". A reader comparing the two is doing exactly
- * what src/cli/standing.ts does, and a disagreement is the log's word against a
- * column's, which the log wins.
+ * The numbers and the position come from the accumulator the standing step
+ * stored, which is the whole point of storing it: an operator page costs a row
+ * rather than a fold of the sealed log. The fold is still what decides — the
+ * recompute is `npm run standing`, which is exactly src/cli/standing.ts asking
+ * this route and folding the events itself, and a disagreement is the log's word
+ * against a column's, which the log wins.
+ *
+ * `stored` is the cache on the operator row and the position it was written at,
+ * or null when standing has never been computed for this operator — null is "not
+ * computed yet" and never "zero". An operator with no accumulator yet is folded
+ * out of the log here, for the same reason: nothing stored is not zero.
  *
  * A 404 for an operator nobody registered: an unregistered name has no standing
  * rather than a standing of zero.
@@ -109,11 +163,13 @@ async function operatorStanding(db: D1Like, operator: string): Promise<Response>
   if ((await getOperator(db, operator)) === null) return refuse(404, "not_found");
 
   const position = await sealedPosition(db);
-  const recomputed =
-    position === null
+  const row = position === null ? null : await storedStandingOf(db, operator);
+  const answer =
+    row ??
+    (position === null
       ? zeroStanding(operator, 0)
       : (standingAt(await sealedLog(db, position), position).get(operator) ??
-        zeroStanding(operator, position));
+        zeroStanding(operator, position)));
 
   // This operator's own row, not the top of the leaderboard: an operator ranked
   // past a page of standings still has the standing the sweep wrote for it.
@@ -121,13 +177,13 @@ async function operatorStanding(db: D1Like, operator: string): Promise<Response>
   return json(
     {
       operator,
-      position: position === null ? null : recomputed.position,
-      earned: recomputed.earned,
-      burned: recomputed.burned,
-      locked: recomputed.locked,
-      standing: recomputed.standing,
-      available: recomputed.available,
-      counts: recomputed.counts,
+      position: position === null ? null : answer.position,
+      earned: answer.earned,
+      burned: answer.burned,
+      locked: answer.locked,
+      standing: answer.standing,
+      available: answer.available,
+      counts: answer.counts,
       formula: STANDING_FORMULA,
       stored: cached,
     },

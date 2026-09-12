@@ -43,6 +43,7 @@ import { base64Decode, base64urlEncode } from "../encoding.js";
 import {
   gitBlobSha,
   mirrorDiff,
+  mirrorDropped,
   mirrorUrls,
   type MirrorFile,
 } from "../mirror.js";
@@ -641,9 +642,11 @@ export class GitHubMirrorAdapter implements MirrorAdapter {
       : null;
     if (typeof head !== "string") return failed("bad_response");
 
-    // (3) What actually changed. A day that changed nothing writes nothing.
+    // (3) What actually changed, and what this export no longer writes. A day
+    // that changed nothing and dropped nothing writes nothing.
     const changed = await mirrorDiff(input.files, existing);
-    if (changed.length === 0) {
+    const dropped = mirrorDropped(input.files, existing);
+    if (changed.length === 0 && dropped.length === 0) {
       return {
         ok: true,
         commit: head,
@@ -664,12 +667,24 @@ export class GitHubMirrorAdapter implements MirrorAdapter {
         method: "POST",
         body: JSON.stringify({
           base_tree: headTree,
-          tree: changed.map((file) => ({
-            path: `${input.prefix}/${file.path}`,
-            mode: BLOB_MODE,
-            type: "blob",
-            content: file.content,
-          })),
+          tree: [
+            ...changed.map((file) => ({
+              path: `${input.prefix}/${file.path}`,
+              mode: BLOB_MODE,
+              type: "blob",
+              content: file.content,
+            })),
+            // A null sha is git's own way of saying the path is gone. Every one
+            // of these came out of this prefix's own listing, so `base_tree`
+            // still leaves the LICENSE, the README and the other environment's
+            // directory exactly where they were.
+            ...dropped.map((path) => ({
+              path: `${input.prefix}/${path}`,
+              mode: BLOB_MODE,
+              type: "blob",
+              sha: null,
+            })),
+          ],
         }),
       },
     );
@@ -709,7 +724,7 @@ export class GitHubMirrorAdapter implements MirrorAdapter {
       ok: true,
       commit: commitSha,
       tree: treeSha,
-      changed: changed.length,
+      changed: changed.length + dropped.length,
       unchanged: false,
       ...mirrorUrls(commitSha, input.prefix),
     };
@@ -749,6 +764,8 @@ export class MockMirrorAdapter implements MirrorAdapter {
 
   /** Every path ever written, keyed `<prefix>/<path>`, with its content. */
   readonly files = new Map<string, string>();
+  /** Every path a push deleted, keyed `<prefix>/<path>`, oldest first. */
+  readonly deleted: string[] = [];
   /** How many commits this mirror has taken. */
   commits = 0;
 
@@ -761,7 +778,8 @@ export class MockMirrorAdapter implements MirrorAdapter {
     }
 
     const changed = await mirrorDiff(input.files, existing);
-    if (changed.length === 0) {
+    const dropped = mirrorDropped(input.files, existing);
+    if (changed.length === 0 && dropped.length === 0) {
       const commit = this.#sha("commit");
       return {
         ok: true,
@@ -776,13 +794,19 @@ export class MockMirrorAdapter implements MirrorAdapter {
     for (const file of changed) {
       this.files.set(`${under}${file.path}`, file.content);
     }
+    // The deletions the real adapter sends as a null sha, recorded so a test can
+    // see that a stale file went rather than only that a fresh one arrived.
+    for (const path of dropped) {
+      this.files.delete(`${under}${path}`);
+      this.deleted.push(`${under}${path}`);
+    }
     this.commits += 1;
     const commit = this.#sha("commit");
     return {
       ok: true,
       commit,
       tree: this.#sha("tree"),
-      changed: changed.length,
+      changed: changed.length + dropped.length,
       unchanged: false,
       ...mirrorUrls(commit, input.prefix),
     };
