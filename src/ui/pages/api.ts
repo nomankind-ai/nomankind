@@ -23,6 +23,8 @@ import {
   DISPUTE_FILING_FEE_CENTS,
   FREE_TIER,
   LIST_PAGE_LIMIT,
+  PAGE_CACHE_SECONDS,
+  PAGE_CACHE_STALE_SECONDS,
   RATE_TIERS,
   READ_PRICE_MICROS_PER_READ,
   READ_SHARE_SPLIT,
@@ -635,11 +637,44 @@ export function renderApi(ctx: PageContext): string {
         that answers 404 is worse than no documentation.
       </p>
 
+      <section class="panel">
+        <h2 class="panel-title">Methods, caching and refusals</h2>
+        <p class="note">
+          Every read door answers a
+          <span class="mono">HEAD</span> exactly as it answers the
+          <span class="mono">GET</span> — the same status, the same headers, no
+          body — and its <span class="mono">Allow</span> header names
+          <span class="mono">GET, HEAD</span>. A wrong method is 405 with
+          <span class="mono">Allow</span> and
+          <span class="mono">{"error":"method_not_allowed"}</span>, whether the
+          path answers a page, an endpoint or both; the one other shape is the
+          final refusal, <span class="mono">{"ok":false,"error":"not_found"}</span>,
+          which is what a path nothing answers gets.
+        </p>
+        <p class="note">
+          The JSON doors are never cached: every one of them answers
+          <span class="mono">cache-control: no-store</span>, so an agent that
+          asks is answered from the log as it is this second. The browsing pages
+          are: <span class="mono">public, max-age=${PAGE_CACHE_SECONDS},
+          stale-while-revalidate=${PAGE_CACHE_STALE_SECONDS}</span>, which is
+          what lets a page cost the log one read however many readers open it in
+          that minute — so a page may
+          be up to ${PAGE_CACHE_SECONDS} seconds behind the log, and a reader
+          who wants this instant's answer asks the endpoint beside it.
+          <span class="mono">GET /policy</span> is cached with the pages, because
+          it is a frozen module constant and the same object for every caller. A
+          request carrying a key or an agent signature is never served from that
+          cache and never stored in it: what it is answered depends on who is
+          asking.
+        </p>
+      </section>
+
       ${endpoints(
         "Read path",
         html`No authentication. A shared path answers HTML to a browser and JSON
         to everyone else, so <span class="mono">Accept: application/json</span>
-        is what a machine sends.`,
+        is what a machine sends, and every response on such a path carries
+        <span class="mono">vary: Accept</span>.`,
         READ_PATH,
       )}
 

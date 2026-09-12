@@ -112,6 +112,22 @@ export function methodNotAllowed(allow: string): Response {
 }
 
 /**
+ * The methods a read door answers, and the `Allow` header that names them.
+ *
+ * A HEAD is a GET without the body — it is how a client asks what a read would
+ * cost and whether it has changed without paying for the bytes — so every read
+ * door answers it with the same status and the same headers as the GET, and the
+ * body is dropped in exactly one place, src/worker/index.ts. A door that
+ * refused it would be a door whose 405 said nothing was wrong.
+ */
+export const READ_METHODS = "GET, HEAD";
+
+/** Whether this request is a read: the GET, or the HEAD that stands for it. */
+export function isRead(request: Request): boolean {
+  return request.method === "GET" || request.method === "HEAD";
+}
+
+/**
  * The status each registration refusal answers with.
  *
  * An excluded party at the door is 403: the request was understood, the identity
@@ -998,8 +1014,8 @@ async function route(
 
   if (path === "/operators") {
     if (request.method === "POST") return register(request, env, deps, path);
-    if (request.method === "GET") return list(url, env);
-    return methodNotAllowed("GET, POST");
+    if (isRead(request)) return list(url, env);
+    return methodNotAllowed(`${READ_METHODS}, POST`);
   }
 
   if (path === "/genesis") {
@@ -1023,13 +1039,13 @@ async function route(
 
   const operatorId = segmentAfter(path, "/operators/");
   if (operatorId !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return operatorById(env, operatorId);
   }
 
   const agentId = segmentAfter(path, "/agents/");
   if (agentId !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return agentById(env, agentId);
   }
 

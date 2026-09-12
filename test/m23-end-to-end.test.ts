@@ -599,6 +599,9 @@ describe("the step's place in the run", () => {
       "standing",
       "payout",
       "attestation",
+      // M25: the counters step, after the standing step so the trusted count is
+      // the run's, and last in the list because it is the last step to run.
+      "counters",
     ]);
     const rows = await sweepSteps(store.db);
     expect(rows).toHaveLength(SWEEP_STEPS.length);
@@ -685,7 +688,7 @@ describe("GET /mirror/latest", () => {
       DAY_TWO,
     );
     expect(response.status).toBe(405);
-    expect(response.headers.get("allow")).toBe("GET");
+    expect(response.headers.get("allow")).toBe("GET, HEAD");
     expect(await response.json()).toEqual({ error: "method_not_allowed" });
   }, 240_000);
 });

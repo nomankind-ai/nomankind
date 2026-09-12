@@ -100,6 +100,8 @@ import {
   authenticate,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -721,8 +723,10 @@ async function route(
   const path = url.pathname;
 
   if (path === ATTESTATIONS) {
-    if (request.method === "GET") return list(env.DB, url);
-    if (request.method !== "POST") return methodNotAllowed("GET, POST");
+    if (isRead(request)) return list(env.DB, url);
+    if (request.method !== "POST") {
+      return methodNotAllowed(`${READ_METHODS}, POST`);
+    }
     return request_(request, env, deps, path);
   }
 
@@ -740,19 +744,19 @@ async function route(
 
   const forOperatorId = pathId(path, "/operators/", "/attestations");
   if (forOperatorId !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return forOperator(env.DB, forOperatorId);
   }
 
   const entryId = pathId(path, "/entries/", "/confidence-inputs");
   if (entryId !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return inputs(env.DB, entryId, deps);
   }
 
   const oneId = pathId(path, ATTESTATIONS_PREFIX, "");
   if (oneId !== null) {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return one(env.DB, oneId);
   }
 

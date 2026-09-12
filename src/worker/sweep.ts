@@ -141,6 +141,7 @@ import {
 import {
   authorityHostsFor,
   DEFAULT_DOMAIN,
+  DOMAIN_SLUGS,
   LIST_PAGE_LIMIT,
   RELEASE_WINDOW_DAYS,
   SEAL_MAX_EVENTS,
@@ -179,11 +180,18 @@ import {
   appendEvents,
   bountiesForEntry,
   bountyPoolRows,
+  countAttestations,
+  countEntries,
+  countOperators,
+  countSeals,
+  countTrustedOperators,
+  countWitnessedSeals,
   dueAssignments,
   dueAttestations,
   dueRevalidationAssignments,
   earliestReadReceiptDay,
   entriesThrough,
+  entryCountsByDomain,
   entryHeadsThrough,
   eventBySeq,
   eventsAfter,
@@ -236,11 +244,14 @@ import {
   putStandings,
   storedStandings,
   supersedersOf,
+  trustedOperatorCountsByDomain,
+  writeCounters,
   setSealRegistry,
   setSealWitnesses,
   staleDue,
   unpricedStakeRow,
   unwitnessedSeals,
+  type Counters,
   type OperatorRecord,
   type ReadCountKeyCursor,
   type ReadCountKeyRow,
@@ -361,6 +372,7 @@ export const SWEEP_STEPS: readonly string[] = Object.freeze([
   "standing",
   "payout",
   "attestation",
+  "counters",
 ]);
 
 /** The four sealing deps, once they are known to be there. */
@@ -374,6 +386,9 @@ interface SealingDeps {
 
 /** How a step counts a refusal. */
 type Skip = (reason: string) => void;
+
+/** The status the home page's "verified" counter counts, spelled once. */
+const VERIFIED: EntryStatus = "verified";
 
 /** One assignment whose seventy-two hours ran out. */
 export interface SweepMiss {
@@ -558,6 +573,19 @@ export interface SweepReport {
     readonly operators: number;
     readonly trusted: readonly string[];
     readonly untrusted: readonly string[];
+  } | null;
+  /**
+   * What the counters step counted, or null when the step refused.
+   *
+   * The counts themselves and not the whole row: the row is in the table for
+   * whoever reads a page, and this is the run's own account of what it wrote.
+   */
+  readonly counters: {
+    readonly position: number;
+    readonly entries: number;
+    readonly operators: number;
+    readonly seals: number;
+    readonly attestations: number;
   } | null;
   /** The payouts this run made, one per operator at most (decision D-053). */
   readonly payouts: readonly {
@@ -2320,6 +2348,77 @@ export async function standingStep(
 }
 
 /**
+ * (j2) Count everything the public pages show, once, and write the row.
+ *
+ * Whitepaper Section 3: the log is the record, and every number a page shows is
+ * a view of it. The view was being taken per reader — the QA of 2026-09-12
+ * found the home, entries, domains and status pages counting whole tables on
+ * every view, including two conditions no index could serve — so it is taken
+ * here instead, once per run, at the position the run sealed.
+ *
+ * After the standing step on purpose: that step is what moves the trusted pool,
+ * so a count taken before it would publish the pool of the run before this one.
+ *
+ * Every count below rides an index and none of them parses JSON: status and
+ * domain have had theirs since 0001 and 0012, and 0018 added the three the
+ * scans needed — entries(stale), operators(trusted, id) and seals(witnessed).
+ * The two per-domain counts are one grouped statement each rather than one per
+ * registered slug, and a slug with nothing in it is written as the zero it is,
+ * so the domains page never has to know which slugs the log has heard of.
+ *
+ * The whole step is a normal skip when it fails: the counters are a view of the
+ * log and never the log, so a run that could not recount them has still swept,
+ * and the pages go on showing the last position that was counted.
+ */
+export async function countersStep(
+  db: D1Like,
+  sealedHead: number,
+  at: string,
+  skip: Skip,
+): Promise<SweepReport["counters"]> {
+  try {
+    const entriesByDomain = await entryCountsByDomain(db);
+    const trustedByDomain = await trustedOperatorCountsByDomain(db);
+    const byDomain: Counters["entries_by_domain"] = {};
+    for (const slug of DOMAIN_SLUGS) {
+      byDomain[slug] = {
+        entries: entriesByDomain[slug] ?? 0,
+        trusted_operators: trustedByDomain[slug] ?? 0,
+      };
+    }
+
+    const counters: Counters = {
+      entries_total: await countEntries(db, {}),
+      // "verified" is a status name from src/derive.ts's EntryStatus and not a
+      // knob: the home page's second counter is the entries that verified.
+      entries_verified: await countEntries(db, { status: VERIFIED }),
+      entries_stale: await countEntries(db, { stale: true }),
+      entries_by_domain: byDomain,
+      operators_registered: await countOperators(db),
+      operators_trusted: await countTrustedOperators(db),
+      seals: await countSeals(db),
+      seals_witnessed: await countWitnessedSeals(db),
+      attestations: await countAttestations(db),
+      sealed_head: sealedHead,
+      position: sealedHead,
+      updated_at: at,
+    };
+    await writeCounters(db, counters);
+
+    return {
+      position: counters.position,
+      entries: counters.entries_total,
+      operators: counters.operators_registered,
+      seals: counters.seals,
+      attestations: counters.attestations,
+    };
+  } catch {
+    skip("counters_failed");
+    return null;
+  }
+}
+
+/**
  * One operator's cycle: what is released, whether it clears the floor, and the
  * transfer that took it out.
  *
@@ -3050,6 +3149,20 @@ export async function runSweep(
       payouts = await payoutStep(db, deps.payout, sealedHead.last_seq, at, skip);
     }
 
+    // (j2) The counters the public pages read, after the standing step so the
+    // trusted count is this run's, and outside the wall the three money steps
+    // stand behind: a log with nothing sealed still has entries, operators and
+    // an empty seals table to count, and a page on a fresh deployment should be
+    // shown those rather than nothing. The position is then -1, which is what
+    // "counted before anything was sealed" means everywhere else in this file.
+    inStep = "counters";
+    const counters = await countersStep(
+      db,
+      sealedHead === null ? -1 : sealedHead.last_seq,
+      at,
+      skip,
+    );
+
     report = {
       at,
       snapshot,
@@ -3070,6 +3183,7 @@ export async function runSweep(
       alerts,
       standing,
       payouts,
+      counters,
       skipped,
     };
 
@@ -3247,6 +3361,8 @@ function stepRows(
             amount: report.payouts.reduce((total, one) => total + one.amount, 0),
           },
           attestation: { expired: report.attestations.expired.length },
+          counters:
+            report.counters === null ? { position: null } : { ...report.counters },
         };
 
   const failedAt =

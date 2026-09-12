@@ -479,7 +479,7 @@ describe("listing operators", () => {
     );
 
     expect(response.status).toBe(405);
-    expect(response.headers.get("allow")).toBe("GET, POST");
+    expect(response.headers.get("allow")).toBe("GET, HEAD, POST");
   });
 });
 

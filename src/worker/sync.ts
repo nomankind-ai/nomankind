@@ -79,6 +79,8 @@ import {
   StorageUnreachable,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -587,7 +589,7 @@ async function route(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.pathname !== "/sync") return null;
-  if (request.method !== "GET") return methodNotAllowed("GET");
+  if (!isRead(request)) return methodNotAllowed(READ_METHODS);
 
   const parsed = parseSyncQuery(url.searchParams);
   // The refusal goes out in the kernel's own word, so a trainer who mistyped

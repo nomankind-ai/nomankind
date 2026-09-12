@@ -461,6 +461,7 @@ describe("the counter migration on a log that has already served reads", () => {
       expect(await migrated.rest()).toEqual([
         "0016_receipt_counter.sql",
         "0017_standing_cursor.sql",
+        "0018_counters.sql",
       ]);
 
       // The row stands at the largest counter already issued, so the next
@@ -488,6 +489,7 @@ describe("the counter migration on a log that has already served reads", () => {
       expect(await migrated.rest()).toEqual([
         "0016_receipt_counter.sql",
         "0017_standing_cursor.sql",
+        "0018_counters.sql",
       ]);
       expect(await nextReadCounter(migrated.db)).toBe(1);
       expect(await allocateReadCounter(migrated.db)).toBe(1);

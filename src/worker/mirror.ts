@@ -29,6 +29,8 @@ import {
   StorageUnreachable,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -107,7 +109,7 @@ export async function handleMirror(
 ): Promise<Response | null> {
   const { pathname } = new URL(request.url);
   if (pathname !== "/mirror/latest") return null;
-  if (request.method !== "GET") return methodNotAllowed("GET");
+  if (!isRead(request)) return methodNotAllowed(READ_METHODS);
 
   try {
     return await latest(guardDatabase(env.DB), env);

@@ -70,6 +70,8 @@ import {
   StorageUnreachable,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -441,7 +443,7 @@ function answerClaim(
     created_at: string;
   } | null,
 ): Response {
-  if (request.method !== "GET" || !wantsHtml(request)) return response;
+  if (!isRead(request) || !wantsHtml(request)) return response;
 
   const ctx: PageContext = {
     environment: env.ENVIRONMENT,
@@ -529,7 +531,7 @@ async function route(
   const path = url.pathname;
 
   if (path === "/keys/tiers") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return tiers();
   }
 
@@ -539,24 +541,24 @@ async function route(
   }
 
   if (path === "/keys/claim") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     return claim(request, env, deps, db, url);
   }
 
   if (path === "/keys/me") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     const held = await keyOf(db, request);
     return held.ok ? me(db, held.key, deps.now) : held.response;
   }
 
   if (path === "/keys/me/usage") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     const held = await keyOf(db, request);
     return held.ok ? usage(db, held.key, url, deps.now) : held.response;
   }
 
   if (path === "/keys/me/receipts") {
-    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
     const held = await keyOf(db, request);
     return held.ok ? receipts(db, held.key, url) : held.response;
   }

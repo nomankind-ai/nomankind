@@ -457,7 +457,7 @@ describe("the door itself", () => {
 
     expect(response).not.toBeNull();
     expect(response!.status).toBe(405);
-    expect(response!.headers.get("allow")).toBe("GET");
+    expect(response!.headers.get("allow")).toBe("GET, HEAD");
     expect(await response!.json()).toEqual({ error: "method_not_allowed" });
   }, 60_000);
 

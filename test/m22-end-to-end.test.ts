@@ -1041,7 +1041,7 @@ describe("one operator's two sides of attestation", () => {
     );
     expect([response.status, response.headers.get("allow")]).toEqual([
       405,
-      "GET",
+      "GET, HEAD",
     ]);
     expect(response.headers.get("cache-control")).toBe("no-store");
   }, 600_000);

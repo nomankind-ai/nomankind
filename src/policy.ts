@@ -1447,6 +1447,24 @@ export const HOME_LATEST_ENTRIES = 10;
 export const LANDING_BAND_SEALS = 12;
 
 /**
+ * How long an anonymous page may be served from the edge cache, and how long
+ * past that a stale copy may be served while a fresh one is fetched.
+ *
+ * Presentation numbers of the same kind as the page sizes above: they say how
+ * far behind the log a *page* may be, never what anything costs or what anybody
+ * is allowed. Sixty seconds because the sweep's own cadence is coarser than
+ * that, so a reader refreshing a page is never shown a log that has moved on
+ * without them for longer than a minute, and because every storage-backed page
+ * costs the same reads whether one reader asks or fifty. The JSON doors are not
+ * cached at all, at any number: an agent asks the log, not the edge.
+ *
+ * Not whitepaper numbers. The maintainer's published policy; they move only by
+ * a later decision.
+ */
+export const PAGE_CACHE_SECONDS = 60;
+export const PAGE_CACHE_STALE_SECONDS = 300;
+
+/**
  * Incentives / Standing: "Standing is the non-monetary record of being right. It
  * is earned by approved submissions, completed validations (assigned work
  * weighted highest), rejections that hold, and upheld challenges ... Amounts and

@@ -31,7 +31,12 @@ import { witnessAdapterFor } from "../adapters/witness.js";
 import { utcDay } from "../anchor.js";
 import type { Core } from "../core.js";
 import type { EventPayloads } from "../events.js";
-import { LIST_PAGE_LIMIT, STATUS_ATTENTION_AFTER_INTERVALS, STATUS_FAILING_AFTER_MINUTES } from "../policy.js";
+import {
+  DOMAIN_SLUGS,
+  LIST_PAGE_LIMIT,
+  STATUS_ATTENTION_AFTER_INTERVALS,
+  STATUS_FAILING_AFTER_MINUTES,
+} from "../policy.js";
 import {
   exercisedStages,
   stageStates,
@@ -52,6 +57,7 @@ import {
   countOperators,
   countSeals,
   countSealsSealedOn,
+  countTrustedOperators,
   countWitnessedSeals,
   dueAssignments,
   dueAttestations,
@@ -66,16 +72,20 @@ import {
   newestUpgradedAnchor,
   owedMeterReports,
   payoutRows,
+  readCounters,
   reconciliationRows,
   sweepSteps,
   trustedOperatorIds,
   unsealedEvents,
+  type Counters,
 } from "../storage/repository.js";
 import type { Env } from "./env.js";
 import {
   StorageUnreachable,
   guardDatabase,
   json,
+  READ_METHODS,
+  isRead,
   methodNotAllowed,
   refuse,
 } from "./registry.js";
@@ -95,6 +105,56 @@ const MILLISECONDS_PER_DAY = 86_400_000;
  * module only asks the store how far that cursor has got.
  */
 const METERING_CURSOR = "metering";
+
+/**
+ * The log's counts: the row the sweep folded, or the counts themselves when no
+ * sweep has folded one yet.
+ *
+ * The one fallback in the system, called by both doors that show these numbers —
+ * this gatherer and the three page gatherers in src/worker/pages.ts — because
+ * three copies of it would be three chances to get it wrong, and the wrong
+ * answer here is the worst kind: zeros are a statement about the log, and a
+ * populated log reporting none of anything is a status board saying the machine
+ * has stopped. That is exactly what a deployment reports between the migration
+ * that adds the counters table and its first sweep, which is minutes of every
+ * upgrade.
+ *
+ * So a missing row is counted, the way every one of these pages counted before
+ * the row existed: the same numbers, at the request's own cost, for as long as
+ * it takes the sweep to run once. `updated_at` is empty and `position` is -1 on
+ * that path, which is what "counted here, folded by nobody" means.
+ */
+export async function logCounters(db: D1Like): Promise<Counters> {
+  const folded = await readCounters(db);
+  if (folded !== null) return folded;
+
+  const byDomain: Counters["entries_by_domain"] = {};
+  for (const slug of DOMAIN_SLUGS) {
+    byDomain[slug] = {
+      entries: await countEntries(db, { domain: slug }),
+      trusted_operators: await countTrustedOperators(db, slug),
+    };
+  }
+  return {
+    entries_total: await countEntries(db, {}),
+    entries_verified: await countEntries(db, { status: "verified" }),
+    entries_stale: await countEntries(db, { stale: true }),
+    entries_by_domain: byDomain,
+    operators_registered: await countOperators(db),
+    operators_trusted: await countTrustedOperators(db),
+    seals: await countSeals(db),
+    seals_witnessed: await countWitnessedSeals(db),
+    attestations: await countAttestations(db),
+    // Nothing folded these, so there is no position they were folded at: both
+    // are -1 and `updated_at` is empty on this path. No caller reads any of the
+    // three to decide anything — the status board reads the newest seal itself —
+    // and a caller that wants to know whether the sweep has ever folded asks
+    // `readCounters`, which answers null until it has.
+    sealed_head: -1,
+    position: -1,
+    updated_at: "",
+  };
+}
 
 /** The UTC day before the one `now` falls on. */
 function yesterdayOf(now: string): string {
@@ -130,6 +190,11 @@ export async function statusInput(
   const yesterday = yesterdayOf(now);
   const steps = await sweepSteps(db);
   const seal = await latestSeal(db);
+  // Every number this page used to count by scanning a table, in one row the
+  // sweep wrote (M25): the seals and their countersignatures, the registered
+  // operators, the entries, and the attestations. Read once here, so the four
+  // scans the QA of 2026-09-12 found are one indexed lookup by primary key.
+  const counters = await logCounters(db);
 
   const snapshotEvent = await latestEventOfType(db, "pool_snapshot");
   const readCountEvent = await latestEventOfType(db, "read_count");
@@ -183,8 +248,8 @@ export async function statusInput(
             witnesses: seal.witnesses.length,
           },
     seals: {
-      total: await countSeals(db),
-      witnessed: await countWitnessedSeals(db),
+      total: counters.seals,
+      witnessed: counters.seals_witnessed,
     },
     unsealed: await unsealedEvents(db, seal === null ? null : seal.last_seq),
     pool: {
@@ -200,13 +265,13 @@ export async function statusInput(
               ],
             },
       trusted: await trustedOperatorIds(db, LIST_PAGE_LIMIT),
-      registered: await countOperators(db),
+      registered: counters.operators_registered,
     },
     assignments: {
       overdue: (await dueAssignments(db, now, LIST_PAGE_LIMIT)).length,
       drafts: await countEntries(db, { status: "draft" }),
     },
-    entries: await countEntries(db, {}),
+    entries: counters.entries_total,
     read_counts: {
       newest:
         readCountEvent === null || readCount === null
@@ -243,7 +308,7 @@ export async function statusInput(
     standing_position: standingPosition,
     attestations: {
       due: (await dueAttestations(db, { now, limit: LIST_PAGE_LIMIT })).length,
-      total: await countAttestations(db),
+      total: counters.attestations,
     },
     mirror: {
       // The track this environment actually runs, asked of the same function the
@@ -357,7 +422,7 @@ export async function handleStatus(
 ): Promise<Response | null> {
   const { pathname } = new URL(request.url);
   if (pathname !== "/status") return null;
-  if (request.method !== "GET") return methodNotAllowed("GET");
+  if (!isRead(request)) return methodNotAllowed(READ_METHODS);
 
   try {
     return await status(guardDatabase(env.DB), env, deps.now);
