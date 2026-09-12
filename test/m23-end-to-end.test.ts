@@ -701,7 +701,12 @@ describe("the thirteenth stage", () => {
       "idle",
       "not configured",
     ]);
-    expect(stage.rule).toBe("today's export committed to the mirror repository");
+    // The rule, and the clause every rule carries since the QA of 2026-09-12: a
+    // stage whose sweep step threw reads failing whatever its own facts say.
+    expect(stage.rule).toBe(
+      "today's export committed to the mirror repository" +
+        "; a step that threw reads failing until it runs clean",
+    );
     expect(stage.evidence[0]).toEqual({
       label: "/mirror/latest",
       href: "/mirror/latest",

@@ -68,6 +68,52 @@ function countingDatabase(): { db: D1Like; statements: () => number } {
   return { db, statements: () => prepared };
 }
 
+/**
+ * One aggregate row, or null for a query that asks for a record.
+ *
+ * Every count in the repository is written `COUNT(...) AS <name>`, so the alias
+ * is in the SQL and the stub does not have to know the schema; every other
+ * column of an aggregate select is a MIN or a MAX over a nullable column, which
+ * is null on an empty table anyway. A query that is not an aggregate at all
+ * answers null, which is "nothing yet" and a whole answer.
+ */
+function aggregate(sql: string): Record<string, unknown> | null {
+  const counts = [...sql.matchAll(/COUNT\s*\([^)]*\)\s+AS\s+(\w+)/gi)];
+  if (counts.length === 0) return null;
+  const row: Record<string, unknown> = {};
+  for (const alias of [...sql.matchAll(/\bAS\s+(\w+)/gi)]) row[alias[1]!] = null;
+  for (const counted of counts) row[counted[1]!] = COUNTED;
+  return row;
+}
+
+/**
+ * The same counting database, for the one door that reads rows rather than
+ * counts: `GET /status` gathers the newest seal, the newest snapshot and the
+ * sweep's step rows, and a stub that answered every `first` with a count would
+ * hand a seal record the shape of a tally. Null is "nothing yet", which is a
+ * whole answer for every one of them, and the aggregates still answer their
+ * number.
+ */
+function statusDatabase(): { db: D1Like; statements: () => number } {
+  let prepared = 0;
+  const make = (sql: string): D1LikeStatement =>
+    ({
+      bind: () => make(sql),
+      first: () => Promise.resolve(aggregate(sql)),
+      all: () => Promise.resolve({ results: [], success: true }),
+      run: () => Promise.resolve({ results: [], success: true }),
+    }) as unknown as D1LikeStatement;
+  const db: D1Like = {
+    prepare: (sql: string) => {
+      prepared += 1;
+      return make(sql);
+    },
+    batch: () => Promise.resolve([]),
+    exec: () => Promise.resolve({ count: 0, duration: 0 }),
+  };
+  return { db, statements: () => prepared };
+}
+
 function envWith(db: D1Like): Env {
   return {
     DB: db,
@@ -265,7 +311,42 @@ describe("the page cache", () => {
     );
   });
 
-  it("never caches a JSON door that is not /policy", async () => {
+  it("caches the status JSON beside the page it is a twin of", async () => {
+    const { db, statements } = statusDatabase();
+    const env = envWith(db);
+    const cache = new TestCache();
+
+    const first = await send(
+      { path: "/status", accept: "application/json" },
+      env,
+      cache,
+    );
+    expect(first.headers.get("content-type")).toBe("application/json");
+    expect(first.headers.get("cache-control")).toBe(EXPECTED_CACHE_CONTROL);
+    expect(first.headers.get("vary")).toBe("Accept");
+    const read = statements();
+    expect(read).toBeGreaterThan(0);
+    const body = await first.text();
+
+    // The point of the whole exercise, on the door the QA of 2026-09-12 timed at
+    // 2.8 seconds while its own HTML twin answered from the cache in 152 ms.
+    const second = await send(
+      { path: "/status", accept: "application/json" },
+      env,
+      cache,
+    );
+    expect(second.status).toBe(200);
+    expect(statements()).toBe(read);
+    expect(await second.text()).toBe(body);
+
+    // And the twins are kept apart, as they are on every negotiated path: the
+    // page is rendered on its own key rather than served the object.
+    const page = await send({ path: "/status" }, env, cache);
+    expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(cache.keys()).toHaveLength(2);
+  });
+
+  it("never caches a JSON door that is neither /policy nor /status", async () => {
     const { db, statements } = countingDatabase();
     const env = envWith(db);
     const cache = new TestCache();

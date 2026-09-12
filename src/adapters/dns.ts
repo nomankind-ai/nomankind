@@ -11,11 +11,18 @@
  * over DNS-over-HTTPS because a Worker has no resolver socket, and it goes
  * through `fetch`, which is the only network call the kernel makes.
  *
+ * The lookup is bounded by src/policy.ts's FETCH_TIMEOUT_MS, as every other
+ * outbound call in the system is: a resolver that accepts the connection and
+ * then never answers would otherwise hold the registration door open for as long
+ * as it liked, and the door is what an operator is waiting on.
+ *
  * `txt` never throws. A resolver that is down and a domain that has no record
  * are different answers — one is the operator's fault and the other is ours —
  * and the caller turns the first into a 503 and the second into a 422. Folding
  * them together would blame an operator for our outage.
  */
+
+import { FETCH_TIMEOUT_MS } from "../policy.js";
 
 /** What a TXT lookup found, or why it could not say. */
 export type TxtLookup =
@@ -68,6 +75,12 @@ function unquote(data: string): string {
 export class DohResolver implements DnsResolver {
   readonly #fetch: typeof fetch;
   readonly #endpoint: string;
+  /**
+   * How long the lookup may take before it is given up on. The policy number
+   * everywhere but in a test, which passes a small window of its own rather than
+   * waiting thirty seconds to watch one expire.
+   */
+  readonly #timeoutMs: number;
 
   /**
    * The default is the platform's own fetch, and the call below reads it out of
@@ -80,9 +93,11 @@ export class DohResolver implements DnsResolver {
   constructor(
     fetchFn: typeof fetch = globalThis.fetch,
     endpoint = DOH_ENDPOINT,
+    timeoutMs = FETCH_TIMEOUT_MS,
   ) {
     this.#fetch = fetchFn;
     this.#endpoint = endpoint;
+    this.#timeoutMs = timeoutMs;
   }
 
   async txt(name: string): Promise<TxtLookup> {
@@ -92,12 +107,14 @@ export class DohResolver implements DnsResolver {
     try {
       const response = await call(url, {
         headers: { accept: "application/dns-json" },
+        signal: AbortSignal.timeout(this.#timeoutMs),
       });
       if (!response.ok) return UNAVAILABLE;
       payload = await response.json();
     } catch {
-      // A thrown fetch, a body that is not JSON: both are "we could not ask",
-      // never "the operator has no record".
+      // A thrown fetch, a resolver that never answered and the timeout gave up
+      // on, a body that is not JSON: all of them are "we could not ask", never
+      // "the operator has no record".
       return UNAVAILABLE;
     }
 

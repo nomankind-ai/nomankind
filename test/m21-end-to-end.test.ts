@@ -816,10 +816,12 @@ describe("an operator whose released rows reach the minimum", () => {
     expect(paid).toHaveLength(1);
     expect(paid[0]!.ref["rows"]).toEqual(["read_share:fixture:payout"]);
 
-    // The cycle is monthly, so a second run in the same month pays nothing.
+    // The cycle is monthly and per operator (D-053), so a second run in the same
+    // month pays nothing: the accrual this one paid is claimed, so the operator
+    // holds nothing released at all and is not even asked about.
     const again = await sweep(new Date(at.getTime() + HOUR_MS));
     expect(again.payouts).toEqual([]);
-    expect(again.skipped["payout_this_cycle"]).toBeGreaterThan(0);
+    expect(again.skipped["payout_below_minimum"]).toBeGreaterThan(0);
     expect(
       await payoutRows(world.store.db, LIST_PAGE_LIMIT, k6.operator),
     ).toHaveLength(1);

@@ -14,6 +14,8 @@
 import { HASH_TAG_ALERT } from "../../alerts.js";
 import { CORE_KEYS } from "../../core.js";
 import {
+  ALERT_DELIVERIES_PER_RUN,
+  ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE,
   ALERT_ENDPOINTS_PER_KEY,
   ALERT_KINDS,
   ALERT_RETRY_MINUTES,
@@ -32,6 +34,7 @@ import {
   SCHEMA_VERSION,
   STRIPE,
 } from "../../policy.js";
+import { STAGE_COUNT } from "../../status.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
 import type { PageContext } from "../types.js";
@@ -223,7 +226,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/status",
     parameters: "—",
     answers:
-      "Every stage of the pipeline as the last sweep left it: as_of, environment, counters (last sweep, stages, sealed head, witnessed), stages — thirteen of them, each with stage, state (ok, attention, failing, idle), last, rule and evidence — exercised (the five stages that run only when someone asks), and thresholds (STATUS_ATTENTION_AFTER_INTERVALS, STATUS_FAILING_AFTER_MINUTES). Nothing is probed to answer it: every reading is a published rule applied to the log and to the report the sweep stored at the end of its last run, so the answer cannot be warmed by asking for it. A browser gets the same object as the status page.",
+      `Every stage of the pipeline as the last sweep left it: as_of, environment, counters (last sweep, stages, sealed head, witnessed), stages — ${STAGE_COUNT} of them, each with stage, state (ok, attention, failing, idle), last, rule and evidence — exercised (the five stages that run only when someone asks), and thresholds (STATUS_ATTENTION_AFTER_INTERVALS, STATUS_FAILING_AFTER_MINUTES). Nothing is probed to answer it: every reading is a published rule applied to the log and to the report the sweep stored at the end of its last run, so the answer cannot be warmed by asking for it. A browser gets the same object as the status page, and the JSON is cached at the edge with it for sixty seconds, so a reading may be up to a minute behind the log. A stage whose sweep step threw reads failing with the error named in its line, whatever its own facts say, until that step runs clean.`,
     refusals:
       "None of its own: a stage that is failing is an answer and not a refusal. 503 storage_unreachable; 405 with Allow: GET.",
   },
@@ -577,7 +580,7 @@ const ALERT_PATH: readonly Endpoint[] = [
     path: "/keys/me/webhooks",
     parameters: "—",
     answers:
-      "{ key, endpoints: [{ id, url, filter, created_at }] } — this key's live endpoints, and never a secret.",
+      "{ key, endpoints: [{ id, url, filter, created_at, enabled }] } — this key's live endpoints, and never a secret. `enabled` is false on an endpoint the step turned off after ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE consecutive timed-out deliveries; it still holds its slot, and deleting it frees the slot.",
     refusals: "401 and 402 as above.",
   },
   {
@@ -1145,6 +1148,17 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
           what happened to every one of them. A failed delivery is the
           endpoint's own problem and never the log's: nothing about the record
           depends on an alert arriving.
+        </p>
+        <p class="note">
+          One run of the step posts at most ${ALERT_DELIVERIES_PER_RUN}
+          deliveries, oldest first, so a host that never answers cannot hold a
+          run for everybody else; the rest go out on the runs after it. An
+          endpoint whose last ${ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE} deliveries
+          all timed out is turned off: its pending deliveries are failed with
+          <span class="mono">endpoint_disabled</span>, and
+          <span class="mono">GET /keys/me/webhooks</span> shows it with
+          <span class="mono">enabled: false</span> so its holder can see why it
+          went quiet.
         </p>
       </section>
 

@@ -835,7 +835,9 @@ describe("a publish that lost the race to the other timer", () => {
 
   it("runs the steps after it rather than rejecting the run", async () => {
     // The anchor is the last step of all, so a report carrying yesterday's is a
-    // run that carried on past the refusal instead of throwing out of it.
+    // run that carried on past the refusal instead of throwing out of it. The
+    // day is the oldest one still owed, and every day before it was anchored by
+    // the runs above, so yesterday is what is left.
     expect(conflicted.anchored).toMatchObject({ date: date(4) });
   });
 

@@ -509,10 +509,13 @@ describe("GET /keys/me/webhooks", () => {
     for (const row of body.endpoints) {
       expect(Object.keys(row).sort()).toEqual([
         "created_at",
+        "enabled",
         "filter",
         "id",
         "url",
       ]);
+      // Nothing has timed out on any of them, so every one is enabled.
+      expect(row["enabled"]).toBe(true);
     }
   }, 600_000);
 

@@ -21,7 +21,11 @@
 import { utcDay, type Anchor, type AnchorExternal } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
 import { domainOf } from "../core.js";
-import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "../policy.js";
+import {
+  DEFAULT_DOMAIN,
+  LIST_PAGE_LIMIT,
+  SWEEP_BATCH_STATEMENTS,
+} from "../policy.js";
 import type { DerivedAttestation } from "../attest.js";
 import type { BountyAccrual } from "../bounty.js";
 import type { Sidecar } from "../derive.js";
@@ -37,6 +41,9 @@ import {
   type ReadCountRow,
 } from "../events.js";
 import type { ReadReceipt, SyncReceipt } from "../receipt.js";
+// The one thing the store and the status rules have to agree on about a step
+// row: how a thrown step is marked in it. Written here, read there.
+import { THROWN_REASON_PREFIX } from "../status.js";
 import type { StakeRecord } from "../stake.js";
 import type { Standing } from "../standing.js";
 import type { Entry } from "../schema.js";
@@ -2771,13 +2778,52 @@ function ledgerRowStatement(db: D1Like, row: LedgerRow): D1LikeStatement {
     );
 }
 
-/** Write a run of ledger rows in one batch; idempotent by id. */
+/**
+ * Write a run of ledger rows, in batches of at most SWEEP_BATCH_STATEMENTS.
+ *
+ * One statement per row, and a published day has as many rows as it had share
+ * holders — more than one D1 batch may safely carry on a day the whole log was
+ * read. So the write is cut rather than refused whole, exactly as a seal's
+ * rewrites are: each chunk is atomic and the chunks are not, and what pays for
+ * that is the `INSERT OR IGNORE` every row is written under. A run killed
+ * between two chunks leaves the rows it wrote, and the run that resumes the day
+ * writes them again over the same ids and changes nothing.
+ */
 export async function putLedgerRows(
   db: D1Like,
   rows: readonly LedgerRow[],
 ): Promise<void> {
   if (rows.length === 0) return;
-  await db.batch(rows.map((row) => ledgerRowStatement(db, row)));
+  await batchInChunks(db, rows.map((row) => ledgerRowStatement(db, row)));
+}
+
+/**
+ * Which entries of one published day the ledger has already priced: the
+ * distinct entries its `read_share` rows name, at that day's own position.
+ *
+ * The one read the day's reconciliation needs that a single run cannot answer
+ * for itself. A day is priced LEDGER_ENTRIES_PER_RUN entries at a time, so by
+ * the run that finishes it, the runs before it wrote rows this one never saw —
+ * and the reconciliation is about the whole day. Every share row of an entry
+ * carries that entry's own published count, so which entries accrued is all the
+ * reconciliation needs from the rows; what each accrued is the event's own
+ * number, which the caller already holds.
+ *
+ * Keyed on `seq`, which is the day's `read_count` event, so a day replayed at a
+ * different position cannot be mistaken for this one.
+ */
+export async function pricedEntriesOfDay(
+  db: D1Like,
+  seq: number,
+): Promise<Set<string>> {
+  const rows = await db
+    .prepare(
+      `SELECT DISTINCT entry_id FROM ledger
+       WHERE kind = 'read_share' AND seq = ? AND entry_id IS NOT NULL`,
+    )
+    .bind(seq)
+    .all<Row>();
+  return new Set(rows.results.map((row) => readText(row, "entry_id")));
 }
 
 /**
@@ -2959,6 +3005,66 @@ export async function releasedUnpaidRows(
     .bind(operator, now)
     .all<Row>();
   return rows.results.map(toLedgerRow);
+}
+
+/**
+ * One operator with something released and unpaid, and whether this cycle has
+ * already paid it.
+ */
+export interface OperatorDue {
+  readonly operator: string;
+  /** A payout row of this operator's, dated inside the cycle asked about. */
+  readonly paidInCycle: boolean;
+}
+
+/**
+ * Every operator that has something released and unpaid at `now`, in id order,
+ * each carrying whether it has already been paid inside `cycle`.
+ *
+ * The one query a payout cycle needs before it asks anybody anything. D-053
+ * pays per operator per calendar month — "at most one payout batch per operator
+ * per cycle" — so whether a cycle is closed is a question about an operator and
+ * never about the log: an operator that crosses the minimum on the twentieth is
+ * owed its cycle's payout even though another operator was paid on the second.
+ * Asking it globally, which is what a single `paidInCycle` gate did, made the
+ * first operator paid each month close the month for everybody else.
+ *
+ * The outer read asks the `ledger_operator_unpaid` index — partial on the
+ * unpaid rows, ordered by (operator_id, available_at) — so the answer is one
+ * seek over exactly the rows that could be due, and a log where nothing is due
+ * answers it empty. The EXISTS beside it seeks 0010's (kind, "date") index for
+ * that operator's payouts inside the month's own bounds, which are the first
+ * and last day a month can carry.
+ *
+ * A row with no operator is not here and can never be paid: that is Section 6's
+ * bare-key reward holding until the key verifies as an operator.
+ */
+export async function operatorsDue(
+  db: D1Like,
+  now: string,
+  cycle: string,
+): Promise<OperatorDue[]> {
+  const rows = await db
+    .prepare(
+      `SELECT due.operator_id AS operator_id,
+              EXISTS (
+                SELECT 1 FROM ledger paid
+                 WHERE paid.kind = 'payout'
+                   AND paid.operator_id = due.operator_id
+                   AND paid."date" >= ? AND paid."date" <= ?
+              ) AS paid_in_cycle
+         FROM ledger due
+        WHERE due.paid_by IS NULL AND due.operator_id IS NOT NULL
+          AND due.kind IN ${BALANCE_KINDS} AND due.available_at <= ?
+        GROUP BY due.operator_id
+        ORDER BY due.operator_id`,
+    )
+    .bind(`${cycle}-01`, `${cycle}-31`, now)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    operator: readText(row, "operator_id"),
+    paidInCycle: readBoolean(row, "paid_in_cycle"),
+  }));
 }
 
 /** The updates that stamp a payout onto the rows it covers. */
@@ -3636,6 +3742,43 @@ export async function sealsSealedOn(db: D1Like, date: string): Promise<Seal[]> {
 }
 
 /**
+ * The oldest UTC day inside a window that carries a seal, or null when none of
+ * the window's days does.
+ *
+ * The anchor step's walk: which day it owes an anchor for next. Asked of the
+ * seals rather than of the calendar, so a log that slept for a year answers in
+ * one seek instead of a run per page of empty days — and so a gap of any length
+ * can never stall the walk. `fromDay` null is "from the beginning of the log",
+ * which is where a log that has never anchored starts; `throughDay` is
+ * inclusive, and is always yesterday, because today is not over.
+ *
+ * The bounds are the same half-open text range `sealsSealedOn` seeks on and for
+ * the same reason: `sealed_at` is the injected clock's ISO instant, always UTC
+ * and always "<day>T...", so a range over the (sealed_at) index answers this
+ * without a function call over every row.
+ */
+export async function firstSealedDayIn(
+  db: D1Like,
+  fromDay: string | null,
+  throughDay: string,
+): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT sealed_at FROM seals
+       WHERE sealed_at >= ? AND sealed_at < ?
+       ORDER BY sealed_at ${ONE_ROW}`,
+    )
+    // The empty string sorts below every instant, the way `allAnchors` uses it.
+    // "U" is the character after "T", so the upper bound takes every instant of
+    // the last day owed and nothing of the day after it — no date arithmetic,
+    // and the same trick `sealsSealedOn` bounds one day with.
+    .bind(fromDay === null ? "" : `${fromDay}T`, `${throughDay}U`)
+    .all<Row>();
+  const first = row.results[0];
+  return first === undefined ? null : utcDay(readText(first, "sealed_at"));
+}
+
+/**
  * The seals still waiting on the outside world, oldest first: no
  * countersignature has been attached yet, or the registry has not accepted the
  * fingerprint. This is the sweep's work queue, and a seal leaves it by being
@@ -3693,23 +3836,124 @@ export type SealRederive = (
   now: Date,
 ) => Promise<StoredEntryInput>;
 
-/** The entries whose submission event falls inside a seal's range, in log order. */
+/** One entry a seal covers: which row to rewrite, and at which position. */
+interface CoveredEntry {
+  readonly id: string;
+  readonly submittedSeq: number;
+}
+
+/**
+ * The entries whose submission event falls inside a seal's range, in log order.
+ *
+ * The LIMIT is the seal's own size. Every read here is written with one, so
+ * that no query can return an unbounded number of rows however the log grows:
+ * a range holds `size` events and an entry has exactly one submission event in
+ * it, so `size` rows is the most the range can hold and a smaller ceiling would
+ * silently leave entries unsealed.
+ */
 async function entriesSubmittedIn(
   db: D1Like,
   firstSeq: number,
   lastSeq: number,
-): Promise<Array<{ id: string; submittedSeq: number }>> {
+  limit: number,
+): Promise<CoveredEntry[]> {
   const rows = await db
     .prepare(
       `SELECT id, submitted_seq FROM entries
-       WHERE submitted_seq >= ? AND submitted_seq <= ? ORDER BY submitted_seq`,
+       WHERE submitted_seq >= ? AND submitted_seq <= ?
+       ORDER BY submitted_seq LIMIT ?`,
     )
-    .bind(firstSeq, lastSeq)
+    .bind(firstSeq, lastSeq, limit)
     .all<Row>();
   return rows.results.map((row) => ({
     id: readText(row, "id"),
     submittedSeq: readInteger(row, "submitted_seq"),
   }));
+}
+
+/**
+ * The entries a seal covers whose stored row does not carry a seal yet.
+ *
+ * What a run killed between chunks leaves behind: the seal row stands and some
+ * of its entries still deny it. The filter is in SQL because the answer is
+ * almost always none, and reading every covered row to find that out would cost
+ * the whole seal's width on every sweep.
+ */
+async function entriesMissingSeal(
+  db: D1Like,
+  seal: Seal,
+): Promise<CoveredEntry[]> {
+  const rows = await db
+    .prepare(
+      `SELECT id, submitted_seq FROM entries
+       WHERE submitted_seq >= ? AND submitted_seq <= ?
+         AND json_extract(entry_json, '$.seal') IS NULL
+       ORDER BY submitted_seq LIMIT ?`,
+    )
+    .bind(seal.first_seq, seal.last_seq, seal.size)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    id: readText(row, "id"),
+    submittedSeq: readInteger(row, "submitted_seq"),
+  }));
+}
+
+/**
+ * The statements that rewrite the entries a seal covers, in log order.
+ *
+ * One statement per entry, built through the caller's own derivation: storage
+ * derives nothing, so the row is whatever `rederive` made of the entry and the
+ * seal now covering it.
+ */
+async function rewriteStatements(
+  db: D1Like,
+  covered: readonly CoveredEntry[],
+  seal: Seal,
+  now: Date,
+  rederive: SealRederive,
+): Promise<D1LikeStatement[]> {
+  const statements: D1LikeStatement[] = [];
+  for (const { id, submittedSeq } of covered) {
+    const stored = await rederive(id, seal, now);
+    statements.push(
+      entryStatement(
+        db,
+        stored.entry,
+        stored.sidecar,
+        submittedSeq,
+        stored.derivedThroughSeq,
+      ),
+    );
+  }
+  return statements;
+}
+
+/**
+ * Send statements to D1 in batches of at most SWEEP_BATCH_STATEMENTS, in order.
+ *
+ * A seal covering SEAL_MAX_EVENTS entries is one statement per entry plus the
+ * seal's own, which is more than one batch may safely carry, so the write is
+ * cut rather than refused whole. Each chunk is atomic and the chunks are not:
+ * what that costs is a run killed between two of them, and what pays for it is
+ * that a rewrite is idempotent — re-deriving an entry whose row already carries
+ * the seal writes the same row — so the next run finishes what this one began.
+ */
+async function batchInChunks(
+  db: D1Like,
+  statements: readonly D1LikeStatement[],
+): Promise<void> {
+  for (const chunk of chunked(statements)) await db.batch(chunk);
+}
+
+/** One write, cut into batches of at most SWEEP_BATCH_STATEMENTS, in order. */
+function chunked(
+  statements: readonly D1LikeStatement[],
+): D1LikeStatement[][] {
+  const chunks: D1LikeStatement[][] = [];
+  for (let from = 0; from < statements.length; from += SWEEP_BATCH_STATEMENTS) {
+    chunks.push([...statements.slice(from, from + SWEEP_BATCH_STATEMENTS)]);
+  }
+  return chunks;
 }
 
 /**
@@ -3730,8 +3974,17 @@ async function entriesSubmittedIn(
  * it wound never sweeps itself, so the second run is an alarm overlapping the
  * one before it rather than a second kind of door.
  *
- * The range is bounded by the seal, so the entries read needs no page size: a
- * batch covers the events since the last seal and nothing more.
+ * Not one batch any more, but several: a seal may cover SEAL_MAX_EVENTS entries
+ * and one D1 batch may not carry that many statements, so the write is cut into
+ * chunks of SWEEP_BATCH_STATEMENTS. The seal row goes first, in the chunk that
+ * also carries the first of the rewrites, because it is the row that claims the
+ * range: a run killed between chunks leaves a seal whose remaining entries the
+ * next run finishes (`completeSealRewrites`), where a run killed before the
+ * seal row leaves nothing at all and the range is simply sealed again.
+ *
+ * The conflict is decided by the first chunk alone. Once the INSERT has gone in,
+ * this run holds the seq, and a failure in a later chunk is a write to finish
+ * rather than a race that was lost.
  */
 export async function recordSeal(
   db: D1Like,
@@ -3739,29 +3992,24 @@ export async function recordSeal(
   now: Date,
   rederive: SealRederive,
 ): Promise<string[]> {
-  const covered = await entriesSubmittedIn(db, seal.first_seq, seal.last_seq);
+  const covered = await entriesSubmittedIn(
+    db,
+    seal.first_seq,
+    seal.last_seq,
+    seal.size,
+  );
   const statements = [
     db
       .prepare(
         `INSERT INTO seals (${SEAL_WRITE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(...sealWriteValues(seal)),
+    ...(await rewriteStatements(db, covered, seal, now, rederive)),
   ];
-  for (const { id, submittedSeq } of covered) {
-    const stored = await rederive(id, seal, now);
-    statements.push(
-      entryStatement(
-        db,
-        stored.entry,
-        stored.sidecar,
-        submittedSeq,
-        stored.derivedThroughSeq,
-      ),
-    );
-  }
 
+  const [first, ...rest] = chunked(statements);
   try {
-    await db.batch(statements);
+    await db.batch(first!);
   } catch (cause) {
     // Ask the table rather than read the driver's message: a seal now standing
     // at this seq is what "conflict" means, and any other failure is not ours
@@ -3771,7 +4019,35 @@ export async function recordSeal(
     }
     throw cause;
   }
+  for (const chunk of rest) await db.batch(chunk);
   return covered.map((entry) => entry.id);
+}
+
+/**
+ * Finish the rewrites of a seal a previous run did not get through.
+ *
+ * The repair for the one thing chunking costs: the seal row stands and some of
+ * the entries it covers still carry no seal, because the run that wrote it was
+ * killed between two chunks. Those rows are re-derived exactly as the first run
+ * would have derived them — a rewrite is idempotent, and the seal is the same
+ * seal — so the log lands where the killed run was taking it.
+ *
+ * Nothing to do is the usual answer, and it costs one indexed read: the
+ * callback is never called, and no batch is sent.
+ */
+export async function completeSealRewrites(
+  db: D1Like,
+  seal: Seal,
+  now: Date,
+  rederive: SealRederive,
+): Promise<string[]> {
+  const pending = await entriesMissingSeal(db, seal);
+  if (pending.length === 0) return [];
+  await batchInChunks(
+    db,
+    await rewriteStatements(db, pending, seal, now, rederive),
+  );
+  return pending.map((entry) => entry.id);
 }
 
 /**
@@ -3783,6 +4059,14 @@ export async function recordSeal(
  * `seal.witnesses` against the seal's own. Written apart, a reader between the
  * two writes would see a countersigned seal and entries that deny it, and the
  * verifier would call the entries wrong.
+ *
+ * Chunked like `recordSeal`, because a seal covering SEAL_MAX_EVENTS entries is
+ * that many statements and one batch may not carry them. The entries go first
+ * and the seal's own UPDATE last, which is the opposite of the seal write and
+ * for the same reason: the seal is what says this work was done, so a run killed
+ * between chunks leaves the seal still uncountersigned and still in
+ * `unwitnessedSeals`, and the next run repeats the whole write — idempotently,
+ * over the same signatures — rather than leaving entries nothing will revisit.
  */
 export async function setSealWitnesses(
   db: D1Like,
@@ -3792,7 +4076,14 @@ export async function setSealWitnesses(
   rederive: SealRederive,
 ): Promise<string[]> {
   const witnessed: Seal = { ...seal, witnesses: [...witnesses] };
+  const covered = await entriesSubmittedIn(
+    db,
+    seal.first_seq,
+    seal.last_seq,
+    seal.size,
+  );
   const statements = [
+    ...(await rewriteStatements(db, covered, witnessed, now, rederive)),
     db
       .prepare(
         `UPDATE seals SET witnesses_json = ?, witnessed = ? WHERE seq = ?`,
@@ -3803,20 +4094,7 @@ export async function setSealWitnesses(
         witnessed.seq,
       ),
   ];
-  const covered = await entriesSubmittedIn(db, seal.first_seq, seal.last_seq);
-  for (const { id, submittedSeq } of covered) {
-    const stored = await rederive(id, witnessed, now);
-    statements.push(
-      entryStatement(
-        db,
-        stored.entry,
-        stored.sidecar,
-        submittedSeq,
-        stored.derivedThroughSeq,
-      ),
-    );
-  }
-  await db.batch(statements);
+  await batchInChunks(db, statements);
   return covered.map((entry) => entry.id);
 }
 
@@ -5778,14 +6056,58 @@ function toSweepStep(row: Row): SweepStepRow {
 }
 
 /**
+ * The step whose row says the run itself did not get through.
+ *
+ * `runSweep` notes a throw against the step it happened in and against the run,
+ * and nothing else ever gives the run a reason: the run is not a step and has no
+ * rule to refuse under. So a batch whose `sweep` row carries a reason is a batch
+ * written by a run that threw, and the reason is the message it threw.
+ */
+const SWEEP_RUN_STEP = "sweep";
+
+/**
+ * The rows this run threw in, marked as thrown.
+ *
+ * The mark is a prefix on the reason and not a column of its own: `last_skip_reason`
+ * already carries either a rule's refusal name or a thrown message, and telling
+ * them apart is the whole of what the status rules need — src/status.ts reads
+ * the prefix and nothing else. A prefix costs no migration, and a row written
+ * before this existed reads exactly as it always did: an ordinary refusal.
+ *
+ * Which rows: the run's own, and every row of this batch whose reason is that
+ * same message, which is the step the run threw in. A step that refused under a
+ * rule on the same run kept its own reason and is untouched.
+ */
+function markThrown(rows: readonly SweepStepRow[]): readonly SweepStepRow[] {
+  const run = rows.find((row) => row.step === SWEEP_RUN_STEP);
+  const thrown = run === undefined ? null : run.last_skip_reason;
+  if (thrown === null || thrown.startsWith(THROWN_REASON_PREFIX)) return rows;
+  return rows.map((row) =>
+    row.last_skip_reason === thrown
+      ? { ...row, last_skip_reason: `${THROWN_REASON_PREFIX}${thrown}` }
+      : row,
+  );
+}
+
+/**
  * Write one run's step rows, in one batch.
  *
- * COALESCE on the three carried columns, and only on those three: a run that
- * reached a step always moves `last_run_at`, `detail_json` and `"trigger"`,
- * because those are about this run; `last_ok_at` and the skip pair are about the
- * last run that had something to say, so a null from this run means "no news"
- * rather than "never". A step that has never once succeeded therefore keeps a
- * null `last_ok_at`, which is exactly what the page reads as `idle`.
+ * COALESCE on the carried columns, and only on those: a run that reached a step
+ * always moves `detail_json` and `"trigger"`, because those are about this run;
+ * `last_ok_at` and the skip pair are about the last run that had something to
+ * say, so a null from this run means "no news" rather than "never". A step that
+ * has never once succeeded therefore keeps a null `last_ok_at`, which is exactly
+ * what the page reads as `idle`.
+ *
+ * And none of the three instants ever moves backwards. The board answers "when
+ * did this last happen", which is a maximum and not a latest write: a run whose
+ * clock is behind the stored row — a redeploy, a retried alarm, two runs racing
+ * — would otherwise date the board to the earlier instant and make every stage
+ * on the page look that much more behind than it is. MAX over the stored value
+ * and this run's, which is a string comparison and is right because every
+ * instant written here is the same fixed-width UTC ISO shape. The run is still
+ * recorded — its detail, its trigger and its reason all land — only the clock
+ * refuses to go back.
  *
  * One batch, so a reader between two steps of the same run never sees half a
  * board.
@@ -5795,16 +6117,24 @@ export async function putSweepSteps(
   rows: readonly SweepStepRow[],
 ): Promise<void> {
   if (rows.length === 0) return;
-  const statements = rows.map((row) =>
+  const statements = markThrown(rows).map((row) =>
     db
       .prepare(
         `INSERT INTO sweep_steps (${SWEEP_STEP_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (step) DO UPDATE SET
-           last_run_at = excluded.last_run_at,
-           last_ok_at = COALESCE(excluded.last_ok_at, sweep_steps.last_ok_at),
+           last_run_at = MAX(excluded.last_run_at, sweep_steps.last_run_at),
+           last_ok_at = COALESCE(
+             MAX(excluded.last_ok_at, sweep_steps.last_ok_at),
+             excluded.last_ok_at,
+             sweep_steps.last_ok_at
+           ),
            last_skip_reason =
              COALESCE(excluded.last_skip_reason, sweep_steps.last_skip_reason),
-           last_skip_at = COALESCE(excluded.last_skip_at, sweep_steps.last_skip_at),
+           last_skip_at = COALESCE(
+             MAX(excluded.last_skip_at, sweep_steps.last_skip_at),
+             excluded.last_skip_at,
+             sweep_steps.last_skip_at
+           ),
            detail_json = excluded.detail_json,
            "trigger" = excluded."trigger"`,
       )

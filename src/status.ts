@@ -392,15 +392,55 @@ function stepOf(input: StatusInput, name: string): SweepStep | null {
 }
 
 /**
- * The reason this step refused on its most recent run, or null.
+ * The mark a thrown step's reason carries in its stored row.
+ *
+ * A step that threw did not refuse under a rule — there is no reason name for
+ * "D1 was gone" — so the board keeps the message itself, and a message and a
+ * reason name would otherwise be the same column read two ways. The prefix is
+ * what tells them apart, written once by `putSweepSteps`
+ * (src/storage/repository.ts) and read only here. A prefix and not a column, so
+ * no migration and no row already written means anything different.
+ */
+export const THROWN_REASON_PREFIX = "threw: ";
+
+/**
+ * What this step's most recent run said, refusal or throw, or null when it said
+ * nothing.
  *
  * The store keeps the last skip a step ever made, so the reason alone cannot say
- * when it was made. A `last_skip_at` equal to `last_run_at` is this run's.
+ * when it was made. A `last_skip_at` equal to `last_run_at` is this run's — and
+ * a later run that got through moves `last_run_at` past it, which is how a
+ * reason stops being read without anything having to clear it.
  */
-function freshSkip(step: SweepStep | null): string | null {
+function freshReason(step: SweepStep | null): string | null {
   if (step === null) return null;
   if (step.last_skip_at !== step.last_run_at) return null;
   return step.last_skip_reason;
+}
+
+/**
+ * The reason this step refused on its most recent run, or null.
+ *
+ * A throw is not one: a rule's refusal is a name the sweep chose and a throw is
+ * whatever fell over, so the rules that read a refusal by name must never be
+ * handed a D1 error message to match against.
+ */
+function freshSkip(step: SweepStep | null): string | null {
+  const reason = freshReason(step);
+  if (reason === null || reason.startsWith(THROWN_REASON_PREFIX)) return null;
+  return reason;
+}
+
+/**
+ * What this step threw on its most recent run, or null when it did not throw.
+ *
+ * The message alone, without the mark: the mark is how the row is read and the
+ * message is what a reader needs to see.
+ */
+function thrownError(step: SweepStep | null): string | null {
+  const reason = freshReason(step);
+  if (reason === null || !reason.startsWith(THROWN_REASON_PREFIX)) return null;
+  return reason.slice(THROWN_REASON_PREFIX.length);
 }
 
 /** A string out of a step's detail, or null when it carries none. */
@@ -1135,6 +1175,63 @@ function changeAlerts(input: StatusInput, now: string): Stage {
 }
 
 /**
+ * Which step of the sweep each stage is a reading of.
+ *
+ * The rules below decide from derived facts — a seal's age, a day's anchor, the
+ * ledger's row — and derived facts are exactly what a step that threw never got
+ * round to changing. So a stage that read those alone would report the state the
+ * last working run left, and a D1 error inside the seal step would show as a
+ * board of green lights. The map is what closes that: every stage names the step
+ * whose failure is its own, and the throw is read before the facts are.
+ *
+ * Two stages read the same step, because one run of `draws` both takes the
+ * beacon round and makes the draws, and a throw in it is both their fault.
+ */
+const STAGE_STEP: ReadonlyMap<string, string> = new Map([
+  ["sweep timer", "sweep"],
+  ["pool snapshot", "snapshot"],
+  ["beacon", "draws"],
+  ["draws and deadlines", "draws"],
+  ["staleness", "staleness"],
+  ["read counts", "publish"],
+  ["sealing", "seal"],
+  ["witnessing", "witness"],
+  ["anchoring", "anchor"],
+  ["ledger", "ledger"],
+  ["standing", "standing"],
+  ["attestations", "attestation"],
+  ["mirror export", "mirror"],
+  ["usage metering", "metering"],
+  ["change alerts", "alerts"],
+]);
+
+/**
+ * The clause every rule carries, because every rule is read the same way when
+ * the step behind it fell over.
+ */
+const THREW_CLAUSE = "; a step that threw reads failing until it runs clean";
+
+/**
+ * One stage, with its step's throw read over whatever its own facts said.
+ *
+ * The state is not softened and the line is not replaced: a reader gets the
+ * stage's own reading with the error named beside it, which is the difference
+ * between "the seal is behind" and "the seal step could not talk to D1".
+ */
+function overThrow(stage: Stage, input: StatusInput): Stage {
+  const rule = `${stage.rule}${THREW_CLAUSE}`;
+  const name = STAGE_STEP.get(stage.stage);
+  const error = name === undefined ? null : thrownError(stepOf(input, name));
+  if (error === null) return { ...stage, rule };
+  return {
+    ...stage,
+    state: "failing",
+    last: line(stage.last, `${THROWN_REASON_PREFIX}${error}`),
+    rule,
+  };
+}
+
+/**
  * The fifteen stages, in the page's order, read against one instant.
  *
  * The order is the machine's own — the timer, then what the timer does, then
@@ -1142,6 +1239,11 @@ function changeAlerts(input: StatusInput, now: string): Stage {
  * page whose rows move around is a status page nobody learns to read.
  */
 export function stageStates(input: StatusInput, now: string): Stage[] {
+  return stages(input, now).map((stage) => overThrow(stage, input));
+}
+
+/** The fifteen rules, each over its own facts and before any throw is read. */
+function stages(input: StatusInput, now: string): Stage[] {
   return [
     sweepTimer(input, now),
     poolSnapshot(input, now),

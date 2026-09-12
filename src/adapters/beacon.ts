@@ -16,6 +16,11 @@
  * Which chain is read is src/policy.ts's BEACON and nothing here; this module
  * holds no endpoint, no chain hash and no number of its own.
  *
+ * The read is bounded by src/policy.ts's FETCH_TIMEOUT_MS, as every other
+ * outbound call in the system is: a chain endpoint that accepts the connection
+ * and then never answers would otherwise hold the whole sweep open behind it,
+ * and every step after the draw with it.
+ *
  * `latest` never throws. A beacon that cannot be reached and one that answers
  * something unusable are different answers — one is the network's fault and the
  * other is the chain's — and the sweep that calls this records the difference
@@ -26,7 +31,7 @@
 
 import type { Beacon } from "../assign.js";
 import { sha256Hex } from "../hash.js";
-import { BEACON } from "../policy.js";
+import { BEACON, FETCH_TIMEOUT_MS } from "../policy.js";
 
 /** A round, or why the beacon could not give one. */
 export type BeaconResult =
@@ -93,6 +98,12 @@ function fromHex(hex: string): Uint8Array | null {
  */
 export class DrandReader implements BeaconReader {
   readonly #fetch: typeof fetch;
+  /**
+   * How long the read may take before it is given up on. The policy number
+   * everywhere but in a test, which passes a small window of its own rather than
+   * waiting thirty seconds to watch one expire.
+   */
+  readonly #timeoutMs: number;
 
   /**
    * The default is the platform's own fetch, and the call below reads it out of
@@ -101,8 +112,12 @@ export class DrandReader implements BeaconReader {
    * object, and Node's does not, which is why only a real deployment showed it
    * (the M13 lesson).
    */
-  constructor(fetchFn: typeof fetch = globalThis.fetch) {
+  constructor(
+    fetchFn: typeof fetch = globalThis.fetch,
+    timeoutMs = FETCH_TIMEOUT_MS,
+  ) {
     this.#fetch = fetchFn;
+    this.#timeoutMs = timeoutMs;
   }
 
   /** The chain's newest round, checked against its own signature. */
@@ -112,12 +127,17 @@ export class DrandReader implements BeaconReader {
 
     let body: LatestBody;
     try {
-      const response = await call(url, { method: "GET" });
+      const response = await call(url, {
+        method: "GET",
+        signal: AbortSignal.timeout(this.#timeoutMs),
+      });
       if (response.status < OK_MIN || response.status > OK_MAX) {
         return UNAVAILABLE;
       }
       body = (await response.json()) as LatestBody;
     } catch {
+      // A thrown fetch, a chain that never answered and the timeout gave up on,
+      // a body that is not JSON: all of them are "we could not ask".
       return UNAVAILABLE;
     }
 
