@@ -129,9 +129,10 @@ describe("worker against a real D1 binding", () => {
     }
   });
 
-  it("exports a scheduled handler, which is the cron trigger's door", () => {
+  it("exports a scheduled handler, which is the cron watchdog's door", () => {
     // wrangler.jsonc names the cadence; this is the entry point it calls, and
-    // it exists on the deployed default export rather than only in a test.
+    // it exists on the deployed default export rather than only in a test. It
+    // arms the sweep's alarm and never sweeps — test/sweeper.test.ts drives it.
     expect(typeof handler.scheduled).toBe("function");
   });
 
@@ -154,7 +155,7 @@ describe("worker against a real D1 binding", () => {
 
   it("arms the sweep's timer on the way through", async () => {
     // Every request arms the Durable Object alarm if nothing is armed, which is
-    // what makes the timer self-healing after the cron never fired. The env the
+    // what makes the timer self-healing between watchdog runs. The env the
     // platform proxy hands back has no SWEEPER binding, so one is added here.
     const urls: string[] = [];
     const stub = {

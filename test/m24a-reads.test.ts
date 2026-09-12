@@ -596,6 +596,9 @@ describe("the day's read count, with duplicates inside it", () => {
         // there, because a day that published no paid read published that fact.
         payload.paid!,
         payload.duplicates!,
+        // Receipt rows, which is not `total`: the sync here is one row and
+        // more than one read.
+        payload.receipts!,
       ),
     );
   });

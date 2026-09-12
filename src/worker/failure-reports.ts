@@ -65,7 +65,8 @@ import {
 import { archiveCapture, type Sidecar } from "../storage/r2.js";
 import type { Env } from "./env.js";
 import {
-  StorageUnreachable,
+  unavailable,
+  withChainRetry,
   authenticate,
   guardDatabase,
   json,
@@ -309,62 +310,71 @@ async function report(
   let derivedEntry: Record<string, unknown> | null = null;
   let openedRevalidation = false;
   try {
-    const written = await recordFailureReport(env.DB, {
-      event: {
-        at,
-        type: "failure_report",
-        entry_id: id,
-        payload: {
-          reporter: auth.agent,
-          operator,
-          observed: body.observed,
-          artifact_hash: frozen.frozen.hash,
-          citation: body.citation,
-        },
-      },
-      // Each report's artifact is its own row under its own role, so no report
-      // overwrites the entry's own captures or another reader's evidence.
-      capture: (event): CaptureRecord => ({
-        entryId: id,
-        role: `report:${event.seq}`,
-        contentHash: frozen.frozen.hash,
-        archiveHash: frozen.frozen.archiveHash,
-        normVersion,
-        kind: frozen.frozen.kind,
-        mediaType: ARTIFACT_MEDIA_TYPE,
-        size: frozen.frozen.bytes.byteLength,
-        fetchedAt: at,
-      }),
-      // Section 8: "A published threshold of reports from distinct operators
-      // auto-opens a revalidation at nomankind's expense." Nobody staked, so the
-      // request names no requester and no operator, and src/stake.ts writes no
-      // row for it.
-      opens: (event): EventInput<"revalidation_requested"> | null => {
-        if (alreadyOpen) return null;
-        if (!failureReportThresholdReached([...priorReports, event], registered)) {
-          return null;
-        }
-        return {
+    // Retried from the derivation: an event's position and hash are the head's,
+    // so a write that lost the next position in the log is built again onto the
+    // head that moved rather than sent again. The derived row and the opened
+    // request are cleared with it, because a row derived at last attempt's
+    // position would be stored at a seq the log never gave it.
+    await withChainRetry(async () => {
+      derivedEntry = null;
+      openedRevalidation = false;
+      const written = await recordFailureReport(env.DB, {
+        event: {
           at,
-          type: "revalidation_requested",
+          type: "failure_report",
           entry_id: id,
-          payload: { requester: null, operator: null, source: "failure_reports" },
-        };
-      },
-      stored: (event, opened) => {
-        const extra = opened === null ? [event] : [event, opened];
-        const derived = rederive(world, id, deps.now, extra);
-        const result = validateEntry(derived.entry);
-        if (!result.ok) throw new SchemaInvalid(result.errors);
-        derivedEntry = derived.entry as Record<string, unknown>;
-        return {
-          entry: derived.entry,
-          sidecar: derived.sidecar,
-          derivedThroughSeq: extra[extra.length - 1]!.seq,
-        };
-      },
+          payload: {
+            reporter: auth.agent,
+            operator,
+            observed: body.observed,
+            artifact_hash: frozen.frozen.hash,
+            citation: body.citation,
+          },
+        },
+        // Each report's artifact is its own row under its own role, so no report
+        // overwrites the entry's own captures or another reader's evidence.
+        capture: (event): CaptureRecord => ({
+          entryId: id,
+          role: `report:${event.seq}`,
+          contentHash: frozen.frozen.hash,
+          archiveHash: frozen.frozen.archiveHash,
+          normVersion,
+          kind: frozen.frozen.kind,
+          mediaType: ARTIFACT_MEDIA_TYPE,
+          size: frozen.frozen.bytes.byteLength,
+          fetchedAt: at,
+        }),
+        // Section 8: "A published threshold of reports from distinct operators
+        // auto-opens a revalidation at nomankind's expense." Nobody staked, so the
+        // request names no requester and no operator, and src/stake.ts writes no
+        // row for it.
+        opens: (event): EventInput<"revalidation_requested"> | null => {
+          if (alreadyOpen) return null;
+          if (!failureReportThresholdReached([...priorReports, event], registered)) {
+            return null;
+          }
+          return {
+            at,
+            type: "revalidation_requested",
+            entry_id: id,
+            payload: { requester: null, operator: null, source: "failure_reports" },
+          };
+        },
+        stored: (event, opened) => {
+          const extra = opened === null ? [event] : [event, opened];
+          const derived = rederive(world, id, deps.now, extra);
+          const result = validateEntry(derived.entry);
+          if (!result.ok) throw new SchemaInvalid(result.errors);
+          derivedEntry = derived.entry as Record<string, unknown>;
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: extra[extra.length - 1]!.seq,
+          };
+        },
+      });
+      openedRevalidation = written.opened !== null;
     });
-    openedRevalidation = written.opened !== null;
   } catch (error) {
     if (error instanceof SchemaInvalid) {
       return json({ error: "schema_invalid", errors: error.errors }, 422);
@@ -429,11 +439,9 @@ export async function handleFailureReports(
       id,
     );
   } catch (error) {
-    if (error instanceof StorageUnreachable) {
-      // The message only: no binding contents, no request data.
-      console.error(`failure-reports: storage unreachable: ${error.message}`);
-      return refuse(503, "storage_unreachable");
-    }
+    // The message only: no binding contents, no request data.
+    const answer = unavailable(error, "failure-reports");
+    if (answer !== null) return answer;
     if (error instanceof ArchiveUnreachable) {
       console.error(`failure-reports: archive unreachable: ${error.message}`);
       return refuse(503, "archive_unreachable");

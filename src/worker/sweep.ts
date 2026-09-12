@@ -205,6 +205,7 @@ import {
   putMirror,
   putSweepSteps,
   readCandidates,
+  countReceiptsOn,
   readCounterRangeOn,
   readCountsByKeyOn,
   meterReported,
@@ -286,14 +287,15 @@ export interface SweepDeps {
    */
   readonly mirror?: MirrorAdapter;
   /**
-   * Which door ran this sweep (M23, decision D-076): `cron` from the scheduled
-   * handler in src/worker/index.ts, `alarm` from the Sweeper Durable Object.
+   * Which timer ran this sweep (M23, decision D-076). There is one: the Sweeper
+   * Durable Object's alarm. The cron trigger arms that alarm and never sweeps,
+   * so `alarm` is the only value a run writes, and the column stays because the
+   * status board reads it and because rows written before the cron door was
+   * retired still say `cron`.
    *
-   * Optional and defaulted to `alarm`, because the alarm is the sweep's own
-   * timer and the cron door is the repair for a chain that broke: a caller that
-   * says nothing is the timer. It reaches only the `sweep_steps` rows the last
-   * step writes, and no rule anywhere reads it — a step that ran did the same
-   * work whichever door called it.
+   * Optional and defaulted, so a caller that says nothing is the timer. It
+   * reaches only the `sweep_steps` rows the last step writes, and no rule
+   * anywhere reads it.
    */
   readonly trigger?: SweepTrigger;
   /**
@@ -310,8 +312,8 @@ export interface SweepDeps {
   readonly alertFetch?: typeof fetch;
 }
 
-/** Which door ran the sweep. */
-export type SweepTrigger = "alarm" | "cron";
+/** Which timer ran the sweep. One timer, so one value. */
+export type SweepTrigger = "alarm";
 
 /**
  * The steps one run writes a `sweep_steps` row for, in the order they run.
@@ -845,6 +847,10 @@ async function publishStep(
       // Present on every day this step publishes, empty on a day that dropped
       // nothing: a reader must be able to tell "no duplicate" from "not said".
       counted.duplicates,
+      // Receipt rows, which `total` is not: one sync receipt can be six reads
+      // or none, so this is the only number the counter range can be held
+      // against, and the difference is a counter drawn and never handed over.
+      await countReceiptsOn(db, date),
     );
 
     // The chain rule, through the one door that enforces it: the event is built

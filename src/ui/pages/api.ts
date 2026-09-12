@@ -285,7 +285,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the operator record: id, maintainer, provider, registered_seq, details (registered_by, attestation, trusted, trusted_seq, named_by, payout_status), agents, domains. The events operator_registered and agent_bound are appended atomically with the rows.",
     refusals:
-      "400 bad body shape; 401 authentication; 422 bad_domain, unregistered_domain, provider_operator (decided against that domain's excluded parties), missing_attestation, bad_attestation, attestation_domain_mismatch; 409 operator_exists, agent_bound; 422 dns_no_record, dns_mismatch and 503 dns_unavailable; 422 payout_not_verified and 503 payout_unavailable.",
+      "400 bad body shape; 401 authentication; 422 bad_domain, unregistered_domain, provider_operator (decided against that domain's excluded parties), missing_attestation, bad_attestation, attestation_domain_mismatch; 409 operator_exists, agent_bound (the name check is re-read on every rebuild, so a twin registering the same name in the same tick is told operator_exists rather than handed a 503); 422 dns_no_record, dns_mismatch and 503 dns_unavailable; 422 payout_not_verified and 503 payout_unavailable; 503 chain_conflict.",
   },
   {
     method: "GET",
@@ -346,7 +346,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry and a Location header. The entry is draft: status is recomputed from the log and is never sent in. The Worker fetches the citation itself under the norm rule and refuses unless what it fetched hashes to the snapshot_hash the author signed.",
     refusals:
-      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, bad_subject_version (the category's subject carries a version as its third segment in this domain, and the entry's has none), unknown_authority (the subject's primary party has no row in this domain's authorities table and the category needs an official source), source_not_official (the category has an authoritative source by nature and the citation is not it), bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 duplicate_claim (the answer carries duplicate_of: the same domain, subject, category and normalized value is already live as a draft or a verified entry and this entry does not supersede it; refused before anything is fetched or written, on the dispute door as well as this one), snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 disclosure_missing (a redaction placeholder with no pointer to its original, or a disclosure body on an entry whose domain and category publish no disclosure rule) and disclosure_mismatch (the disclosed value does not hash to the placeholder), both before anything is written; 422 schema_invalid; 409 chain_moved.",
+      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, bad_subject_version (the category's subject carries a version as its third segment in this domain, and the entry's has none), unknown_authority (the subject's primary party has no row in this domain's authorities table and the category needs an official source), source_not_official (the category has an authoritative source by nature and the citation is not it), bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 duplicate_claim (the answer carries duplicate_of: the same domain, subject, category and normalized value is already live as a draft or a verified entry and this entry does not supersede it; refused before anything is fetched or written, on the dispute door as well as this one), snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 disclosure_missing (a redaction placeholder with no pointer to its original, or a disclosure body on an entry whose domain and category publish no disclosure rule) and disclosure_mismatch (the disclosed value does not hash to the placeholder), both before anything is written; 422 schema_invalid; 503 chain_conflict when three rebuilds in a row lose the log's next position to another writer.",
   },
   {
     method: "POST",
@@ -799,8 +799,10 @@ POST
         probes, the model's answers, each scorer's signed score — and then a
         record anyone can read. Every one of them answers
         <span class="mono">cache-control: no-store</span>, a wrong method gets
-        405 with an <span class="mono">Allow</span> header, and a storage
-        failure is 503 <span class="mono">storage_unreachable</span>.`,
+        405 with an <span class="mono">Allow</span> header, a storage
+        failure is 503 <span class="mono">storage_unreachable</span>, and a
+        write that keeps losing the log's next position to another writer is
+        503 <span class="mono">chain_conflict</span> after three rebuilds.`,
         ATTESTATION_PATH,
       )}
 
@@ -1009,6 +1011,22 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           <span class="mono">total</span>, and the per-key counts sum to that
           total.
         </p>
+        <p class="note">
+          The day's payload also carries
+          <span class="mono">counter_first</span>,
+          <span class="mono">counter_last</span> and
+          <span class="mono">receipts</span>: the running counters the day spans
+          and how many receipts of either kind were issued inside it.
+          <span class="mono">receipts</span> counts rows and
+          <span class="mono">total</span> counts reads — one sync receipt can be
+          six reads or none — so it is the one number the range can be held
+          against:
+          <span class="mono">counter_last - counter_first + 1 - receipts</span>
+          is how many counters were drawn and never handed over, which is what a
+          request that died between drawing its number and storing its receipt
+          leaves behind. It is evidence about the receipts and not about money,
+          so the ledger and the mirror pass it through untouched.
+        </p>
       </section>
 
       <section class="panel">
@@ -1212,7 +1230,8 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
           <span class="mono">fetcher_not_configured</span>,
           <span class="mono">archive_unreachable</span>,
           <span class="mono">receipts_not_configured</span>,
-          <span class="mono">receipt_conflict</span>).
+          <span class="mono">receipt_conflict</span>,
+          <span class="mono">chain_conflict</span>).
         </p>
       </section>
 

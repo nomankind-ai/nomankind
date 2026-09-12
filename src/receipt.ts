@@ -501,6 +501,21 @@ function buildDuplicates(
     .sort((left, right) => (left.entry_id < right.entry_id ? -1 : 1));
 }
 
+/**
+ * The day's receipt-row count, checked before it is published.
+ *
+ * A count is a whole number that is not negative, and a payload carrying
+ * anything else would be a number nobody can subtract from the counter range.
+ */
+function checkReceipts(receipts: number): number {
+  if (!Number.isSafeInteger(receipts) || receipts < 0) {
+    throw new RangeError(
+      `buildReadCountPayload: bad_receipts: ${String(receipts)}`,
+    );
+  }
+  return receipts;
+}
+
 export function buildReadCountPayload(
   date: string,
   rows: readonly ReadCountRow[],
@@ -508,6 +523,7 @@ export function buildReadCountPayload(
   counterLast: number | null,
   paid?: PaidReadCounts,
   duplicates?: readonly ReadCountDuplicate[],
+  receipts?: number,
 ): EventPayloads["read_count"] {
   if (!isCalendarDate(date)) {
     throw new RangeError(
@@ -542,6 +558,10 @@ export function buildReadCountPayload(
     total,
     counter_first: total === 0 ? null : counterFirst,
     counter_last: total === 0 ? null : counterLast,
+    // Rows and not reads, so the counter range has something it can be held
+    // against: a range wider than the receipts issued is a number drawn and
+    // never handed over. Refused rather than repaired, like every count here.
+    ...(receipts === undefined ? {} : { receipts: checkReceipts(receipts) }),
     ...(paid === undefined ? {} : { paid: buildPaid(paid) }),
     ...(duplicates === undefined
       ? {}

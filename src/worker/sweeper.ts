@@ -10,10 +10,13 @@
  * ours: the object sets it, the platform delivers it, and the object sets the
  * next one before it returns.
  *
- * The cron stays where it is. It costs nothing, and the sweep is idempotent —
- * a snapshot is committed only when the pool has moved, an assignment is closed
- * only when its window has run out, a draw is made only when one is owed — so
- * two timers pointed at it are two chances to catch up rather than a race.
+ * The cron stays where it is, but it no longer sweeps. It is the watchdog: its
+ * only job is to arm this object's alarm when nothing is armed, which is the
+ * one failure the alarm cannot repair for itself — a run killed mid-flight sets
+ * no next alarm, and a chain that has stopped is not restarted by anything
+ * except a visitor. With the cron arming rather than sweeping, the sweep runs on
+ * one timer at one cadence, and a dead chain heals within five minutes whether
+ * anyone visits or not.
  *
  * The object holds no state of its own beyond the alarm. Everything the sweep
  * needs is read from D1 on each run, so a Sweeper that is evicted, moved, or
@@ -116,10 +119,10 @@ export interface SweeperDeps {
 /**
  * The whole of what one sweep needs, built from the bindings.
  *
- * The one place the sealing adapters are constructed: the scheduled handler, the
- * alarm and `/run` all come through here, so the three timers into the sweep
- * cannot disagree about which witness track or which calendar this environment
- * is on. `ineligibleAgents` is nomankind's own pair — the maintainer agent and
+ * The one place the sealing adapters are constructed: the alarm and `/run` both
+ * come through here, so the two ways into the sweep cannot disagree about which
+ * witness track or which calendar this environment is on.
+ * `ineligibleAgents` is nomankind's own pair — the maintainer agent and
  * whatever key the sealing agent holds — because the paper makes nomankind
  * ineligible to witness its own seal, and an unset binding is simply absent
  * rather than an empty id in the set.
@@ -147,20 +150,19 @@ export async function sweepDepsFor(
       anchorAdapterFor(env.ENVIRONMENT, () => new Date(nowMs())),
     // The payout adapter this environment runs (D-013 as amended, D-053): a
     // mock on demo and local, the stub that refuses on production. Built here
-    // rather than only at the scheduled handler because the alarm is a sweep
-    // like any other — a cycle that pays through the cron door and skips
+    // rather than at a door, because a cycle that pays through `/run` and skips
     // `payout_unconfigured` through the alarm would be two different sweeps.
     payout: deps?.payout ?? payoutAdapterFor(env.ENVIRONMENT),
     // Where the day's export goes (M23). Built here for the reason the payout
-    // adapter is: the alarm is a sweep like any other, and an environment that
-    // mirrored through the cron door and skipped `mirror_unavailable` through
-    // the alarm would be two different sweeps. The secret decides the track, so
-    // an environment without one says so rather than failing a call a day.
+    // adapter is: an environment that mirrored through `/run` and skipped
+    // `mirror_unavailable` through the alarm would be two different sweeps. The
+    // secret decides the track, so an environment without one says so rather
+    // than failing a call a day.
     mirror: deps?.mirror ?? mirrorAdapterFor(env),
     // Where the day's paid reads are reported (M24, D-078). Built here for the
-    // reason the payout adapter is: the alarm is a sweep like any other, and an
-    // environment that metered through the cron door and skipped
-    // `metering_unavailable` through the alarm would be two different sweeps.
+    // reason the payout adapter is: an environment that metered through `/run`
+    // and skipped `metering_unavailable` through the alarm would be two
+    // different sweeps.
     // No alertFetch: the deployed step delivers through the platform's own.
     payments: deps?.payments ?? paymentsAdapterFor(env),
   };
@@ -236,6 +238,31 @@ export class Sweeper {
 }
 
 /**
+ * Arm the timer, and wait for it.
+ *
+ * One `/ensure` into the single instance: the object reads its own alarm first,
+ * so a call against an armed Sweeper sets nothing and writes nothing. Both ways
+ * in use this — every request through `ensureSweeper` below, and the cron
+ * watchdog in src/worker/index.ts, which awaits it because a scheduled
+ * invocation has nothing else to wait on.
+ *
+ * Never throws. A missing binding is the normal case in tests and under the
+ * bindings-only platform proxy, and neither a served request nor the watchdog
+ * must fail because a timer could not be armed.
+ */
+export async function armSweeper(env: Env): Promise<void> {
+  const namespace = env.SWEEPER;
+  if (namespace === undefined || namespace === null) return;
+  try {
+    await namespace.get(namespace.idFromName(SWEEPER_INSTANCE)).fetch(ENSURE_URL);
+  } catch (error) {
+    console.error(
+      `sweeper: ensure failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
  * Arm the timer, from a request.
  *
  * Called on every request the Worker serves, which is what makes the alarm
@@ -243,28 +270,9 @@ export class Sweeper {
  * broken, and the object itself decides whether anything needs setting. It is
  * deferred through `waitUntil`, so the response never waits on it.
  *
- * Never throws. A missing binding is the normal case in tests and under the
- * bindings-only platform proxy, and a serving Worker must not fail a request
- * because a timer could not be armed.
+ * Never throws, for the reason `armSweeper` does not.
  */
 export function ensureSweeper(env: Env, ctx: ExecutionContextLike): void {
-  const namespace = env.SWEEPER;
-  if (namespace === undefined || namespace === null) return;
-  try {
-    const stub = namespace.get(namespace.idFromName(SWEEPER_INSTANCE));
-    ctx.waitUntil(
-      stub.fetch(ENSURE_URL).then(
-        () => undefined,
-        (error: unknown) => {
-          console.error(
-            `sweeper: ensure failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        },
-      ),
-    );
-  } catch (error) {
-    console.error(
-      `sweeper: ensure failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  if (env.SWEEPER === undefined || env.SWEEPER === null) return;
+  ctx.waitUntil(armSweeper(env));
 }

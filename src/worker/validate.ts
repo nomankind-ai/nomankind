@@ -67,7 +67,8 @@ import {
 import { checkValidation, type OperatorInfo } from "../validate.js";
 import type { Env } from "./env.js";
 import {
-  StorageUnreachable,
+  unavailable,
+  withChainRetry,
   authenticate,
   guardDatabase,
   json,
@@ -585,111 +586,100 @@ async function validate(
   };
 
   try {
-    await recordValidation(env.DB, {
-      event: {
-        at,
-        type: "validation",
-        entry_id: id,
-        payload: { record, signature: body.signature },
-      },
-      // Section 6, "Dispute": "An upheld challenge returns the stake, pays the
-      // challenger, overturns the entry", and a failed one "forfeits the stake".
-      // Both land on the CHALLENGED entry, and both land in this batch: the
-      // decision that decides the correction is the moment the target is
-      // overturned or the challenge is done, and a reader between two writes
-      // must never see a correction verified and its target still standing.
-      alsoEvents: (event): readonly EventInput[] => {
-        if (challenged === null) return [];
-        const status = decide(event).derived.status;
-        const correctionId = challenged.filed.payload.correction_entry_id;
-        if (status === "verified") {
-          return [
-            {
-              at,
-              type: "dispute_upheld",
-              entry_id: challenged.id,
-              payload: { correction_entry_id: correctionId },
-            },
-          ];
-        }
-        if (status === "rejected") {
-          return [
-            {
-              at,
-              type: "dispute_failed",
-              entry_id: challenged.id,
-              payload: {
-                correction_entry_id: correctionId,
-                reason: firstRejectionReason(
-                  decide(event).entry as Record<string, unknown>,
-                ),
+    // Retried, and retried from here: the event's position and hash are the
+    // head's, so a decision that lost the race to the sweep or to another door
+    // has to be derived again onto the head that moved rather than sent again.
+    // The memo is cleared with it — an entry derived over last attempt's
+    // position would be an entry stored at a seq the log never gave it.
+    await withChainRetry(async () => {
+      decided = null;
+      derivedEntry = null;
+      verifiedByThisDecision = false;
+      await recordValidation(env.DB, {
+        event: {
+          at,
+          type: "validation",
+          entry_id: id,
+          payload: { record, signature: body.signature },
+        },
+        // Section 6, "Dispute": "An upheld challenge returns the stake, pays the
+        // challenger, overturns the entry", and a failed one "forfeits the stake".
+        // Both land on the CHALLENGED entry, and both land in this batch: the
+        // decision that decides the correction is the moment the target is
+        // overturned or the challenge is done, and a reader between two writes
+        // must never see a correction verified and its target still standing.
+        alsoEvents: (event): readonly EventInput[] => {
+          if (challenged === null) return [];
+          const status = decide(event).derived.status;
+          const correctionId = challenged.filed.payload.correction_entry_id;
+          if (status === "verified") {
+            return [
+              {
+                at,
+                type: "dispute_upheld",
+                entry_id: challenged.id,
+                payload: { correction_entry_id: correctionId },
               },
-            },
-          ];
-        }
-        // Still draft: the challenge has neither stood nor failed yet.
-        return [];
-      },
-      // Called with the event already sealed onto the head and before anything
-      // is written, so the entry stored is derived from a log that holds this
-      // decision, and a schema refusal here leaves the log exactly as it was.
-      stored: (event) => {
-        const derived = decide(event);
-        const result = validateEntry(derived.entry);
-        if (!result.ok) throw new SchemaInvalid(result.errors);
-        derivedEntry = derived.entry as Record<string, unknown>;
-        verifiedByThisDecision = derived.derived.status === "verified";
-        return {
-          entry: derived.entry,
-          sidecar: derived.sidecar,
-          derivedThroughSeq: event.seq,
-        };
-      },
-      // The other entries this decision changed, rewritten in the same batch.
-      // Nothing is decided here: each is rederived over its own world with this
-      // decision and whatever it sealed folded in, and derivation is what says
-      // what changed.
-      also: (event, extra): readonly StoredEntryInput[] => {
-        const rows: StoredEntryInput[] = [];
-
-        // Freshness and decay: the superseding entry "names the superseded entry
-        // inside the new entry's frozen, signed core ... and the old entry's
-        // superseded-by pointer is derived from it". The approvals are the
-        // check, so the pointer appears at exactly the decision that verifies
-        // this entry and never earlier. A decision that does not verify it
-        // leaves the target's row untouched, which is why this is asked after
-        // `stored` has run rather than before.
-        if (supersession !== null && verifiedByThisDecision) {
-          const merged: EntryWorld = {
-            registry: supersession.world.registry,
-            entryEvents: supersession.world.entryEvents,
-            superseders: [...supersession.world.superseders, ...entryEvents],
-            versionSiblings: supersession.world.versionSiblings,
-            // The target's own seal, carried through: rewriting its row must not
-            // erase a seal it really has.
-            seal: supersession.world.seal,
-          };
-          const target = rederive(merged, supersession.id, deps.now, [event]);
-          const result = validateEntry(target.entry);
+            ];
+          }
+          if (status === "rejected") {
+            return [
+              {
+                at,
+                type: "dispute_failed",
+                entry_id: challenged.id,
+                payload: {
+                  correction_entry_id: correctionId,
+                  reason: firstRejectionReason(
+                    decide(event).entry as Record<string, unknown>,
+                  ),
+                },
+              },
+            ];
+          }
+          // Still draft: the challenge has neither stood nor failed yet.
+          return [];
+        },
+        // Called with the event already sealed onto the head and before anything
+        // is written, so the entry stored is derived from a log that holds this
+        // decision, and a schema refusal here leaves the log exactly as it was.
+        stored: (event) => {
+          const derived = decide(event);
+          const result = validateEntry(derived.entry);
           if (!result.ok) throw new SchemaInvalid(result.errors);
-          rows.push({
-            entry: target.entry,
-            sidecar: target.sidecar,
+          derivedEntry = derived.entry as Record<string, unknown>;
+          verifiedByThisDecision = derived.derived.status === "verified";
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
             derivedThroughSeq: event.seq,
-          });
-        }
+          };
+        },
+        // The other entries this decision changed, rewritten in the same batch.
+        // Nothing is decided here: each is rederived over its own world with this
+        // decision and whatever it sealed folded in, and derivation is what says
+        // what changed.
+        also: (event, extra): readonly StoredEntryInput[] => {
+          const rows: StoredEntryInput[] = [];
 
-        // The older versions of the same model, rewritten from the same log
-        // position: this is where their `stale` appears. Each is rederived over
-        // its own world -- which already carries this entry's events, because
-        // this entry is one of its version siblings -- with this decision folded
-        // in, and derivation is what says whether it went stale. A sibling that
-        // comes back fresh is a newer version, or one this decision did not
-        // retire, and its row is left alone.
-        if (verifiedByThisDecision) {
-          for (const sibling of siblings) {
-            const target = rederive(sibling.world, sibling.id, deps.now, [event]);
-            if (!target.derived.stale) continue;
+          // Freshness and decay: the superseding entry "names the superseded entry
+          // inside the new entry's frozen, signed core ... and the old entry's
+          // superseded-by pointer is derived from it". The approvals are the
+          // check, so the pointer appears at exactly the decision that verifies
+          // this entry and never earlier. A decision that does not verify it
+          // leaves the target's row untouched, which is why this is asked after
+          // `stored` has run rather than before.
+          if (supersession !== null && verifiedByThisDecision) {
+            const merged: EntryWorld = {
+              registry: supersession.world.registry,
+              entryEvents: supersession.world.entryEvents,
+              superseders: [...supersession.world.superseders, ...entryEvents],
+              versionSiblings: supersession.world.versionSiblings,
+              // The target's own seal, carried through: rewriting its row must not
+              // erase a seal it really has.
+              seal: supersession.world.seal,
+            };
+            const target = rederive(merged, supersession.id, deps.now, [event]);
             const result = validateEntry(target.entry);
             if (!result.ok) throw new SchemaInvalid(result.errors);
             rows.push({
@@ -698,39 +688,60 @@ async function validate(
               derivedThroughSeq: event.seq,
             });
           }
-        }
 
-        // The challenged entry, rewritten from the same log position: this is
-        // where `overturned_by` and the disputes[] outcome appear.
-        if (challenged !== null && extra.length > 0) {
-          const target = rederive(
-            challenged.world,
-            challenged.id,
-            deps.now,
-            extra,
-          );
-          const result = validateEntry(target.entry);
-          if (!result.ok) throw new SchemaInvalid(result.errors);
-          rows.push({
-            entry: target.entry,
-            sidecar: target.sidecar,
-            derivedThroughSeq: extra[extra.length - 1]!.seq,
-          });
-        }
+          // The older versions of the same model, rewritten from the same log
+          // position: this is where their `stale` appears. Each is rederived over
+          // its own world -- which already carries this entry's events, because
+          // this entry is one of its version siblings -- with this decision folded
+          // in, and derivation is what says whether it went stale. A sibling that
+          // comes back fresh is a newer version, or one this decision did not
+          // retire, and its row is left alone.
+          if (verifiedByThisDecision) {
+            for (const sibling of siblings) {
+              const target = rederive(sibling.world, sibling.id, deps.now, [event]);
+              if (!target.derived.stale) continue;
+              const result = validateEntry(target.entry);
+              if (!result.ok) throw new SchemaInvalid(result.errors);
+              rows.push({
+                entry: target.entry,
+                sidecar: target.sidecar,
+                derivedThroughSeq: event.seq,
+              });
+            }
+          }
 
-        return rows;
-      },
-      // Section 6: the outcome returns, pays or forfeits what the challenger put
-      // up. The rows are src/stake.ts's, read out of the filing and the outcome
-      // event, and they land in the batch that sealed the outcome.
-      ledger: (_event, extra) => {
-        if (challenged === null || extra.length === 0) return [];
-        const outcome = extra[0] as
-          | Event<"dispute_upheld">
-          | Event<"dispute_failed">;
-        return disputeOutcomeStakes(challenged.filed, outcome);
-      },
-      answeredAssignmentSeq,
+          // The challenged entry, rewritten from the same log position: this is
+          // where `overturned_by` and the disputes[] outcome appear.
+          if (challenged !== null && extra.length > 0) {
+            const target = rederive(
+              challenged.world,
+              challenged.id,
+              deps.now,
+              extra,
+            );
+            const result = validateEntry(target.entry);
+            if (!result.ok) throw new SchemaInvalid(result.errors);
+            rows.push({
+              entry: target.entry,
+              sidecar: target.sidecar,
+              derivedThroughSeq: extra[extra.length - 1]!.seq,
+            });
+          }
+
+          return rows;
+        },
+        // Section 6: the outcome returns, pays or forfeits what the challenger put
+        // up. The rows are src/stake.ts's, read out of the filing and the outcome
+        // event, and they land in the batch that sealed the outcome.
+        ledger: (_event, extra) => {
+          if (challenged === null || extra.length === 0) return [];
+          const outcome = extra[0] as
+            | Event<"dispute_upheld">
+            | Event<"dispute_failed">;
+          return disputeOutcomeStakes(challenged.filed, outcome);
+        },
+        answeredAssignmentSeq,
+      });
     });
   } catch (error) {
     if (error instanceof SchemaInvalid) {
@@ -794,11 +805,9 @@ export async function handleValidate(
       id,
     );
   } catch (error) {
-    if (error instanceof StorageUnreachable) {
-      // The message only: no binding contents, no request data.
-      console.error(`validate: storage unreachable: ${error.message}`);
-      return refuse(503, "storage_unreachable");
-    }
+    // The message only: no binding contents, no request data.
+    const answer = unavailable(error, "validate");
+    if (answer !== null) return answer;
     throw error;
   }
 }

@@ -247,7 +247,7 @@ describe("a sweep's own account of itself", () => {
       await name(party, NOW);
     }
     await beacon.advance(AT);
-    await runSweep(env, { now: NOW, beacon, trigger: "cron" });
+    await runSweep(env, { now: NOW, beacon });
 
     const rows = await sweepSteps(store.db);
     expect(rows).toHaveLength(SWEEP_STEPS.length);
@@ -256,7 +256,7 @@ describe("a sweep's own account of itself", () => {
     );
     for (const row of rows) {
       expect([row.step, row.last_run_at]).toEqual([row.step, AT]);
-      expect([row.step, row.trigger]).toEqual([row.step, "cron"]);
+      expect([row.step, row.trigger]).toEqual([row.step, "alarm"]);
     }
 
     const byStep = new Map(rows.map((row) => [row.step, row]));
@@ -513,7 +513,7 @@ describe("a step whose dependency throws", () => {
     };
 
     await expect(
-      runSweep(env, { now: at, beacon: broken, trigger: "cron" }),
+      runSweep(env, { now: at, beacon: broken }),
     ).rejects.toThrow("beacon adapter exploded");
 
     // The run threw, and the board is still there: every step still has a row,
@@ -526,7 +526,7 @@ describe("a step whose dependency throws", () => {
         step,
         at.toISOString(),
       ]);
-      expect([step, byStep.get(step)!.trigger]).toEqual([step, "cron"]);
+      expect([step, byStep.get(step)!.trigger]).toEqual([step, "alarm"]);
     }
     // The step it threw in carries what the throw said, dated to this run, and
     // does not claim to have got through.

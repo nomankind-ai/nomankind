@@ -16,14 +16,21 @@
   // serving the same Worker.
   "workers_dev": false,
   "preview_urls": false,
-  // The sweep (src/worker/sweep.ts): commit the pool snapshot when it has
-  // moved, close the assignments whose seventy-two hours have run out, and draw
-  // for the entries owed a draw. Every five minutes.
+  // The cron trigger: the watchdog over the sweep's timer, and not the sweep.
+  // The `scheduled` handler in src/worker/index.ts arms the Sweeper Durable
+  // Object's alarm and does nothing else, so a chain of alarms broken by a run
+  // the platform killed mid-flight heals within five minutes without waiting
+  // for a visitor. An armed Sweeper is read and left alone.
   //
-  // This cadence is deployment configuration and NOT a policy number: it says
-  // how often the Worker looks, never how long a validator has (that is
+  // Five minutes is deployment configuration and NOT a policy number: it says
+  // how often the watchdog looks, never how long a validator has (that is
   // ASSIGNMENT_WINDOW_HOURS in src/policy.ts) or when a draw is legitimate
-  // (src/assign.ts). Moving it changes only how promptly the log catches up.
+  // (src/assign.ts). The sweep's own cadence is SWEEP_INTERVAL_MINUTES.
+  //
+  // One expression, written as an explicit list, and it is the whole schedule:
+  // a deploy replaces whatever schedule the Worker has with exactly this, which
+  // is how the demo Worker's duplicated registration — two scheduled events per
+  // cycle, seen in the QA of 2026-09-12 — becomes one.
   //
   // `triggers` is an inheritable key, so demo and production run the same
   // schedule from this one block; `wrangler deploy --dry-run --env demo` and
@@ -37,10 +44,10 @@
   // scheduled invocation and no error. A Durable Object alarm is a real timer
   // on the free plan and it is ours: the object arms it, the platform delivers
   // it, and the object arms the next one before it returns. Any request to the
-  // Worker arms it if it is not armed.
+  // Worker arms it if it is not armed, and so does the cron above.
   //
-  // The cron stays as a second, harmless timer: the sweep is idempotent, so two
-  // of them are two chances to catch up rather than a race.
+  // The sweep runs here and nowhere else: one timer, one cadence, one set of
+  // sweep_steps rows per interval.
   //
   // The cadence is SWEEP_INTERVAL_MINUTES in src/policy.ts, which the class
   // reads; it is operational and not a rule of the paper.

@@ -311,6 +311,26 @@ export type EventPayloads = {
     counter_first: number | null;
     counter_last: number | null;
     /**
+     * How many receipts of either kind were issued that day.
+     *
+     * Rows, not reads, and the difference is the point. `total` is what the
+     * entries earned — one per read receipt and one per verified entry a sync
+     * delivered — so a sync receipt covering six entries is one row and six
+     * reads, and `total` cannot be held against the counter range. This can:
+     * `counter_last - counter_first + 1 - receipts` is how many counters the
+     * day drew and never handed a receipt over for, which is what a request
+     * that died between drawing its number and storing its receipt leaves
+     * behind. Section 9 asks readers to check the published counts against the
+     * receipts they hold, and without this a drawn-and-dropped number would be
+     * invisible in the payload.
+     *
+     * Optional, and absent on every event published before the counter was
+     * allocated rather than guessed: a payload that never carried it says
+     * nothing about gaps, which is what it meant. Neither the mirror nor the
+     * ledger reads it — it is evidence about the receipts, not about money.
+     */
+    receipts?: number;
+    /**
      * The half of the day that was paid for (M24): the same rows over keyed
      * receipts only, the same reads per key, and their common total.
      *

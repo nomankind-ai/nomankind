@@ -298,7 +298,10 @@ export interface Counter {
   readonly lastSweepAt: string | null;
   /** How long ago that was, in words: "2 min ago". Null with no run. */
   readonly lastSweepAge: string | null;
-  /** What started it: "alarm" or "cron". Null with no run. */
+  /**
+   * Which timer ran it, off the row. "alarm" for every run the sweep makes now;
+   * a row left by the retired cron door still reads "cron". Null with no run.
+   */
   readonly lastSweepTrigger: string | null;
   /**
    * Stages reading ok, with idle counted among them: a stage that is owed
