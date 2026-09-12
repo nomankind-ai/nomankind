@@ -132,6 +132,7 @@ import {
   disputeRewardRow,
   payoutPlan,
   payoutRow,
+  pricedReads,
   readShareRows,
   reconciliationRow,
   type EntryShareState,
@@ -142,6 +143,7 @@ import {
   authorityHostsFor,
   DEFAULT_DOMAIN,
   DOMAIN_SLUGS,
+  LEDGER_ENTRIES_PER_RUN,
   LIST_PAGE_LIMIT,
   RELEASE_WINDOW_DAYS,
   SEAL_MAX_EVENTS,
@@ -180,6 +182,7 @@ import {
   appendEvents,
   bountiesForEntry,
   bountyPoolRows,
+  completeSealRewrites,
   countAttestations,
   countEntries,
   countOperators,
@@ -190,6 +193,7 @@ import {
   dueAttestations,
   dueRevalidationAssignments,
   earliestReadReceiptDay,
+  firstSealedDayIn,
   entriesThrough,
   entryCountsByDomain,
   entryHeadsThrough,
@@ -199,10 +203,11 @@ import {
   eventsForEntry,
   eventsInRange,
   eventsOfType,
-  getAnchor,
   getEntry,
+  getOperator,
   headSeq,
   heldReadShareRows,
+  latestAnchor,
   latestEventOfType,
   latestSeal,
   ledgerCursor,
@@ -213,7 +218,8 @@ import {
   mirrorClaimOn,
   openRevalidationAssignment,
   operatorDomains,
-  payoutRows,
+  operatorsDue,
+  pricedEntriesOfDay,
   priceLedgerRow,
   pendingAnchorsAfter,
   putAnchor,
@@ -551,6 +557,17 @@ export interface SweepReport {
     readonly clawbacks: number;
     readonly bounties: number;
     readonly reconciliations: number;
+    /**
+     * How many of a published day's entries this run priced, at most
+     * LEDGER_ENTRIES_PER_RUN.
+     */
+    readonly entries: number;
+    /**
+     * The published day this run stopped part-way through, or null when it did
+     * not stop on one. A day named here is not a fault: it is a day longer than
+     * one run prices, and the next run resumes it where this one stopped.
+     */
+    readonly day: string | null;
     readonly ok: boolean;
   } | null;
   /**
@@ -1059,6 +1076,57 @@ async function rewriteForSeal(
 }
 
 /**
+ * Finish the newest seal's rewrites, when a run was killed part-way through
+ * them.
+ *
+ * A seal's write is the seal row and one statement per entry it covers, sent to
+ * D1 in chunks; the seal row is in the first chunk, so a run killed between
+ * chunks leaves a seal standing over entries that do not carry it yet. The
+ * repair is the same derivation the killed run was making — `rewriteForSeal`
+ * over the seal's own events — and it is idempotent, so an entry already
+ * rewritten is simply not among the ones this reads.
+ *
+ * The events are read only when there is something to rewrite. Nothing to do is
+ * the usual answer and costs one indexed read: no page of events, no batch.
+ *
+ * False when the published schema refused one of the entries, which is the seal
+ * step's own rule (`SealSchemaInvalid`) and stops this run from sealing more on
+ * top of a seal it could not finish.
+ */
+async function finishPreviousSeal(
+  db: D1Like,
+  seal: Seal,
+  deps: SealingDeps,
+  skip: Skip,
+  cache: WorldCache,
+): Promise<boolean> {
+  let events: Event[] | null = null;
+  try {
+    const finished = await completeSealRewrites(
+      db,
+      seal,
+      deps.now,
+      async (entryId, sealed, now) => {
+        const batch = (events ??= await eventsInRange(
+          db,
+          seal.first_seq,
+          seal.last_seq,
+        ));
+        return rewriteForSeal(db, entryId, sealed, batch, now, cache);
+      },
+    );
+    if (finished.length > 0) skip("seal_rewrites_resumed");
+  } catch (error) {
+    if (error instanceof SealSchemaInvalid) {
+      skip("schema_invalid");
+      return false;
+    }
+    throw error;
+  }
+  return true;
+}
+
+/**
  * (f) Seal every event the last seal did not cover.
  *
  * Whitepaper, Lifecycle of an entry (Seal): "Everything gets sealed, including
@@ -1069,6 +1137,12 @@ async function rewriteForSeal(
  * A racing timer is a refusal rather than a repair: `recordSeal` inserts plainly
  * and the second sweep counts `seal_conflict` and carries on, because the other
  * one sealed exactly the range this one was about to.
+ *
+ * Before it seals anything it finishes the last seal, because a seal's write is
+ * several D1 batches and a run the platform killed between two of them leaves
+ * entries that deny the seal standing over them. That is the one thing the
+ * chunking costs and this is what pays for it: the rewrites are idempotent, so
+ * the repair is the same derivation the killed run was making.
  */
 async function sealStep(
   db: D1Like,
@@ -1077,6 +1151,12 @@ async function sealStep(
   cache: WorldCache,
 ): Promise<SweepReport["sealed"]> {
   const previous = await latestSeal(db);
+  if (
+    previous !== null &&
+    !(await finishPreviousSeal(db, previous, deps, skip, cache))
+  ) {
+    return null;
+  }
   // -1, because eventsAfter reads strictly after and seq 0 is a real position.
   const after = previous === null ? -1 : previous.last_seq;
   const batch = await eventsAfter(db, after, SEAL_MAX_EVENTS);
@@ -1291,51 +1371,68 @@ async function witnessStep(
 }
 
 /**
- * (h) Anchor yesterday's seals into an external timestamping chain.
+ * (h) Anchor a day's seals into an external timestamping chain.
  *
  * Whitepaper, Lifecycle of an entry (Seal): "Anchoring each day's batch hash
  * into an external public timestamping chain ... makes the existence proof
- * independent of 1F916's maturity." Yesterday's, because today is not over: a
+ * independent of 1F916's maturity." Never today, because today is not over: a
  * day anchored while seals are still being made would be false rather than
  * stale (src/anchor.ts, `verifyAnchor`).
+ *
+ * A backlog rather than yesterday alone: the days owed run from the day after
+ * the newest anchored one — or from the log's first sealed day, when nothing
+ * has ever been anchored — through yesterday, and each run takes the oldest one
+ * still owed. Section 12: the anchor is what narrows a compromised witness
+ * set's window to the gap between sealing and anchoring, so a day whose
+ * following day saw no sweep at all has to stay owed until some later run takes
+ * it, rather than falling out of the window forever, which is what asking only
+ * about yesterday did.
+ *
+ * The next day owed is asked of the seals rather than counted out on the
+ * calendar: `firstSealedDayIn` seeks the (sealed_at) index for the oldest seal
+ * inside the window, so a hundred and fifty sealless days cost the same one
+ * seek as none, and a gap can never stall the walk — which is what stepping
+ * days a page at a time did, because a page of empty days recorded no progress
+ * for the next run to start from.
+ *
+ * The newest anchored day is where the walk starts whatever its receipt says. A
+ * calendar that was down is not a day to stand on: the record is written and
+ * verifies without the receipt (D-037), and chasing the receipt is a separate
+ * job — the retry below, which runs only when the walk owes nothing, and the
+ * upgrade step (h1) after it. One outage cannot leave every later day
+ * unanchored.
+ *
+ * One day a run, oldest first, because a chain asked for the whole of a long
+ * backlog at once is a stranger asked for a year of favours in one night. A day
+ * with no seals is never anchored at all — an anchor with no roots would be a
+ * claim about a day nothing was sealed on — and the walk does not so much as
+ * look at it.
  *
  * The record is written before the hash is posted, and the receipt is recorded
  * separately when it comes back, because the receipt is not in the anchor hash
  * (D-037): the day that was posted and the day that verifies are the same day.
  */
-async function anchorStep(
+export async function anchorStep(
   db: D1Like,
   deps: SealingDeps,
   skip: Skip,
 ): Promise<SweepReport["anchored"]> {
-  const date = utcDay(
+  const yesterday = utcDay(
     new Date(deps.now.getTime() - MILLISECONDS_PER_DAY).toISOString(),
   );
 
-  const existing = await getAnchor(db, date);
-  if (existing !== null) {
-    // Already anchored, and already carrying its receipt: nothing to do. Named
-    // like every other no-op here, so a run that anchored nothing says why.
-    if (existing.external !== null) {
-      skip("already_anchored");
-      return null;
-    }
-    const external = await postAnchor(deps, existing);
-    if (external === null) skip("anchor_pending");
-    else await setAnchorExternal(db, date, external);
-    return {
-      date,
-      seals: existing.roots.length,
-      external: external === null ? null : external.kind,
-    };
-  }
+  const latest = await latestAnchor(db);
+  // Days are "YYYY-MM-DD", so text order is chronological. Null is "from the
+  // beginning of the log": nothing has ever been anchored.
+  const from = latest === null ? null : dayAfter(latest.date);
+  const date =
+    from !== null && from > yesterday
+      ? null
+      : await firstSealedDayIn(db, from, yesterday);
+  if (date === null) return pendingReceipt(db, deps, latest, skip);
 
+  // The day came out of the seals table, so it has seals; this reads them.
   const seals = await sealsSealedOn(db, date);
-  if (seals.length === 0) {
-    skip("no_seals_to_anchor");
-    return null;
-  }
-
   const built = await buildAnchor(seals, date);
   if (!built.ok) {
     skip(built.reason);
@@ -1347,9 +1444,53 @@ async function anchorStep(
   if (external === null) skip("anchor_pending");
   else await setAnchorExternal(db, date, external);
 
+  // Another sealed day behind this one means the backlog is not empty, and the
+  // run says so rather than looking current.
+  if ((await firstSealedDayIn(db, dayAfter(date), yesterday)) !== null) {
+    skip("anchor_bounded");
+  }
+
   return {
     date,
     seals: seals.length,
+    external: external === null ? null : external.kind,
+  };
+}
+
+/**
+ * The run owes no day: post the newest anchor's hash again if the chain never
+ * took it, and otherwise say why nothing was anchored.
+ *
+ * This is the only place a receipt is chased, and it runs only when the walk
+ * found nothing owed — so a calendar that is down costs the current log a retry
+ * a run and costs a log with a backlog nothing at all. The record itself does
+ * not move: the anchor hash never covered the receipt (D-037), so the day that
+ * verified before the retry is the day that verifies after it.
+ */
+async function pendingReceipt(
+  db: D1Like,
+  deps: SealingDeps,
+  latest: Anchor | null,
+  skip: Skip,
+): Promise<SweepReport["anchored"]> {
+  if (latest === null) {
+    // Nothing has ever been sealed on a finished day, so no day owes an anchor.
+    skip("no_seals_to_anchor");
+    return null;
+  }
+  if (latest.external !== null) {
+    // Already anchored, and already carrying its receipt: nothing to do. Named
+    // like every other no-op here, so a run that anchored nothing says why.
+    skip("already_anchored");
+    return null;
+  }
+
+  const external = await postAnchor(deps, latest);
+  if (external === null) skip("anchor_pending");
+  else await setAnchorExternal(db, latest.date, external);
+  return {
+    date: latest.date,
+    seals: latest.roots.length,
     external: external === null ? null : external.kind,
   };
 }
@@ -1804,6 +1945,19 @@ export async function mirrorStep(
  */
 export const LEDGER_CURSOR = "ledger";
 
+/**
+ * How far into the day at LEDGER_CURSOR + 1 the ledger step has priced, as an
+ * index into that day's priced reads. Zero, and the row absent, when no day is
+ * part-way through.
+ *
+ * Its own row rather than a field of the ledger cursor, because ledger_state
+ * holds positions and this is one: the position inside a day, which the step
+ * needs for exactly as long as a day takes more than one run to price. A row
+ * somebody drops costs a day repriced, and repricing writes the same rows over
+ * the same ids.
+ */
+export const LEDGER_DAY_CURSOR = "ledger_day";
+
 /** Narrow one event to its own type, the way the kernel does it. */
 function isEvent<T extends EventType>(event: Event, type: T): event is Event<T> {
   return event.type === type;
@@ -1882,41 +2036,86 @@ async function shareStateOf(
   };
 }
 
+/** How far one run got through one published day. */
+interface DayPricing {
+  /** The rows it wrote: the chunk's shares, and the reconciliation if it ended the day. */
+  readonly rows: LedgerRow[];
+  /** How many of the day's entries this run priced. */
+  readonly priced: number;
+  /** The entry the next run resumes at; the day's length once it is done. */
+  readonly through: number;
+  /** Whether every entry of the day has now been priced. */
+  readonly done: boolean;
+  /** The day's reconciliation, meaningful only on the run that finished it. */
+  readonly ok: boolean;
+}
+
 /**
- * Price one published day of reads: a share row per holder, the withheld halves
- * of every stale entry, and the day's reconciliation beside them.
+ * Price part of one published day of reads: a share row per holder, the
+ * withheld halves of every stale entry, and — on the run that reaches the end
+ * of the day — the day's reconciliation beside them.
  *
  * Section 9: "Each day's published count is the number the seal commits to and
  * payouts are computed from." So the count this reads is the sealed event's own
  * and never the receipts underneath it, and the reconciliation says whether the
  * two still agree.
+ *
+ * Part of a day, because pricing one entry costs a read of the entry and a read
+ * per read-share slot it seated: a day on which a thousand entries were read is
+ * thousands of statements, and a run that tried them all would be killed
+ * part-way through rather than finish. So a run takes `limit` entries from
+ * `from`, and the next run resumes where it stopped. What that costs is that a
+ * day is priced across runs and not inside one transaction; what pays for it is
+ * that every row is idempotent by its id, so a run that died after writing half
+ * a chunk writes the same rows again and changes nothing.
+ *
+ * The reconciliation waits for the end of the day because it is about the whole
+ * day: a reconciliation written over one chunk would name every entry the other
+ * chunks priced as unpriced. It is built from what the earlier chunks actually
+ * landed (`pricedEntriesOfDay`) plus this one's own rows, and every share row of
+ * an entry carries that entry's published count, so which entries accrued is all
+ * it needs from them.
  */
 async function priceDay(
   db: D1Like,
   event: Event<"read_count">,
-): Promise<{ rows: LedgerRow[]; ok: boolean }> {
+  from: number,
+  limit: number,
+): Promise<DayPricing> {
   const { date } = event.payload;
+  const reads: readonly ReadCountRow[] = pricedReads(event);
+  const through = Math.min(from + limit, reads.length);
+
   const states = new Map<string, EntryShareState>();
-  for (const read of event.payload.reads as readonly ReadCountRow[]) {
+  for (const read of reads.slice(from, through)) {
     const stored = await getEntry(db, read.entry_id);
     if (stored === null) continue;
     states.set(read.entry_id, await shareStateOf(db, stored, date));
   }
 
+  // Only this chunk's entries have a state, so only this chunk's entries get
+  // rows: an entry the run has not reached yet is not "unpriced", it is next.
   const rows = readShareRows(event, (entryId) => states.get(entryId) ?? null);
+  const priced = through - from;
+  if (through < reads.length) {
+    return { rows, priced, through, done: false, ok: true };
+  }
 
-  // Every share row of one entry carries that entry's published count, so the
-  // map holds it once: the reconciliation asks what the ledger accrued for the
-  // entry, not what each holder was paid.
-  const accrued = new Map<string, number>();
+  const accruedEntries = await pricedEntriesOfDay(db, event.seq);
   for (const row of rows) {
-    if (row.kind !== "read_share") continue;
-    if (row.entry_id === null || row.reads === null) continue;
-    accrued.set(row.entry_id, row.reads);
+    if (row.kind !== "read_share" || row.entry_id === null) continue;
+    accruedEntries.add(row.entry_id);
+  }
+  const accrued = new Map<string, number>();
+  for (const read of reads) {
+    if (accruedEntries.has(read.entry_id)) accrued.set(read.entry_id, read.count);
   }
   const reconciliation = reconciliationRow(event, accrued);
   return {
     rows: [...rows, reconciliation],
+    priced,
+    through,
+    done: true,
     ok: reconciliation.ref["ok"] === true,
   };
 }
@@ -1982,29 +2181,57 @@ async function priceBounty(
  * nothing. The cursor is what makes it a fold rather than a rescan, and losing
  * it costs only work: every row is idempotent by its id.
  */
-async function ledgerStep(
+export async function ledgerStep(
   db: D1Like,
   sealedHead: number,
 ): Promise<SweepReport["ledger"]> {
   const cursor = (await ledgerCursor(db, LEDGER_CURSOR)) ?? -1;
+  const started = (await ledgerCursor(db, LEDGER_DAY_CURSOR)) ?? 0;
+  let offset = started;
+  let budget = LEDGER_ENTRIES_PER_RUN;
   let readShares = 0;
   let clawbacks = 0;
   let bounties = 0;
   let reconciliations = 0;
+  let entries = 0;
+  let day: string | null = null;
   let ok = true;
+  // The last position this run finished with. A day it only got part-way
+  // through is not finished, so the cursor stays behind that event and the next
+  // run reads it again.
+  let through = cursor;
+  let stopped = false;
 
-  for (let from = cursor + 1; from <= sealedHead; ) {
+  walk: for (let from = cursor + 1; from <= sealedHead; ) {
     const to = Math.min(from + LIST_PAGE_LIMIT - 1, sealedHead);
     const page = await eventsInRange(db, from, to);
     for (const event of page) {
       if (isEvent(event, "read_count")) {
-        const priced = await priceDay(db, event);
+        const priced = await priceDay(db, event, offset, budget);
         await putLedgerRows(db, priced.rows);
         readShares += priced.rows.filter((row) => row.kind === "read_share").length;
+        entries += priced.priced;
+        budget -= priced.priced;
+        if (!priced.done) {
+          // Stop on the day rather than past it: the cursor is left below this
+          // event and the entry cursor says which entry of it comes next.
+          offset = priced.through;
+          day = event.payload.date;
+          stopped = true;
+          break walk;
+        }
+        offset = 0;
         reconciliations += 1;
         if (!priced.ok) ok = false;
+        through = event.seq;
+        if (budget <= 0) {
+          stopped = true;
+          break walk;
+        }
         continue;
       }
+
+      through = event.seq;
 
       if (isEvent(event, "dispute_upheld")) {
         const entryId = event.entry_id;
@@ -2043,13 +2270,19 @@ async function ledgerStep(
     from = to + 1;
   }
 
-  await setLedgerCursor(db, LEDGER_CURSOR, sealedHead);
+  // A run that walked the whole range is through to the head, whether or not
+  // the last position it read carried anything to price.
+  if (!stopped) through = sealedHead;
+  if (offset !== started) await setLedgerCursor(db, LEDGER_DAY_CURSOR, offset);
+  await setLedgerCursor(db, LEDGER_CURSOR, through);
   return {
-    through: sealedHead,
+    through,
     read_shares: readShares,
     clawbacks,
     bounties,
     reconciliations,
+    entries,
+    day,
     ok,
   };
 }
@@ -2431,6 +2664,10 @@ export async function countersStep(
  * never selected and never paid. That is the whole mechanism behind Section 6's
  * bare-key reward: it accrues to the key and holds, and turning it into dollars
  * means verifying as an operator, which gives the row an operator to pay.
+ *
+ * Whether this operator's cycle has been paid already is the step's question
+ * and not this one's: it comes back with the list of who is owed anything, in
+ * the same statement, so a run that has nothing to do costs exactly one read.
  */
 async function payOperator(
   db: D1Like,
@@ -2440,13 +2677,6 @@ async function payOperator(
   at: string,
   skip: Skip,
 ): Promise<SweepReport["payouts"][number] | null> {
-  const cycle = cycleOf(at);
-  const paid = await payoutRows(db, LIST_PAGE_LIMIT, operator.id);
-  if (paid.some((row) => row.date !== null && cycleOf(row.date) === cycle)) {
-    skip("payout_this_cycle");
-    return null;
-  }
-
   const plan = payoutPlan(operator.id, await releasedUnpaidRows(db, operator.id, at), at);
   if (plan.rows.length === 0) {
     // Nothing due, or due but under the floor: either way nothing leaves and
@@ -2484,15 +2714,29 @@ async function payOperator(
  *
  * Whitepaper Section 9: "Accrued fees are held for thirty days before payout",
  * and decision D-053 batches what is left per operator per calendar month above
- * a published minimum. Every operator is asked, in id order, because an operator
- * with nothing due is a real answer and a cycle that only looked at the ones it
- * expected would quietly drop the rest.
+ * a published minimum. Work due at most once a month, on a step that runs every
+ * few minutes — so the run asks one question before it asks anybody anything.
+ *
+ * Who holds something released and unpaid, and which of them this cycle has
+ * already paid? One statement on the `ledger_operator_unpaid` index, and only
+ * the operators it names are asked anything further. Walking the whole
+ * directory to ask two questions of each was a monthly job's cost paid on every
+ * run of the sweep, and an operator with nothing due is answered by its absence
+ * from that list rather than by two reads of its own.
+ *
+ * Per operator, because that is what D-053 says: "at most one payout batch per
+ * operator per cycle". A single gate over the whole log — has anybody been paid
+ * this month — made the first operator paid each month close the month for
+ * everyone else, so an operator crossing the minimum on the twentieth waited
+ * for a cycle it was owed. Now an operator already paid inside the cycle is
+ * counted `payout_this_cycle` and passed over, and the operators beside it are
+ * paid in the same run.
  *
  * The transfer is the one thing in this whole file that leaves the system, so it
  * is the one thing whose failure is counted three ways: below the floor,
  * unavailable, refused. On none of them is a row marked paid.
  */
-async function payoutStep(
+export async function payoutStep(
   db: D1Like,
   adapter: PayoutAdapter | undefined,
   sealedHead: number,
@@ -2504,22 +2748,32 @@ async function payoutStep(
     return [];
   }
 
+  const due = await operatorsDue(db, at, cycleOf(at));
+  if (due.length === 0) {
+    // Nothing is past the holdback anywhere: the same answer an operator below
+    // the floor gets, because in both cases nothing leaves and nothing is
+    // claimed, and what there is carries to the next cycle.
+    skip("payout_below_minimum");
+    return [];
+  }
+
   const payouts: SweepReport["payouts"][number][] = [];
-  let afterId: string | undefined;
-  for (;;) {
-    const page = await listOperators(
-      db,
-      afterId === undefined
-        ? { limit: LIST_PAGE_LIMIT }
-        : { limit: LIST_PAGE_LIMIT, afterId },
-    );
-    if (page.length === 0) break;
-    for (const operator of page) {
-      const made = await payOperator(db, adapter, operator, sealedHead, at, skip);
-      if (made !== null) payouts.push(made);
+  for (const owed of due) {
+    if (owed.paidInCycle) {
+      // D-053 pays an operator once a cycle: this one has had its batch, and
+      // what it has accrued since carries to the next month.
+      skip("payout_this_cycle");
+      continue;
     }
-    if (page.length < LIST_PAGE_LIMIT) break;
-    afterId = page[page.length - 1]!.id;
+    const operator = await getOperator(db, owed.operator);
+    if (operator === null) {
+      // A ledger row naming an operator the directory does not have. Nothing
+      // can be sent, for the same reason a missing payout reference cannot.
+      skip("payout_unavailable");
+      continue;
+    }
+    const made = await payOperator(db, adapter, operator, sealedHead, at, skip);
+    if (made !== null) payouts.push(made);
   }
   return payouts;
 }

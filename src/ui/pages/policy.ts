@@ -532,6 +532,24 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         "The retry ladder, in minutes from the attempt that failed: attempt n schedules the next at now plus the nth entry, and past the last entry the delivery is failed rather than retried forever.",
     },
     {
+      name: "ALERT_EVENTS_PER_RUN",
+      value: String(policy.ALERT_EVENTS_PER_RUN),
+      means:
+        "How many sealed events past its cursor one run of the alert step derives alerts from. A backlog is not dropped: the next run starts where this one stopped.",
+    },
+    {
+      name: "ALERT_DELIVERIES_PER_RUN",
+      value: String(policy.ALERT_DELIVERIES_PER_RUN),
+      means:
+        "How many due deliveries one run posts, oldest first. Each may take ALERT_TIMEOUT_MS, so the bound is what keeps one dead endpoint from holding a whole run.",
+    },
+    {
+      name: "ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE",
+      value: String(policy.ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE),
+      means:
+        "How many consecutive timed-out deliveries turn an endpoint off. Its pending deliveries are then failed endpoint_disabled, and GET /keys/me/webhooks shows the holder that it is no longer enabled.",
+    },
+    {
       name: "ALERT_KINDS",
       value: policy.ALERT_KINDS.join(", "),
       means:
@@ -734,6 +752,18 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         "The most events one seal covers. A longer run is not dropped: the next seal continues from where this one stopped, so the chain stays contiguous.",
     },
     {
+      name: "SWEEP_BATCH_STATEMENTS",
+      value: String(policy.SWEEP_BATCH_STATEMENTS),
+      means:
+        "The most statements one database batch carries. An operational limit rather than a rule of the record: a seal covering the ceiling above is one write per entry it covers, so the write is cut into batches the database takes rather than one it may refuse.",
+    },
+    {
+      name: "LEDGER_ENTRIES_PER_RUN",
+      value: String(policy.LEDGER_ENTRIES_PER_RUN),
+      means:
+        "How many of a published day's entries one run of the ledger step prices. A longer day is not dropped: the next run resumes it where this one stopped, and the day's reconciliation is written only once every entry of it has been priced.",
+    },
+    {
       name: "WITNESS_FILE_TAIL_BYTES",
       value: `${policy.WITNESS_FILE_TAIL_BYTES} bytes`,
       means:
@@ -839,6 +869,23 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "HOME_LATEST_ENTRIES",
       value: String(policy.HOME_LATEST_ENTRIES),
       means: "How many entries the home page's latest-sealed row shows.",
+    },
+    {
+      name: "LANDING_BAND_SEALS",
+      value: String(policy.LANDING_BAND_SEALS),
+      means: "How many seals the landing page's live seal-chain band shows.",
+    },
+    {
+      name: "PAGE_CACHE_SECONDS",
+      value: `${policy.PAGE_CACHE_SECONDS} seconds`,
+      means:
+        "How long an anonymous page may be served from the edge cache. Operational rather than a rule of the record: it says how far behind the log a page may be, never what anything costs or what anyone is allowed. The JSON doors are not cached at any number.",
+    },
+    {
+      name: "PAGE_CACHE_STALE_SECONDS",
+      value: `${policy.PAGE_CACHE_STALE_SECONDS} seconds`,
+      means:
+        "How long past that a stale copy may be served while a fresh one is fetched.",
     },
   ];
 

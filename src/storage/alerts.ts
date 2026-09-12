@@ -16,7 +16,7 @@
  * could reach.
  */
 
-import type { AlertKind } from "../policy.js";
+import { SWEEP_BATCH_STATEMENTS, type AlertKind } from "../policy.js";
 import {
   readInteger,
   readJson,
@@ -322,6 +322,22 @@ export async function putAlertDeliveriesIfNew(
   await insertDeliveries(db, batch, "INSERT OR IGNORE");
 }
 
+/**
+ * The write behind both, cut into batches of at most SWEEP_BATCH_STATEMENTS.
+ *
+ * One statement per delivery, and a run that examined a page of events with
+ * several endpoints subscribed writes events times alerts times endpoints rows
+ * — more than one D1 batch may safely carry. So the write is cut rather than
+ * refused whole, exactly as the seal's rewrites and the ledger's rows are.
+ *
+ * What the chunks cost is that they are not one transaction, and that is why
+ * the cursor is moved by the caller only after this returns: a run killed
+ * between two chunks has written some of the page's deliveries and moved
+ * nothing, and the run after it derives the same page again. The random-id
+ * write would then duplicate what the killed run landed, which is a delivery
+ * made twice rather than an alert lost — the direction this step errs in
+ * everywhere, and the reason every body carries its own id.
+ */
 async function insertDeliveries(
   db: D1Like,
   batch: readonly AlertDeliveryInput[],
@@ -345,7 +361,13 @@ async function insertDeliveries(
         delivery.createdAt,
       ),
   );
-  await db.batch(statements);
+  for (
+    let from = 0;
+    from < statements.length;
+    from += SWEEP_BATCH_STATEMENTS
+  ) {
+    await db.batch(statements.slice(from, from + SWEEP_BATCH_STATEMENTS));
+  }
 }
 
 /**
@@ -428,6 +450,44 @@ export async function markDelivery(
       id,
     )
     .run();
+}
+
+/** What one attempted delivery came back as, for the endpoint-silence rule. */
+export interface AlertAttemptOutcome {
+  readonly last_status: number | null;
+  readonly last_error: string | null;
+}
+
+/**
+ * One endpoint's most recent attempted deliveries, newest first.
+ *
+ * Attempted, which is `attempts > 0`: a delivery nobody has posted yet says
+ * nothing about whether the endpoint answers, and a step that delivers oldest
+ * first leaves the untried ones at the newest end. The caller's own limit, like
+ * every read here, and the newest by the same (created_at, id) pair the
+ * endpoint's own listing pages by, so two deliveries built in one run of the
+ * step cannot hide each other.
+ *
+ * The status and the error only: the rule this feeds asks whether the endpoint
+ * answered, and the bodies are the holder's listing's business.
+ */
+export async function recentAttempts(
+  db: D1Like,
+  endpointId: string,
+  limit: number,
+): Promise<AlertAttemptOutcome[]> {
+  const rows = await db
+    .prepare(
+      `SELECT last_status, last_error FROM alert_deliveries
+       WHERE endpoint_id = ? AND attempts > 0
+       ORDER BY created_at DESC, id DESC LIMIT ?`,
+    )
+    .bind(endpointId, limit)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    last_status: readNullableInteger(row, "last_status"),
+    last_error: readNullableText(row, "last_error"),
+  }));
 }
 
 /**

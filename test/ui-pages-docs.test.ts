@@ -43,6 +43,7 @@ import {
   TXT_RECORD_PREFIX,
 } from "../src/registry.js";
 import { READ_QUERY_REFUSALS } from "../src/read.js";
+import { STAGE_COUNT } from "../src/status.js";
 import { SUBMISSION_REFUSALS } from "../src/submit.js";
 import { SYNC_QUERY_REFUSALS } from "../src/sync.js";
 import { renderApi } from "../src/ui/pages/api.js";
@@ -1409,11 +1410,11 @@ describe("renderApi", () => {
   });
 
   it("counts the status stages as the status rules count them", () => {
-    // The mirror export is a stage of the pipeline now, so the endpoint's own
-    // description says thirteen: a page naming twelve would be documenting a
-    // shape the route no longer answers.
-    expect(page).toContain("thirteen of them");
-    expect(page).not.toContain("twelve of them");
+    // The count is read from the status rules themselves rather than spelled
+    // here, so a stage added to the pipeline cannot leave the endpoint's own
+    // description documenting a shape the route no longer answers.
+    expect(page).toContain(`${STAGE_COUNT} of them`);
+    expect(page).not.toContain("thirteen of them");
   });
 
   it("carries no script and no inline style", () => {

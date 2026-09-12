@@ -163,10 +163,17 @@ describe("the fifteen stages", () => {
       "every published paid read reported to the provider",
       "every sealed change delivered to every subscribed endpoint",
     ];
-    expect(stageStates(empty(), NOW).map((one) => one.rule)).toEqual(rules);
+    // And the clause every one of them carries, because every one of them is
+    // read the same way when the step behind it fell over: a stage that decided
+    // from derived facts alone would report the state the last working run left
+    // (the QA of 2026-09-12).
+    const said = rules.map(
+      (rule) => `${rule}; a step that threw reads failing until it runs clean`,
+    );
+    expect(stageStates(empty(), NOW).map((one) => one.rule)).toEqual(said);
     // The rule is what the state was decided by and not a reading of it, so a
     // world where things have happened says exactly the same fifteen.
-    expect(stageStates(swept(), NOW).map((one) => one.rule)).toEqual(rules);
+    expect(stageStates(swept(), NOW).map((one) => one.rule)).toEqual(said);
   });
 
   it("names the constants it applies and never their values", () => {

@@ -42,7 +42,10 @@ import { base64urlEncode } from "../encoding.js";
 import type { Event } from "../events.js";
 import { entryHash } from "../hash.js";
 import {
+  ALERT_DELIVERIES_PER_RUN,
+  ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE,
   ALERT_ENDPOINTS_PER_KEY,
+  ALERT_EVENTS_PER_RUN,
   ALERT_KINDS,
   ALERT_RETRY_MINUTES,
   ALERT_TIMEOUT_MS,
@@ -64,6 +67,7 @@ import {
   putAlertDeliveries,
   putAlertDeliveriesIfNew,
   putAlertEndpoint,
+  recentAttempts,
   setAlertCursor,
   setStaleAlertCursor,
   staleAlertCursor,
@@ -154,8 +158,19 @@ function filterOf(endpoint: AlertEndpointRecord): AlertFilter {
   };
 }
 
-/** One endpoint as its holder sees it. Never the secret. */
-function endpointView(endpoint: AlertEndpointRecord): Record<string, unknown> {
+/**
+ * One endpoint as its holder sees it. Never the secret.
+ *
+ * `enabled` is the one derived field on it, and like every derived field here
+ * it is recomputed rather than stored: an endpoint is enabled unless its last
+ * ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE deliveries all went unanswered
+ * (`silenced` below). A holder whose endpoint went quiet learns it here rather
+ * than by noticing that nothing arrives.
+ */
+function endpointView(
+  endpoint: AlertEndpointRecord,
+  enabled: boolean,
+): Record<string, unknown> {
   return {
     id: endpoint.id,
     url: endpoint.url,
@@ -166,7 +181,53 @@ function endpointView(endpoint: AlertEndpointRecord): Record<string, unknown> {
       kinds: endpoint.kinds,
     },
     created_at: endpoint.created_at,
+    enabled,
   };
+}
+
+/**
+ * An error name that means the endpoint never answered.
+ *
+ * `endpoint_disabled` is in the list because it is the mark this very rule
+ * leaves: once an endpoint is off, its pending deliveries are closed with that
+ * reason rather than posted, and a rule that read those rows as "not a timeout"
+ * would turn the endpoint back on with the first of them. A delivery this rule
+ * refused is a continuation of the silence that caused it, not evidence
+ * against it.
+ */
+const SILENT_ERRORS: readonly string[] = [
+  "TimeoutError",
+  "AbortError",
+  "endpoint_disabled",
+];
+
+/**
+ * Whether an endpoint has stopped answering.
+ *
+ * Section 9 sells alerts, and a host that has not answered its last
+ * ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE deliveries is not slow but gone: a step
+ * that kept posting to it would spend its whole per-run budget on nobody, and
+ * the backlog behind it would only grow. Fewer attempts than the rule asks for
+ * is never silence — a new endpoint that timed out once is retried on the
+ * published ladder like any other.
+ *
+ * Derived from the delivery records and never stored, so the answer is
+ * recomputed from what actually happened and a holder can check it at
+ * `GET /keys/me/webhooks/{id}/deliveries`.
+ */
+async function silenced(db: D1Like, endpointId: string): Promise<boolean> {
+  const recent = await recentAttempts(
+    db,
+    endpointId,
+    ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE,
+  );
+  if (recent.length < ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE) return false;
+  return recent.every(
+    (attempt) =>
+      attempt.last_status === null &&
+      attempt.last_error !== null &&
+      SILENT_ERRORS.includes(attempt.last_error),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -305,13 +366,17 @@ async function subscribe(
     createdAt: now.toISOString(),
   });
 
-  return json({ ...endpointView(stored), secret: stored.secret }, 201);
+  return json({ ...endpointView(stored, true), secret: stored.secret }, 201);
 }
 
 /** The key's live endpoints. No secrets: they were shown once. */
 async function listEndpoints(db: D1Like, key: KeyRecord): Promise<Response> {
   const rows = await alertEndpointsForKey(db, key.id, ALERT_ENDPOINTS_PER_KEY);
-  return json({ key: key.id, endpoints: rows.map(endpointView) }, 200);
+  const endpoints: Record<string, unknown>[] = [];
+  for (const row of rows) {
+    endpoints.push(endpointView(row, !(await silenced(db, row.id))));
+  }
+  return json({ key: key.id, endpoints }, 200);
 }
 
 /**
@@ -609,26 +674,31 @@ function bodyFor(
  * Walk the sealed events past the cursor and write the deliveries they call
  * for, then move the cursor.
  *
- * Bounded by LIST_PAGE_LIMIT events per run, like every other step that walks
- * the log: a backlog is caught up over runs and never in one unbounded read.
- * The cursor moves to the last event examined, so the next run starts where
- * this one stopped whether or not any of those events alerted anybody.
+ * Bounded by ALERT_EVENTS_PER_RUN events per run: a backlog is caught up over
+ * runs and never in one unbounded read. Its own number and not the page limit
+ * every listing uses, because the cost here is not a page of rows — deriving
+ * one event's alerts rebuilds an entry's world, and a hundred of those is a
+ * hundred folds inside an alarm that also has to deliver. The cursor moves to
+ * the last event examined, so the next run starts where this one stopped
+ * whether or not any of those events alerted anybody.
+ *
+ * The world cache is the run's, handed in: two events about one entry rebuild
+ * it once.
  */
 async function createDeliveries(
   db: D1Like,
   input: { now: Date; sealedHead: number; origin: string },
   endpoints: readonly AlertEndpointRecord[],
+  cache: WorldCache,
 ): Promise<number> {
   const cursor = await alertCursor(db);
   if (cursor >= input.sealedHead) return 0;
 
-  const page = await eventsAfter(db, cursor, LIST_PAGE_LIMIT);
+  const page = await eventsAfter(db, cursor, ALERT_EVENTS_PER_RUN);
   const events = page.filter((event) => event.seq <= input.sealedHead);
   if (events.length === 0) return 0;
 
   const at = input.now.toISOString();
-  // One reading of the registry for the whole run, handed to every gathering.
-  const cache = worldCache();
   const batch: AlertDeliveryInput[] = [];
   for (const event of events) {
     const alerts = await alertsFor(db, event, input.now, cache);
@@ -795,12 +865,22 @@ async function deliver(
     kind: AlertKind;
   },
   input: { now: Date; fetch: typeof fetch },
+  off: Map<string, boolean>,
 ): Promise<"delivered" | "retried" | "failed"> {
   const at = input.now.toISOString();
   const endpoint = await alertEndpoint(db, delivery.endpoint_id);
-  if (endpoint === null || endpoint.disabled_at !== null) {
-    // The holder turned it off after this alert was built. Nothing is posted,
-    // and the row says why rather than sitting pending forever.
+  // The silence rule, asked once per endpoint per run: a run that posts
+  // ALERT_DELIVERIES_PER_RUN deliveries to one dead endpoint would otherwise
+  // ask it that many times for the same answer.
+  let quiet = off.get(delivery.endpoint_id);
+  if (quiet === undefined) {
+    quiet = endpoint !== null && (await silenced(db, endpoint.id));
+    off.set(delivery.endpoint_id, quiet);
+  }
+  if (endpoint === null || endpoint.disabled_at !== null || quiet) {
+    // The holder turned it off after this alert was built, or it stopped
+    // answering and the rule turned it off. Nothing is posted, and the row says
+    // why rather than sitting pending forever.
     await markDelivery(db, delivery.id, {
       status: "failed",
       attempts: delivery.attempts,
@@ -915,6 +995,8 @@ export async function runAlertStep(
   skip: (reason: string) => void,
 ): Promise<AlertStepReport> {
   let created = 0;
+  // One reading of the registry for the whole run, handed to every gathering.
+  const cache = worldCache();
   const endpoints = await enabledAlertEndpoints(db, null, LIST_PAGE_LIMIT);
   if (endpoints.length === 0) {
     await setAlertCursor(db, input.sealedHead);
@@ -924,19 +1006,24 @@ export async function runAlertStep(
     );
     skip("alerts_no_endpoint");
   } else {
-    created = await createDeliveries(db, input, endpoints);
+    created = await createDeliveries(db, input, endpoints, cache);
     created += await createStaleDeliveries(db, input, endpoints);
   }
 
   let delivered = 0;
   let failed = 0;
   let retried = 0;
+  // At most ALERT_DELIVERIES_PER_RUN, oldest first: each may take
+  // ALERT_TIMEOUT_MS, so a run that took a page of them could be held for a
+  // quarter of an hour by hosts that never answer, and the backlog behind them
+  // would only grow. What this run does not reach, the next one does.
+  const off = new Map<string, boolean>();
   for (const row of await dueDeliveries(
     db,
     input.now.toISOString(),
-    LIST_PAGE_LIMIT,
+    ALERT_DELIVERIES_PER_RUN,
   )) {
-    const outcome = await deliver(db, row, input);
+    const outcome = await deliver(db, row, input, off);
     if (outcome === "delivered") delivered += 1;
     else if (outcome === "failed") failed += 1;
     else retried += 1;

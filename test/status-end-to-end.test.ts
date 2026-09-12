@@ -529,12 +529,18 @@ describe("a step whose dependency throws", () => {
       expect([step, byStep.get(step)!.trigger]).toEqual([step, "alarm"]);
     }
     // The step it threw in carries what the throw said, dated to this run, and
-    // does not claim to have got through.
-    expect(byStep.get("draws")!.last_skip_reason).toBe("beacon adapter exploded");
+    // does not claim to have got through. Marked as thrown rather than left as a
+    // bare message: a rule's refusal and a thrown message share one column, and
+    // every stage rule reads the mark to tell them apart (the QA of 2026-09-12).
+    expect(byStep.get("draws")!.last_skip_reason).toBe(
+      "threw: beacon adapter exploded",
+    );
     expect(byStep.get("draws")!.last_skip_at).toBe(at.toISOString());
     expect(byStep.get("draws")!.last_ok_at).not.toBe(at.toISOString());
     // So does the run itself: a sweep that fell over did not get through.
-    expect(byStep.get("sweep")!.last_skip_reason).toBe("beacon adapter exploded");
+    expect(byStep.get("sweep")!.last_skip_reason).toBe(
+      "threw: beacon adapter exploded",
+    );
     expect(byStep.get("sweep")!.last_ok_at).not.toBe(at.toISOString());
     // The steps above it ran, and say so.
     expect(byStep.get("snapshot")!.last_ok_at).toBe(at.toISOString());

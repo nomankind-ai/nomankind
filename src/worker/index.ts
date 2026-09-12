@@ -205,10 +205,10 @@ const PAGE_CACHE_CONTROL =
   `stale-while-revalidate=${PAGE_CACHE_STALE_SECONDS}`;
 
 /**
- * The paths whose 200 is a page: everything `handlePages` renders, plus the one
- * JSON door that is cached with them — `GET /policy`, which is a frozen module
- * constant and the same object for every caller. The listing, the entry, the
- * operator directory and one operator are the prefixes below.
+ * The paths whose 200 is a page: everything `handlePages` renders, plus the two
+ * JSON doors that are cached with them — `GET /policy` and `GET /status`, named
+ * in CACHEABLE_JSON_PATHS below. The listing, the entry, the operator directory
+ * and one operator are the prefixes below.
  */
 const CACHEABLE_PATHS: ReadonlySet<string> = new Set([
   "/",
@@ -315,11 +315,24 @@ function cacheable(request: Request, url: URL): boolean {
   return cacheablePath(url.pathname);
 }
 
+/**
+ * The JSON doors cached beside the pages, and the only ones.
+ *
+ * `GET /policy` is a frozen module constant and the same object for every
+ * caller. `GET /status` is the same reading of the same stored rows the status
+ * page is rendered from, and nothing on it is probed when it is asked for — so
+ * the twin that a browser gets cached and the twin that an agent gets rendered
+ * from D1 every time was one door answering the same question at two prices.
+ * Both are anonymous answers: a request carrying a key or an agent signature is
+ * never served from the cache or stored in it, whatever its path.
+ */
+const CACHEABLE_JSON_PATHS: ReadonlySet<string> = new Set(["/policy", "/status"]);
+
 /** Whether the answer we rendered is one of the documents that may be stored. */
 function storable(path: string, response: Response): boolean {
   if (response.status !== 200) return false;
   const type = response.headers.get("content-type") ?? "";
-  return type.startsWith("text/html") || path === "/policy";
+  return type.startsWith("text/html") || CACHEABLE_JSON_PATHS.has(path);
 }
 
 /**

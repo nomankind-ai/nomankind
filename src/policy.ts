@@ -1160,14 +1160,49 @@ export const WITNESSES_REQUIRED = 1;
 
 /**
  * Lifecycle of an entry (Seal). The most events one seal may cover. A run
- * longer than this is not dropped: the seal takes the first thousand and the
+ * longer than this is not dropped: the seal takes the first two hundred and the
  * next run continues from where it stopped, so the chain stays contiguous.
  *
  * Not a whitepaper number, and not a rule: it is operational, a ceiling on the
- * work one sweep does and on the size of one Merkle batch. The maintainer's own
- * choice; it moves only by a later decision.
+ * work one sweep does and on the size of one Merkle batch. A published
+ * placeholder of the maintainer's own — two hundred, because a seal's writes
+ * are one statement per entry it covers and the sweep has five minutes to make
+ * them, so the ceiling is set where one run's work comfortably fits rather than
+ * where D1 gives out. It moves only by a later decision.
  */
-export const SEAL_MAX_EVENTS = 1000;
+export const SEAL_MAX_EVENTS = 200;
+
+/**
+ * The most statements one D1 batch may carry.
+ *
+ * An operational limit rather than a rule of the record: it says nothing about
+ * what anyone may do or what anything costs, only the size a write is cut into
+ * so that a seal covering SEAL_MAX_EVENTS entries reaches the database as
+ * several safe batches instead of one it may refuse. A hundred, which is the
+ * size D1 is known to take.
+ *
+ * Published like every other constant here all the same — it lives in this
+ * module and on the policy page, because the rule is that every number the
+ * kernel reads is one a reader can look up, whether or not it is a rule.
+ */
+export const SWEEP_BATCH_STATEMENTS = 100;
+
+/**
+ * Incentives / Money, Section 9: "Each day's published count is the number the
+ * seal commits to and payouts are computed from." How many of a published day's
+ * entries one run of the ledger step prices.
+ *
+ * Not a whitepaper number and not a rule about money: what a day is worth does
+ * not depend on it. Pricing one entry is a read of the entry and a read per
+ * read-share slot it seated, so a day on which a thousand entries were read is
+ * thousands of statements, and a run that tried them all would be killed
+ * part-way through a day rather than finish it. A published placeholder of the
+ * maintainer's own — twenty, which leaves room for the rest of the sweep in one
+ * alarm — and the day is not dropped: the next run resumes the same day where
+ * this one stopped, and the day's reconciliation is written only once every
+ * entry of it has been priced. It moves only by a later decision.
+ */
+export const LEDGER_ENTRIES_PER_RUN = 20;
 
 /**
  * Lifecycle of an entry (Seal). How many bytes of a witness's published
@@ -1458,8 +1493,8 @@ export const LANDING_BAND_SEALS = 12;
  * costs the same reads whether one reader asks or fifty. The JSON doors are not
  * cached at all, at any number: an agent asks the log, not the edge.
  *
- * Not whitepaper numbers. The maintainer's published policy; they move only by
- * a later decision.
+ * Not whitepaper numbers, and operational rather than rules of the record. The
+ * maintainer's published policy; they move only by a later decision.
  */
 export const PAGE_CACHE_SECONDS = 60;
 export const PAGE_CACHE_STALE_SECONDS = 300;
@@ -1693,6 +1728,27 @@ export const ALERT_RETRY_MINUTES: readonly number[] = Object.freeze([
 ]);
 
 /**
+ * What one run of the alert step may do: how many sealed events past its cursor
+ * it derives alerts from, how many due deliveries it posts, and how many
+ * consecutive timed-out deliveries turn an endpoint off.
+ *
+ * None of the three is in the paper, which names the feature and no amount: the
+ * maintainer's own placeholders, published here so a subscriber can see what
+ * bounds the step, and they move only by a later decision.
+ *
+ * Twenty events, because deriving one event's alerts re-derives a world; eight
+ * deliveries, because each may take ALERT_TIMEOUT_MS and eight of those fit
+ * inside one alarm with room to spare, where a hundred would not; five
+ * timeouts, because an endpoint that has not answered its last five deliveries
+ * is not slow but gone, and a run that kept posting to it would spend its whole
+ * budget on a host nobody is listening on. A backlog is not dropped by any of
+ * them: what a run does not reach, the next run does.
+ */
+export const ALERT_EVENTS_PER_RUN = 20;
+export const ALERT_DELIVERIES_PER_RUN = 8;
+export const ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE = 5;
+
+/**
  * What a change alert can be about: the seven moments in an entry's life a
  * subscriber is told about. Every one of them is a fact already in the sealed
  * log, so an alert is a notification of something public and never a fact of
@@ -1786,6 +1842,8 @@ export const POLICY = Object.freeze({
   STATUS_FAILING_AFTER_MINUTES,
   WITNESSES_REQUIRED,
   SEAL_MAX_EVENTS,
+  SWEEP_BATCH_STATEMENTS,
+  LEDGER_ENTRIES_PER_RUN,
   WITNESS_FILE_TAIL_BYTES,
   REGISTRY,
   WITNESS_PIN,
@@ -1816,6 +1874,9 @@ export const POLICY = Object.freeze({
   ALERT_ENDPOINTS_PER_KEY,
   ALERT_TIMEOUT_MS,
   ALERT_RETRY_MINUTES,
+  ALERT_EVENTS_PER_RUN,
+  ALERT_DELIVERIES_PER_RUN,
+  ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE,
   ALERT_KINDS,
   PAYOUT_MINIMUM_MICROS,
   PAYOUT_CYCLE,
@@ -1836,5 +1897,7 @@ export const POLICY = Object.freeze({
   USAGE_DAYS_MAX,
   HOME_LATEST_ENTRIES,
   LANDING_BAND_SEALS,
+  PAGE_CACHE_SECONDS,
+  PAGE_CACHE_STALE_SECONDS,
   BEACON,
 });

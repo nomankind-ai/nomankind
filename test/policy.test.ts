@@ -28,6 +28,8 @@ import {
   excludedPartyDomains,
   NONCE_RETENTION_SECONDS,
   NORM_VERSION,
+  PAGE_CACHE_SECONDS,
+  PAGE_CACHE_STALE_SECONDS,
   PAYOUT_CYCLE,
   PAYOUT_MINIMUM_MICROS,
   POLICY,
@@ -40,6 +42,7 @@ import {
   REPRODUCTION_RUNS,
   SEAL_INTERVAL_MINUTES,
   SEAL_MAX_EVENTS,
+  SWEEP_BATCH_STATEMENTS,
   SCHEMA_VERSION,
   SLOT_COUNT,
   stalenessWindowDays,
@@ -100,6 +103,8 @@ const EXPECTED_POLICY_KEYS = [
   "STATUS_FAILING_AFTER_MINUTES",
   "WITNESSES_REQUIRED",
   "SEAL_MAX_EVENTS",
+  "SWEEP_BATCH_STATEMENTS",
+  "LEDGER_ENTRIES_PER_RUN",
   "WITNESS_FILE_TAIL_BYTES",
   "REGISTRY",
   "WITNESS_PIN",
@@ -130,6 +135,9 @@ const EXPECTED_POLICY_KEYS = [
   "ALERT_ENDPOINTS_PER_KEY",
   "ALERT_TIMEOUT_MS",
   "ALERT_RETRY_MINUTES",
+  "ALERT_EVENTS_PER_RUN",
+  "ALERT_DELIVERIES_PER_RUN",
+  "ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE",
   "ALERT_KINDS",
   "PAYOUT_MINIMUM_MICROS",
   "PAYOUT_CYCLE",
@@ -150,6 +158,8 @@ const EXPECTED_POLICY_KEYS = [
   "USAGE_DAYS_MAX",
   "HOME_LATEST_ENTRIES",
   "LANDING_BAND_SEALS",
+  "PAGE_CACHE_SECONDS",
+  "PAGE_CACHE_STALE_SECONDS",
   "BEACON",
 ];
 
@@ -399,13 +409,24 @@ describe("policy numbers", () => {
     // maintainer's initial policy (D-054): one distinct pinned operator.
     expect(WITNESSES_REQUIRED).toBe(1);
     // The most events one seal covers; the next run continues from there.
-    expect(SEAL_MAX_EVENTS).toBe(1000);
+    expect(SEAL_MAX_EVENTS).toBe(200);
+    // And the size its write is cut into: a seal covering the ceiling is one
+    // statement per entry plus its own row, which is more than one D1 batch may
+    // carry, so the ceiling is a whole number of batches and then some.
+    expect(SWEEP_BATCH_STATEMENTS).toBe(100);
+    expect(SEAL_MAX_EVENTS).toBeGreaterThan(SWEEP_BATCH_STATEMENTS);
+    // Operational, and published all the same: every number the kernel reads is
+    // one a reader can look up, so it is in the frozen object like the rest.
+    expect(POLICY.SWEEP_BATCH_STATEMENTS).toBe(SWEEP_BATCH_STATEMENTS);
+    expect(POLICY.PAGE_CACHE_SECONDS).toBe(PAGE_CACHE_SECONDS);
+    expect(POLICY.PAGE_CACHE_STALE_SECONDS).toBe(PAGE_CACHE_STALE_SECONDS);
     // How much of a witness's growing JSONL file is read, from the end.
     expect(WITNESS_FILE_TAIL_BYTES).toBe(262144);
     expect(WITNESS_FILE_TAIL_BYTES).toBe(256 * 1024);
     for (const value of [
       WITNESSES_REQUIRED,
       SEAL_MAX_EVENTS,
+      SWEEP_BATCH_STATEMENTS,
       WITNESS_FILE_TAIL_BYTES,
     ]) {
       expect(Number.isInteger(value)).toBe(true);
