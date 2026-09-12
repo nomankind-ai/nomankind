@@ -233,6 +233,31 @@ describe("a run whose seal step throws", () => {
     expect(board.filter((one) => one.state === "failing").length).toBe(
       [sealing, timer].length,
     );
+
+    // The steps above the throw are dated to the run that fell over, and the
+    // steps below it keep the row the last run that reached them left: a step
+    // the run never got to is a step that has not been re-run, and dating its
+    // row to this run would date it to a run it had no part in and wipe the
+    // detail the stage rules read off it.
+    const byStep = new Map(rows.map((row) => [row.step, row]));
+    for (const step of ["sweep", "snapshot", "draws", "seal"]) {
+      expect([step, byStep.get(step)!.last_run_at]).toEqual([
+        step,
+        broke.toISOString(),
+      ]);
+    }
+    for (const step of ["witness", "anchor", "mirror", "ledger", "counters"]) {
+      expect([step, byStep.get(step)!.last_run_at]).toEqual([
+        step,
+        NOW.toISOString(),
+      ]);
+      // And with their own detail still on them, from the run that did reach
+      // them: a blank row would read as a step that has never run at all.
+      expect([step, byStep.get(step)!.last_skip_reason]).not.toEqual([
+        step,
+        `${THROWN_REASON_PREFIX}${D1_ERROR}`,
+      ]);
+    }
   }, 240_000);
 
   it("reads ok again after a later run of that step gets through", async () => {

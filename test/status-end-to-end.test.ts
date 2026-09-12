@@ -25,6 +25,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FixtureBeacon, type BeaconReader } from "../src/adapters/beacon.js";
 import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import {
+  FETCH_TIMEOUT_MS,
   STATUS_ATTENTION_AFTER_INTERVALS,
   STATUS_FAILING_AFTER_MINUTES,
   SWEEP_INTERVAL_MINUTES,
@@ -287,10 +288,13 @@ describe("a sweep's own account of itself", () => {
         "unsealed",
       ]);
     }
-    // The beacon answered, so the draws step's last good read is this run.
+    // No draft in this world is owed a validator, so the chain was never asked
+    // and the row says exactly that: a step that did what the rule says is a
+    // step that got through, and "no round was needed" is not "the beacon is
+    // down" (src/status.ts reads the reason word to tell them apart).
     expect(byStep.get("draws")!.last_ok_at).toBe(AT);
-    expect(byStep.get("draws")!.detail["beacon_reason"]).toBeNull();
-    expect(byStep.get("draws")!.detail["beacon_at"]).toBe(AT);
+    expect(byStep.get("draws")!.detail["beacon_reason"]).toBe("no_draw_due");
+    expect(byStep.get("draws")!.detail["beacon_at"]).toBeNull();
   }, 240_000);
 
   it("carries a step's last refusal forward past a later run that worked", async () => {
@@ -502,22 +506,28 @@ describe("the how it works page, over the same world", () => {
   }, 240_000);
 });
 
-describe("a step whose dependency throws", () => {
-  it("writes the board anyway, with the throw's message on the step", async () => {
-    // The beacon is the draws step's one dependency, and this one does not
-    // refuse under a rule — it breaks, which is the case the report has no word
-    // for. Everything above the draws step has already happened when it does.
+describe("a beacon that would throw, on a run that owes no draw", () => {
+  it("is never asked, and the run gets through", async () => {
+    // The draws step used to read the chain once a run whatever the log said,
+    // so a beacon that broke took the sweep down with it and a beacon that was
+    // merely slow held every step behind it for a whole fetch timeout — which
+    // is what the demo deployment spent thirty seconds a run doing. The read is
+    // made where the draw is decided now, and no draft in this world is owed
+    // one: this reader would throw if anything asked it, and nothing does.
+    //
+    // A step that really throws is the subject of test/status-thrown-step.ts;
+    // what is pinned here is that the beacon is not asked for nothing.
     const at = later(SWEEP_INTERVAL_MINUTES, settled);
     const broken: BeaconReader = {
       latest: () => Promise.reject(new Error("beacon adapter exploded")),
     };
 
-    await expect(
-      runSweep(env, { now: at, beacon: broken }),
-    ).rejects.toThrow("beacon adapter exploded");
+    const report = await runSweep(env, { now: at, beacon: broken });
+    expect(report.drawn).toEqual([]);
+    expect(report.revalidation_drawn).toEqual([]);
 
-    // The run threw, and the board is still there: every step still has a row,
-    // and every step the run reached is dated to it.
+    // Every step still has a row, and every one of them is dated to this run:
+    // the run got through, so nothing was left behind by a throw.
     const rows = await sweepSteps(store.db);
     expect(rows).toHaveLength(SWEEP_STEPS.length);
     const byStep = new Map(rows.map((row) => [row.step, row]));
@@ -526,40 +536,22 @@ describe("a step whose dependency throws", () => {
         step,
         at.toISOString(),
       ]);
-      expect([step, byStep.get(step)!.trigger]).toEqual([step, "alarm"]);
-    }
-    // The step it threw in carries what the throw said, dated to this run, and
-    // does not claim to have got through. Marked as thrown rather than left as a
-    // bare message: a rule's refusal and a thrown message share one column, and
-    // every stage rule reads the mark to tell them apart (the QA of 2026-09-12).
-    expect(byStep.get("draws")!.last_skip_reason).toBe(
-      "threw: beacon adapter exploded",
-    );
-    expect(byStep.get("draws")!.last_skip_at).toBe(at.toISOString());
-    expect(byStep.get("draws")!.last_ok_at).not.toBe(at.toISOString());
-    // So does the run itself: a sweep that fell over did not get through.
-    expect(byStep.get("sweep")!.last_skip_reason).toBe(
-      "threw: beacon adapter exploded",
-    );
-    expect(byStep.get("sweep")!.last_ok_at).not.toBe(at.toISOString());
-    // The steps above it ran, and say so.
-    expect(byStep.get("snapshot")!.last_ok_at).toBe(at.toISOString());
-    expect(byStep.get("expiry")!.last_ok_at).toBe(at.toISOString());
-    // The steps below it never ran, so their rows are untouched: the run that
-    // last reached them is still the run they describe, detail and all.
-    for (const step of ["seal", "ledger", "attestation"]) {
-      expect([step, byStep.get(step)!.last_run_at]).toEqual([
+      expect([step, byStep.get(step)!.last_skip_reason]).not.toEqual([
         step,
-        settled.toISOString(),
+        "threw: beacon adapter exploded",
       ]);
     }
-    expect(byStep.get("standing")!.detail["position"]).toEqual(
-      expect.any(Number),
-    );
+    // The draws row says why there is no round, and counts as a step that
+    // worked: "nothing needed one" is the rule, not a failure.
+    expect(byStep.get("draws")!.detail["beacon_reason"]).toBe("no_draw_due");
+    expect(byStep.get("draws")!.detail["beacon_round"]).toBeNull();
+    expect(byStep.get("draws")!.last_ok_at).toBe(at.toISOString());
 
-    // And the page reads it: the sweep timer is dated by the run that fell over
-    // rather than by the last one that worked, which is the whole point of
-    // writing the board on the way out.
+    // And the run reports what each step spent, so a run that did wait on
+    // something can be told from one that did not.
+    const total = Object.values(report.durations).reduce((a, b) => a + b, 0);
+    expect(total).toBeLessThan(FETCH_TIMEOUT_MS);
+
     const body = await status(at);
     expect(body["as_of"]).toBe(at.toISOString());
   }, 240_000);

@@ -32,6 +32,7 @@
 import type { Beacon } from "../assign.js";
 import { sha256Hex } from "../hash.js";
 import { BEACON, FETCH_TIMEOUT_MS } from "../policy.js";
+import { withDeadline } from "./timeout.js";
 
 /** A round, or why the beacon could not give one. */
 export type BeaconResult =
@@ -125,21 +126,23 @@ export class DrandReader implements BeaconReader {
     const call = this.#fetch;
     const url = `${BEACON.endpoint}/${BEACON.chain_hash}/public/latest`;
 
-    let body: LatestBody;
+    let body: LatestBody | null;
     try {
-      const response = await call(url, {
-        method: "GET",
-        signal: AbortSignal.timeout(this.#timeoutMs),
+      // The window covers the request and the body together, and the timer
+      // behind it is cleared the moment either finishes: an `AbortSignal.timeout`
+      // cannot be cleared, and a timer still pending holds the whole invocation
+      // open on workerd (src/adapters/timeout.ts).
+      body = await withDeadline(this.#timeoutMs, async (signal) => {
+        const response = await call(url, { method: "GET", signal });
+        if (response.status < OK_MIN || response.status > OK_MAX) return null;
+        return (await response.json()) as LatestBody;
       });
-      if (response.status < OK_MIN || response.status > OK_MAX) {
-        return UNAVAILABLE;
-      }
-      body = (await response.json()) as LatestBody;
     } catch {
       // A thrown fetch, a chain that never answered and the timeout gave up on,
       // a body that is not JSON: all of them are "we could not ask".
       return UNAVAILABLE;
     }
+    if (body === null) return UNAVAILABLE;
 
     try {
       return await check(body);

@@ -347,6 +347,12 @@ export interface SweepDeps {
    * caller says nothing; a test injects its own so no alert leaves the process.
    */
   readonly alertFetch?: typeof fetch;
+  /**
+   * How long one alert delivery may take. The policy number when a caller says
+   * nothing; injectable for the same reason `alertFetch` is, so a test can
+   * watch a dead endpoint time out without waiting out the real window.
+   */
+  readonly alertTimeoutMs?: number;
 }
 
 /** Which timer ran the sweep. One timer, so one value. */
@@ -612,6 +618,18 @@ export interface SweepReport {
   }[];
   /** One count per reason nothing was done, keyed by the reason's own name. */
   readonly skipped: Readonly<Record<string, number>>;
+  /**
+   * How long each step took, in milliseconds, keyed by the step's own name.
+   *
+   * The one wall-clock measurement in this file, and it is diagnostics and
+   * nothing else: no event carries it, no derived field reads it, and the log's
+   * own time is still the injected clock everywhere it matters. It is here
+   * because a run that took thirty seconds of wall time on forty-six
+   * milliseconds of CPU — which is what one uncancellable timeout did to the
+   * demo deployment — looked, in the report, exactly like a run that took two.
+   * A duration per step says which one waited.
+   */
+  readonly durations: Readonly<Record<string, number>>;
 }
 
 /** The largest seq present, or -1 when there is nothing to read at. */
@@ -2807,6 +2825,22 @@ export async function runSweep(
   // The report is untouched by it: `skipped` counts exactly what it always
   // counted, and this records, per step, the first reason that step gave.
   let inStep = SWEEP_STEPS[0]!;
+  // What each step spent, in wall-clock milliseconds. `Date.now()` and not the
+  // injected clock on purpose: the injected clock is the log's time and does not
+  // move inside a run, and what this measures is exactly what that hides — time
+  // spent waiting on D1 and on the network. It never leaves the report.
+  const durations: Record<string, number> = {};
+  let stepStartedAt = Date.now();
+  const closeStep = (): void => {
+    const now = Date.now();
+    durations[inStep] = (durations[inStep] ?? 0) + (now - stepStartedAt);
+    stepStartedAt = now;
+  };
+  /** Close the step that was running and start the next one. */
+  const enter = (step: string): void => {
+    closeStep();
+    inStep = step;
+  };
   const stepSkip = new Map<string, string>();
   const noteSkip = (step: string, reason: string): void => {
     if (!stepSkip.has(step)) stepSkip.set(step, reason);
@@ -2822,6 +2856,18 @@ export async function runSweep(
   // exactly the run a reader most needs to see.
   let beacon: Beacon | null = null;
   let beaconRefusal: string | null = null;
+  /** Whether any step asked the chain for a round on this run. */
+  let beaconRead = false;
+  /**
+   * The word a run that never needed one records.
+   *
+   * A run that owes no draw makes no beacon read (below), and the board has to
+   * tell that from a read that failed: "nothing asked for one" is the clockwork
+   * working, and `beacon_unavailable` is not. The status rules read the reason
+   * word, and this one is not among the beacon's refusals (src/status.ts), so
+   * the stage reads as a stage with no round rather than as one that is down.
+   */
+  const NO_DRAW_DUE = "no_draw_due";
   let report: SweepReport | null = null;
   /** What a refused mirror push said, or null while none has refused. */
   let mirrorDetail: string | null = null;
@@ -2837,7 +2883,7 @@ export async function runSweep(
   const cache = worldCache();
 
   try {
-    inStep = "snapshot";
+    enter("snapshot");
     // (a) The pool snapshot. Committed before any draw, and never by a draw: the
     // commitment has to be in the log before the beacon round that uses it.
     const registry = await registryEvents(db, cache);
@@ -2861,7 +2907,7 @@ export async function runSweep(
       snapshot = { seq: event.seq, operators: [...owed] };
     }
 
-    inStep = "expiry";
+    enter("expiry");
     // (b) Expiry. The rows say which assignments are past their deadline; the
     // kernel says whether each one is still open and really missed, because the
     // row is only an index into the log and the log is the record.
@@ -2890,7 +2936,7 @@ export async function runSweep(
       });
     }
 
-    inStep = "revalidation";
+    enter("revalidation");
     // (b2) The same expiry, for the other purpose. Section 6, "Revalidate": the
     // check carries the same seventy-two hours as a validation assignment, and a
     // checker who lets them run out is missed exactly as a validator is. A miss
@@ -2944,12 +2990,25 @@ export async function runSweep(
       });
     }
 
-    inStep = "draws";
+    enter("draws");
     // (c) The draws. One beacon read for the whole run, so every entry drawn in
-    // this run is drawn against the same public round.
-    const result = await deps.beacon.latest();
-    beacon = result.ok ? result.beacon : null;
-    beaconRefusal = result.ok ? null : result.reason;
+    // this run is drawn against the same public round — and none at all on a run
+    // that draws nothing.
+    //
+    // Read where the draw is decided rather than here, because the rule already
+    // says which entries are owed one and reading the chain for a run that owes
+    // none is a network call made on the strength of nothing: a log whose pool
+    // is below the switch owes no draw at all, and its sweep spent a round trip
+    // to the beacon every few minutes to be told what the log had already said.
+    const readBeacon = async (): Promise<Beacon | null> => {
+      if (!beaconRead) {
+        beaconRead = true;
+        const result = await deps.beacon.latest();
+        beacon = result.ok ? result.beacon : null;
+        beaconRefusal = result.ok ? null : result.reason;
+      }
+      return beacon;
+    };
 
     const drawn: SweepDraw[] = [];
     let afterSubmittedSeq: number | undefined;
@@ -2984,7 +3043,9 @@ export async function runSweep(
           continue;
         }
 
-        if (beacon === null) {
+        // A draw is owed, so the chain is asked — once, for the whole run.
+        const round = await readBeacon();
+        if (round === null) {
           skip(beaconRefusal ?? "beacon_unavailable");
           continue;
         }
@@ -3002,7 +3063,7 @@ export async function runSweep(
         const draw = await drawValidator({
           entryId,
           snapshot: pool,
-          beacon,
+          beacon: round,
           exclude: [
             ...exclusionsFor(all, entryId),
             ...outsideDomain(
@@ -3048,7 +3109,7 @@ export async function runSweep(
             at,
             agent: agent.agentId,
             operator: draw.operator,
-            beaconRound: beacon.round,
+            beaconRound: round.round,
             replacement: due.replacement,
           }),
         );
@@ -3063,7 +3124,7 @@ export async function runSweep(
           entry_id: entryId,
           operator: draw.operator,
           agent: agent.agentId,
-          beacon_round: beacon.round,
+          beacon_round: round.round,
           replacement: due.replacement,
           seq: event.seq,
         });
@@ -3083,7 +3144,7 @@ export async function runSweep(
     // of the kernel whether it is still open. That is bounded by how many checks
     // have ever been asked for, which is what the cap and the stake exist to keep
     // small.
-    inStep = "revalidation";
+    enter("revalidation");
     const revalidationDrawn: SweepRevalidationDraw[] = [];
     let afterRequestSeq = -1;
     for (;;) {
@@ -3111,7 +3172,9 @@ export async function runSweep(
           continue;
         }
 
-        if (beacon === null) {
+        // The same one read, whichever step needs it first.
+        const round = await readBeacon();
+        if (round === null) {
           skip(beaconRefusal ?? "beacon_unavailable");
           continue;
         }
@@ -3151,12 +3214,12 @@ export async function runSweep(
         const attempted = await drawValidator({
           entryId,
           snapshot: pool,
-          beacon,
+          beacon: round,
           exclude,
         });
         const draw =
           !attempted.ok && attempted.reason === "pool_below_switch"
-            ? await drawChecker({ entryId, snapshot: pool, beacon, exclude })
+            ? await drawChecker({ entryId, snapshot: pool, beacon: round, exclude })
             : attempted;
         if (!draw.ok) {
           skip(draw.reason);
@@ -3181,7 +3244,7 @@ export async function runSweep(
               request_seq: request.seq,
               agent: agent.agentId,
               operator: draw.operator,
-              beacon_round: beacon.round,
+              beacon_round: round.round,
               // The same seventy-two hours a validation assignment carries.
               deadline: assignmentDeadline(at),
             },
@@ -3201,7 +3264,7 @@ export async function runSweep(
           request_seq: request.seq,
           operator: draw.operator,
           agent: agent.agentId,
-          beacon_round: beacon.round,
+          beacon_round: round.round,
           seq: event.seq,
         });
       }
@@ -3210,7 +3273,7 @@ export async function runSweep(
       if (requests.length < LIST_PAGE_LIMIT) break;
     }
 
-    inStep = "staleness";
+    enter("staleness");
     // (d) Staleness. Whitepaper Section 7, "Freshness and decay": past its window
     // an entry stays verified but shows as stale. Nobody appends an event for
     // that — the window closing is a fact about the calendar and about the log,
@@ -3276,14 +3339,14 @@ export async function runSweep(
       afterId = page[page.length - 1]!.id;
     }
 
-    inStep = "publish";
+    enter("publish");
     // (e) The day's read counts. Before the seal on purpose: the count this run
     // publishes is sealed by this same run, which is what Section 9's "each day's
     // published count is the number the seal commits to" asks for. It needs
     // nothing but the clock, so it runs on every environment.
     const published = await publishStep(db, deps.now, at, skip);
 
-    inStep = "attestation";
+    enter("attestation");
     // (e2) The attestations whose window ran out. Before the seal for the same
     // reason the read counts are: an expiry appended here is sealed by this same
     // run, so the log commits to it at once rather than a cycle later.
@@ -3298,7 +3361,7 @@ export async function runSweep(
     let anchored: SweepReport["anchored"] = null;
     let upgraded: SweepReport["upgraded"] = null;
     const sealing = sealingDeps(deps);
-    inStep = "seal";
+    enter("seal");
     if (sealing === null) {
       skip("sealing_unconfigured");
       // One refusal in the report, three steps on the status board: the witness
@@ -3314,9 +3377,9 @@ export async function runSweep(
         registry,
         headPosition(registry),
       );
-      inStep = "witness";
+      enter("witness");
       witnessed = await witnessStep(db, sealing, maintainers, skip, cache);
-      inStep = "anchor";
+      enter("anchor");
       anchored = await anchorStep(db, sealing, skip);
       // (h1) And, in the same step, one pending proof finished if a calendar
       // has finished one. After the day's anchor, because a day that was just
@@ -3329,7 +3392,7 @@ export async function runSweep(
     // before the money, because the ledger reads the same sealed head this
     // export was built at. It never throws past this try/catch for a rule: every
     // refusal is counted like every step above it.
-    inStep = "mirror";
+    enter("mirror");
     const mirrored = await mirrorStep(
       db,
       env.ENVIRONMENT,
@@ -3356,7 +3419,7 @@ export async function runSweep(
       retried: 0,
     };
     const sealedHead = await latestSeal(db);
-    inStep = "ledger";
+    enter("ledger");
     if (sealedHead === null) {
       skip("unsealed");
       skip("unsealed");
@@ -3373,7 +3436,7 @@ export async function runSweep(
       ledger = await ledgerStep(db, sealedHead.last_seq);
       // (i2) The provider's meter, after the ledger and off the same sealed
       // events: what the log published is what a reader is billed for.
-      inStep = "metering";
+      enter("metering");
       metered = await meteringStep(
         db,
         env.ENVIRONMENT,
@@ -3384,7 +3447,7 @@ export async function runSweep(
       );
       // (i3) The change alerts, after the meter and before the standing fold:
       // an endpoint hears about a sealed change in the run that sealed it.
-      inStep = "alerts";
+      enter("alerts");
       alerts = await runAlertStep(
         db,
         {
@@ -3394,12 +3457,15 @@ export async function runSweep(
           // The bodies carry paths and the reader knows the host it subscribed
           // to, so no origin is invented here (contract section 8.2).
           origin: "",
+          ...(deps.alertTimeoutMs === undefined
+            ? {}
+            : { timeoutMs: deps.alertTimeoutMs }),
         },
         skip,
       );
-      inStep = "standing";
+      enter("standing");
       standing = await standingStep(db, sealedHead.last_seq, at, skip, cache);
-      inStep = "payout";
+      enter("payout");
       payouts = await payoutStep(db, deps.payout, sealedHead.last_seq, at, skip);
     }
 
@@ -3409,7 +3475,7 @@ export async function runSweep(
     // an empty seals table to count, and a page on a fresh deployment should be
     // shown those rather than nothing. The position is then -1, which is what
     // "counted before anything was sealed" means everywhere else in this file.
-    inStep = "counters";
+    enter("counters");
     const counters = await countersStep(
       db,
       sealedHead === null ? -1 : sealedHead.last_seq,
@@ -3417,6 +3483,7 @@ export async function runSweep(
       skip,
     );
 
+    closeStep();
     report = {
       at,
       snapshot,
@@ -3439,6 +3506,7 @@ export async function runSweep(
       payouts,
       counters,
       skipped,
+      durations,
     };
 
     // The run's own account of itself, once, on stdout. Nothing else surfaces the
@@ -3483,7 +3551,10 @@ export async function runSweep(
       stepRows(at, report, deps, {
         stepSkip,
         beacon,
-        beaconRefusal,
+        // A run that never needed a round says so, rather than leaving the
+        // stage looking like one that has never been read.
+        beaconRefusal: beaconRead ? beaconRefusal : NO_DRAW_DUE,
+        beaconNeeded: beaconRead,
         mirrorDetail,
         failedStep,
       }),
@@ -3526,6 +3597,15 @@ interface Board {
   readonly stepSkip: ReadonlyMap<string, string>;
   readonly beacon: Beacon | null;
   readonly beaconRefusal: string | null;
+  /**
+   * Whether the run asked the chain at all.
+   *
+   * False is a run that owed no draw, and its draws row is a step that worked:
+   * `last_ok_at` for this one step means "the beacon answered", and a run that
+   * never had to ask did what the rule said. Only a read that was made and came
+   * back empty leaves the stage without a good instant.
+   */
+  readonly beaconNeeded: boolean;
   /** What a refused push said, which no report field carries. */
   readonly mirrorDetail: string | null;
   /** The step the run threw in, or null when it finished. */
@@ -3558,7 +3638,7 @@ function stepRows(
   deps: SweepDeps,
   board: Board,
 ): SweepStepRow[] {
-  const { stepSkip, beacon, beaconRefusal } = board;
+  const { stepSkip, beacon, beaconRefusal, beaconNeeded } = board;
   const trigger = deps.trigger ?? "alarm";
   const details: Record<string, Record<string, unknown>> =
     report === null
@@ -3635,7 +3715,7 @@ function stepRows(
       last_run_at: at,
       last_ok_at:
         step === "draws"
-          ? beacon === null
+          ? beacon === null && beaconNeeded
             ? null
             : at
           : okAt(at, step, stepSkip),

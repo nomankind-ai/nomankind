@@ -23,6 +23,7 @@
  */
 
 import { FETCH_TIMEOUT_MS } from "../policy.js";
+import { withDeadline } from "./timeout.js";
 
 /** What a TXT lookup found, or why it could not say. */
 export type TxtLookup =
@@ -105,12 +106,17 @@ export class DohResolver implements DnsResolver {
     const url = `${this.#endpoint}?name=${encodeURIComponent(name)}&type=TXT`;
     let payload: unknown;
     try {
-      const response = await call(url, {
-        headers: { accept: "application/dns-json" },
-        signal: AbortSignal.timeout(this.#timeoutMs),
+      // One window over the request and the body, on a timer that is cleared
+      // when they are done: a pending `AbortSignal.timeout` holds the whole
+      // invocation open on workerd (src/adapters/timeout.ts).
+      payload = await withDeadline(this.#timeoutMs, async (signal) => {
+        const response = await call(url, {
+          headers: { accept: "application/dns-json" },
+          signal,
+        });
+        if (!response.ok) return null;
+        return (await response.json()) as unknown;
       });
-      if (!response.ok) return UNAVAILABLE;
-      payload = await response.json();
     } catch {
       // A thrown fetch, a resolver that never answered and the timeout gave up
       // on, a body that is not JSON: all of them are "we could not ask", never
