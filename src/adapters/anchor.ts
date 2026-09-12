@@ -27,6 +27,7 @@ import type {
 } from "../anchor.js";
 import { base64Decode, base64Encode } from "../encoding.js";
 import { ANCHOR_CALENDARS, FETCH_TIMEOUT_MS } from "../policy.js";
+import { withDeadline } from "./timeout.js";
 import { PRODUCTION } from "./payout.js";
 
 /** The OpenTimestamps calendar wire, as the calendars publish it. Format, not policy. */
@@ -610,24 +611,25 @@ export class OpenTimestampsAdapter implements AnchorAdapter {
    */
   async #timestamp(url: string): Promise<Uint8Array | "pending" | "unavailable"> {
     const call = this.#fetch;
-    let response: Response;
+    let bytes: Uint8Array | "pending" | "unavailable";
     try {
-      response = await call(url, {
-        method: "GET",
-        headers: { accept: OTS_MEDIA_TYPE, "user-agent": USER_AGENT },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      // One window over the request and the bytes, cleared when they are done:
+      // a pending `AbortSignal.timeout` cannot be cleared and holds the whole
+      // invocation open on workerd (src/adapters/timeout.ts).
+      bytes = await withDeadline(FETCH_TIMEOUT_MS, async (signal) => {
+        const response = await call(url, {
+          method: "GET",
+          headers: { accept: OTS_MEDIA_TYPE, "user-agent": USER_AGENT },
+          signal,
+        });
+        if (response.status === 404) return "pending" as const;
+        if (!response.ok) return "unavailable" as const;
+        return new Uint8Array(await response.arrayBuffer());
       });
     } catch {
       return "unavailable";
     }
-    if (response.status === 404) return "pending";
-    if (!response.ok) return "unavailable";
-    let bytes: Uint8Array;
-    try {
-      bytes = new Uint8Array(await response.arrayBuffer());
-    } catch {
-      return "unavailable";
-    }
+    if (bytes === "pending" || bytes === "unavailable") return bytes;
     return bytes.byteLength === 0 ? "unavailable" : bytes;
   }
 
@@ -637,34 +639,31 @@ export class OpenTimestampsAdapter implements AnchorAdapter {
     digest: Uint8Array,
   ): Promise<string | null> {
     const call = this.#fetch;
-    let response: Response;
+    let bytes: Uint8Array | null;
     try {
-      response = await call(`${calendar}${OTS_DIGEST_PATH}`, {
-        method: "POST",
-        headers: {
-          accept: OTS_MEDIA_TYPE,
-          "content-type": OTS_CONTENT_TYPE,
-          "user-agent": USER_AGENT,
-        },
-        // The raw digest bytes, with nothing wrapped around them: the calendar
-        // reads the body as the commitment itself, whatever the content type
-        // its wire asks for says.
-        body: digest as unknown as BodyInit,
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      // The window covers the request and the proof bytes, and its timer is
+      // cleared when they are done (src/adapters/timeout.ts).
+      bytes = await withDeadline(FETCH_TIMEOUT_MS, async (signal) => {
+        const response = await call(`${calendar}${OTS_DIGEST_PATH}`, {
+          method: "POST",
+          headers: {
+            accept: OTS_MEDIA_TYPE,
+            "content-type": OTS_CONTENT_TYPE,
+            "user-agent": USER_AGENT,
+          },
+          // The raw digest bytes, with nothing wrapped around them: the calendar
+          // reads the body as the commitment itself, whatever the content type
+          // its wire asks for says.
+          body: digest as unknown as BodyInit,
+          signal,
+        });
+        if (!response.ok) return null;
+        return new Uint8Array(await response.arrayBuffer());
       });
     } catch {
       return null;
     }
-
-    if (!response.ok) return null;
-
-    let bytes: Uint8Array;
-    try {
-      bytes = new Uint8Array(await response.arrayBuffer());
-    } catch {
-      return null;
-    }
-    if (bytes.byteLength === 0) return null;
+    if (bytes === null || bytes.byteLength === 0) return null;
 
     // Standard base64, not base64url: an .ots proof is a binary blob carried in
     // JSON, not an identifier that ever goes in a URL.

@@ -44,6 +44,7 @@ import {
   signBytes,
   verifyBytes,
 } from "../identity.js";
+import { withDeadline } from "./timeout.js";
 import {
   FETCH_TIMEOUT_MS,
   REGISTRY,
@@ -399,30 +400,44 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
    * nothing about itself: the error a fetch throws can carry a request's own
    * headers, and one of ours is a bearer credential.
    */
-  async #call(url: string, init: RequestInit): Promise<Response | null> {
+  async #call(
+    url: string,
+    init: RequestInit,
+    signal: AbortSignal,
+  ): Promise<Response | null> {
     const call = this.#fetch;
     try {
-      return await call(url, {
-        ...init,
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
+      return await call(url, { ...init, signal });
     } catch {
       return null;
     }
   }
 
-  /** A GET whose body is JSON, or null on any failure at all. */
+  /**
+   * A GET whose body is JSON, or null on any failure at all.
+   *
+   * The deadline is opened here rather than around the request alone, so it
+   * covers the body too, and its timer is cleared the moment the read is done:
+   * a pending `AbortSignal.timeout` cannot be cleared and holds the whole
+   * invocation open on workerd (src/adapters/timeout.ts).
+   */
   async #json(url: string): Promise<unknown | null> {
-    const response = await this.#call(url, {
-      method: "GET",
-      headers: { accept: "application/json", "user-agent": USER_AGENT },
+    return withDeadline(FETCH_TIMEOUT_MS, async (signal) => {
+      const response = await this.#call(
+        url,
+        {
+          method: "GET",
+          headers: { accept: "application/json", "user-agent": USER_AGENT },
+        },
+        signal,
+      );
+      if (response === null || !response.ok) return null;
+      try {
+        return (await response.json()) as unknown;
+      } catch {
+        return null;
+      }
     });
-    if (response === null || !response.ok) return null;
-    try {
-      return await response.json();
-    } catch {
-      return null;
-    }
   }
 
   async seal(seal: Seal, now: Date): Promise<RegistrySeal | null> {
@@ -445,29 +460,39 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
       await signBytes(key, encoder.encode(payload)),
     );
 
-    const response = await this.#call(`${this.#origin}/api/seal`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json",
-        authorization: `Bearer ${this.#credential}`,
-        "user-agent": USER_AGENT,
-      },
-      body: JSON.stringify({
-        hash: fingerprint,
-        label: this.#label,
-        signature,
-      }),
+    // The deadline covers the request and its body together, on a timer that is
+    // cleared as soon as they are done (src/adapters/timeout.ts). `refused` is
+    // the registry saying no, which is not the same as a body that would not
+    // parse: that one is a receipt of null on a call that was accepted.
+    const answered = await withDeadline(FETCH_TIMEOUT_MS, async (signal) => {
+      const response = await this.#call(
+        `${this.#origin}/api/seal`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+            authorization: `Bearer ${this.#credential}`,
+            "user-agent": USER_AGENT,
+          },
+          body: JSON.stringify({
+            hash: fingerprint,
+            label: this.#label,
+            signature,
+          }),
+        },
+        signal,
+      );
+      if (response === null) return null;
+      if (!response.ok && response.status !== CONFLICT) return null;
+      try {
+        return { receipt: (await response.json()) as unknown };
+      } catch {
+        return { receipt: null };
+      }
     });
-    if (response === null) return null;
-    if (!response.ok && response.status !== CONFLICT) return null;
-
-    let receipt: unknown = null;
-    try {
-      receipt = await response.json();
-    } catch {
-      receipt = null;
-    }
+    if (answered === null) return null;
+    const receipt = answered.receipt;
 
     // A 409 means the hash is already sealed under this label, which is a
     // success from where the sweep stands: the fingerprint is in the log. Its
@@ -845,7 +870,33 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
     witness: WitnessPin,
     proof: CheckedProof,
   ): Promise<CheckedLine | null> {
-    const ranged = await this.#call(witness.url, {
+    // Each request gets a window of its own, covering it and the text it
+    // answers with, on a timer cleared the moment the read is done
+    // (src/adapters/timeout.ts). Two windows and not one shared between them:
+    // the retry below is a second request to the same host, and a first attempt
+    // that spent most of the window would otherwise leave the retry a sliver of
+    // it and fail a witness file that was merely slow.
+    const read = async (
+      init: RequestInit,
+    ): Promise<{ status: number; text: string } | null> =>
+      withDeadline(FETCH_TIMEOUT_MS, async (signal) => {
+        const response = await this.#call(witness.url, init, signal);
+        if (response === null) return null;
+        // A 416 is an answer this caller acts on rather than a failure, so it
+        // comes back with an empty body for the retry to notice.
+        if (!response.ok) {
+          return response.status === RANGE_NOT_SATISFIABLE
+            ? { status: response.status, text: "" }
+            : null;
+        }
+        try {
+          return { status: response.status, text: await response.text() };
+        } catch {
+          return null;
+        }
+      });
+
+    const ranged = await read({
       method: "GET",
       headers: {
         "user-agent": USER_AGENT,
@@ -856,27 +907,17 @@ export class RegistryWitnessAdapter implements EnvironmentWitnessAdapter {
 
     // A 416 means the file is shorter than the tail asked for, so ask for the
     // file itself; anything else it answers is the answer.
-    const response =
+    const file =
       ranged.status === RANGE_NOT_SATISFIABLE
-        ? await this.#call(witness.url, {
-            method: "GET",
-            headers: { "user-agent": USER_AGENT },
-          })
+        ? await read({ method: "GET", headers: { "user-agent": USER_AGENT } })
         : ranged;
-    if (response === null || !response.ok) return null;
+    if (file === null || file.status === RANGE_NOT_SATISFIABLE) return null;
 
-    let text: string;
-    try {
-      text = await response.text();
-    } catch {
-      return null;
-    }
-
-    const lines = text.split("\n");
+    const lines = file.text.split("\n");
     // A 200 means the server ignored the range and sent the whole file, so the
     // first line is whole; a 206 means it sent a tail, and the first line is a
     // fragment of whatever record the byte offset fell inside.
-    const usable = response.status === PARTIAL_CONTENT ? lines.slice(1) : lines;
+    const usable = file.status === PARTIAL_CONTENT ? lines.slice(1) : lines;
 
     let newest: CheckedLine | null = null;
     for (const raw of usable) {

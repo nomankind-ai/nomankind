@@ -48,6 +48,7 @@ import {
   type MirrorFile,
 } from "../mirror.js";
 import { FETCH_TIMEOUT_MS, MIRROR } from "../policy.js";
+import { withDeadline } from "./timeout.js";
 
 /** Which mirror track an environment runs. */
 export type MirrorKind = "github" | "mock" | "unavailable";
@@ -298,6 +299,12 @@ export interface InstallationTokenOptions {
   readonly api: string;
   /** The instant the JWT is dated from. Injected, never read from the clock. */
   readonly now: Date;
+  /**
+   * How long each of the two calls may take. The policy number when the caller
+   * says nothing; a test passes a small window rather than waiting out the real
+   * one.
+   */
+  readonly timeoutMs?: number;
 }
 
 /** A minted token, or the named refusal that stands in its place. */
@@ -333,28 +340,32 @@ async function mintCall(
   call: typeof fetch,
   url: string,
   init: RequestInit,
+  timeoutMs: number,
 ): Promise<MintAnswer> {
-  let response: Response;
+  // One window over the request and the body, on a timer cleared when they are
+  // done: a pending `AbortSignal.timeout` cannot be cleared and holds the whole
+  // invocation open on workerd (src/adapters/timeout.ts).
   try {
-    response = await call(url, {
-      ...init,
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    return await withDeadline(timeoutMs, async (signal) => {
+      const response = await call(url, { ...init, signal });
+      if (!response.ok) {
+        return {
+          ok: false,
+          status: response.status,
+          detail:
+            response.status === UNAUTHORIZED
+              ? "app_auth"
+              : String(response.status),
+        };
+      }
+      try {
+        return { ok: true, body: (await response.json()) as unknown };
+      } catch {
+        return { ok: false, status: 0, detail: "bad_response" };
+      }
     });
   } catch {
     return { ok: false, status: 0, detail: "network" };
-  }
-  if (!response.ok) {
-    return {
-      ok: false,
-      status: response.status,
-      detail:
-        response.status === UNAUTHORIZED ? "app_auth" : String(response.status),
-    };
-  }
-  try {
-    return { ok: true, body: await response.json() };
-  } catch {
-    return { ok: false, status: 0, detail: "bad_response" };
   }
 }
 
@@ -396,10 +407,12 @@ export async function installationToken(
     "user-agent": USER_AGENT,
   };
 
+  const timeoutMs = options.timeoutMs ?? FETCH_TIMEOUT_MS;
   const installation = await mintCall(
     call,
     `${options.api}/repos/${options.repository}/installation`,
     { method: "GET", headers },
+    timeoutMs,
   );
   if (!installation.ok) {
     return mintFailed(
@@ -424,6 +437,7 @@ export async function installationToken(
         permissions: { contents: "write" },
       }),
     },
+    timeoutMs,
   );
   if (!minted.ok) return mintFailed(minted.detail);
 
@@ -472,6 +486,13 @@ export type GitHubMirrorOptions = {
    * nothing about the time.
    */
   readonly now?: () => Date;
+  /**
+   * How long one call to GitHub may take. The policy number everywhere but in a
+   * test, which passes a small window of its own rather than waiting thirty
+   * seconds to watch one expire — the same hook `DrandReader` and the capture
+   * fetcher carry.
+   */
+  readonly timeoutMs?: number;
 } & MirrorCredential;
 
 /** One call's answer: the parsed body, or the refusal it should become. */
@@ -504,6 +525,7 @@ export class GitHubMirrorAdapter implements MirrorAdapter {
   readonly #branch: string;
   readonly #api: string;
   readonly #now: () => Date;
+  readonly #timeoutMs: number;
 
   constructor(options: GitHubMirrorOptions) {
     this.#credential =
@@ -515,6 +537,7 @@ export class GitHubMirrorAdapter implements MirrorAdapter {
     this.#branch = options.branch ?? MIRROR.branch;
     this.#api = options.api ?? MIRROR.api;
     this.#now = options.now ?? (() => new Date());
+    this.#timeoutMs = options.timeoutMs ?? FETCH_TIMEOUT_MS;
   }
 
   async push(input: MirrorPushInput): Promise<MirrorPush> {
@@ -544,6 +567,7 @@ export class GitHubMirrorAdapter implements MirrorAdapter {
       repository: this.#repository,
       api: this.#api,
       now: this.#now(),
+      timeoutMs: this.#timeoutMs,
     });
     return minted.ok ? minted.token : failed(minted.detail);
   }
@@ -562,33 +586,34 @@ export class GitHubMirrorAdapter implements MirrorAdapter {
     moving = false,
   ): Promise<Answer> {
     const call = this.#fetch;
-    let response: Response;
+    // The window covers the request and the body, and its timer is cleared the
+    // moment they are done (src/adapters/timeout.ts).
     try {
-      response = await call(`${this.#api}${path}`, {
-        ...init,
-        headers: {
-          authorization: `Bearer ${bearer}`,
-          accept: GITHUB_ACCEPT,
-          "x-github-api-version": GITHUB_API_VERSION,
-          "user-agent": USER_AGENT,
-          ...(init.body === undefined
-            ? {}
-            : { "content-type": "application/json" }),
-        },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      return await withDeadline(this.#timeoutMs, async (signal) => {
+        const response = await call(`${this.#api}${path}`, {
+          ...init,
+          headers: {
+            authorization: `Bearer ${bearer}`,
+            accept: GITHUB_ACCEPT,
+            "x-github-api-version": GITHUB_API_VERSION,
+            "user-agent": USER_AGENT,
+            ...(init.body === undefined
+              ? {}
+              : { "content-type": "application/json" }),
+          },
+          signal,
+        });
+        if (!response.ok) {
+          return { ok: false, refusal: this.#refusal(response.status, moving) };
+        }
+        try {
+          return { ok: true, body: (await response.json()) as unknown };
+        } catch {
+          return { ok: false, refusal: failed("bad_response") };
+        }
       });
     } catch {
       return { ok: false, refusal: failed("network") };
-    }
-
-    if (!response.ok) {
-      return { ok: false, refusal: this.#refusal(response.status, moving) };
-    }
-
-    try {
-      return { ok: true, body: await response.json() };
-    } catch {
-      return { ok: false, refusal: failed("bad_response") };
     }
   }
 

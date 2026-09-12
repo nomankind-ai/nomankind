@@ -31,6 +31,7 @@
  * FETCH_TIMEOUT_MS. WebCrypto only, never `node:crypto`.
  */
 
+import { withDeadline } from "./timeout.js";
 import {
   FETCH_TIMEOUT_MS,
   RATE_TIERS,
@@ -183,12 +184,24 @@ export interface StripeOptions {
   readonly fetch?: typeof fetch;
   /** Where an `Idempotency-Key` comes from. Tests pin it; the Worker does not. */
   readonly random?: () => string;
+  /**
+   * How long one call to the provider may take. The policy number everywhere
+   * but in a test, which passes a small window of its own rather than waiting
+   * out the real one.
+   */
+  readonly timeoutMs?: number;
 }
 
 /** One call's answer: the parsed body, or the refusal that ends the caller. */
 type Answer =
   | { ok: true; body: unknown }
   | { ok: false; refusal: PaymentsResult<never> };
+
+/**
+ * What a body that is not JSON reads as: a marker of its own, because `null`
+ * and `undefined` are both bodies Stripe can really send.
+ */
+const UNPARSABLE = Symbol("unparsable");
 
 export class StripeAdapter implements PaymentsAdapter {
   readonly kind = "stripe";
@@ -197,6 +210,7 @@ export class StripeAdapter implements PaymentsAdapter {
   readonly #webhookSecret: string | null;
   readonly #fetch: typeof fetch;
   readonly #random: () => string;
+  readonly #timeoutMs: number;
 
   constructor(options: StripeOptions) {
     this.#secretKey = options.secretKey;
@@ -207,6 +221,7 @@ export class StripeAdapter implements PaymentsAdapter {
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.#random =
       options.random ?? ((): string => globalThis.crypto.randomUUID());
+    this.#timeoutMs = options.timeoutMs ?? FETCH_TIMEOUT_MS;
   }
 
   /**
@@ -222,21 +237,32 @@ export class StripeAdapter implements PaymentsAdapter {
     body?: Record<string, string | number>,
   ): Promise<Answer> {
     const call = this.#fetch;
-    let response: Response;
+    // One window over the request and the body, on a timer that is cleared when
+    // they are done: a pending `AbortSignal.timeout` cannot be cleared and holds
+    // the whole invocation open on workerd (src/adapters/timeout.ts).
+    let answered: { status: number; ok: boolean; parsed: unknown } | null;
     try {
-      response = await call(`${STRIPE.api}${path}`, {
-        method,
-        headers: {
-          authorization: `Bearer ${this.#secretKey}`,
-          ...(body === undefined
-            ? {}
-            : {
-                "content-type": "application/x-www-form-urlencoded",
-                "idempotency-key": this.#random(),
-              }),
-        },
-        ...(body === undefined ? {} : { body: form(body) }),
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      answered = await withDeadline(this.#timeoutMs, async (signal) => {
+        const response = await call(`${STRIPE.api}${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${this.#secretKey}`,
+            ...(body === undefined
+              ? {}
+              : {
+                  "content-type": "application/x-www-form-urlencoded",
+                  "idempotency-key": this.#random(),
+                }),
+          },
+          ...(body === undefined ? {} : { body: form(body) }),
+          signal,
+        });
+        const { status, ok } = response;
+        try {
+          return { status, ok, parsed: (await response.json()) as unknown };
+        } catch {
+          return { status, ok, parsed: UNPARSABLE };
+        }
       });
     } catch {
       // Nothing about the throw travels: a fetch's error can carry the
@@ -244,23 +270,21 @@ export class StripeAdapter implements PaymentsAdapter {
       return { ok: false, refusal: { ok: false, refusal: "network" } };
     }
 
-    let parsed: unknown;
-    try {
-      parsed = await response.json();
-    } catch {
+    const { status, ok, parsed } = answered;
+    if (parsed === UNPARSABLE) {
       return {
         ok: false,
-        refusal: badResponse(`${response.status} unparsable`),
+        refusal: badResponse(`${status} unparsable`),
       };
     }
 
-    if (!response.ok) {
+    if (!ok) {
       return {
         ok: false,
         refusal: {
           ok: false,
           refusal: "provider_error",
-          detail: providerDetail(response.status, parsed),
+          detail: providerDetail(status, parsed),
         },
       };
     }

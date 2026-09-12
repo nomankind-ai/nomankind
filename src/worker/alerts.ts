@@ -37,6 +37,7 @@ import {
   type AlertBody,
   type AlertFilter,
 } from "../alerts.js";
+import { withDeadline } from "../adapters/timeout.js";
 import { domainOf, extractCore, type Core } from "../core.js";
 import { base64urlEncode } from "../encoding.js";
 import type { Event } from "../events.js";
@@ -864,7 +865,7 @@ async function deliver(
     body: Record<string, unknown>;
     kind: AlertKind;
   },
-  input: { now: Date; fetch: typeof fetch },
+  input: { now: Date; fetch: typeof fetch; timeoutMs?: number },
   off: Map<string, boolean>,
 ): Promise<"delivered" | "retried" | "failed"> {
   const at = input.now.toISOString();
@@ -901,37 +902,44 @@ async function deliver(
 
   const attempts = delivery.attempts + 1;
   const call = input.fetch;
-  let response: Response;
+  let status: number;
   try {
-    response = await call(endpoint.url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-nomankind-alert": delivery.id,
-        "x-nomankind-kind": delivery.kind,
-        "x-nomankind-signature": signature,
-      },
-      body,
-      signal: AbortSignal.timeout(ALERT_TIMEOUT_MS),
+    // The window is ALERT_TIMEOUT_MS and its timer is cleared the moment the
+    // endpoint answers: a pending `AbortSignal.timeout` cannot be cleared, and
+    // on workerd a timer still waiting holds the whole invocation open long
+    // after the call it was watching came back (src/adapters/timeout.ts).
+    status = await withDeadline(input.timeoutMs ?? ALERT_TIMEOUT_MS, async (signal) => {
+      const response = await call(endpoint.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-nomankind-alert": delivery.id,
+          "x-nomankind-kind": delivery.kind,
+          "x-nomankind-signature": signature,
+        },
+        body,
+        signal,
+      });
+      return response.status;
     });
   } catch (error) {
     const name = error instanceof Error ? error.name : "Error";
     return retry(db, delivery.id, attempts, input.now, null, name);
   }
 
-  if (response.status >= 200 && response.status < 300) {
+  if (status >= 200 && status < 300) {
     await markDelivery(db, delivery.id, {
       status: "delivered",
       attempts,
       nextAt: at,
       deliveredAt: at,
-      lastStatus: response.status,
+      lastStatus: status,
       lastError: null,
     });
     return "delivered";
   }
 
-  return retry(db, delivery.id, attempts, input.now, response.status, null);
+  return retry(db, delivery.id, attempts, input.now, status, null);
 }
 
 /** Schedule the next attempt, or give up once the ladder is exhausted. */
@@ -991,6 +999,12 @@ export async function runAlertStep(
     sealedHead: number;
     fetch: typeof fetch;
     origin: string;
+    /**
+     * How long one delivery may take. ALERT_TIMEOUT_MS when the caller says
+     * nothing; a test passes a small window of its own rather than waiting out
+     * the real one, exactly as the adapters' own constructors allow.
+     */
+    timeoutMs?: number;
   },
   skip: (reason: string) => void,
 ): Promise<AlertStepReport> {
