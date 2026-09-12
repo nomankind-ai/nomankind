@@ -83,7 +83,13 @@ import {
   methodNotAllowed,
   refuse,
 } from "./registry.js";
-import { entryWorld, rederive, worldAt } from "./world.js";
+import {
+  entryWorld,
+  rederive,
+  worldAt,
+  worldCache,
+  type WorldCache,
+} from "./world.js";
 
 /** How many random bytes an id is made of: 8 bytes is the 16 hex an id shows. */
 const ID_BYTES = 8;
@@ -510,11 +516,17 @@ function deriveAt(
  * before it, through the same gathering every writer uses, so an alert says
  * what the log said at that moment and never what it says now. A second run
  * over the same event would build the same body.
+ *
+ * `cache` is one run's reading of the registry, shared by every gathering the
+ * run makes: a page of a hundred events read the same six paged queries a
+ * hundred times over to arrive at the same registry, which is most of a run's
+ * subrequest budget spent on one unchanging answer.
  */
 async function alertsFor(
   db: D1Like,
   event: Event,
   now: Date,
+  cache: WorldCache,
 ): Promise<DerivedAlert[]> {
   const entryId = event.entry_id;
   if (entryId === null) return [];
@@ -529,7 +541,7 @@ async function alertsFor(
     return [];
   }
 
-  const world = await entryWorld(db, entryId);
+  const world = await entryWorld(db, entryId, cache);
   const after = deriveAt(world, entryId, event.seq, now);
   if (after === null) return [];
   const before =
@@ -538,7 +550,7 @@ async function alertsFor(
   let target: Entry | null = null;
   const supersedes = after["supersedes"];
   if (event.type === "validation" && typeof supersedes === "string") {
-    const targetWorld = await entryWorld(db, supersedes);
+    const targetWorld = await entryWorld(db, supersedes, cache);
     target = deriveAt(targetWorld, supersedes, event.seq, now);
   }
 
@@ -613,9 +625,11 @@ async function createDeliveries(
   if (events.length === 0) return 0;
 
   const at = input.now.toISOString();
+  // One reading of the registry for the whole run, handed to every gathering.
+  const cache = worldCache();
   const batch: AlertDeliveryInput[] = [];
   for (const event of events) {
-    const alerts = await alertsFor(db, event, input.now);
+    const alerts = await alertsFor(db, event, input.now, cache);
     if (alerts.length === 0) continue;
     const seal = await sealCovering(db, event.seq);
     // Below the sealed head there is always a covering seal; an event without

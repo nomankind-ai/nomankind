@@ -1122,6 +1122,27 @@ export async function mirrorDiff(
 }
 
 /**
+ * The paths already in the repository under this export's directory that this
+ * export does not write.
+ *
+ * A file the layout stopped producing — an entry that left the release window,
+ * a format that was renamed — stayed in the repository forever, because a push
+ * that only writes what changed never says that something is gone. The mirror is
+ * the sealed record and a stale file in it is a claim the log does not make, so
+ * the push deletes these. Sorted, so two pushes of one state produce one tree.
+ *
+ * `existing` is keyed relative to the export's directory, exactly as
+ * `mirrorDiff` asks, so nothing outside that directory can be named here.
+ */
+export function mirrorDropped(
+  files: readonly MirrorFile[],
+  existing: ReadonlyMap<string, string>,
+): string[] {
+  const written = new Set(files.map((file) => file.path));
+  return [...existing.keys()].filter((path) => !written.has(path)).sort();
+}
+
+/**
  * Where one export can be read: the repository tree at the commit that wrote it,
  * and the raw `mirror.json` beside it.
  *

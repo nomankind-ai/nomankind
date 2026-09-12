@@ -39,6 +39,7 @@ import type { Event } from "../events.js";
 import type { EvidenceTier } from "../evidence.js";
 import { entryHash } from "../hash.js";
 import { signSyncReceipt, type SyncReceipt } from "../receipt.js";
+import { isVersionStalenessCategory, LIST_PAGE_LIMIT } from "../policy.js";
 import { releasedHead } from "../release.js";
 import type { Entry } from "../schema.js";
 import type { Seal } from "../seal.js";
@@ -46,7 +47,9 @@ import type { SourceClass } from "../sources.js";
 import type { D1Like } from "../storage/d1.js";
 import {
   ReceiptConflictError,
+  eventsAfter,
   eventsInRange,
+  getEntry,
   latestSeal,
   allocateReadCounter,
   putSyncReceipt,
@@ -80,7 +83,14 @@ import {
   refuse,
 } from "./registry.js";
 import { buildInclusionProof } from "./seals.js";
-import { entryWorld, rederive, worldAt } from "./world.js";
+import {
+  entryWorld,
+  expiredByClock,
+  isRegistryEvent,
+  rederive,
+  worldCache,
+  worldAt,
+} from "./world.js";
 
 /** One entry as it stood at the sealed head: the record, and what filters ask. */
 interface EntryState {
@@ -144,14 +154,85 @@ class Covering {
 }
 
 /**
+ * The entries the page may not serve from their stored rows, or null when none
+ * of them may be.
+ *
+ * A stored row holds the entry as it was derived over the whole log — that is
+ * what the read door serves and what every write door and the sweep keep
+ * current — while this stream owes the trainer the entry as it was derived at
+ * the sealed head. The two are the same entry unless something the page's head
+ * does not cover has moved it, so the question this answers is which entries the
+ * events past `head` can move:
+ *
+ *   - a registry event moves every entry at once, and an event about no entry
+ *     (a seal's own, a pool snapshot) is not one this can reason about, so
+ *     either answers "no entry may be served from its row";
+ *   - an event about an entry moves that entry, and moves whatever that entry
+ *     declared it supersedes, because a superseder verifying past the head is
+ *     what would make the older one superseded;
+ *   - a decision on an entry in one of the version-staleness categories
+ *     (decision D-096) stales every other version of the same model, which is
+ *     an entry no event of the tail names, so that too answers "none".
+ *
+ * Bounded like every other walk of the log: a tail longer than one page is not
+ * accounted for at all, it answers "none", and the page re-derives as it always
+ * did. Costs one read of the tail plus one keyed read per entry named in it.
+ */
+async function unservableAfter(
+  db: D1Like,
+  head: number,
+): Promise<ReadonlySet<string> | null> {
+  const tail = await eventsAfter(db, head, LIST_PAGE_LIMIT);
+  if (tail.length >= LIST_PAGE_LIMIT) return null;
+
+  const moved = new Set<string>();
+  for (const event of tail) {
+    if (event.entry_id === null || isRegistryEvent(event.type)) return null;
+    moved.add(event.entry_id);
+  }
+  for (const entryId of [...moved]) {
+    const stored = await getEntry(db, entryId);
+    // No row for an entry the log holds events about: the store is behind its
+    // own log, which is not a state to serve rows in.
+    if (stored === null) return null;
+    const fields = stored.entry as unknown as Record<string, unknown>;
+    if (isVersionStalenessCategory(domainOf(fields), fields["category"])) {
+      return null;
+    }
+    const supersedes = fields["supersedes"];
+    if (typeof supersedes === "string") moved.add(supersedes);
+  }
+  return moved;
+}
+
+/**
  * Every entry the page touches, derived once each at the sealed head.
  *
  * One entry can be touched by several events in one page — a submission and two
  * validations — and re-deriving it once per event would read the same world
  * three times to arrive at the same answer three times.
+ *
+ * An entry nothing past the head has moved is served from its stored row
+ * instead, which is the same record at one keyed read rather than the six paged
+ * registry queries, the supersession and version-sibling walks and the seal's
+ * whole batch that gathering its world costs. The row is not served as it
+ * stands: `stale` is the one field derivation reads the clock for, so it is
+ * recomputed at the seal's own instant, and an entry whose stored `stale` cannot
+ * be told apart from D-096's version staleness is re-derived rather than
+ * guessed at. Everything else in the record — status, the approvers, the
+ * sidecar, the seal — is a fact about the log and not about when it was read.
+ *
+ * The shared `worldCache` is the other half: the entries that do fall back read
+ * the registry once between them rather than once each.
  */
 class Entries {
   readonly #memo = new Map<string, Promise<EntryState>>();
+  readonly #cache = worldCache();
+  readonly #moved: ReadonlySet<string> | null;
+
+  constructor(moved: ReadonlySet<string> | null) {
+    this.#moved = moved;
+  }
 
   state(db: D1Like, entryId: string, at: Date, head: number): Promise<EntryState> {
     const memoized = this.#memo.get(entryId);
@@ -167,7 +248,12 @@ class Entries {
     at: Date,
     head: number,
   ): Promise<EntryState> {
-    const world = worldAt(await entryWorld(db, entryId), head);
+    const moved = this.#moved;
+    if (moved !== null && !moved.has(entryId)) {
+      const stored = await this.#fromRow(db, entryId, at, head);
+      if (stored !== null) return stored;
+    }
+    const world = worldAt(await entryWorld(db, entryId, this.#cache), head);
     const { entry, derived, sidecar } = rederive(world, entryId, at);
     return {
       entry,
@@ -177,6 +263,46 @@ class Entries {
       effective_tier: sidecar.effective_tier,
       domain: domainOf(entry),
       source_class: sidecar.source.class,
+    };
+  }
+
+  /** One entry from its stored row, or null when the row cannot answer. */
+  async #fromRow(
+    db: D1Like,
+    entryId: string,
+    at: Date,
+    head: number,
+  ): Promise<EntryState | null> {
+    const stored = await getEntry(db, entryId);
+    if (stored === null) return null;
+    // A row derived through a position the page does not cover saw events this
+    // trainer is not being handed, whatever the tail said.
+    if (stored.derivedThroughSeq > head) return null;
+
+    const fields = stored.entry as unknown as Record<string, unknown>;
+    const expiresAt = fields["expires_at"];
+    const expired = expiredByClock(
+      typeof expiresAt === "string" ? expiresAt : null,
+      at,
+    );
+    const wasStale = fields["stale"] === true;
+    // Stale with the window still open is D-096's staleness, which is a fact
+    // about the log and not about the clock — and the row does not say which of
+    // the two made it stale. Ask the events.
+    if (wasStale && !expired) return null;
+    const entry =
+      wasStale === expired
+        ? stored.entry
+        : ({ ...stored.entry, stale: expired } as Entry);
+
+    return {
+      entry,
+      sidecar: stored.sidecar,
+      entry_hash: await entryHash(extractCore(entry)),
+      status: fields["status"] as EntryStatus,
+      effective_tier: stored.sidecar.effective_tier,
+      domain: domainOf(entry),
+      source_class: stored.sidecar.source.class,
     };
   }
 }
@@ -358,7 +484,7 @@ async function page(
   const events = await eventsInRange(db, query.from, head);
 
   const covering = new Covering();
-  const entries = new Entries();
+  const entries = new Entries(await unservableAfter(db, worldHead));
   const at = new Date(asOf);
   const items: Item[] = [];
 

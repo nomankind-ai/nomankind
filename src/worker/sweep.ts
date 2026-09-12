@@ -113,6 +113,7 @@ import {
   operatorDomainsAt,
   registeredOperatorsAt,
   type EntryStatus,
+  type Sidecar,
 } from "../derive.js";
 import { openRevalidation, revalidationDrawExclusions } from "../dispute.js";
 import { duplicateKey, sameDuplicateKey } from "../duplicate.js";
@@ -143,6 +144,7 @@ import {
   LIST_PAGE_LIMIT,
   RELEASE_WINDOW_DAYS,
   SEAL_MAX_EVENTS,
+  SWEEP_INTERVAL_MINUTES,
   WITNESSES_REQUIRED,
 } from "../policy.js";
 import {
@@ -162,7 +164,12 @@ import {
   type Seal,
   type WitnessSignature,
 } from "../seal.js";
-import { standingAt, trustChangesAt } from "../standing.js";
+import {
+  standingAfter,
+  standingAt,
+  trustChangesAt,
+  type Standing,
+} from "../standing.js";
 import type { D1Like } from "../storage/d1.js";
 import {
   EventAppendError,
@@ -176,7 +183,8 @@ import {
   dueAttestations,
   dueRevalidationAssignments,
   earliestReadReceiptDay,
-  entryIdsThrough,
+  entriesThrough,
+  entryHeadsThrough,
   eventBySeq,
   eventsAfter,
   eventsForAttestation,
@@ -193,7 +201,8 @@ import {
   listAttestations,
   listEntries,
   listOperators,
-  mirrorOn,
+  claimMirror,
+  mirrorClaimOn,
   openRevalidationAssignment,
   operatorDomains,
   payoutRows,
@@ -224,7 +233,9 @@ import {
   sealsSealedOn,
   setAnchorExternal,
   setLedgerCursor,
-  setOperatorStanding,
+  putStandings,
+  storedStandings,
+  supersedersOf,
   setSealRegistry,
   setSealWitnesses,
   staleDue,
@@ -236,13 +247,22 @@ import {
   type StoredBountyRow,
   type SweepStepRow,
   type StoredEntry,
+  type StoredEntryRow,
   type StoredEntryInput,
 } from "../storage/repository.js";
 import { keyById } from "../storage/keys.js";
 import { checkWitnesses, witnessedCount, type Witness } from "../witness.js";
 import { runAlertStep, type AlertStepReport } from "./alerts.js";
 import type { Env } from "./env.js";
-import { entryWorld, rederive, registryEvents, worldAt } from "./world.js";
+import {
+  entryWorld,
+  expiredByClock,
+  rederive,
+  registryEvents,
+  worldAt,
+  worldCache,
+  type WorldCache,
+} from "./world.js";
 
 /**
  * The pinned witness set an environment judges countersignatures against:
@@ -991,8 +1011,9 @@ async function rewriteForSeal(
   seal: Seal,
   batch: readonly Event[],
   now: Date,
+  cache: WorldCache,
 ): Promise<StoredEntryInput> {
-  const world = await entryWorld(db, entryId);
+  const world = await entryWorld(db, entryId, cache);
   const sealed = await entrySeal(batch, [seal], entryId);
   const seals =
     sealed === null
@@ -1025,6 +1046,7 @@ async function sealStep(
   db: D1Like,
   deps: SealingDeps,
   skip: Skip,
+  cache: WorldCache,
 ): Promise<SweepReport["sealed"]> {
   const previous = await latestSeal(db);
   // -1, because eventsAfter reads strictly after and seq 0 is a real position.
@@ -1045,7 +1067,7 @@ async function sealStep(
   let entries: string[];
   try {
     entries = await recordSeal(db, seal, deps.now, (entryId, sealed, now) =>
-      rewriteForSeal(db, entryId, sealed, batch, now),
+      rewriteForSeal(db, entryId, sealed, batch, now, cache),
     );
   } catch (error) {
     if (error instanceof SealConflictError) {
@@ -1137,6 +1159,7 @@ async function witnessStep(
   deps: SealingDeps,
   maintainerOperators: ReadonlySet<string>,
   skip: Skip,
+  cache: WorldCache,
 ): Promise<SweepReport["witnessed"]> {
   const witnessed: { seq: number; operators: string[] }[] = [];
   const context = {
@@ -1224,7 +1247,7 @@ async function witnessStep(
         [...seal.witnesses, ...kept],
         deps.now,
         (entryId, updated, now) =>
-          rewriteForSeal(db, entryId, updated, batch, now),
+          rewriteForSeal(db, entryId, updated, batch, now, cache),
       );
     } catch (error) {
       if (error instanceof SealSchemaInvalid) {
@@ -1466,32 +1489,94 @@ async function allOperators(db: D1Like): Promise<MirrorOperator[]> {
 }
 
 /**
- * Every entry at or below the sealed head, derived there.
+ * Every entry at or below the sealed head, as the sealed head has it.
  *
- * Exactly the way `GET /sync` produces an entry record — `worldAt` to the sealed
- * head, then `rederive` at the newest seal's `sealed_at` — because the mirror
- * and the delta stream must not be able to describe the same entry at the same
- * position two different ways. The stored row is not read: it was derived at
- * whatever position its last writer reached, which is not the sealed head.
+ * What the export needs of an entry is the derivation the sealed head supports —
+ * exactly what `GET /sync` produces, `worldAt` to the head then `rederive` at
+ * the newest seal's instant, because the mirror and the delta stream must not be
+ * able to describe the same entry at the same position two different ways.
+ *
+ * Almost always the stored row already is that derivation. A row's
+ * `derived_through_seq` is the position of the last event its writer folded, and
+ * when that is the entry's own last event at or below the head, the row was
+ * derived over the world this export would rebuild, so rebuilding it would cost
+ * ten statements to arrive at the bytes already in hand. So the rows are read a
+ * page at a time with one grouped read of where each entry's events stop, and
+ * only a row that is behind — or one derived past the head, over events the
+ * export must not see — is derived again. A thousand entries costs the pages and
+ * the stragglers rather than ten thousand statements.
  */
+/**
+ * A stored row read at an instant, or null when only the events can answer.
+ *
+ * `stale` is derivation's one clock-dependent field, and the row carries the
+ * answer its writer's clock gave. The export's clock is the newest seal's, which
+ * on a run that seals nothing is behind the staleness step's own `now`, so a row
+ * taken as it stands could say an entry is stale at a position at which
+ * `GET /sync` says it is fresh — one entry at one position described two ways,
+ * which is the one thing the mirror and the delta stream may not do. So the
+ * clock is applied here, by the rule src/worker/sync.ts applies at its own door
+ * and out of the same function: `expiresAt` in the past at `asOf` is stale, and
+ * a row that is stale with its window still open was made stale by something
+ * else — D-096's version staleness, a fact about the log and not the clock —
+ * which the row does not distinguish, so that row goes to the events.
+ */
+function clockedAt(
+  row: StoredEntryRow,
+  asOf: Date,
+): { entry: Entry; sidecar: Sidecar } | null {
+  const fields = row.entry as unknown as Record<string, unknown>;
+  const expiresAt = fields["expires_at"];
+  const expired = expiredByClock(
+    typeof expiresAt === "string" ? expiresAt : null,
+    asOf,
+  );
+  const wasStale = fields["stale"] === true;
+  if (wasStale && !expired) return null;
+  return {
+    entry:
+      wasStale === expired
+        ? row.entry
+        : ({ ...row.entry, stale: expired } as Entry),
+    sidecar: row.sidecar,
+  };
+}
+
 async function mirrorEntries(
   db: D1Like,
   head: number,
   asOf: Date,
+  cache: WorldCache,
 ): Promise<MirrorEntryRecord[]> {
   const records: MirrorEntryRecord[] = [];
   let afterSubmittedSeq: number | undefined;
   for (;;) {
-    const page = await entryIdsThrough(
+    const page = await entriesThrough(
       db,
       afterSubmittedSeq === undefined
         ? { throughSeq: head, limit: LIST_PAGE_LIMIT }
         : { throughSeq: head, limit: LIST_PAGE_LIMIT, afterSubmittedSeq },
     );
     if (page.length === 0) break;
+    const heads = await entryHeadsThrough(
+      db,
+      page.map((row) => row.id),
+      head,
+    );
     for (const row of page) {
-      const world = worldAt(await entryWorld(db, row.id), head);
-      const derived = rederive(world, row.id, asOf);
+      const needed = heads.get(row.id);
+      const current =
+        needed !== undefined &&
+        row.derivedThroughSeq >= needed &&
+        row.derivedThroughSeq <= head;
+      const fromRow = current ? clockedAt(row, asOf) : null;
+      const derived =
+        fromRow ??
+        rederive(
+          worldAt(await entryWorld(db, row.id, cache), head),
+          row.id,
+          asOf,
+        );
       records.push({
         entry: derived.entry,
         sidecar: derived.sidecar,
@@ -1557,13 +1642,14 @@ async function mirrorAnswers(
  * the report and the status page use, and a refused push is a day that is not
  * mirrored yet rather than a run that failed — the sweep goes on to the ledger.
  */
-async function mirrorStep(
+export async function mirrorStep(
   db: D1Like,
   environment: string,
   adapter: MirrorAdapter | undefined,
   now: Date,
   at: string,
   skip: Skip,
+  cache: WorldCache = worldCache(),
 ): Promise<MirrorOutcome> {
   const none: MirrorOutcome = { report: null, detail: null };
 
@@ -1581,12 +1667,37 @@ async function mirrorStep(
   }
 
   const date = utcDay(now.toISOString());
-  if ((await mirrorOn(db, date)) !== null) {
+  const claim = await mirrorClaimOn(db, date);
+  if (claim !== null && claim.state === "pushed") {
     skip("mirror_current");
     return none;
   }
 
   const head = newest.last_seq;
+  // The claim, before the export is built and long before it is pushed. A run
+  // that dies anywhere after this line leaves the row pending, which is the
+  // whole point: the day is marked as being worked on rather than as done.
+  //
+  // Somebody else may be exporting this day already. A claim younger than one
+  // interval is a run that has not come back yet and this one stands down; an
+  // older one is a run that died, and this one takes the day over — so a killed
+  // export is retried by the next run and not by every run of the day. Which of
+  // two overlapping runs gets it is decided inside the one statement the claim
+  // is, and the loser is told so here.
+  const claimed = await claimMirror(db, {
+    date,
+    started_at: at,
+    head,
+    seal_seq: newest.seq,
+    take_over_before: new Date(
+      now.getTime() - SWEEP_INTERVAL_MINUTES * 60_000,
+    ).toISOString(),
+  });
+  if (!claimed) {
+    skip("mirror_pending");
+    return none;
+  }
+
   let files;
   try {
     files = buildMirror({
@@ -1600,7 +1711,7 @@ async function mirrorStep(
       seals: await allSeals(db),
       anchors: await allAnchors(db),
       events: await sealedLog(db, head),
-      entries: await mirrorEntries(db, head, new Date(newest.sealed_at)),
+      entries: await mirrorEntries(db, head, new Date(newest.sealed_at), cache),
       operators: await allOperators(db),
       attestations: await mirrorAnswers(db, head),
     });
@@ -1624,6 +1735,7 @@ async function mirrorStep(
 
   // An unchanged push still writes the row: the day's bytes are in the
   // repository, so the day is current and the next run must not push again.
+  // This is the claim turning into an export — the same row, now pushed.
   await putMirror(db, {
     date,
     exported_at: at,
@@ -2064,6 +2176,65 @@ export async function sealedLog(db: D1Like, sealedHead: number): Promise<Event[]
 }
 
 /**
+ * The events one incremental standing fold needs, given a cursor.
+ *
+ * The tail is the point: at a cursor the sweep reads the events it has not
+ * folded yet and not the log. Two things go in beside it, and both are about
+ * what the fold asks of an entry's whole history rather than of one event — the
+ * registry, which every derivation is judged against, and the events of the
+ * entries the tail names whose own log starts before the cursor, so the fold can
+ * see that an entry's submission credit is already spent and which of its
+ * signers an earlier upheld dispute already burned. A superseding entry's events
+ * come with its target's, because whether a target derives verified is a
+ * question about both.
+ *
+ * Everything here is bounded by the tail: an idle five minutes reads the
+ * registry and nothing else.
+ */
+async function standingTail(
+  db: D1Like,
+  from: number,
+  head: number,
+  cache: WorldCache,
+): Promise<Event[]> {
+  const tail: Event[] = [];
+  for (let cursor = from + 1; cursor <= head; ) {
+    const to = Math.min(cursor + LIST_PAGE_LIMIT - 1, head);
+    const page = await eventsInRange(db, cursor, to);
+    tail.push(...page);
+    cursor = to + 1;
+  }
+
+  const bySeq = new Map<number, Event>();
+  const add = (events: readonly Event[]): void => {
+    for (const event of events) {
+      if (event.seq <= head) bySeq.set(event.seq, event);
+    }
+  };
+  add(await registryEvents(db, cache));
+  add(tail);
+
+  const submitted = new Set<string>();
+  const touched = new Set<string>();
+  for (const event of tail) {
+    if (event.entry_id === null) continue;
+    if (event.type === "entry_submitted") submitted.add(event.entry_id);
+    touched.add(event.entry_id);
+  }
+  for (const entryId of touched) {
+    // An entry the tail submitted is an entry the tail holds whole.
+    if (submitted.has(entryId)) continue;
+    add(await eventsForEntry(db, entryId));
+    for (const superseder of await supersedersOf(db, entryId, LIST_PAGE_LIMIT)) {
+      if (superseder === entryId) continue;
+      add(await eventsForEntry(db, superseder));
+    }
+  }
+
+  return [...bySeq.values()].sort((left, right) => left.seq - right.seq);
+}
+
+/**
  * (j) Recompute every operator's standing, and let it move the trusted pool.
  *
  * Whitepaper Section 9: standing "is derived from the sealed public events by a
@@ -2076,22 +2247,40 @@ export async function sealedLog(db: D1Like, sealedHead: number): Promise<Event[]
  * The trust changes are appended here and are sealed by the next run, which is
  * also the run whose pool snapshot picks them up: a pool the log has not sealed
  * is not a pool anyone can recompute a draw against.
+ *
+ * Exported, like `mirrorStep` beside it, because what this step costs is now
+ * part of what it promises: a run at a cursor must read the events after the
+ * cursor and not the log, and a test that cannot call the step on its own can
+ * only measure the whole sweep's reads and not this one's.
  */
-async function standingStep(
+export async function standingStep(
   db: D1Like,
   sealedHead: number,
   at: string,
   skip: Skip,
+  cache: WorldCache = worldCache(),
 ): Promise<SweepReport["standing"]> {
-  const events = await sealedLog(db, sealedHead);
-  const standings = standingAt(events, sealedHead);
-  for (const [operator, standing] of standings) {
-    // An operator the log mentions but nobody registered has no row to cache
-    // this on, and the update simply matches nothing.
-    await setOperatorStanding(db, operator, standing.standing, sealedHead);
-  }
+  // The cursor: what a previous run folded, and how far. A position above the
+  // sealed head is not a cursor this run can continue from — the log it covers
+  // is not the log this run sees — and neither is a set of rows that disagree
+  // about where they are, so both fold the whole thing and write a cursor the
+  // next run can use.
+  const stored = await storedStandings(db);
+  const from =
+    stored.position === null || stored.position > sealedHead ? -1 : stored.position;
+  const prior = from === -1 ? new Map<string, Standing>() : stored.standings;
+  const events =
+    from === -1
+      ? await sealedLog(db, sealedHead)
+      : await standingTail(db, from, sealedHead, cache);
 
-  const changes = trustChangesAt(events, sealedHead);
+  const standings = standingAfter(events, prior, from, sealedHead);
+  // The accumulators and the operator rows' cached column, together: what is
+  // written is a cache of what the published formula says at this position, and
+  // `position` is what makes it checkable.
+  await putStandings(db, [...standings.values()]);
+
+  const changes = trustChangesAt(events, sealedHead, standings);
   const applied: { trust: string[]; untrust: string[] } = { trust: [], untrust: [] };
   for (const [kind, operators] of [
     ["operator_trusted", changes.trust],
@@ -2286,11 +2475,19 @@ export async function runSweep(
   /** The step the run threw in, or null while nothing has thrown. */
   let failedStep: string | null = null;
 
+  // One registry reading for the whole run. Every step below that gathers an
+  // entry's world asks the registry for it, and the registry is the same for all
+  // of them: a run that re-read it per entry spent most of its subrequests
+  // answering one question over and over. Created here and never outside a run,
+  // because an isolate outlives the run and a registry remembered past it would
+  // answer the next run with a log that has moved.
+  const cache = worldCache();
+
   try {
     inStep = "snapshot";
     // (a) The pool snapshot. Committed before any draw, and never by a draw: the
     // commitment has to be in the log before the beacon round that uses it.
-    const registry = await registryEvents(db);
+    const registry = await registryEvents(db, cache);
     // Decision D-071: every draw below is domain-blind by construction, so the
     // caller is the one that keeps an operator out of a domain it never attested
     // in. This is the fold the exclusion lists are built from, taken once for the
@@ -2357,7 +2554,7 @@ export async function runSweep(
         skip("revalidation_not_missed");
         continue;
       }
-      const world = await entryWorld(db, due.entryId);
+      const world = await entryWorld(db, due.entryId, cache);
       const event = await recordRevalidationMissed(
         db,
         {
@@ -2550,7 +2747,7 @@ export async function runSweep(
         // Unreachable: `appendEvent` refuses an entry-scoped event without one.
         if (entryId === null) continue;
 
-        const world = await entryWorld(db, entryId);
+        const world = await entryWorld(db, entryId, cache);
         const open = openRevalidation(world.entryEvents);
         if (open === null || open.seq !== request.seq) {
           skip("revalidation_resolved");
@@ -2687,7 +2884,7 @@ export async function runSweep(
       if (page.length === 0) break;
 
       for (const due of page) {
-        const world = await entryWorld(db, due.id);
+        const world = await entryWorld(db, due.id, cache);
         const derived = rederive(world, due.id, deps.now);
         // The column said the window had run out; derivation is the authority on
         // whether it actually has. A row that comes back fresh is left alone —
@@ -2757,7 +2954,7 @@ export async function runSweep(
       noteSkip("witness", "sealing_unconfigured");
       noteSkip("anchor", "sealing_unconfigured");
     } else {
-      sealed = await sealStep(db, sealing, skip);
+      sealed = await sealStep(db, sealing, skip, cache);
       // Who the maintainer is, read exactly as derivation reads it: the operators
       // the registry events flag, at the head of what this run read.
       const { maintainers } = registeredOperatorsAt(
@@ -2765,7 +2962,7 @@ export async function runSweep(
         headPosition(registry),
       );
       inStep = "witness";
-      witnessed = await witnessStep(db, sealing, maintainers, skip);
+      witnessed = await witnessStep(db, sealing, maintainers, skip, cache);
       inStep = "anchor";
       anchored = await anchorStep(db, sealing, skip);
       // (h1) And, in the same step, one pending proof finished if a calendar
@@ -2787,6 +2984,7 @@ export async function runSweep(
       deps.now,
       at,
       skip,
+      cache,
     );
     mirrorDetail = mirrored.detail;
 
@@ -2847,7 +3045,7 @@ export async function runSweep(
         skip,
       );
       inStep = "standing";
-      standing = await standingStep(db, sealedHead.last_seq, at, skip);
+      standing = await standingStep(db, sealedHead.last_seq, at, skip, cache);
       inStep = "payout";
       payouts = await payoutStep(db, deps.payout, sealedHead.last_seq, at, skip);
     }

@@ -458,7 +458,10 @@ describe("the counter migration on a log that has already served reads", () => {
           .run();
       }
 
-      expect(await migrated.rest()).toEqual(["0016_receipt_counter.sql"]);
+      expect(await migrated.rest()).toEqual([
+        "0016_receipt_counter.sql",
+        "0017_standing_cursor.sql",
+      ]);
 
       // The row stands at the largest counter already issued, so the next
       // reader continues the stream rather than starting it again.
@@ -482,7 +485,10 @@ describe("the counter migration on a log that has already served reads", () => {
   it("seeds an empty log at zero, and hands the first reader 1", async () => {
     const migrated = await partiallyMigrated("0015_paid_access.sql");
     try {
-      expect(await migrated.rest()).toEqual(["0016_receipt_counter.sql"]);
+      expect(await migrated.rest()).toEqual([
+        "0016_receipt_counter.sql",
+        "0017_standing_cursor.sql",
+      ]);
       expect(await nextReadCounter(migrated.db)).toBe(1);
       expect(await allocateReadCounter(migrated.db)).toBe(1);
       expect(await nextReadCounter(migrated.db)).toBe(2);

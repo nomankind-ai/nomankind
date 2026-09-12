@@ -38,6 +38,7 @@ import {
 } from "../events.js";
 import type { ReadReceipt, SyncReceipt } from "../receipt.js";
 import type { StakeRecord } from "../stake.js";
+import type { Standing } from "../standing.js";
 import type { Entry } from "../schema.js";
 import type { RegistrySeal, Seal, WitnessSignature } from "../seal.js";
 import {
@@ -3113,6 +3114,179 @@ export async function setOperatorStanding(
 }
 
 /**
+ * What the sweep's standing fold left behind: every operator's accumulator, and
+ * the position they all cover.
+ *
+ * `position` is null when there is nothing to continue from — no rows at all, or
+ * rows that do not agree on a position, which is a half-written run and not a
+ * cursor. A null position is the whole fold, which is always the right answer
+ * and only ever the slow one.
+ */
+export interface StoredStandings {
+  readonly position: number | null;
+  readonly standings: Map<string, Standing>;
+}
+
+const STANDING_COLUMNS = [
+  "operator",
+  "position",
+  "earned",
+  "burned",
+  "locked",
+  "validations_volunteered",
+  "validations_assigned",
+  "validations_reproduced",
+  "attestations_scored",
+  "submissions_verified",
+  "disputes_upheld",
+  "revalidations_changed",
+  "overturned",
+  "missed",
+  "forfeits",
+] as const;
+
+/** One stored accumulator, with `standing` and `available` computed back. */
+function toStanding(row: Row): Standing {
+  const earned = readInteger(row, "earned");
+  const burned = readInteger(row, "burned");
+  const locked = readInteger(row, "locked");
+  const standing = earned - burned;
+  return {
+    operator: readText(row, "operator"),
+    earned,
+    burned,
+    locked,
+    standing,
+    available: standing - locked,
+    counts: {
+      validations_volunteered: readInteger(row, "validations_volunteered"),
+      validations_assigned: readInteger(row, "validations_assigned"),
+      validations_reproduced: readInteger(row, "validations_reproduced"),
+      attestations_scored: readInteger(row, "attestations_scored"),
+      submissions_verified: readInteger(row, "submissions_verified"),
+      disputes_upheld: readInteger(row, "disputes_upheld"),
+      revalidations_changed: readInteger(row, "revalidations_changed"),
+      overturned: readInteger(row, "overturned"),
+      missed: readInteger(row, "missed"),
+      forfeits: readInteger(row, "forfeits"),
+    },
+    position: readInteger(row, "position"),
+  };
+}
+
+/**
+ * Every stored accumulator, paged by operator id.
+ *
+ * Paged rather than read whole because this is the one read the incremental fold
+ * does every run and an unbounded scan is exactly what the storage layer exists
+ * to prevent. Operators are the small dimension — a page or two of them against
+ * a log of millions of events — which is the whole reason folding forward from
+ * these is cheaper than folding the log.
+ */
+export async function storedStandings(db: D1Like): Promise<StoredStandings> {
+  const standings = new Map<string, Standing>();
+  let position: number | null = null;
+  let agreed = true;
+  let after = "";
+  for (;;) {
+    const rows = await db
+      .prepare(
+        `SELECT ${STANDING_COLUMNS.join(", ")} FROM operator_standing
+         WHERE operator > ? ORDER BY operator LIMIT ?`,
+      )
+      .bind(after, LIST_PAGE_LIMIT)
+      .all<Row>();
+    for (const row of rows.results) {
+      const standing = toStanding(row);
+      standings.set(standing.operator, standing);
+      if (position === null) position = standing.position;
+      else if (position !== standing.position) agreed = false;
+    }
+    if (rows.results.length < LIST_PAGE_LIMIT) break;
+    after = readText(rows.results[rows.results.length - 1]!, "operator");
+  }
+  if (!agreed) return { position: null, standings };
+  return { position, standings };
+}
+
+/** One operator's stored accumulator, or null when the fold has never run. */
+export async function storedStandingOf(
+  db: D1Like,
+  operator: string,
+): Promise<Standing | null> {
+  const row = await db
+    .prepare(
+      `SELECT ${STANDING_COLUMNS.join(", ")} FROM operator_standing
+       WHERE operator = ? ${ONE_ROW}`,
+    )
+    .bind(operator)
+    .first<Row>();
+  return row === null ? null : toStanding(row);
+}
+
+/** The upsert that stores one operator's accumulator at its position. */
+function standingStatement(db: D1Like, standing: Standing): D1LikeStatement {
+  return db
+    .prepare(
+      `INSERT INTO operator_standing (${STANDING_COLUMNS.join(", ")})
+       VALUES (${STANDING_COLUMNS.map(() => "?").join(", ")})
+       ON CONFLICT (operator) DO UPDATE SET
+         ${STANDING_COLUMNS.filter((name) => name !== "operator")
+           .map((name) => `${name} = excluded.${name}`)
+           .join(",\n         ")}`,
+    )
+    .bind(
+      standing.operator,
+      standing.position,
+      standing.earned,
+      standing.burned,
+      standing.locked,
+      standing.counts.validations_volunteered,
+      standing.counts.validations_assigned,
+      standing.counts.validations_reproduced,
+      standing.counts.attestations_scored,
+      standing.counts.submissions_verified,
+      standing.counts.disputes_upheld,
+      standing.counts.revalidations_changed,
+      standing.counts.overturned,
+      standing.counts.missed,
+      standing.counts.forfeits,
+    );
+}
+
+/**
+ * Store what the fold returned: the accumulators, and the `standing` column
+ * beside the operator rows the directory and the pool read.
+ *
+ * One batch per chunk, because the rows must move together: a run that wrote
+ * half the operators at a new position and died would leave positions that do
+ * not agree, which `storedStandings` reads as no cursor at all and folds the
+ * whole log to repair. Both writes for one operator sit in the same batch for
+ * the same reason `recordTrustChange` puts its event and its row in one.
+ */
+export async function putStandings(
+  db: D1Like,
+  standings: readonly Standing[],
+): Promise<void> {
+  const CHUNK = 50;
+  for (let from = 0; from < standings.length; from += CHUNK) {
+    const statements: D1LikeStatement[] = [];
+    for (const standing of standings.slice(from, from + CHUNK)) {
+      statements.push(standingStatement(db, standing));
+      statements.push(
+        operatorStandingStatement(
+          db,
+          standing.operator,
+          standing.standing,
+          standing.position,
+        ),
+      );
+    }
+    if (statements.length > 0) await db.batch(statements);
+  }
+}
+
+/**
  * The cached standings, by operator, highest first. Operators whose standing has
  * never been computed are not in the map at all: null is "not computed yet" and
  * never "zero", and a page that finds an operator missing recomputes.
@@ -5782,15 +5956,24 @@ function toMirror(row: Row): MirrorRecord {
   };
 }
 
-/** Record one day's export, replacing whatever was there for that day. */
+/**
+ * Record one day's export as pushed, replacing whatever was there for that day.
+ *
+ * The second half of the claim `claimMirror` opened: the day's bytes are in the
+ * repository, and the row says so with the commit that carries them. A day whose
+ * row is still pending is a day whose export did not land, which is what keeps
+ * `latestMirror` and `mirrorOn` honest about what has been exported.
+ */
 export async function putMirror(
   db: D1Like,
   record: MirrorRecord,
 ): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO mirrors (${MIRROR_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO mirrors (${MIRROR_COLUMNS}, state)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pushed')
        ON CONFLICT ("date") DO UPDATE SET
+         state = 'pushed',
          exported_at = excluded.exported_at,
          commit_sha = excluded.commit_sha,
          tree_sha = excluded.tree_sha,
@@ -5825,22 +6008,133 @@ export async function putMirror(
 export async function latestMirror(db: D1Like): Promise<MirrorRecord | null> {
   const row = await db
     .prepare(
-      `SELECT ${MIRROR_COLUMNS} FROM mirrors ORDER BY "date" DESC ${ONE_ROW}`,
+      `SELECT ${MIRROR_COLUMNS} FROM mirrors
+       WHERE state = 'pushed' ORDER BY "date" DESC ${ONE_ROW}`,
     )
     .first<Row>();
   return row === null ? null : toMirror(row);
 }
 
-/** One day's export, by its UTC calendar day, or null when that day has none. */
+/**
+ * One day's export, by its UTC calendar day, or null when that day has none.
+ *
+ * Pushed rows only, for the same reason `latestMirror` reads only those: a
+ * pending row is an export in flight or an export that died, and either way the
+ * day is not mirrored. `mirrorClaimOn` is the read that can see a claim.
+ */
 export async function mirrorOn(
   db: D1Like,
   date: string,
 ): Promise<MirrorRecord | null> {
   const row = await db
-    .prepare(`SELECT ${MIRROR_COLUMNS} FROM mirrors WHERE "date" = ? ${ONE_ROW}`)
+    .prepare(
+      `SELECT ${MIRROR_COLUMNS} FROM mirrors
+       WHERE "date" = ? AND state = 'pushed' ${ONE_ROW}`,
+    )
     .bind(date)
     .first<Row>();
   return row === null ? null : toMirror(row);
+}
+
+/** A day's claim on the export: which state it is in, and since when. */
+export interface MirrorClaim {
+  readonly date: string;
+  readonly state: "pending" | "pushed";
+  /** When the export that holds this claim started, or null for a 0014 row. */
+  readonly started_at: string | null;
+  readonly head: number;
+  readonly seal_seq: number;
+}
+
+/**
+ * The day's row whatever state it is in, or null when the day is untouched.
+ *
+ * The read the mirror step makes before it does anything: a pushed row is a day
+ * that is done, a fresh pending row is a run that is still exporting, and a
+ * stale pending row is a run that died and a day this run takes over.
+ */
+export async function mirrorClaimOn(
+  db: D1Like,
+  date: string,
+): Promise<MirrorClaim | null> {
+  const row = await db
+    .prepare(
+      `SELECT "date", state, started_at, head, seal_seq FROM mirrors
+       WHERE "date" = ? ${ONE_ROW}`,
+    )
+    .bind(date)
+    .first<Row>();
+  if (row === null) return null;
+  return {
+    date: readText(row, "date"),
+    state: readText(row, "state") === "pending" ? "pending" : "pushed",
+    started_at: readNullableText(row, "started_at"),
+    head: readInteger(row, "head"),
+    seal_seq: readInteger(row, "seal_seq"),
+  };
+}
+
+/**
+ * Claim a day for this run: write the row pending, before the export is built.
+ *
+ * 0014 wrote nothing until the push succeeded, so a run killed mid-export left
+ * no trace and every later run that day paid for the whole export again. The
+ * claim is what makes a killed run cost one retry instead of all of them, and
+ * it is deliberately not a lock: a claim older than a sweep interval is taken
+ * over, because a lock nobody can release is worse than an export done twice.
+ *
+ * The commit columns are the empty string until there is a commit. They are not
+ * nullable — 0014 declared them NOT NULL and a migration reshapes nothing — and
+ * nothing reads them on a pending row, because the two reads that serve them
+ * ask for pushed rows only.
+ */
+export async function claimMirror(
+  db: D1Like,
+  claim: {
+    readonly date: string;
+    readonly started_at: string;
+    readonly head: number;
+    readonly seal_seq: number;
+    /**
+     * The instant a pending claim becomes stale: one sweep interval before the
+     * run's own. A claim at or after it belongs to a run that may still be
+     * going, and this caller does not get the day.
+     */
+    readonly take_over_before: string;
+  },
+): Promise<boolean> {
+  // One statement, because two are a race: the two timers overlap by design,
+  // and a read-then-write would let both read "stale" and both claim the day,
+  // which is the export done twice that the row exists to prevent. The insert
+  // wins an untouched day; the update wins a claim that is pending and old; a
+  // pushed row and a fresh claim match neither and the row comes back null.
+  const row = await db
+    .prepare(
+      `INSERT INTO mirrors (
+         "date", exported_at, commit_sha, tree_sha, head, seal_seq,
+         entries, files_changed, url, raw_url, state, started_at
+       ) VALUES (?, ?, '', '', ?, ?, 0, 0, '', '', 'pending', ?)
+       ON CONFLICT ("date") DO UPDATE SET
+         state = 'pending',
+         started_at = excluded.started_at,
+         exported_at = excluded.exported_at,
+         head = excluded.head,
+         seal_seq = excluded.seal_seq
+       WHERE mirrors.state = 'pending'
+         AND mirrors.started_at IS NOT NULL
+         AND mirrors.started_at < ?
+       RETURNING "date"`,
+    )
+    .bind(
+      claim.date,
+      claim.started_at,
+      claim.head,
+      claim.seal_seq,
+      claim.started_at,
+      claim.take_over_before,
+    )
+    .first<Row>();
+  return row !== null;
 }
 
 /** Where a page of exportable entry ids starts and stops. */
@@ -5862,6 +6156,88 @@ export interface EntryIdsThroughQuery {
  * the last writer reached — is not what the mirror carries. Keyset over
  * submitted_seq, so the walk costs an index seek per page however far in it is.
  */
+/** One stored entry row, with the id the export writes it under. */
+export interface StoredEntryRow extends StoredEntry {
+  readonly id: string;
+}
+
+/**
+ * A page of stored entry rows at or below a sealed position, in submission
+ * order.
+ *
+ * The same keyset walk `entryIdsThrough` does, carrying the derived row itself
+ * rather than only the id. The export reads these because re-deriving every
+ * entry from its own world costs ten statements an entry and a thousand entries
+ * is ten thousand statements a day; a row whose `derived_through_seq` is the
+ * entry's own last event at or below the head was derived over exactly the
+ * world the export would rebuild, and the caller falls back to the derivation
+ * for any row that is not.
+ */
+export async function entriesThrough(
+  db: D1Like,
+  query: EntryIdsThroughQuery,
+): Promise<StoredEntryRow[]> {
+  const rows =
+    query.afterSubmittedSeq === undefined
+      ? await db
+          .prepare(
+            `SELECT id, ${ENTRY_COLUMNS} FROM entries
+             WHERE submitted_seq <= ? ORDER BY submitted_seq LIMIT ?`,
+          )
+          .bind(query.throughSeq, query.limit)
+          .all<Row>()
+      : await db
+          .prepare(
+            `SELECT id, ${ENTRY_COLUMNS} FROM entries
+             WHERE submitted_seq <= ? AND submitted_seq > ?
+             ORDER BY submitted_seq LIMIT ?`,
+          )
+          .bind(query.throughSeq, query.afterSubmittedSeq, query.limit)
+          .all<Row>();
+  return rows.results.map((row) => ({
+    id: readText(row, "id"),
+    ...toStoredEntry(row),
+  }));
+}
+
+/**
+ * The last position at or below `throughSeq` at which each of these entries'
+ * own events moved, by entry id.
+ *
+ * One grouped read for a whole page, so the export can tell a stored row that
+ * was derived over the world the sealed head holds from one that is behind it,
+ * without asking the events table once per entry. An entry absent from the map
+ * has no event at or below the position, which its own derivation would throw
+ * over anyway.
+ */
+export async function entryHeadsThrough(
+  db: D1Like,
+  ids: readonly string[],
+  throughSeq: number,
+): Promise<Map<string, number>> {
+  const heads = new Map<string, number>();
+  if (ids.length === 0) return heads;
+  // D1 takes a hundred bound values in a statement and a page of entries is a
+  // hundred ids, so the page is asked in halves rather than in one query that
+  // would refuse at exactly the page size the rest of this module uses.
+  const CHUNK = 50;
+  for (let from = 0; from < ids.length; from += CHUNK) {
+    const chunk = ids.slice(from, from + CHUNK);
+    const rows = await db
+      .prepare(
+        `SELECT entry_id, MAX(seq) AS head FROM events
+         WHERE seq <= ? AND entry_id IN (${chunk.map(() => "?").join(", ")})
+         GROUP BY entry_id`,
+      )
+      .bind(throughSeq, ...chunk)
+      .all<Row>();
+    for (const row of rows.results) {
+      heads.set(readText(row, "entry_id"), readInteger(row, "head"));
+    }
+  }
+  return heads;
+}
+
 export async function entryIdsThrough(
   db: D1Like,
   query: EntryIdsThroughQuery,

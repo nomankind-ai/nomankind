@@ -659,10 +659,12 @@ describe("renderApi", () => {
   });
 
   it("documents the standing and ledger routes with their shapes and refusals", () => {
-    // Standing is recomputed over the log rather than read from a column, and
-    // the page has to say so: that is the whole difference between a number a
-    // reader can check and a score nomankind hands out.
-    expect(page).toContain("recomputed over the sealed log");
+    // Standing is served from what the sweep folded, at the position it folded
+    // to, and the recompute is a command. The page has to say both: that is the
+    // whole difference between a number a reader can check and a score
+    // nomankind hands out.
+    expect(page).toContain("as the sweep last folded it");
+    expect(page).toContain("the recompute is the command");
     expect(page).toContain("formula");
     expect(page).toContain("stored");
     expect(page).toContain(
