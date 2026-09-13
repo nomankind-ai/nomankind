@@ -30,11 +30,17 @@ import type { Event } from "../src/events.js";
 import { SCHEMA_VERSION } from "../src/policy.js";
 import type { Sidecar } from "../src/derive.js";
 import {
-  isReleased,
+  REGISTRY_EVENT_TYPES,
+  isEventReleased,
   releaseDateOf,
   withholdEntry,
   withholdEvent,
 } from "../src/release.js";
+import {
+  agentOperatorsAt,
+  registeredOperatorsAt,
+  trustedOperatorsAt,
+} from "../src/derive.js";
 import { buildSeal } from "../src/seal.js";
 import { verifyOffline, type LogBundle } from "../src/verify.js";
 import { buildVerifyWorld, type VerifyWorld } from "./helpers/verify-world.js";
@@ -48,6 +54,13 @@ const TAIL_SEALED_AT = "2026-10-10T00:00:00Z";
 
 /** A reader's clock two days after the tail seal: inside its window. */
 const INSIDE_THE_WINDOW = "2026-10-12T00:00:00Z";
+
+/**
+ * A reader's clock a fortnight after the world's own seal: inside the *first*
+ * seal's window too, which is where the whole bundle is still withheld and the
+ * registry carve-out is the only thing a free reader can read.
+ */
+const INSIDE_THE_FIRST_WINDOW = "2026-09-22T00:00:00Z";
 
 /** A reader's clock long after it: nothing of this log is withheld any more. */
 const AFTER_THE_WINDOW = "2026-12-01T00:00:00Z";
@@ -78,9 +91,13 @@ async function sealedWorld(
 }
 
 /**
- * The bundle as a reader with no key is served it: every event whose covering
- * seal has not released yet as a hash line, exactly as `GET /events` answers a
- * free reader (src/worker/events.ts).
+ * The bundle as a reader with no key is served it: every event the window has
+ * not opened yet as a hash line, exactly as `GET /events` answers a free reader
+ * (src/worker/events.ts).
+ *
+ * Through `isEventReleased` and not through `isReleased`, because that is what
+ * the door calls: the registry goes out whole from the day it is sealed, and a
+ * helper that withheld it would be testing a view no reader is ever served.
  */
 function keyless(bundle: LogBundle, now: Date): LogBundle {
   return {
@@ -90,7 +107,11 @@ function keyless(bundle: LogBundle, now: Date): LogBundle {
         (candidate) =>
           event.seq >= candidate.first_seq && event.seq <= candidate.last_seq,
       );
-      return isReleased(seal === undefined ? null : seal.sealed_at, now)
+      return isEventReleased(
+        event,
+        seal === undefined ? null : seal.sealed_at,
+        now,
+      )
         ? event
         : (withholdEvent(event) as unknown as Event);
     }),
@@ -242,6 +263,50 @@ describe("the offline verifier, inside the release window", () => {
       report.diffs.some((diff) => diff.reason === "entry_withheld"),
     ).toBe(false);
     expect(report.diffs.some((diff) => diff.check === "schema")).toBe(true);
+  });
+
+  it("carries the registry in full while the entry's own events are hash lines", async () => {
+    // A clock inside the first seal's own window, where before the carve-out
+    // every line of this bundle was a hash line and a free reader could not
+    // name one operator out of a log whose `/operators` page named them all.
+    const { world, bundle } = await sealedWorld(INSIDE_THE_WINDOW);
+    const free = keyless(bundle, new Date(INSIDE_THE_FIRST_WINDOW));
+
+    const full = free.events.filter((event) => event.payload !== null);
+    const held = hashLines(free);
+    expect(full.length).toBeGreaterThan(0);
+    expect(held.length).toBeGreaterThan(0);
+    // The split is by type and by nothing else: the six registry types whole,
+    // everything an entry is made of held back.
+    expect(full.every((event) => REGISTRY_EVENT_TYPES.includes(event.type))).toBe(
+      true,
+    );
+    expect(held.some((event) => event.type === "entry_submitted")).toBe(true);
+    expect(
+      held.every((event) => !REGISTRY_EVENT_TYPES.includes(event.type)),
+    ).toBe(true);
+
+    // Which is the point of it: the registry a fork derives from the free
+    // bundle is the registry the whole log derives, operator for operator.
+    const head = bundle.events[bundle.events.length - 1]!.seq;
+    expect(registeredOperatorsAt(free.events, head)).toEqual(
+      registeredOperatorsAt(bundle.events, head),
+    );
+    expect(trustedOperatorsAt(free.events, head)).toEqual(
+      trustedOperatorsAt(bundle.events, head),
+    );
+    expect(agentOperatorsAt(free.events, head)).toEqual(
+      agentOperatorsAt(bundle.events, head),
+    );
+
+    // And the count the report prints is lower for it: it used to be every
+    // line in the bundle, and it is now the lines about entries alone.
+    const report = await verifyOffline(world.entry, free);
+    expect(report.withheld).toBe(held.length);
+    expect(report.withheld).toBeLessThan(free.events.length);
+    // The hash lines are still read as the events they are, so the run reaches
+    // the checks past the bundle rather than stopping on a malformed line.
+    expect(report.diffs.filter((diff) => diff.check === "bundle")).toEqual([]);
   });
 
   it("checks a released export exactly as it always was", async () => {

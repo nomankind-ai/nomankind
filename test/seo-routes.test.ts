@@ -93,6 +93,11 @@ async function seedEntry(
     .run();
 }
 
+/** Three entries around the first page boundary, at MAX-1, MAX and MAX+1. */
+const ENTRY_BEFORE_BOUNDARY = "nmk_00000000000000000000000000000d41";
+const ENTRY_ON_BOUNDARY = "nmk_00000000000000000000000000000e52";
+const ENTRY_AFTER_BOUNDARY = "nmk_00000000000000000000000000000f63";
+
 const ENTRY_OLDEST = "nmk_000000000000000000000000000000a1";
 const ENTRY_MIDDLE = "nmk_000000000000000000000000000000b2";
 const ENTRY_NEWEST = "nmk_000000000000000000000000000000c3";
@@ -104,6 +109,17 @@ beforeAll(async () => {
   await seedEntry(ENTRY_OLDEST, "2026-09-01T10:15:00.000Z", 1);
   await seedEntry(ENTRY_MIDDLE, "2026-09-05T23:59:59.000Z", 2);
   await seedEntry(ENTRY_NEWEST, "2026-09-11T08:00:00.000Z", 3);
+  await seedEntry(
+    ENTRY_BEFORE_BOUNDARY,
+    "2026-09-12T01:00:00.000Z",
+    SITEMAP_MAX_ENTRIES - 1,
+  );
+  await seedEntry(ENTRY_ON_BOUNDARY, "2026-09-12T02:00:00.000Z", SITEMAP_MAX_ENTRIES);
+  await seedEntry(
+    ENTRY_AFTER_BOUNDARY,
+    "2026-09-12T03:00:00.000Z",
+    SITEMAP_MAX_ENTRIES + 1,
+  );
   for (const [index, id] of ["k1.example", "k2.example", AWKWARD_OPERATOR].entries()) {
     await putOperator(store.db, {
       id,
@@ -358,25 +374,176 @@ function endlessEntries(): { db: D1Like; limits: () => number[] } {
 }
 
 describe("the sitemap's bound", () => {
-  it("never names more entries than policy publishes", async () => {
+  const endlessEnv = (db: D1Like) =>
+    envWith({ ENVIRONMENT: "production", APEX_HOST, APP_HOST }, db);
+
+  it("answers an index once the log outgrows one document", async () => {
     const endless = endlessEntries();
-    const response = await get(
-      `${APP_ORIGIN}/sitemap.xml`,
-      envWith({ ENVIRONMENT: "production", APEX_HOST, APP_HOST }, endless.db),
+    const response = await get(`${APP_ORIGIN}/sitemap.xml`, endlessEnv(endless.db));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(
+      "application/xml; charset=utf-8",
     );
     const xml = await response.text();
-    const entryUrls = [...xml.matchAll(/<loc>[^<]*\/entries\/[^<]*<\/loc>/g)];
-    expect(entryUrls).toHaveLength(SITEMAP_MAX_ENTRIES);
 
-    // And every read that produced them was keyed and limited: no page asked
-    // for more than the list page size, and the last one asked for exactly what
-    // was left of the bound.
+    // The index names documents and no pages of its own: a crawler that follows
+    // it reads the whole log, which is the point of it existing at all.
+    expect(xml).toContain(
+      `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`,
+    );
+    expect(xml.trimEnd().endsWith("</sitemapindex>")).toBe(true);
+    expect(xml).not.toContain("<urlset");
+    expect(xml).not.toContain("/entries/");
+
+    const named = locations(xml);
+    expect(named[0]).toBe(`${APP_ORIGIN}/sitemap-pages.xml`);
+    // The fixture's newest position is one below a million, so the sequence
+    // space needs exactly that many pages of the published width.
+    const pages = Math.floor(999_999 / SITEMAP_MAX_ENTRIES) + 1;
+    expect(named).toHaveLength(pages + 1);
+    expect(named[1]).toBe(`${APP_ORIGIN}/sitemap-entries-1.xml`);
+    expect(named[named.length - 1]).toBe(
+      `${APP_ORIGIN}/sitemap-entries-${pages}.xml`,
+    );
+
+    // And the walk that decided it was keyed and limited: no page asked for
+    // more than the list page size, and the last asked for what was left of the
+    // bound. Nothing here read the whole table to find out it was too big.
     const asked = endless.limits();
     expect(asked.length).toBeGreaterThan(1);
     for (const limit of asked) expect(limit).toBeLessThanOrEqual(LIST_PAGE_LIMIT);
     expect(asked.reduce((total, limit) => total + limit, 0)).toBe(
       SITEMAP_MAX_ENTRIES,
     );
+  }, 60_000);
+
+  it("never names more entries on one page than policy publishes", async () => {
+    const endless = endlessEntries();
+    const xml = await (
+      await get(`${APP_ORIGIN}/sitemap-entries-1.xml`, endlessEnv(endless.db))
+    ).text();
+    const entryUrls = [...xml.matchAll(/<loc>[^<]*\/entries\/[^<]*<\/loc>/g)];
+    expect(entryUrls).toHaveLength(SITEMAP_MAX_ENTRIES);
+
+    const asked = endless.limits();
+    expect(asked.length).toBeGreaterThan(1);
+    for (const limit of asked) expect(limit).toBeLessThanOrEqual(LIST_PAGE_LIMIT);
+    expect(asked.reduce((total, limit) => total + limit, 0)).toBe(
+      SITEMAP_MAX_ENTRIES,
+    );
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// The documents the index names
+// ---------------------------------------------------------------------------
+
+describe("the sitemap's own pages", () => {
+  const production = () =>
+    envWith({ ENVIRONMENT: "production", APEX_HOST, APP_HOST });
+
+  it("puts the static pages and the operators in one document", async () => {
+    const response = await get(`${APP_ORIGIN}/sitemap-pages.xml`, production());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(
+      "application/xml; charset=utf-8",
+    );
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const xml = await response.text();
+    const found = locations(xml);
+    expect(found).toContain(`${APP_ORIGIN}/`);
+    expect(found).toContain(`${APP_ORIGIN}/policy`);
+    expect(found).toContain(`${APP_ORIGIN}/operators/k1.example`);
+    // The log is the other half, and it is on the entry pages.
+    expect(xml).not.toContain("/entries/");
+  }, 60_000);
+
+  it("carries every entry of its own fixed range, and its dates", async () => {
+    const xml = await (
+      await get(`${APP_ORIGIN}/sitemap-entries-1.xml`, production())
+    ).text();
+    expect(xml).toContain(
+      `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">`,
+    );
+    // The three seeded entries sit at positions 1 to 3, which is page one.
+    for (const id of [ENTRY_OLDEST, ENTRY_MIDDLE, ENTRY_NEWEST]) {
+      expect(locations(xml)).toContain(`${APP_ORIGIN}/entries/${id}`);
+    }
+    expect(xml).toContain(
+      `<loc>${APP_ORIGIN}/entries/${ENTRY_NEWEST}</loc><lastmod>2026-09-11</lastmod>`,
+    );
+    // A page is a range and nothing else: the static pages are on the other
+    // document, so nothing is listed twice.
+    expect(xml).not.toContain(`${APP_ORIGIN}/policy`);
+  }, 60_000);
+
+  it("answers an empty range with an empty document, not a refusal", async () => {
+    const response = await get(
+      `${APP_ORIGIN}/sitemap-entries-3.xml`,
+      production(),
+    );
+    // A page whose range nothing has been submitted in yet is a page that will
+    // fill: a 404 would tell a crawler the address was wrong rather than empty.
+    expect(response.status).toBe(200);
+    expect(locations(await response.text())).toEqual([]);
+  }, 60_000);
+
+  it("splits the pages at the bound, half-open, and lists nothing twice", async () => {
+    // The boundary itself: a range that included its own end would put the
+    // entry at position SITEMAP_MAX_ENTRIES on page one *and* page two, and a
+    // crawler would be handed one entry at two addresses.
+    const pages = await Promise.all(
+      [1, 2].map(async (page) =>
+        locations(
+          await (
+            await get(`${APP_ORIGIN}/sitemap-entries-${page}.xml`, production())
+          ).text(),
+        ),
+      ),
+    );
+    const on = (id: string) =>
+      pages
+        .map((found, index) =>
+          found.includes(`${APP_ORIGIN}/entries/${id}`) ? index + 1 : 0,
+        )
+        .filter((page) => page !== 0);
+
+    expect(on(ENTRY_BEFORE_BOUNDARY)).toEqual([1]);
+    expect(on(ENTRY_ON_BOUNDARY)).toEqual([2]);
+    expect(on(ENTRY_AFTER_BOUNDARY)).toEqual([2]);
+  }, 60_000);
+
+  it("answers a HEAD, and refuses every other method", async () => {
+    for (const path of ["/sitemap-pages.xml", "/sitemap-entries-1.xml"]) {
+      const head = await get(`${APP_ORIGIN}${path}`, production(), {
+        method: "HEAD",
+      });
+      expect([path, head.status]).toEqual([path, 200]);
+      expect(head.body).toBeNull();
+
+      const put = await get(`${APP_ORIGIN}${path}`, production(), {
+        method: "PUT",
+      });
+      expect([path, put.status]).toEqual([path, 405]);
+      expect(put.headers.get("allow")).toContain("GET");
+    }
+  }, 60_000);
+
+  it("is held at the edge like the sitemap that names it", () => {
+    for (const path of ["/sitemap-pages.xml", "/sitemap-entries-1.xml"]) {
+      expect([path, cacheablePath(path)]).toEqual([path, true]);
+    }
+  });
+
+  it("is not offered on the apex, which has one page", async () => {
+    const response = await get(`${APEX_ORIGIN}/sitemap-pages.xml`, production());
+    expect(response.status).toBe(404);
+    // And the apex's own sitemap is the one line it has always been.
+    const xml = await (
+      await get(`${APEX_ORIGIN}/sitemap.xml`, production())
+    ).text();
+    expect(locations(xml)).toEqual([`${APEX_ORIGIN}/`]);
+    expect(xml).not.toContain("<sitemapindex");
   }, 60_000);
 });
 
@@ -473,10 +640,32 @@ describe("the Link header", () => {
     expect(missing.status).toBe(404);
     expect(missing.headers.get("link")).toBe(expectedLink(APP_CSS_HREF));
 
-    for (const path of ["/robots.txt", "/sitemap.xml", "/favicon.svg"]) {
+    for (const path of [
+      "/robots.txt",
+      "/sitemap.xml",
+      "/sitemap-pages.xml",
+      "/favicon.svg",
+    ]) {
       const file = await get(`${APP_ORIGIN}${path}`, envWith({ APP_HOST }));
       expect([path, file.headers.get("link")]).toEqual([path, null]);
     }
+  }, 60_000);
+
+  it("is carried by the final not-found too, which is a page like any other", async () => {
+    // The 404 no door answered (src/worker/index.ts): it is the app's layout
+    // linking the app's stylesheet, so it must ask for that sheet as early as
+    // every other page does.
+    const missing = await get(`${APP_ORIGIN}/nothing-here`, envWith({ APP_HOST }), {
+      headers: HTML,
+    });
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(missing.headers.get("link")).toBe(expectedLink(APP_CSS_HREF));
+
+    // The agent's twin is a record and carries no hint about a stylesheet.
+    const json = await get(`${APP_ORIGIN}/nothing-here`, envWith({ APP_HOST }));
+    expect(json.status).toBe(404);
+    expect(json.headers.get("link")).toBeNull();
   }, 60_000);
 });
 

@@ -38,6 +38,7 @@ import { extractCore, type Core } from "../core.js";
 import type { ReconfirmationRecord } from "../events.js";
 import { NORM_VERSION } from "../policy.js";
 import { signRecord } from "../records.js";
+import { runCommand } from "./main.js";
 import { operatorFor } from "./submit.js";
 import {
   errorOf,
@@ -45,7 +46,6 @@ import {
   getJson,
   readKeyFile,
   signingHttp,
-  reasonOf,
   signedPost,
   WebHttpClient,
   type HttpClient,
@@ -338,28 +338,29 @@ if (
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   };
-  let code: number = FAILED;
-  try {
-    const run = await runRevalidate({
-      key: await readKeyFile(plan.keyPath),
-      baseUrl: plan.baseUrl,
-      entryId: plan.entryId,
-      resolve: plan.resolve,
-      deps: {
-        http: new WebHttpClient(),
-        fetcher: new WebFetcher(),
-        now: new Date(),
-        clock: () => new Date(),
-        io,
+  process.exit(
+    await runCommand(
+      { name: "revalidate", baseUrl: plan.baseUrl, io },
+      async () => {
+        const run = await runRevalidate({
+          key: await readKeyFile(plan.keyPath),
+          baseUrl: plan.baseUrl,
+          entryId: plan.entryId,
+          resolve: plan.resolve,
+          deps: {
+            http: new WebHttpClient(),
+            fetcher: new WebFetcher(),
+            now: new Date(),
+            clock: () => new Date(),
+            io,
+          },
+        });
+        if (!run.ok && run.status === null) {
+          io.stderr(`${plan.entryId}: ${run.error ?? "unknown error"}`);
+        }
+        return run.ok ? OK : FAILED;
       },
-    });
-    if (!run.ok && run.status === null) {
-      io.stderr(`${plan.entryId}: ${run.error ?? "unknown error"}`);
-    }
-    code = run.ok ? OK : FAILED;
-  } catch (error) {
-    io.stderr(`revalidate: ${reasonOf(error)}`);
-  }
-  process.exit(code);
+    ),
+  );
 }
 /* c8 ignore stop */

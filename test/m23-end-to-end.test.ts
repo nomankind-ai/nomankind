@@ -33,7 +33,8 @@ import {
   type MirrorPushInput,
 } from "../src/adapters/mirror.js";
 import { MockPayoutAdapter } from "../src/adapters/payout.js";
-import type { ApproverRecord, Event } from "../src/events.js";
+import type { ApproverRecord, Event, EventType } from "../src/events.js";
+import { REGISTRY_EVENT_TYPES } from "../src/release.js";
 import {
   DEFAULT_DOMAIN,
   MIRROR,
@@ -436,10 +437,20 @@ describe("the day's export", () => {
       .filter((line) => line.length > 0)
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(events.length).toBeGreaterThan(0);
+    let held = 0;
     for (const event of events) {
+      // The registry is never withheld: `GET /operators` publishes the same
+      // facts from the first minute, so the seal file carries them whole and
+      // everything about an entry waits for the window (D-100).
+      if (REGISTRY_EVENT_TYPES.includes(event["type"] as EventType)) {
+        expect(event["payload"]).not.toBeNull();
+        continue;
+      }
+      held += 1;
       expect(event["payload"]).toBeNull();
       expect(event["withheld"]).toBe(true);
     }
+    expect(held).toBeGreaterThan(0);
   }, 240_000);
 
   it("recomputes standing and the ledger at the released head", async () => {

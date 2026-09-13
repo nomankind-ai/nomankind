@@ -87,7 +87,7 @@ import {
 } from "../adapters/stripe.js";
 import { PAGE_CACHE_SECONDS, PAGE_CACHE_STALE_SECONDS } from "../policy.js";
 import { HEADER_AGENT } from "../request.js";
-import { htmlResponse } from "../ui/html.js";
+import { APP_CSS_HREF, htmlResponse } from "../ui/html.js";
 import { renderNotFound } from "../ui/pages/errors.js";
 import {
   ENVIRONMENT_MISCONFIGURED,
@@ -101,7 +101,12 @@ import { handleEvents } from "./events.js";
 import { handleFailureReports } from "./failure-reports.js";
 import { handleKeys } from "./keys.js";
 import { handleMirror } from "./mirror.js";
-import { forMethod, handlePages, wantsHtml } from "./pages.js";
+import {
+  forMethod,
+  handlePages,
+  wantsHtml,
+  withResourceHints,
+} from "./pages.js";
 import { handleRead } from "./read.js";
 import { handleReconfirm } from "./reconfirm.js";
 import { READ_METHODS, handleRegistry, isRead, json } from "./registry.js";
@@ -247,7 +252,9 @@ const CACHEABLE_PATHS: ReadonlySet<string> = new Set([
  * The cacheable paths that answer something other than HTML, by content type:
  * text for robots, XML for the sitemap, an image for the icon. `storable` below
  * reads this, because a cache that only ever stored `text/html` would have held
- * none of them however carefully they were listed above.
+ * none of them however carefully they were listed above. The sitemap's own pages
+ * are XML too and are the prefix `isSitemapDocument` matches, not names here:
+ * there is one of them per fixed range of a log that grows.
  */
 const CACHEABLE_FILE_PATHS: ReadonlySet<string> = new Set([
   "/robots.txt",
@@ -268,8 +275,20 @@ export function cacheablePath(path: string): boolean {
     CACHEABLE_PATHS.has(path) ||
     path.startsWith("/entries/") ||
     path.startsWith("/operators/") ||
-    path.startsWith("/docs/")
+    path.startsWith("/docs/") ||
+    isSitemapDocument(path)
   );
+}
+
+/**
+ * The sitemap's own pages, once the log has outgrown one document (D-114): the
+ * index at /sitemap.xml, /sitemap-pages.xml and the fixed
+ * /sitemap-entries-<k>.xml ranges. A prefix rather than a list, because the
+ * number of them grows with the log and a set here would have to be rewritten
+ * every time it did.
+ */
+function isSitemapDocument(path: string): boolean {
+  return path.startsWith("/sitemap-");
 }
 
 /**
@@ -365,7 +384,8 @@ function storable(path: string, response: Response): boolean {
   return (
     type.startsWith("text/html") ||
     CACHEABLE_JSON_PATHS.has(path) ||
-    CACHEABLE_FILE_PATHS.has(path)
+    CACHEABLE_FILE_PATHS.has(path) ||
+    isSitemapDocument(path)
   );
 }
 
@@ -645,19 +665,26 @@ async function dispatch(
     (request.method === "GET" || request.method === "HEAD") &&
     wantsHtml(request);
   if (browsing) {
+    // And with the same `Link` the pages carry (D-114): it is the app's layout
+    // linking the app's stylesheet, so a reader who mistyped an address waits
+    // for that sheet exactly as long as a reader who did not. The hint is
+    // written by src/worker/pages.ts, which is where every other page's is.
     return forMethod(
       request,
-      htmlResponse(
-        renderNotFound({
-          environment: env.ENVIRONMENT,
-          path: pathname,
-          origin: new URL(request.url).origin,
-          // No canonical address (D-114): a path nothing answers is not a page
-          // this deployment has anywhere, and a canonical link built from it
-          // would hand an indexer an address that serves this same 404.
-          canonical_origin: null,
-        }),
-        404,
+      withResourceHints(
+        htmlResponse(
+          renderNotFound({
+            environment: env.ENVIRONMENT,
+            path: pathname,
+            origin: new URL(request.url).origin,
+            // No canonical address (D-114): a path nothing answers is not a page
+            // this deployment has anywhere, and a canonical link built from it
+            // would hand an indexer an address that serves this same 404.
+            canonical_origin: null,
+          }),
+          404,
+        ),
+        APP_CSS_HREF,
       ),
     );
   }

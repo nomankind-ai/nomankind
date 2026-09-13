@@ -3626,18 +3626,26 @@ export async function standingForOperators(
 ): Promise<Map<string, OperatorStanding>> {
   const standings = new Map<string, OperatorStanding>();
   if (ids.length === 0) return standings;
-  const rows = await db
-    .prepare(
-      `SELECT id, standing, standing_seq FROM operators
-       WHERE standing IS NOT NULL AND id IN (${ids.map(() => "?").join(", ")})`,
-    )
-    .bind(...ids)
-    .all<Row>();
-  for (const row of rows.results) {
-    standings.set(readText(row, "id"), {
-      standing: readInteger(row, "standing"),
-      seq: readInteger(row, "standing_seq"),
-    });
+  // D1 takes a hundred bound values in a statement, and one id is one bound
+  // value here, so a caller that hands in more than a hundred ids would get a
+  // refusal from the database rather than a short map. Asked in chunks, the
+  // same way `entryHeadsThrough` asks a page of entries.
+  const CHUNK = 50;
+  for (let from = 0; from < ids.length; from += CHUNK) {
+    const chunk = ids.slice(from, from + CHUNK);
+    const rows = await db
+      .prepare(
+        `SELECT id, standing, standing_seq FROM operators
+         WHERE standing IS NOT NULL AND id IN (${chunk.map(() => "?").join(", ")})`,
+      )
+      .bind(...chunk)
+      .all<Row>();
+    for (const row of rows.results) {
+      standings.set(readText(row, "id"), {
+        standing: readInteger(row, "standing"),
+        seq: readInteger(row, "standing_seq"),
+      });
+    }
   }
   return standings;
 }
@@ -5513,6 +5521,53 @@ export async function entryIdsNewestFirst(
 }
 
 /**
+ * A keyset page of entry ids inside one fixed range of submitted positions,
+ * oldest position first.
+ *
+ * The sitemap's other query (decision D-114). Once the newest-entries walk above
+ * hits its published bound the document becomes an index of pages, and a page is
+ * a fixed slice of the sequence space rather than an offset into a list: that is
+ * what keeps an entry on the page it was first listed on however many entries
+ * are written after it, and what means there is no offset to page by. So the
+ * range is half-open — `fromSeq` in, `toSeq` out — and the two columns are
+ * `entryIdsNewestFirst`'s own, read for the same reason and derived from just as
+ * little.
+ *
+ * Ascending, because a fixed range is walked from its start, and resumed
+ * strictly after the last position seen. The caller owns the page size here as
+ * everywhere else in this file, so nothing reads a range in one query either.
+ */
+export async function entryIdsInSubmittedRange(
+  db: D1Like,
+  query: {
+    readonly fromSeq: number;
+    /** Exclusive: the first position of the next page's range. */
+    readonly toSeq: number;
+    readonly limit: number;
+    /** Resume strictly after this submitted_seq; omit for the first page. */
+    readonly afterSubmittedSeq?: number;
+  },
+): Promise<EntryLocation[]> {
+  const start =
+    query.afterSubmittedSeq === undefined
+      ? query.fromSeq
+      : query.afterSubmittedSeq + 1;
+  const rows = await db
+    .prepare(
+      `SELECT id, submitted_at, submitted_seq FROM entries ` +
+        `WHERE submitted_seq >= ? AND submitted_seq < ? ` +
+        `ORDER BY submitted_seq ASC LIMIT ?`,
+    )
+    .bind(start, query.toSeq, query.limit)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    id: readText(row, "id"),
+    submittedAt: readText(row, "submitted_at"),
+    submittedSeq: readInteger(row, "submitted_seq"),
+  }));
+}
+
+/**
  * How many operators are in the trusted pool.
  *
  * Trust is granted by an `operator_trusted` event and recorded on the row by
@@ -6296,6 +6351,15 @@ function markThrown(rows: readonly SweepStepRow[]): readonly SweepStepRow[] {
  *
  * One batch, so a reader between two steps of the same run never sees half a
  * board.
+ *
+ * And a row whose stored value would not change is not written at all. Fifteen
+ * rows a run and a run every five minutes is about four thousand writes a day,
+ * most of them a step that did exactly what it did last time; the `WHERE` on
+ * the `DO UPDATE` mirrors the `SET` list column by column and refuses the
+ * update when every one of them would land on what is already there. It is one
+ * clause on the same batch, so nothing is read before it is written. A run
+ * whose clock has moved is still a change — the board dates itself by
+ * `last_run_at`, so "nothing happened, five minutes ago" is news.
  */
 export async function putSweepSteps(
   db: D1Like,
@@ -6321,7 +6385,24 @@ export async function putSweepSteps(
              sweep_steps.last_skip_at
            ),
            detail_json = excluded.detail_json,
-           "trigger" = excluded."trigger"`,
+           "trigger" = excluded."trigger"
+         WHERE
+           MAX(excluded.last_run_at, sweep_steps.last_run_at)
+             IS NOT sweep_steps.last_run_at
+           OR COALESCE(
+                MAX(excluded.last_ok_at, sweep_steps.last_ok_at),
+                excluded.last_ok_at,
+                sweep_steps.last_ok_at
+              ) IS NOT sweep_steps.last_ok_at
+           OR COALESCE(excluded.last_skip_reason, sweep_steps.last_skip_reason)
+             IS NOT sweep_steps.last_skip_reason
+           OR COALESCE(
+                MAX(excluded.last_skip_at, sweep_steps.last_skip_at),
+                excluded.last_skip_at,
+                sweep_steps.last_skip_at
+              ) IS NOT sweep_steps.last_skip_at
+           OR excluded.detail_json IS NOT sweep_steps.detail_json
+           OR excluded."trigger" IS NOT sweep_steps."trigger"`,
       )
       .bind(
         row.step,

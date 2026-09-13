@@ -27,7 +27,11 @@
 
 import type { Event } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
-import { isReleased, withholdEvent, type WithheldEvent } from "../release.js";
+import {
+  isEventReleased,
+  withholdEvent,
+  type WithheldEvent,
+} from "../release.js";
 import type { Seal } from "../seal.js";
 import { eventsAfter, headSeq, sealsBetween } from "../storage/repository.js";
 import {
@@ -75,8 +79,8 @@ const EVENTS_QUERY_WORDS = {
 } as const;
 
 /**
- * The page as a free reader sees it: every event whose covering seal has not
- * released yet as a hash line (decision D-100).
+ * The page as a free reader sees it: every event the window has not opened yet
+ * as a hash line (decision D-100).
  *
  * Per event and by its own seal rather than by a single boundary, because the
  * question the window asks is about the seal that covers the event: an event
@@ -84,6 +88,11 @@ const EVENTS_QUERY_WORDS = {
  * hash, the links, the type, the instant and the entry id all stay, so a reader
  * who cannot yet see what happened can still prove that it happened, in that
  * order, at that instant — which is the whole of what `GET /events` is for.
+ *
+ * Which events wait is src/release.ts's to say and not this door's: the mirror
+ * export asks the same function, so a page read here and a seal file cloned
+ * from the mirror hold the same lines. The registry never waits, which is why
+ * this door no longer withholds the naming that `GET /operators` publishes.
  */
 function withhold(
   events: readonly Event[],
@@ -96,7 +105,7 @@ function withhold(
         event.seq >= candidate.first_seq && event.seq <= candidate.last_seq,
     );
     const sealedAt = seal === undefined ? null : seal.sealed_at;
-    return isReleased(sealedAt, now) ? event : withholdEvent(event);
+    return isEventReleased(event, sealedAt, now) ? event : withholdEvent(event);
   });
 }
 

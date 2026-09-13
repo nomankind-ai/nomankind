@@ -53,9 +53,11 @@ import {
   type AttestationScoreRecord,
   type AttestationScorer,
   type Event,
+  type EventType,
   type Probe,
 } from "../src/events.js";
 import { entryHash } from "../src/hash.js";
+import { REGISTRY_EVENT_TYPES } from "../src/release.js";
 import { answersHash, probeSetHash, type ProbeAnswer } from "../src/probe.js";
 import { exportPrivateKeyPkcs8, generateKeypair } from "../src/identity.js";
 import { runMirror } from "../src/cli/mirror.js";
@@ -855,14 +857,23 @@ describe("the mirror command rebuilds the export from the public doors", () => {
     expect([...withheld.keys()].filter((path) => path.startsWith("entries/"))).toEqual(
       [],
     );
+    let held = 0;
     for (const line of withheld
       .get("events/00000000.jsonl")!
       .split("\n")
       .filter((one) => one.length > 0)
       .map((one) => JSON.parse(one) as Record<string, unknown>)) {
+      // The registry is never withheld: it is public from the first minute at
+      // `GET /operators`, so the command writes it whole (D-100).
+      if (REGISTRY_EVENT_TYPES.includes(line["type"] as EventType)) {
+        expect(line["payload"]).not.toBeNull();
+        continue;
+      }
+      held += 1;
       expect(line["payload"]).toBeNull();
       expect(line["withheld"]).toBe(true);
     }
+    expect(held).toBeGreaterThan(0);
 
     // The same reads, signed by an agent bound to a registered operator: the
     // M2 signature every write door already verifies, over the method, the

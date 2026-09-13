@@ -2,11 +2,12 @@
  * The release window, as a rule (decisions D-100 and D-101).
  *
  * Whitepaper Section 8 as D-100 amends it: training on the data is free *on
- * release*, and the window is what the paid product is. The rule itself is four
- * functions and a clock somebody else supplies — an event's release date is its
- * covering seal's `sealed_at` plus the window, an entry's is its submission
- * event's, an unsealed event is not released, and what is withheld is content
- * and never proof.
+ * release*, and the window is what the paid product is. The rule itself is a
+ * handful of functions and a clock somebody else supplies — an event's release
+ * date is its covering seal's `sealed_at` plus the window, an entry's is its
+ * submission event's, an unsealed event is not released, the six registry types
+ * do not wait for the window at all, and what is withheld is content and never
+ * proof.
  *
  * So what is pinned here is exactly that: the arithmetic at the boundary, on it
  * and a millisecond either side; null for a thing nothing has sealed; the
@@ -28,6 +29,8 @@ import { entryHash } from "../src/hash.js";
 import { RELEASE_WINDOW_DAYS } from "../src/policy.js";
 import {
   CONTENT_CORE_KEYS,
+  REGISTRY_EVENT_TYPES,
+  isEventReleased,
   isReleased,
   isWithheld,
   releaseDateOf,
@@ -96,6 +99,57 @@ describe("whether something is released", () => {
     // The window starts at the seal, so an event the log has not committed to
     // has no date to have reached — however old it is.
     expect(isReleased(null, new Date("2099-01-01T00:00:00.000Z"))).toBe(false);
+  });
+});
+
+describe("whether one event is released", () => {
+  const SEALED_AT = "2026-09-11T00:00:00.000Z";
+  const OPENS = releaseDateOf(SEALED_AT);
+  const INSIDE = new Date(Date.parse(OPENS) - DAY_MS);
+
+  /** One event of a type, which is all this rule reads of it. */
+  function of(type: Event["type"]): Pick<Event, "type"> {
+    return { type };
+  }
+
+  it("releases every registry type the moment it is sealed", () => {
+    // The six that say who the operators are. `GET /operators` has published
+    // exactly this from the first minute, and D-100 promises it does.
+    expect(REGISTRY_EVENT_TYPES).toEqual([
+      "operator_registered",
+      "operator_trusted",
+      "operator_untrusted",
+      "agent_bound",
+      "operator_joined_domain",
+      "pool_snapshot",
+    ]);
+    for (const type of REGISTRY_EVENT_TYPES) {
+      expect(isEventReleased(of(type), SEALED_AT, INSIDE)).toBe(true);
+    }
+  });
+
+  it("keeps the window for everything about an entry", () => {
+    for (const type of [
+      "entry_submitted",
+      "assignment",
+      "validation",
+      "reconfirmation",
+      "dispute_filed",
+      "revalidation_requested",
+      "failure_report",
+      "read_count",
+      "attestation_scored",
+    ] as Event["type"][]) {
+      expect(REGISTRY_EVENT_TYPES.includes(type)).toBe(false);
+      expect(isEventReleased(of(type), SEALED_AT, INSIDE)).toBe(false);
+      expect(isEventReleased(of(type), SEALED_AT, new Date(OPENS))).toBe(true);
+    }
+  });
+
+  it("releases nothing the log has not sealed, registry or not", () => {
+    const far = new Date("2099-01-01T00:00:00.000Z");
+    expect(isEventReleased(of("operator_registered"), null, far)).toBe(false);
+    expect(isEventReleased(of("entry_submitted"), null, far)).toBe(false);
   });
 });
 

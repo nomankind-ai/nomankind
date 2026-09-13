@@ -318,6 +318,60 @@ describe("a run whose clock is behind the board", () => {
     expect(row?.detail["position"]).toBe(7);
   }, 240_000);
 
+  it("writes nothing at all for a row that would not change", async () => {
+    // Fifteen rows a run and a run every five minutes: a step that did exactly
+    // what it did last time must not spend a write saying so. Counted with a
+    // trigger rather than with a read, because what is at stake is the write
+    // itself and not the value it would have left behind.
+    await store.db.exec(
+      "CREATE TABLE IF NOT EXISTS sweep_step_writes (n INTEGER PRIMARY KEY AUTOINCREMENT, step TEXT)",
+    );
+    await store.db.exec(
+      "CREATE TRIGGER IF NOT EXISTS sweep_step_write AFTER UPDATE ON sweep_steps " +
+        "BEGIN INSERT INTO sweep_step_writes (step) VALUES (new.step); END",
+    );
+    const writes = async (): Promise<number> => {
+      const row = await store.db
+        .prepare("SELECT COUNT(*) AS n FROM sweep_step_writes")
+        .first<{ n: number }>();
+      return row?.n ?? 0;
+    };
+
+    const at = "2026-09-10T14:00:00.000Z";
+    const row = {
+      step: "quiet",
+      last_run_at: at,
+      last_ok_at: at,
+      last_skip_reason: null,
+      last_skip_at: null,
+      detail: { position: 3 },
+      trigger: "alarm",
+    } as const;
+
+    await putSweepSteps(store.db, [row]);
+    const before = await writes();
+
+    // The same run written again: same clock, same detail, same trigger.
+    await putSweepSteps(store.db, [row]);
+    expect(await writes()).toBe(before);
+
+    // A detail that moved is news, and so is a clock that moved.
+    await putSweepSteps(store.db, [{ ...row, detail: { position: 4 } }]);
+    expect(await writes()).toBe(before + 1);
+    await putSweepSteps(store.db, [
+      { ...row, detail: { position: 4 }, last_run_at: "2026-09-10T14:05:00.000Z" },
+    ]);
+    expect(await writes()).toBe(before + 2);
+
+    const stored = (await sweepSteps(store.db)).find(
+      (one) => one.step === "quiet",
+    );
+    expect(stored?.last_run_at).toBe("2026-09-10T14:05:00.000Z");
+    expect(stored?.detail["position"]).toBe(4);
+
+    await store.db.exec("DROP TRIGGER sweep_step_write");
+  }, 240_000);
+
   it("moves every instant forward for a run that is ahead of the board", async () => {
     const ahead = new Date("2026-09-10T13:00:00.000Z");
     await putSweepSteps(store.db, [

@@ -18,6 +18,12 @@
  * `entry_withheld` and the day the content opens — rather than as the eight
  * true-but-useless differences the ordinary checks found in it.
  *
+ * One thing is added to the diffs and nothing is taken away: a hand-edited
+ * content field fails the signature, the core and the derived view, and the
+ * three lines are one fault. They are all printed, the count still counts them
+ * all, and one `note:` line after the count says what they add up to. The
+ * kernel decides when it applies (`oneEditExplains`).
+ *
  * node:fs and node:path are allowed in this CLI file only; the kernel itself
  * stays Workers-safe.
  */
@@ -26,7 +32,12 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { SCHEMA_VERSION } from "../policy.js";
-import { verifyOffline, type Diff, type VerifyReport } from "../verify.js";
+import {
+  oneEditExplains,
+  verifyOffline,
+  type Diff,
+  type VerifyReport,
+} from "../verify.js";
 
 export interface VerifyIo {
   stdout: (line: string) => void;
@@ -147,6 +158,17 @@ export async function verify(
     io.stdout(formatDiff(diff));
   }
   io.stdout(`${report.diffs.length} diff(s)`);
+
+  // One edit to a content field fails the signature, the core and the derived
+  // view, which is three lines above and one fault underneath. The lines and
+  // the count stay as they are — each check really did fail — and this says
+  // what they add up to, so a reader does not go looking for three causes. The
+  // kernel decides it (src/verify.ts); nothing is judged here.
+  if (oneEditExplains(report)) {
+    io.stdout(
+      "note: one edit to the core would account for the signature and hash differences above",
+    );
+  }
   return 1;
 }
 

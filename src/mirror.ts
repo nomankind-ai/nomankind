@@ -32,9 +32,13 @@
  * may still be reading in ten years.
  *
  * Nothing unreleased is exported in full either (decision D-100). A seal's
- * events are written whole once that seal's `sealed_at` is a window old, and
- * until then they are hash lines: the seq, the instant, the type, the entry id,
- * the chain link and the hash, with `payload: null` and `withheld: true`. An
+ * events about entries are written whole once that seal's `sealed_at` is a
+ * window old, and until then they are hash lines: the seq, the instant, the
+ * type, the entry id, the chain link and the hash, with `payload: null` and
+ * `withheld: true`. Its registry events are written whole from the first day,
+ * because the registry is public from the first minute (src/release.ts,
+ * `REGISTRY_EVENT_TYPES`) — so a fork can name the operators out of the seal
+ * files on the day the clone is taken rather than a window later. An
  * entry gets its `entries/<id>.json` when its own submission event releases, and
  * `index.json` carries a row for it from the first day either way -- every index
  * column is proof, and the row names the date the file will appear on. So a seal
@@ -68,6 +72,7 @@
 
 import { DOMAIN_SLUGS, MIRROR, NORM_VERSION, SCHEMA_VERSION } from "./policy.js";
 import {
+  isEventReleased,
   isReleased,
   isWithheld,
   releaseDateOf,
@@ -288,8 +293,9 @@ export interface MirrorInput {
    * Which of the two directories this is (decision D-100), `released` by
    * default and by omission.
    *
-   * `released` is the published export: a seal inside its window is written as
-   * hash lines and an entry whose submission has not opened has no file. `full`
+   * `released` is the published export: a seal inside its window has its events
+   * about entries written as hash lines and its registry events written whole,
+   * and an entry whose submission has not opened has no file. `full`
    * is the copy a fork entitled to the content takes with a key or a signature
    * — the same directory with every seal and every entry written whole. It is a
    * superset and never a different reading of the clock: `released_head`,
@@ -893,10 +899,14 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
   // that says how much of the log is public is still `released`'s.
   const whole = input.view === "full";
   for (const seal of seals) {
-    const open = whole || isReleased(seal.sealed_at, now);
     const batch: (Event | WithheldEvent)[] = [];
     for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
       const event = bySeq.get(seq)!;
+      // Per event and through the door's own function, so a seal file and a
+      // free `GET /events` page hold the same lines for the same instant: the
+      // registry from the first day, the entries a window later. A file inside
+      // its window is still written once and rewritten once, on release.
+      const open = whole || isEventReleased(event, seal.sealed_at, now);
       batch.push(open ? event : withholdEvent(event));
     }
     files.push({ path: sealFileName(seal.seq), content: lines(batch) });

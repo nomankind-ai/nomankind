@@ -29,6 +29,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { runCommand } from "./main.js";
 import {
   errorOf,
   readKeyFile,
@@ -255,22 +256,23 @@ if (
     process.exit(BAD_ARGUMENTS);
   }
 
-  let code: number = FAILED;
-  try {
-    const run = await runReport({
-      key: await readKeyFile(plan.keyPath),
-      baseUrl: plan.baseUrl,
-      entryId: plan.entryId,
-      report,
-      deps: { http: new WebHttpClient(), now: new Date(), io },
-    });
-    if (!run.ok && run.status === null) {
-      io.stderr(`report: ${run.error ?? "unknown error"}`);
-    }
-    code = run.ok ? OK : FAILED;
-  } catch (error) {
-    io.stderr(`report: ${reasonOf(error)}`);
-  }
-  process.exit(code);
+  process.exit(
+    await runCommand(
+      { name: "report", baseUrl: plan.baseUrl, io },
+      async () => {
+        const run = await runReport({
+          key: await readKeyFile(plan.keyPath),
+          baseUrl: plan.baseUrl,
+          entryId: plan.entryId,
+          report,
+          deps: { http: new WebHttpClient(), now: new Date(), io },
+        });
+        if (!run.ok && run.status === null) {
+          io.stderr(`report: ${run.error ?? "unknown error"}`);
+        }
+        return run.ok ? OK : FAILED;
+      },
+    ),
+  );
 }
 /* c8 ignore stop */

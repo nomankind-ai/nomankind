@@ -26,7 +26,9 @@
  *                           reports the true head; a keyed page reaches it
  *   GET /entries/{id}       `{ proof, release_date }` to a free reader and the
  *                           entry itself to a signed one
- *   GET /events             unreleased events as hash lines to a free reader
+ *   GET /events             unreleased events about entries as hash lines to a
+ *                           free reader; the registry in full from the first
+ *                           minute, as `GET /operators` already served it
  *   GET /captures/{hash}    403 `unreleased` to a free reader, served to a key
  *                           or a signed operator
  *   GET /events/{seq}/proof proof, and served as it always was
@@ -49,7 +51,7 @@ import { buildExport, exportPlan, exportClient } from "../src/cli/export.js";
 import { runValidator } from "../src/cli/validator.js";
 import type { Core } from "../src/core.js";
 import { base64urlEncode } from "../src/encoding.js";
-import type { ApproverRecord, Event } from "../src/events.js";
+import type { ApproverRecord, Event, EventType } from "../src/events.js";
 import {
   agentIdFromPublicKey,
   exportPrivateKeyPkcs8,
@@ -65,7 +67,11 @@ import {
 } from "../src/policy.js";
 import { verifyReadReceipt, verifySyncReceipt } from "../src/receipt.js";
 import { signRecord } from "../src/records.js";
-import { isWithheld, releaseDateOf } from "../src/release.js";
+import {
+  REGISTRY_EVENT_TYPES,
+  isWithheld,
+  releaseDateOf,
+} from "../src/release.js";
 import { txtRecordName } from "../src/registry.js";
 import { putKey } from "../src/storage/keys.js";
 import { latestSeal, readCountsOn } from "../src/storage/repository.js";
@@ -626,24 +632,59 @@ describe("the entry door", () => {
 // ---------------------------------------------------------------------------
 
 describe("the log's own page", () => {
-  it("serves unreleased events to a free reader as hash lines", async () => {
+  it("serves unreleased events about entries to a free reader as hash lines", async () => {
     const answer = await free("/events?limit=100");
     expect(answer.status).toBe(200);
     const events = answer.body["events"] as Record<string, unknown>[];
     expect(events.length).toBeGreaterThan(0);
-    // Every one of them is withheld today: the seal is an hour old.
-    expect(events.every((event) => isWithheld(event))).toBe(true);
+    const held = events.filter((event) => isWithheld(event));
+    // Everything about an entry is withheld today: the seal is an hour old.
+    expect(held.length).toBeGreaterThan(0);
+    expect(
+      held.every(
+        (event) => !REGISTRY_EVENT_TYPES.includes(event["type"] as EventType),
+      ),
+    ).toBe(true);
     for (const event of events) {
-      expect(event["payload"]).toBeNull();
-      // The proof stays whole: the position, the instant, the type, the entry
-      // and both links.
+      // The proof stays whole whichever kind of line this is: the position, the
+      // instant, the type, the entry and both links.
       expect(typeof event["hash"]).toBe("string");
       expect(typeof event["at"]).toBe("string");
       expect(typeof event["type"]).toBe("string");
       expect("prev_hash" in event).toBe(true);
+      if (isWithheld(event)) expect(event["payload"]).toBeNull();
     }
     // The head is the true head whoever is asking.
     expect(typeof answer.body["head"]).toBe("number");
+  });
+
+  it("serves a free reader the registry in full, inside the window", async () => {
+    const answer = await free("/events?limit=100");
+    const events = answer.body["events"] as Record<string, unknown>[];
+    const whole = events.filter((event) => !isWithheld(event));
+
+    // The reading this fixes: `GET /operators` names these operators trusted on
+    // the day the pool trusts them, and this door was handing the naming itself
+    // over as a hash line for a whole window.
+    expect(
+      whole.every((event) =>
+        REGISTRY_EVENT_TYPES.includes(event["type"] as EventType),
+      ),
+    ).toBe(true);
+    for (const type of ["operator_registered", "operator_trusted"]) {
+      const named = whole.filter((event) => event["type"] === type);
+      expect(named.length).toBeGreaterThan(0);
+      for (const event of named) {
+        expect(event["payload"]).not.toBeNull();
+        expect(event["withheld"]).toBeUndefined();
+      }
+    }
+    // And the entry's own submission still waits, which is what the window is.
+    const submitted = events.filter(
+      (event) => event["type"] === "entry_submitted",
+    );
+    expect(submitted.length).toBeGreaterThan(0);
+    expect(submitted.every((event) => isWithheld(event))).toBe(true);
   });
 
   it("serves the whole event to a key and to a signed operator", async () => {
@@ -847,8 +888,14 @@ describe("the export command", () => {
     const entry = result.entry as Record<string, unknown>;
     expect([entry["id"], entry["claim"]]).toEqual([sealedEntry["id"], null]);
     // The proof is whole: the log is there, hash line by hash line, and the
-    // seals are there to check them against.
-    expect(result.bundle.events.every((event) => isWithheld(event))).toBe(true);
+    // seals are there to check them against. The registry is there in full
+    // beside them, which is what lets this bundle name its own signers.
+    expect(
+      result.bundle.events.every((event) =>
+        isWithheld(event) ? true : REGISTRY_EVENT_TYPES.includes(event.type),
+      ),
+    ).toBe(true);
+    expect(result.bundle.events.some((event) => isWithheld(event))).toBe(true);
     expect(result.bundle.seals.length).toBeGreaterThan(0);
     expect(io.err).toEqual([]);
   });

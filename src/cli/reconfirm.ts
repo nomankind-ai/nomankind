@@ -54,6 +54,7 @@ import { NORM_VERSION } from "../policy.js";
 import { signRecord } from "../records.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { readEvents } from "./export.js";
+import { runCommand } from "./main.js";
 import { operatorFor } from "./submit.js";
 import {
   buildValidatorReceipt,
@@ -63,7 +64,6 @@ import {
   parsePredicate,
   readKeyFile,
   signingHttp,
-  reasonOf,
   runPredicate,
   signedPost,
   SNAPSHOT_MISMATCH,
@@ -382,27 +382,25 @@ if (
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   };
-  let code = 1;
-  try {
-    const run = await runReconfirm({
-      key: await readKeyFile(keyPath),
-      baseUrl,
-      entryId,
-      deps: {
-        http: new WebHttpClient(),
-        fetcher: new WebFetcher(),
-        now: new Date(),
-        clock: () => new Date(),
-        io,
-      },
-    });
-    if (!run.ok && run.status === null) {
-      io.stderr(`${entryId}: ${run.error ?? "unknown error"}`);
-    }
-    code = run.ok ? 0 : 1;
-  } catch (error) {
-    io.stderr(`${entryId}: ${reasonOf(error)}`);
-  }
-  process.exit(code);
+  process.exit(
+    await runCommand({ name: "reconfirm", baseUrl, io }, async () => {
+      const run = await runReconfirm({
+        key: await readKeyFile(keyPath),
+        baseUrl,
+        entryId,
+        deps: {
+          http: new WebHttpClient(),
+          fetcher: new WebFetcher(),
+          now: new Date(),
+          clock: () => new Date(),
+          io,
+        },
+      });
+      if (!run.ok && run.status === null) {
+        io.stderr(`${entryId}: ${run.error ?? "unknown error"}`);
+      }
+      return run.ok ? 0 : 1;
+    }),
+  );
 }
 /* c8 ignore stop */

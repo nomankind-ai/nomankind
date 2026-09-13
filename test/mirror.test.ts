@@ -60,7 +60,8 @@ import {
   RELEASE_WINDOW_DAYS,
   SCHEMA_VERSION,
 } from "../src/policy.js";
-import { releaseDateOf } from "../src/release.js";
+import { REGISTRY_EVENT_TYPES, releaseDateOf } from "../src/release.js";
+import { registeredOperatorsAt, trustedOperatorsAt } from "../src/derive.js";
 import { mirrorPlan } from "../src/cli/mirror.js";
 import {
   entryIdsThrough,
@@ -509,12 +510,13 @@ describe("git blob names", () => {
 /**
  * The release window in the layout (decision D-100, D-101).
  *
- * One rule and two views of one sealed head: inside the window a seal's file is
- * hash lines and its entries have no file at all, and on the far side of it the
- * very same input writes everything. What is pinned here is that nothing but the
- * content moves — every hash, every seal, every index row and every proof column
- * is in both — and that the boundary is exactly the window rather than a day
- * either side of it.
+ * One rule and two views of one sealed head: inside the window a seal's file
+ * holds its entry events as hash lines and its registry events whole, its
+ * entries have no file at all, and on the far side of it the very same input
+ * writes everything. What is pinned here is that nothing but an entry's content
+ * moves — every hash, every seal, every index row and every proof column is in
+ * both — and that the boundary is exactly the window rather than a day either
+ * side of it.
  */
 describe("the release window", () => {
   /** An instant inside the window: the day the events were sealed. */
@@ -522,7 +524,7 @@ describe("the release window", () => {
     return firstSeal.sealed_at;
   }
 
-  it("writes an unreleased seal as hash lines and nothing else", () => {
+  it("writes an unreleased seal's entry events as hash lines and nothing else", () => {
     const files = buildMirror(input({ now: inside() }));
     const written = linesOf(
       files,
@@ -534,20 +536,51 @@ describe("the release window", () => {
     ) as Record<string, unknown>[];
 
     expect(written).toHaveLength(full.length);
+    let held = 0;
     for (let index = 0; index < written.length; index += 1) {
       const line = written[index]!;
       const event = full[index]!;
-      expect(line["payload"]).toBeNull();
-      expect(line["withheld"]).toBe(true);
-      // Everything the proof is made of is in the hash line, unchanged.
+      expect(event["payload"]).not.toBeNull();
+      // The proof is in every line either way, unchanged.
       expect(line["seq"]).toBe(event["seq"]);
       expect(line["at"]).toBe(event["at"]);
       expect(line["type"]).toBe(event["type"]);
       expect(line["entry_id"]).toBe(event["entry_id"]);
       expect(line["prev_hash"]).toBe(event["prev_hash"]);
       expect(line["hash"]).toBe(event["hash"]);
-      expect(event["payload"]).not.toBeNull();
+      // The registry is public from the first minute, so its six types are the
+      // released line to the byte; everything about an entry waits.
+      if (REGISTRY_EVENT_TYPES.includes(line["type"] as Event["type"])) {
+        expect(line).toEqual(event);
+        continue;
+      }
+      held += 1;
+      expect(line["payload"]).toBeNull();
+      expect(line["withheld"]).toBe(true);
     }
+    expect(held).toBeGreaterThan(0);
+  });
+
+  it("names the operators out of an unreleased seal file", () => {
+    const written = linesOf(
+      buildMirror(input({ now: inside() })),
+      `events/${String(firstSeal.seq).padStart(8, "0")}.jsonl`,
+    ) as Event[];
+    const public_ = written.filter((event) => event.payload !== null);
+
+    // What the carve-out is for: a fork that clones the directory on day one
+    // derives the same registry the whole log derives, rather than waiting a
+    // window for a naming `GET /operators` had published all along.
+    const head = firstSeal.last_seq;
+    expect(registeredOperatorsAt(public_, head)).toEqual(
+      registeredOperatorsAt(sealedEvents, head),
+    );
+    expect(trustedOperatorsAt(public_, head)).toEqual(
+      trustedOperatorsAt(sealedEvents, head),
+    );
+    expect(
+      public_.every((event) => REGISTRY_EVENT_TYPES.includes(event.type)),
+    ).toBe(true);
   });
 
   it("writes no entry file for an entry whose submission is unreleased", () => {
@@ -589,7 +622,11 @@ describe("the release window", () => {
     ) as Record<string, unknown>;
     expect(early["format"]).toBe(MIRROR_FORMAT);
     expect(early["release_window_days"]).toBe(RELEASE_WINDOW_DAYS);
+    // Still null, and the registry going out early does not move it: the
+    // released head is the boundary for entry content and for the folds over
+    // it, and this seal's entry payloads are still holes.
     expect(early["released_head"]).toBeNull();
+    expect(early["standing_position"]).toBe(-1);
     // The head and the counts are the sealed record's either way: the window
     // moves content, never proof.
     expect(early["head"]).toBe(firstSeal.last_seq);

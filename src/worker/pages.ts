@@ -43,7 +43,9 @@
  * pages in every sense that matters to this file — anonymous, the same bytes for
  * every reader, refused on a wrong method with the handlers' own envelope — and
  * three of them are answered before the database is reached for, because only
- * the sitemap is a reading of the log.
+ * the sitemap is a reading of the log. Once that log outgrows one document the
+ * sitemap becomes an index naming `/sitemap-pages.xml` and the fixed
+ * `/sitemap-entries-<k>.xml` ranges, which are served here on the same terms.
  *
  * No policy number lives here: the bare integers are HTTP status codes, and the
  * page sizes are LIST_PAGE_LIMIT, HOME_LATEST_ENTRIES, LANDING_BAND_SEALS and
@@ -86,6 +88,7 @@ import {
   countSeals,
   countTrustedOperators,
   disputeOf,
+  entryIdsInSubmittedRange,
   entryIdsNewestFirst,
   entryLedgerRows,
   eventsForEntry,
@@ -238,7 +241,21 @@ const PAGE_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/sitemap.xml",
   "/favicon.svg",
   "/favicon.ico",
+  // The redirect to /mirror/latest. The door under it is at the longer path, so
+  // there is nothing here a POST could have been meant for.
+  "/mirror",
 ]);
+
+/**
+ * The documents the sitemap index names, which are this route's outright too.
+ *
+ * A set would have had to hold one name per page of a log that grows, so it is
+ * the prefix instead: everything under `/sitemap-` is a sitemap, and there is no
+ * other door anywhere in the system on a path that starts that way.
+ */
+function isSitemapDocument(path: string): boolean {
+  return path.startsWith("/sitemap-");
+}
 
 /** Does this request want a page, or a record? */
 export function wantsHtml(request: Request): boolean {
@@ -1548,7 +1565,115 @@ function robots(env: Env, url: URL): Response {
 }
 
 /**
- * `/sitemap.xml`, the sitemaps.org urlset.
+ * The entries of one page of the index: a fixed slice of the sequence space,
+ * oldest position first.
+ *
+ * Keyset pages inside the range and the bound applied to the total, exactly as
+ * the newest-first walk does it — the range is SITEMAP_MAX_ENTRIES positions
+ * wide and positions are unique, so the bound can only be reached and never
+ * passed, and a store that answered otherwise still could not make this document
+ * grow.
+ */
+async function sitemapEntriesInRange(
+  db: D1Like,
+  fromSeq: number,
+  toSeq: number,
+): Promise<EntryLocation[]> {
+  const found: EntryLocation[] = [];
+  let afterSubmittedSeq: number | undefined;
+  while (found.length < SITEMAP_MAX_ENTRIES) {
+    const limit = Math.min(LIST_PAGE_LIMIT, SITEMAP_MAX_ENTRIES - found.length);
+    const page = await entryIdsInSubmittedRange(db, {
+      fromSeq,
+      toSeq,
+      limit,
+      afterSubmittedSeq,
+    });
+    for (const row of page) found.push(row);
+    if (page.length < limit) break;
+    afterSubmittedSeq = page[page.length - 1]!.submittedSeq;
+  }
+  return found;
+}
+
+/** The XML both documents are wrapped in, and the headers both are served with. */
+function xmlDocument(body: string): Response {
+  return new Response(`<?xml version="1.0" encoding="UTF-8"?>\n${body}`, {
+    status: 200,
+    headers: fileHeaders("application/xml; charset=utf-8", "no-store"),
+  });
+}
+
+function urlset(urls: readonly string[]): Response {
+  return xmlDocument(
+    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+      `${urls.join("")}</urlset>\n`,
+  );
+}
+
+/** One `<sitemap>` of the index: another document, and no dates of its own. */
+function sitemapElement(location: string): string {
+  return `  <sitemap><loc>${escapeXml(location)}</loc></sitemap>\n`;
+}
+
+/**
+ * Which entry page a submitted position falls on, counting from one.
+ *
+ * Page k is the half-open range [(k-1) * SITEMAP_MAX_ENTRIES, k *
+ * SITEMAP_MAX_ENTRIES) of the event sequence space. The sequence space and not a
+ * count of rows: a position is assigned once and never moves, so an entry stays
+ * on the page it was first listed on forever, and a crawler that has page 3 has
+ * it for good. A count would have shifted every entry by one the next time
+ * something was submitted, which is the offset paging this design exists to
+ * avoid.
+ */
+function entryPageOf(submittedSeq: number): number {
+  return Math.floor(submittedSeq / SITEMAP_MAX_ENTRIES) + 1;
+}
+
+/** `/sitemap-entries-<k>.xml`, or null when the path is not one of those. */
+function entryPagePath(path: string): number | null {
+  const match = /^\/sitemap-entries-([1-9][0-9]{0,8})\.xml$/.exec(path);
+  return match === null ? null : Number(match[1]);
+}
+
+/** The static pages and every operator: the half of the site that is not the log. */
+async function sitemapPages(env: Env, db: D1Like, url: URL): Promise<Response> {
+  const origin = siteOrigin(env, url);
+  const urls = SITEMAP_STATIC_PATHS.map((path) =>
+    urlElement(`${origin}${path}`, null),
+  );
+  for (const record of await sitemapOperators(db)) {
+    urls.push(
+      urlElement(`${origin}/operators/${encodeURIComponent(record.id)}`, null),
+    );
+  }
+  return urlset(urls);
+}
+
+/** One page of entries. A range nothing was submitted in is an empty urlset. */
+async function sitemapEntryPage(
+  env: Env,
+  db: D1Like,
+  url: URL,
+  page: number,
+): Promise<Response> {
+  const origin = siteOrigin(env, url);
+  const from = (page - 1) * SITEMAP_MAX_ENTRIES;
+  const rows = await sitemapEntriesInRange(db, from, from + SITEMAP_MAX_ENTRIES);
+  return urlset(
+    rows.map((row) =>
+      urlElement(
+        `${origin}/entries/${encodeURIComponent(row.id)}`,
+        dateOf(row.submittedAt),
+      ),
+    ),
+  );
+}
+
+/**
+ * `/sitemap.xml`: the sitemaps.org urlset, or the index of them once the log
+ * has outgrown one document.
  *
  * On the apex it is one line, because the apex has one page: everything else
  * lives on the app, and pointing a crawler at the app's paths under the apex's
@@ -1557,13 +1682,24 @@ function robots(env: Env, url: URL): Response {
  * SITEMAP_MAX_ENTRIES entries with the date each was submitted — all of them
  * absolute on the canonical origin, so the document says the same thing
  * whichever host it was fetched from.
+ *
+ * Until that walk comes back full. A bounded document that silently stopped
+ * naming the rest of the log would be a record with an unlisted majority
+ * (D-114), so at the bound this answers a `<sitemapindex>` instead: the pages
+ * and the operators in one file, and the entries in as many fixed pages as the
+ * sequence space needs. The walk is what decides, rather than the newest
+ * position, because positions are the log's and not the entries' — a store with
+ * ten entries at position ten thousand still fits in one document. And the
+ * newest position is what counts the pages, which is why it is read off the head
+ * of the walk we already did rather than asked for again.
  */
 async function sitemap(env: Env, db: D1Like, url: URL): Promise<Response> {
   const origin = siteOrigin(env, url);
-  const urls: string[] = [];
-  if (onApex(env, url)) {
-    urls.push(urlElement(`${origin}/`, null));
-  } else {
+  if (onApex(env, url)) return urlset([urlElement(`${origin}/`, null)]);
+
+  const newest = await sitemapEntries(db);
+  if (newest.length < SITEMAP_MAX_ENTRIES) {
+    const urls: string[] = [];
     for (const path of SITEMAP_STATIC_PATHS) {
       urls.push(urlElement(`${origin}${path}`, null));
     }
@@ -1572,7 +1708,7 @@ async function sitemap(env: Env, db: D1Like, url: URL): Promise<Response> {
         urlElement(`${origin}/operators/${encodeURIComponent(record.id)}`, null),
       );
     }
-    for (const row of await sitemapEntries(db)) {
+    for (const row of newest) {
       urls.push(
         urlElement(
           `${origin}/entries/${encodeURIComponent(row.id)}`,
@@ -1580,15 +1716,18 @@ async function sitemap(env: Env, db: D1Like, url: URL): Promise<Response> {
         ),
       );
     }
+    return urlset(urls);
   }
-  const body =
-    `<?xml version="1.0" encoding="UTF-8"?>\n` +
-    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-    `${urls.join("")}</urlset>\n`;
-  return new Response(body, {
-    status: 200,
-    headers: fileHeaders("application/xml; charset=utf-8", "no-store"),
-  });
+
+  const documents = [sitemapElement(`${origin}/sitemap-pages.xml`)];
+  const last = entryPageOf(newest[0]!.submittedSeq);
+  for (let page = 1; page <= last; page += 1) {
+    documents.push(sitemapElement(`${origin}/sitemap-entries-${page}.xml`));
+  }
+  return xmlDocument(
+    `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+      `${documents.join("")}</sitemapindex>\n`,
+  );
 }
 
 /**
@@ -1613,8 +1752,14 @@ function faviconResponse(): Response {
  * The href is the same versioned one the document links and comes from the same
  * constant — a second spelling of the version would be a second source of it,
  * and a preload of a URL the page does not link is a fetch nothing uses.
+ *
+ * Exported because one HTML answer is built outside this file: the final
+ * not-found in src/worker/index.ts, which is the page a reader who mistyped an
+ * address is looking at (D-114). It links the same stylesheet every other page
+ * links, so it waits for it exactly as long, and a second rule for how the hint
+ * is written would be a second spelling of it.
  */
-function withResourceHints(response: Response, sheet: string): Response {
+export function withResourceHints(response: Response, sheet: string): Response {
   const type = response.headers.get("content-type") ?? "";
   if (!type.startsWith("text/html")) return response;
   const headers = new Headers(response.headers);
@@ -1673,6 +1818,15 @@ async function route(
   // The crawler's own document, here rather than beside the other three because
   // it is the one that reads the log.
   if (path === "/sitemap.xml") return sitemap(env, db, url);
+
+  // The documents the index above names, on the app alone: the apex has one page
+  // and no records of its own, so an index there would be the app's log listed
+  // under the apex's name — the very thing /sitemap.xml refuses to do.
+  if (!onApex(env, url)) {
+    if (path === "/sitemap-pages.xml") return sitemapPages(env, db, url);
+    const page = entryPagePath(path);
+    if (page !== null) return sitemapEntryPage(env, db, url, page);
+  }
 
   if (path === "/landing") return landing(db, ctx);
 
@@ -1733,6 +1887,24 @@ async function route(
   // there is one implementation of the rules and one of the endpoint.
   if (path === "/status") return wants ? status(db, ctx, env, now) : null;
 
+  // The page is at /mirror/latest, and a reader who types the shorter address
+  // was asking for it: a 404 on the parent of a page that exists is a dead end
+  // this route put there itself (the QA of 2026-09-12). Permanent, because the
+  // page's address is not going to move, and to every caller rather than only a
+  // browser — the JSON door is at the same longer path, so a redirect is the
+  // right answer whichever of the two documents was wanted. The query travels,
+  // because the answer belongs to whoever is asking.
+  if (path === "/mirror") {
+    return new Response(null, {
+      status: 308,
+      headers: {
+        location: `/mirror/latest${url.search}`,
+        "cache-control": "no-store",
+        "strict-transport-security": STRICT_TRANSPORT_SECURITY,
+      },
+    });
+  }
+
   // The mirror splits the same way (Section 11): a browser gets the page, and
   // everything else falls through to the JSON route in src/worker/mirror.ts,
   // which is the one place the 404 shapes and the Allow header are decided.
@@ -1781,7 +1953,8 @@ export async function handlePages(
   // the handlers' own words; everything shared falls through to the door that
   // owns it, which answers with its own Allow.
   if (!isRead(request)) {
-    return PAGE_ONLY_PATHS.has(url.pathname)
+    return PAGE_ONLY_PATHS.has(url.pathname) ||
+      isSitemapDocument(url.pathname)
       ? methodNotAllowed(READ_METHODS)
       : null;
   }

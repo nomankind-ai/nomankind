@@ -289,6 +289,49 @@ describe("GET /mirror/latest", () => {
     );
   });
 
+  it("sends the shorter address to the page, permanently", async () => {
+    // The QA of 2026-09-12: /mirror answered 404 while the page it obviously
+    // means sits one segment below it.
+    for (const accept of ["text/html", "application/json"]) {
+      const response = await handlePages(
+        new Request("https://demo.nomankind.ai/mirror", {
+          headers: { accept },
+        }),
+        env(),
+        { now },
+      );
+      expect([accept, response?.status]).toEqual([accept, 308]);
+      expect(response?.headers.get("location")).toBe("/mirror/latest");
+      // A view of a log that moves is never held, redirect or page.
+      expect(response?.headers.get("cache-control")).toBe("no-store");
+    }
+  });
+
+  it("keeps the query the caller sent, and answers a HEAD", async () => {
+    const response = await handlePages(
+      new Request("https://demo.nomankind.ai/mirror?format=json", {
+        method: "HEAD",
+        headers: { accept: "text/html" },
+      }),
+      env(),
+      { now },
+    );
+    expect(response?.status).toBe(308);
+    expect(response?.body).toBeNull();
+    expect(response?.headers.get("location")).toBe("/mirror/latest?format=json");
+  });
+
+  it("refuses every method but a read, in the handlers' own envelope", async () => {
+    const response = await handlePages(
+      new Request("https://demo.nomankind.ai/mirror", { method: "POST" }),
+      env(),
+      { now },
+    );
+    expect(response?.status).toBe(405);
+    expect(response?.headers.get("allow")).toBe("GET, HEAD");
+    expect(await response!.json()).toEqual({ error: "method_not_allowed" });
+  });
+
   it("leaves every other caller to the JSON route", async () => {
     for (const accept of ["application/json", "*/*"]) {
       const response = await handlePages(
