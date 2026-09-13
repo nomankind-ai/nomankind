@@ -5464,6 +5464,54 @@ export async function listEntriesPage(
   return rows.results.map(toStoredEntry);
 }
 
+/** One entry as the sitemap names it: where it lives, and when it was written. */
+export interface EntryLocation {
+  readonly id: string;
+  readonly submittedAt: string;
+  readonly submittedSeq: number;
+}
+
+/**
+ * A keyset page of entry ids, newest submitted position first.
+ *
+ * The sitemap's query and nothing else's (decision D-114): it needs one URL and
+ * one date per entry, and `listEntriesPage` above would have parsed an entry and
+ * a sidecar out of JSON for every row to hand back two columns. So this reads
+ * the two columns — `id` and `submitted_at`, both of them the entries table's
+ * own since 0001 — and derives nothing at all.
+ *
+ * Paged by keyset like every other listing here, on the same `submitted_seq`
+ * index, and with the caller's own limit: there is no default page size in this
+ * file and nothing here reads the whole table.
+ */
+export async function entryIdsNewestFirst(
+  db: D1Like,
+  query: {
+    readonly limit: number;
+    /** Resume strictly before this submitted_seq; omit for the first page. */
+    readonly beforeSubmittedSeq?: number;
+  },
+): Promise<EntryLocation[]> {
+  const where =
+    query.beforeSubmittedSeq === undefined ? "" : "WHERE submitted_seq < ? ";
+  const bindings =
+    query.beforeSubmittedSeq === undefined
+      ? [query.limit]
+      : [query.beforeSubmittedSeq, query.limit];
+  const rows = await db
+    .prepare(
+      `SELECT id, submitted_at, submitted_seq FROM entries ${where}` +
+        `ORDER BY submitted_seq DESC LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    id: readText(row, "id"),
+    submittedAt: readText(row, "submitted_at"),
+    submittedSeq: readInteger(row, "submitted_seq"),
+  }));
+}
+
 /**
  * How many operators are in the trusted pool.
  *

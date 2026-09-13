@@ -42,6 +42,7 @@ const ctx: PageContext = {
   environment: "demo",
   path: "/how-it-works",
   origin: "https://demo.nomankind.ai",
+  canonical_origin: "https://demo.nomankind.ai",
 };
 
 const statusCtx: PageContext = { ...ctx, path: "/status" };

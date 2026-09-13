@@ -900,6 +900,12 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       means: "How many seals the landing page's live seal-chain band shows.",
     },
     {
+      name: "SITEMAP_MAX_ENTRIES",
+      value: String(policy.SITEMAP_MAX_ENTRIES),
+      means:
+        "The most entry URLs one /sitemap.xml carries, newest submission first. A bound on the document rather than a rule of the record: a sitemap that grew with the log would be a read of the whole table dressed as a file.",
+    },
+    {
       name: "PAGE_CACHE_SECONDS",
       value: `${policy.PAGE_CACHE_SECONDS} seconds`,
       means:

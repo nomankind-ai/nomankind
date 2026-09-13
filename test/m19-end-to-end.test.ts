@@ -174,6 +174,20 @@ async function ok(path: string, now: Date = NOW): Promise<string> {
   return answer.body;
 }
 
+/** One page, with the resource hints the browsing route carries (D-114). */
+async function okWithHints(path: string): Promise<string> {
+  const response = await send(new Request(`${TEST_ORIGIN}${path}`, { headers: HTML }));
+  expect([path, response.status]).toEqual([path, 200]);
+  // The stylesheet this page links, preloaded, and a connection opened to the
+  // one font host the content-security-policy names.
+  expect([path, response.headers.get("link")]).toEqual([
+    path,
+    `<${APP_CSS_HREF}>; rel=preload; as=style, ` +
+      `<https://fonts.googleapis.com>; rel=preconnect`,
+  ]);
+  return response.text();
+}
+
 /** One page asked for as a browser carrying a registered operator's signature. */
 async function signedPage(
   agent: TestAgent,
@@ -875,6 +889,13 @@ describe("the documentation pages and the front door", () => {
       expect(body).toContain("VERIFIED");
     }, 60_000);
   });
+
+  it("tells the browser to fetch that stylesheet first (D-114)", async () => {
+    // The header is the same version the document links, from the same
+    // constant: a preload of a URL the page does not link is a fetch nothing
+    // uses, and a second spelling of the version would be a second source of it.
+    for (const path of ["/", "/entries", "/policy"]) await okWithHints(path);
+  }, 60_000);
 
   it("serves the stylesheet as CSS, cacheable, to any reader", async () => {
     const response = await send(new Request(`${TEST_ORIGIN}/static/app.css`));

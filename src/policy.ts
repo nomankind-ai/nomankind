@@ -1528,6 +1528,23 @@ export const HOME_LATEST_ENTRIES = 10;
 export const LANDING_BAND_SEALS = 12;
 
 /**
+ * The most entry URLs one `/sitemap.xml` carries (decision D-114).
+ *
+ * A page size of the same kind as the three above — it says how much of the log
+ * one document points a crawler at, never what anything costs or what anybody is
+ * allowed — and the bound that keeps a sitemap from growing with the log: a
+ * document that listed every entry would be a read of the whole table dressed as
+ * a file, and the newest SITEMAP_MAX_ENTRIES submissions are what a crawler that
+ * comes back daily actually needs.
+ *
+ * A placeholder for the maintainer: five thousand is the sitemaps.org protocol's
+ * own bound divided by ten, chosen so the document stays well inside the format's
+ * limits with no second number here for its size. Not a whitepaper number. The
+ * maintainer's published policy; it moves only by a later decision.
+ */
+export const SITEMAP_MAX_ENTRIES = 5000;
+
+/**
  * How long an anonymous page may be served from the edge cache, and how long
  * past that a stale copy may be served while a fresh one is fetched.
  *
@@ -2085,6 +2102,7 @@ export const POLICY = Object.freeze({
   USAGE_DAYS_MAX,
   HOME_LATEST_ENTRIES,
   LANDING_BAND_SEALS,
+  SITEMAP_MAX_ENTRIES,
   PAGE_CACHE_SECONDS,
   PAGE_CACHE_STALE_SECONDS,
   BEACON,

@@ -327,6 +327,61 @@ function navItems(path: string): Safe[] {
 }
 
 /**
+ * What this record is, in one sentence, for a head that has nothing better.
+ *
+ * Every page passes `layout` a description of its own, so this is the fallback
+ * and not the usual case: it is used for `og:description` on a page rendered
+ * without one (a test's bare layout, an error page added later without the
+ * field), because a share card with no description at all is worse than the
+ * site's own sentence. It is never written into the `description` meta, which
+ * stays absent when a page gave none — that meta is the page's claim about
+ * itself and the log does not make claims nobody wrote.
+ */
+export const SITE_DESCRIPTION =
+  "Every fact here carries its proof before a model learns it.";
+
+/** The icon every page links, drawn by the Worker at /favicon.svg. */
+const FAVICON_PATH = "/favicon.svg";
+
+/**
+ * The head tags that say what this page is to something that is not a reader
+ * (decision D-114): the canonical address, the Open Graph card, the Twitter
+ * card kind, and the icon.
+ *
+ * One function rather than a block in each document, because the landing page
+ * is not in `layout` and a second copy of these rules is a second set of rules.
+ * Every value goes through `html`, so a title or a description is escaped in an
+ * attribute exactly as it is in the body.
+ *
+ * The canonical and `og:url` are emitted only when the deployment declares an
+ * origin (`canonical_origin`), and they are the same string when they are: a
+ * canonical and a share URL that disagreed would be two addresses for one page.
+ * There is no `og:image`: nothing in this repository is an image asset, and a
+ * card that named one would name a 404.
+ */
+export function seoHead(
+  ctx: PageContext,
+  options: { title: string; description: string },
+): Safe {
+  const canonical =
+    ctx.canonical_origin === null
+      ? null
+      : `${ctx.canonical_origin}${ctx.path}`;
+  return html`${canonical === null
+    ? raw("")
+    : html`<link rel="canonical" href="${canonical}" />`}
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="nomankind" />
+    <meta property="og:title" content="${options.title}" />
+    <meta property="og:description" content="${options.description}" />
+    ${canonical === null
+      ? raw("")
+      : html`<meta property="og:url" content="${canonical}" />`}
+    <meta name="twitter:card" content="summary" />
+    <link rel="icon" type="image/svg+xml" href="${FAVICON_PATH}" />`;
+}
+
+/**
  * The whole document: the head, the sticky header, the page's body, the footer.
  *
  * There is no `<script>` here and there is no inline `style` attribute either —
@@ -345,13 +400,18 @@ export function layout(
     options.description === undefined
       ? raw("")
       : html`<meta name="description" content="${options.description}" />`;
+  const title = `${options.title} · nomankind`;
   const document = html`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${options.title} · nomankind</title>
+    <title>${title}</title>
     ${description}
+    ${seoHead(ctx, {
+      title,
+      description: options.description ?? SITE_DESCRIPTION,
+    })}
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap"

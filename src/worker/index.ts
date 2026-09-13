@@ -233,6 +233,27 @@ const CACHEABLE_PATHS: ReadonlySet<string> = new Set([
   "/domains",
   "/status",
   "/mirror/latest",
+  // The four files a crawler reads (decision D-114). Anonymous GETs of bytes
+  // that are the same for every reader, so they are held at the edge exactly as
+  // the pages are: a crawler that walks the whole site costs the log what one
+  // reader costs it.
+  "/robots.txt",
+  "/sitemap.xml",
+  "/favicon.svg",
+  "/favicon.ico",
+]);
+
+/**
+ * The cacheable paths that answer something other than HTML, by content type:
+ * text for robots, XML for the sitemap, an image for the icon. `storable` below
+ * reads this, because a cache that only ever stored `text/html` would have held
+ * none of them however carefully they were listed above.
+ */
+const CACHEABLE_FILE_PATHS: ReadonlySet<string> = new Set([
+  "/robots.txt",
+  "/sitemap.xml",
+  "/favicon.svg",
+  "/favicon.ico",
 ]);
 
 /**
@@ -341,7 +362,11 @@ const CACHEABLE_JSON_PATHS: ReadonlySet<string> = new Set(["/policy", "/status"]
 function storable(path: string, response: Response): boolean {
   if (response.status !== 200) return false;
   const type = response.headers.get("content-type") ?? "";
-  return type.startsWith("text/html") || CACHEABLE_JSON_PATHS.has(path);
+  return (
+    type.startsWith("text/html") ||
+    CACHEABLE_JSON_PATHS.has(path) ||
+    CACHEABLE_FILE_PATHS.has(path)
+  );
 }
 
 /**
@@ -384,9 +409,19 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The same response, saying it may be held for a minute. */
+/**
+ * The same response, saying it may be held for a minute.
+ *
+ * Unless it already says it may be held for longer: the favicon (D-114) carries
+ * the stylesheets' own hour, because it is one file that says nothing about the
+ * log, and a layer that shortened it on the way out would be deciding a cache
+ * rule the route already decided. Everything else arrives here `no-store` — a
+ * page is a view of a log that moves — and is given the minute.
+ */
 function forPageCache(response: Response): Response {
   const headers = new Headers(response.headers);
+  const own = response.headers.get("cache-control") ?? "";
+  if (own.includes("public")) return response;
   headers.set("cache-control", PAGE_CACHE_CONTROL);
   return new Response(response.body, {
     status: response.status,
@@ -617,6 +652,10 @@ async function dispatch(
           environment: env.ENVIRONMENT,
           path: pathname,
           origin: new URL(request.url).origin,
+          // No canonical address (D-114): a path nothing answers is not a page
+          // this deployment has anywhere, and a canonical link built from it
+          // would hand an indexer an address that serves this same 404.
+          canonical_origin: null,
         }),
         404,
       ),

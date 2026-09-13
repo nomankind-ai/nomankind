@@ -188,6 +188,7 @@ describe("the two published faces of the registry", () => {
         path: "/domains",
         environment: "demo",
         origin: "https://demo.example",
+        canonical_origin: "https://demo.example",
         version: "v0.1.29",
       } as Parameters<typeof renderDomains>[0],
       { counts },

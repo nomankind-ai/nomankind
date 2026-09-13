@@ -30,11 +30,33 @@ import {
   CONTACT_EMAIL,
   fmtInstant,
   html,
+  seoHead,
   shortHash,
   versionedHref,
   type Safe,
 } from "../html.js";
 import type { LandingData, PageContext } from "../types.js";
+
+/**
+ * The front door's title, and the one place it is written (D-114).
+ *
+ * Not the bare wordmark it used to be. This is the page a search result and a
+ * shared link show first, and "nomankind" alone says nothing to somebody who
+ * has never heard the name — the title has to carry what the record is for. It
+ * is the `<title>` and the `og:title` both, because a card that disagreed with
+ * the tab would be two names for one page.
+ */
+const LANDING_TITLE = "nomankind: verified facts for models that keep learning";
+
+/**
+ * The sentence under it, in the `description` meta and the `og:description`.
+ * Written once here rather than twice in the head, for the same reason.
+ */
+const LANDING_DESCRIPTION =
+  "nomankind is a sealed feed of facts about the AI ecosystem, made for " +
+  "continual learners. Nothing enters the feed until its source is captured " +
+  "and hashed, three independent operators have checked it, and a witnessed " +
+  "seal has dated it.";
 
 /**
  * Where the top bar points. The first three are this site's own pages — the
@@ -245,11 +267,12 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>nomankind</title>
-    <meta
-      name="description"
-      content="nomankind is a sealed feed of facts about the AI ecosystem, made for continual learners. Nothing enters the feed until its source is captured and hashed, three independent operators have checked it, and a witnessed seal has dated it."
-    />
+    <title>${LANDING_TITLE}</title>
+    <meta name="description" content="${LANDING_DESCRIPTION}" />
+    ${seoHead(ctx, {
+      title: LANDING_TITLE,
+      description: LANDING_DESCRIPTION,
+    })}
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap"

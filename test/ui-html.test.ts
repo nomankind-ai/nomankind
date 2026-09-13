@@ -14,6 +14,7 @@ import {
   APP_CSS_HREF,
   CONTACT_EMAIL,
   CONTENT_SECURITY_POLICY,
+  SITE_DESCRIPTION,
   STRICT_TRANSPORT_SECURITY,
   badge,
   cssResponse,
@@ -36,6 +37,7 @@ const ctx: PageContext = {
   environment: "demo",
   path: "/entries",
   origin: "https://demo.nomankind.ai",
+  canonical_origin: "https://demo.nomankind.ai",
 };
 
 describe("escapeHtml", () => {
@@ -232,6 +234,67 @@ describe("layout", () => {
     expect(APP_CSS_HREF).toMatch(/^\/static\/app\.css\?v=[0-9a-f]{8}$/);
     expect(document).toContain("https://fonts.googleapis.com/css2?family=Space+Grotesk");
     expect(document).toContain("family=JetBrains+Mono");
+  });
+
+  /**
+   * D-114: the head says what the page is to something that is not a reader.
+   * Pinned here as the whole set, so a tag dropped from `seoHead` cannot pass
+   * by being untested — the card a link shows is the one thing about this UI
+   * nobody looking at the UI would notice was broken.
+   */
+  it("carries the canonical address, the card and the icon", () => {
+    expect(document).toContain(
+      `<link rel="canonical" href="https://demo.nomankind.ai/entries" />`,
+    );
+    expect(document).toContain(`<meta property="og:type" content="website" />`);
+    expect(document).toContain(
+      `<meta property="og:site_name" content="nomankind" />`,
+    );
+    expect(document).toContain(
+      `<meta property="og:title" content="Entries · nomankind" />`,
+    );
+    expect(document).toContain(
+      `<meta property="og:description" content="The log." />`,
+    );
+    expect(document).toContain(
+      `<meta property="og:url" content="https://demo.nomankind.ai/entries" />`,
+    );
+    expect(document).toContain(`<meta name="twitter:card" content="summary" />`);
+    expect(document).toContain(
+      `<link rel="icon" type="image/svg+xml" href="/favicon.svg" />`,
+    );
+    // No og:image: this repository holds no image asset, and a card naming one
+    // would name a 404.
+    expect(document).not.toContain("og:image");
+  });
+
+  /**
+   * A page rendered without a description still has a card, because a share
+   * with no sentence at all is worse than the site's own. The `description`
+   * meta stays absent: that one is the page's claim about itself, and the log
+   * does not make claims nobody wrote.
+   */
+  it("falls back to the site sentence for a page that passes no description", () => {
+    const bare = layout(ctx, { title: "Docs", body: html`<p>body</p>` });
+    expect(bare).not.toContain(`<meta name="description"`);
+    expect(bare).toContain(
+      `<meta property="og:description" content="${SITE_DESCRIPTION}" />`,
+    );
+    expect(SITE_DESCRIPTION).toBe(
+      "Every fact here carries its proof before a model learns it.",
+    );
+  });
+
+  /** Null origin: no canonical and no og:url, rather than a guess. */
+  it("omits the canonical and the og:url when no origin is declared", () => {
+    const unknown = layout(
+      { ...ctx, canonical_origin: null },
+      { title: "Entries", body: html`<p>body</p>`, description: "The log." },
+    );
+    expect(unknown).not.toContain("rel=\"canonical\"");
+    expect(unknown).not.toContain("og:url");
+    expect(unknown).toContain(`<meta property="og:type" content="website" />`);
+    expect(unknown).toContain(`<meta name="twitter:card" content="summary" />`);
   });
 
   /**
