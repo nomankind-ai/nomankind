@@ -63,6 +63,7 @@ import {
   type CaptureRecord,
 } from "../storage/repository.js";
 import { archiveCapture, type Sidecar } from "../storage/r2.js";
+import { fetcherAgentId } from "./config.js";
 import type { Env } from "./env.js";
 import {
   unavailable,
@@ -283,8 +284,8 @@ async function report(
 
   // The provenance of the archived artifact names the 1F916 identity that put
   // it there, which is ours (D-016), exactly as a capture's sidecar does.
-  const fetcher = env.MAINTAINER_AGENT_ID;
-  if (fetcher === "") return refuse(503, "fetcher_not_configured");
+  const fetcher = fetcherAgentId(env);
+  if (fetcher === null) return refuse(503, "fetcher_not_configured");
 
   const at = deps.now.toISOString();
 

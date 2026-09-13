@@ -17,7 +17,18 @@
  * would be a number the server is right to disagree with. Which is also why the
  * endpoint computes at exactly that position.
  *
- * Reads are unauthenticated, so this command holds no key and signs nothing.
+ * Reads are unauthenticated and this command signs nothing by default. That was
+ * enough until the release window (decision D-100) arrived: an event inside the
+ * window is served to a free reader as a hash line — its payload null and
+ * `withheld: true` beside it — and every event on a running log is inside the
+ * window for its first thirty days. A fold over a nulled payload is not a
+ * disagreement about a number, it is a crash, and the D-102 gap was exactly
+ * that: `npm run standing` read the events door keyless and fell over on the
+ * first hash line. So the fold refuses in one named sentence when it meets one,
+ * and `--sign <key.json>` is the way through — the same flag, the same
+ * `signingHttp`, the same operator signature `readerAccess` verifies, as
+ * `npm run read` and `npm run sync` already take.
+ *
  * Everything goes over the injected http client, so a test drives it in process
  * with no network. node:path is allowed in this CLI file only.
  */
@@ -26,16 +37,31 @@ import { resolve } from "node:path";
 
 import type { Event } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
+import { isWithheld } from "../release.js";
 import { standingOf, zeroStanding, type Standing } from "../standing.js";
 import {
   errorOf,
   getJson,
+  readKeyFile,
+  signingHttp,
+  type Clock,
   WebHttpClient,
   type HttpClient,
   type ValidatorIo,
 } from "./validator.js";
+import { runCommand } from "./main.js";
 
-const USAGE = "usage: standing <base-url> <operator>";
+const USAGE = "usage: standing <base-url> <operator> [--sign <key.json>]";
+
+/**
+ * What a free run is told when the log it must fold is still inside the window.
+ *
+ * Names the flag rather than the decision: an operator checking their own
+ * number wants the next command to type, and the rule behind it is on
+ * /policy and in the paper for whoever wants it.
+ */
+export const WITHHELD_REFUSAL =
+  "withheld inside the release window; pass --sign <key.json>";
 
 /** The fields compared, in the order they are printed. The order is the contract. */
 export const STANDING_FIELDS = [
@@ -80,12 +106,17 @@ async function sealedHead(
   return Number.isSafeInteger(last) ? (last as number) : undefined;
 }
 
-/** The sealed log, paged off the public endpoint, oldest first. */
+/**
+ * The sealed log, paged off the public endpoint, oldest first.
+ *
+ * `null` is a door that would not answer; `"withheld"` is a door that answered
+ * with a hash line, which is a different thing and gets a different sentence.
+ */
 async function sealedEvents(
   http: HttpClient,
   baseUrl: string,
   through: number,
-): Promise<Event[] | null> {
+): Promise<Event[] | null | "withheld"> {
   const events: Event[] = [];
   // `after` is exclusive and seq 0 is a real position, so the start of the log
   // is asked for by omitting `after` rather than by writing -1.
@@ -103,6 +134,9 @@ async function sealedEvents(
 
     for (const event of listed as Event[]) {
       if (event.seq > through) return events;
+      // A hash line carries no payload to fold. Caught here rather than in the
+      // kernel, where it would be a TypeError about a property of null.
+      if (isWithheld(event)) return "withheld";
       events.push(event);
     }
     after = (listed[listed.length - 1] as Event).seq;
@@ -115,6 +149,40 @@ async function sealedEvents(
 function served(body: Record<string, unknown>, field: StandingField): number | undefined {
   const value = body[field];
   return typeof value === "number" ? value : undefined;
+}
+
+/** One command line, read: which log, whose standing, and what signs the reads. */
+export interface StandingPlan {
+  readonly baseUrl: string;
+  readonly operator: string;
+  readonly signPath: string | null;
+}
+
+/**
+ * Read the arguments, or answer null for the usage line and exit 2.
+ *
+ * Pure and run before any I/O, so a bad invocation never touches the network.
+ */
+export function standingPlan(args: readonly string[]): StandingPlan | null {
+  let signPath: string | null = null;
+  const positional: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] as string;
+    if (argument === "--sign") {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith("--")) return null;
+      if (signPath !== null) return null;
+      signPath = value;
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--")) return null;
+    positional.push(argument);
+  }
+  const [baseUrl, operator] = positional;
+  if (baseUrl === undefined || operator === undefined) return null;
+  if (positional.length !== 2) return null;
+  return { baseUrl, operator, signPath };
 }
 
 /**
@@ -130,20 +198,22 @@ export async function runStanding(
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   },
+  clock: Clock = () => new Date(),
 ): Promise<number> {
-  const [baseUrl, operator, ...rest] = args;
-  if (
-    baseUrl === undefined ||
-    operator === undefined ||
-    baseUrl.startsWith("--") ||
-    operator.startsWith("--") ||
-    rest.length > 0
-  ) {
+  const plan = standingPlan(args);
+  if (plan === null) {
     io.stderr(USAGE);
     return BAD_ARGUMENTS;
   }
+  const { baseUrl, operator } = plan;
+  // Every request this run makes goes out under the same credential, so the
+  // seals, the events and the served answer are all read on one tier.
+  const client =
+    plan.signPath === null
+      ? http
+      : signingHttp(http, await readKeyFile(plan.signPath), clock);
 
-  const head = await sealedHead(http, baseUrl);
+  const head = await sealedHead(client, baseUrl);
   if (head === undefined) {
     io.stdout("failed seals");
     return FAILED;
@@ -155,7 +225,11 @@ export async function runStanding(
   if (head === null) {
     local = zeroStanding(operator, 0);
   } else {
-    const events = await sealedEvents(http, baseUrl, head);
+    const events = await sealedEvents(client, baseUrl, head);
+    if (events === "withheld") {
+      io.stdout(WITHHELD_REFUSAL);
+      return FAILED;
+    }
     if (events === null) {
       io.stdout("failed events");
       return FAILED;
@@ -164,7 +238,7 @@ export async function runStanding(
   }
 
   const answer = await getJson(
-    http,
+    client,
     baseUrl,
     `/operators/${encodeURIComponent(operator)}/standing`,
   );
@@ -212,6 +286,16 @@ if (
   process.argv[1] !== undefined &&
   import.meta.filename === resolve(process.argv[1])
 ) {
-  process.exit(await runStanding(process.argv.slice(2), new WebHttpClient()));
+  const args = process.argv.slice(2);
+  const io: ValidatorIo = {
+    stdout: (line: string) => console.log(line),
+    stderr: (line: string) => console.error(line),
+  };
+  process.exit(
+    await runCommand(
+      { name: "standing", baseUrl: args[0] ?? null, io },
+      () => runStanding(args, new WebHttpClient(), io),
+    ),
+  );
 }
 /* c8 ignore stop */

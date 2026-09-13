@@ -683,6 +683,23 @@ describe("renderApi", () => {
     expect(page).toContain(`npm run standing -- ${ctx.origin} &lt;operator&gt;`);
   });
 
+  it("documents --sign on every command that reads past the window", () => {
+    // The QA of 2026-09-13: the page listed these three without the flag, so a
+    // reader following it ran a command that stops on a withheld line.
+    expect(page).toContain(
+      `npm run standing -- ${ctx.origin} &lt;operator&gt; [--sign &lt;key.json&gt;]`,
+    );
+    expect(page).toContain(
+      `npm run attest -- request &lt;model-key.json&gt; ${ctx.origin} [--sign &lt;key.json&gt;]`,
+    );
+    expect(page).toContain("&lt;attestation-id&gt; [--sign &lt;key.json&gt;]");
+    expect(page).toContain("npm run checkpoint -- [--wait-seal]");
+    // And the refusal an unsigned run earns is named where the flag is.
+    expect(page.replace(/\s+/g, " ")).toContain(
+      "withheld inside the release window; pass --sign &lt;key.json&gt;",
+    );
+  });
+
   it("documents paid access: the tiers table, the header, and every key door", () => {
     expect(page).toContain(">Paid access: tiers and keys</h2>");
 
@@ -865,6 +882,13 @@ describe("renderApi", () => {
   it("names the signing tag and the key command", () => {
     expect(page).toContain("nomankind-request-v1");
     expect(page).toContain("npm run keygen");
+    // keygen takes a name and writes outside the clone (D-016). The page said
+    // `-- <path>`, which is the one thing the command refuses.
+    expect(page).toContain(
+      "npm run keygen -- [&lt;name&gt; | --out &lt;path&gt;]",
+    );
+    expect(page).toContain("~/.nomankind/keys/&lt;name&gt;.json");
+    expect(page).not.toContain("npm run keygen -- &lt;path&gt;");
   });
 
   it("spells the example commands against this origin", () => {
@@ -1706,12 +1730,16 @@ describe("renderDryRun", () => {
   });
 
   it("gives each command its real argument form", () => {
-    expect(page).toContain("npm run keygen -- ./demo-key.json");
+    // keygen takes a name, and the key lands outside the clone (D-016): a guide
+    // that taught `./demo-key.json` taught a path a `git add .` would commit.
+    expect(page).toContain("npm run keygen -- demo");
+    expect(page).not.toContain("npm run keygen -- ./");
+    expect(page).toContain("~/.nomankind/keys/demo.json");
     expect(page).toContain(
-      `npm run register -- ./demo-key.json ${LOCAL_DEMO_ORIGIN} &lt;your domain&gt;`,
+      `npm run register -- ~/.nomankind/keys/demo.json ${LOCAL_DEMO_ORIGIN} &lt;your domain&gt;`,
     );
     expect(page).toContain(
-      `npm run validate -- ./demo-key.json ${LOCAL_DEMO_ORIGIN} &lt;entry-id&gt;`,
+      `npm run validate -- ~/.nomankind/keys/demo.json ${LOCAL_DEMO_ORIGIN} &lt;entry-id&gt;`,
     );
     expect(page).toContain("--duplicate-of &lt;entry-id&gt;");
     expect(page).toContain(

@@ -107,7 +107,11 @@ import {
   type OperatorStanding,
   type StoredEntry,
 } from "../storage/repository.js";
-import { htmlResponse, cssResponse } from "../ui/html.js";
+import {
+  STRICT_TRANSPORT_SECURITY,
+  htmlResponse,
+  cssResponse,
+} from "../ui/html.js";
 import { renderApi } from "../ui/pages/api.js";
 import {
   FORK_DOCUMENT,
@@ -156,6 +160,7 @@ import {
   unmeteredFreeReader,
   type ReaderAccess,
 } from "./access.js";
+import { configured, maintainerAgentId } from "./config.js";
 import type { Env } from "./env.js";
 import {
   READ_METHODS,
@@ -980,9 +985,7 @@ async function genesis(
       attestationText: ATTESTATION_TEXT,
       attestationVersion: ATTESTATION_VERSION,
       txtRecordPrefix: TXT_RECORD_PREFIX,
-      maintainerConfigured:
-        typeof env.MAINTAINER_AGENT_ID === "string" &&
-        env.MAINTAINER_AGENT_ID !== "",
+      maintainerConfigured: maintainerAgentId(env) !== null,
     }),
   );
 }
@@ -1353,8 +1356,8 @@ async function route(
   // (decision D-021). Only production sets APEX_HOST, so local and demo answer
   // the home page at `/` and no request there can be mistaken for the apex.
   if (path === "/") {
-    const apex = env.APEX_HOST;
-    return apex !== undefined && apex !== "" && apex === url.hostname
+    const apex = configured(env.APEX_HOST);
+    return apex !== null && apex === url.hostname
       ? landing(db, ctx)
       : home(request, env, db, ctx, url, now);
   }
@@ -1450,13 +1453,14 @@ export async function handlePages(
   // it is above the method check on purpose — a POST to www is redirected too,
   // because there is no door on www for it to have been meant for. Only
   // production sets APEX_HOST, so no local or demo hostname can match.
-  const apex = env.APEX_HOST;
-  if (apex !== undefined && apex !== "" && url.hostname === `www.${apex}`) {
+  const apex = configured(env.APEX_HOST);
+  if (apex !== null && url.hostname === `www.${apex}`) {
     return new Response(null, {
       status: 301,
       headers: {
         location: `https://${apex}${url.pathname}${url.search}`,
         "cache-control": "no-store",
+        "strict-transport-security": STRICT_TRANSPORT_SECURITY,
       },
     });
   }

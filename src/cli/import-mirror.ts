@@ -110,6 +110,7 @@ import {
   setOperatorStanding,
 } from "../storage/repository.js";
 import { LEDGER_CURSOR, sealedLog } from "../worker/sweep.js";
+import { runCommand } from "./main.js";
 import { verifyMirror } from "./verify-mirror.js";
 import { WebHttpClient, type HttpClient, type ValidatorIo } from "./validator.js";
 
@@ -726,11 +727,19 @@ if (
   process.argv[1] !== undefined &&
   import.meta.filename === resolve(process.argv[1])
 ) {
+  const io: ValidatorIo = {
+    stdout: (line: string) => console.log(line),
+    stderr: (line: string) => console.error(line),
+  };
+  // Through the one wrapper every entry point goes through (src/cli/main.ts).
+  // The refusals below are the failures this command understands; the wrapper
+  // is for the ones it does not, so a miniflare that throws on the way out is
+  // one named line rather than a stack with every path in it. It talks to a
+  // directory and not to a base URL, so there is none to name.
   process.exit(
-    await run(process.argv.slice(2), {
-      stdout: (line: string) => console.log(line),
-      stderr: (line: string) => console.error(line),
-    }),
+    await runCommand({ name: "import-mirror", baseUrl: null, io }, () =>
+      run(process.argv.slice(2), io),
+    ),
   );
 }
 /* c8 ignore stop */

@@ -18,6 +18,7 @@
 
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
+import { checkParameters, readPosition } from "../params.js";
 import { SOURCE_CLASSES } from "../sources.js";
 import type { EntriesFilter } from "./types.js";
 
@@ -94,6 +95,19 @@ export const ENTRIES_QUERY_REFUSALS = [
 
 export type EntriesQueryRefusal = (typeof ENTRIES_QUERY_REFUSALS)[number];
 
+/** The two words this listing refuses a malformed query in. */
+const ENTRIES_QUERY_WORDS = {
+  unknown: "unknown_parameter",
+  repeated: "repeated_parameter",
+  bad: "bad_before",
+} as const;
+
+/**
+ * The cursor a caller who named none is read as. Negative, so it can never
+ * collide with a position: seq 0 is a real one, and `before` is exclusive.
+ */
+const NO_CURSOR = -1;
+
 /**
  * The filter a listing applies. `domain` is carried beside the fields
  * src/ui/types.ts already declares (decision D-071): a chip group filters the
@@ -132,15 +146,15 @@ function readEnum(
  * is a legitimate position, so the bound is non-negative rather than positive.
  */
 export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
-  for (const name of params.keys()) {
-    if (!ENTRIES_QUERY_PARAMETERS.includes(name)) {
-      return { ok: false, reason: "unknown_parameter" };
-    }
-  }
-  for (const name of ENTRIES_QUERY_PARAMETERS) {
-    if (params.getAll(name).length > 1) {
-      return { ok: false, reason: "repeated_parameter" };
-    }
+  // The two rules every door shares, in the order this one has always run them
+  // and now through the one reader that runs them everywhere (src/params.ts).
+  const checked = checkParameters(
+    params,
+    ENTRIES_QUERY_PARAMETERS,
+    ENTRIES_QUERY_WORDS,
+  );
+  if (!checked.ok) {
+    return { ok: false, reason: checked.reason as EntriesQueryRefusal };
   }
 
   const category = readEnum(params, "category", ENTRY_CATEGORIES);
@@ -156,14 +170,17 @@ export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
   const fresh = readEnum(params, "fresh", FRESHNESS_VALUES);
   if (!fresh.ok) return { ok: false, reason: "bad_fresh" };
 
-  let before: number | null = null;
-  if (params.has("before")) {
-    const text = params.get("before") ?? "";
-    if (!/^\d+$/.test(text)) return { ok: false, reason: "bad_before" };
-    const value = Number(text);
-    if (!Number.isSafeInteger(value)) return { ok: false, reason: "bad_before" };
-    before = value;
-  }
+  // The keyset cursor, read by the same rule every other door reads a position
+  // by: plain decimal, no sign, no padding, and a safe integer. `1e9` was
+  // already refused. `0099` was not — the old test was `/^\d+$/`, which read it
+  // as 99 — and is refused now (the QA of 2026-09-13): a position has one
+  // spelling, the same one the seals and the events and the delta stream read,
+  // and two spellings of one cursor would be two URLs for one page. It is a
+  // deliberate narrowing and not a regression nobody chose; the refusal is
+  // `bad_before`, which is this door's word for a value it cannot read.
+  const cursor = readPosition(params, "before", NO_CURSOR, ENTRIES_QUERY_WORDS);
+  if (!cursor.ok) return { ok: false, reason: "bad_before" };
+  const before = cursor.value === NO_CURSOR ? null : cursor.value;
 
   return {
     ok: true,

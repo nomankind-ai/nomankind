@@ -70,6 +70,7 @@ import {
   type ReaderAccess,
   type ReaderRefusal,
 } from "./access.js";
+import { checkParameters } from "../params.js";
 import type { Env } from "./env.js";
 import { clocked } from "./world.js";
 import {
@@ -84,6 +85,16 @@ import {
 
 /** The ids nomankind mints, exactly as src/read.ts narrows the schema's pattern. */
 const ENTRY_ID_PATTERN = /^nmk_[0-9a-f]{32}$/;
+
+/**
+ * The words a door that takes no query at all refuses one in: the frozen
+ * reader's own, so `/read/{id}` and `/read` answer a mistyped parameter in the
+ * same word.
+ */
+const NO_QUERY_WORDS = {
+  unknown: "unknown_parameter",
+  repeated: "repeated_parameter",
+} as const;
 
 /**
  * The key that signs receipts, and the agent id it belongs to.
@@ -482,6 +493,13 @@ async function route(
   const id = idAfterPrefix(path);
   if (id !== null) {
     if (!isRead(request)) return methodNotAllowed(READ_METHODS);
+    // This door names the entry in its path and takes nothing else, so a
+    // parameter on it is a demand that was never applied. It used to be
+    // dropped, which meant `/read/{id}?min_tier=observed` answered an entry
+    // below the demand and looked like it had met it, while the very same
+    // demand on the query twin was checked (the QA of 2026-09-12).
+    const checked = checkParameters(url.searchParams, [], NO_QUERY_WORDS);
+    if (!checked.ok) return refuse(400, checked.reason);
     const granted = await gate(db, request, env, now);
     if (!granted.ok) return granted.response;
     return byId(db, id, env, granted.reader, granted.access, now);

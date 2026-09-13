@@ -44,17 +44,33 @@ import {
   reasonOf,
   runValidator,
   signedPost,
+  signingHttp,
   WebHttpClient,
   type HttpClient,
   type ValidatorIo,
   type ValidatorKey,
 } from "./validator.js";
+import { runCommand } from "./main.js";
 
 const USAGE =
-  "usage: checkpoint [--wait-seal] <base-url> <maintainer-key.json> <fixture-a.json> <fixture-b.json> <fixture-c.json> <out-dir>";
+  "usage: checkpoint [--wait-seal] <base-url> <maintainer-key.json> <fixture-a.json> <fixture-b.json> <fixture-c.json> <out-dir> [--sign <key.json>]";
 
 /** The flag that waits for the sweep to seal the entry before exporting. */
 const WAIT_SEAL_FLAG = "--wait-seal";
+
+/** The flag that signs every read this walk makes (decision D-100). */
+const SIGN_FLAG = "--sign";
+
+/**
+ * What the walk says when the entry it just made is still inside the window.
+ *
+ * The D-102 gap, on this command: the entry is seconds old, so a free export of
+ * it is the released view — the proof, the seal, and the day the content opens
+ * — and `verifyOffline` answers `entry_withheld` rather than ok. That is the
+ * window working, not the checkpoint failing, and the fix is the flag.
+ */
+export const WITHHELD_REFUSAL =
+  "withheld inside the release window; pass --sign <key.json>";
 
 /**
  * How often the wait asks, in seconds. Not a policy number and not a rule: the
@@ -221,6 +237,69 @@ async function waitForSeal(
     }
     await sleep(POLL_SECONDS * MILLISECONDS_PER_SECOND);
   }
+}
+
+/** One command line, read: the walk's five paths, its out dir and its flags. */
+export interface CheckpointPlan {
+  readonly baseUrl: string;
+  readonly maintainerPath: string;
+  readonly aPath: string;
+  readonly bPath: string;
+  readonly cPath: string;
+  readonly outDir: string;
+  readonly waitSeal: boolean;
+  /** The key every read is signed with (decision D-100), or null. */
+  readonly signPath: string | null;
+}
+
+/**
+ * Read the arguments, or answer null for the usage line and exit 2.
+ *
+ * Pure and exported rather than written inline at the entry point, because the
+ * flags and the six positionals have to be separated without the flags' own
+ * values being counted as positionals -- which is exactly the kind of thing
+ * that is wrong until a test says otherwise.
+ */
+export function checkpointPlan(argv: readonly string[]): CheckpointPlan | null {
+  let waitSeal = false;
+  let signPath: string | null = null;
+  const positional: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] as string;
+    if (argument === WAIT_SEAL_FLAG) {
+      waitSeal = true;
+      continue;
+    }
+    if (argument === SIGN_FLAG) {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("--")) return null;
+      if (signPath !== null) return null;
+      signPath = value;
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("--")) return null;
+    positional.push(argument);
+  }
+  if (positional.length !== 6) return null;
+  const [baseUrl, maintainerPath, aPath, bPath, cPath, outDir] = positional as [
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
+  return {
+    baseUrl,
+    maintainerPath,
+    aPath,
+    bPath,
+    cPath,
+    outDir,
+    waitSeal,
+    signPath,
+  };
 }
 
 /**
@@ -441,6 +520,14 @@ export async function runCheckpoint(input: {
 
   // Step seven: the offline verifier, on those two files and nothing else.
   const report = await verifyOffline(exported.entry, exported.bundle);
+  // An export taken without a credential, of an entry made a minute ago, is the
+  // released view of something the window has not opened. One named line, and
+  // the diffs below are not printed: they would all say the same thing.
+  const withheld = report.diffs.some((diff) => diff.reason === "entry_withheld");
+  if (withheld) {
+    step("verify", false, WITHHELD_REFUSAL);
+    return stop();
+  }
   const ok = step(
     "verify",
     report.ok,
@@ -469,52 +556,51 @@ if (
   process.argv[1] !== undefined &&
   import.meta.filename === resolve(process.argv[1])
 ) {
-  const args = process.argv.slice(2);
-  const waitSeal = args.includes(WAIT_SEAL_FLAG);
-  const [baseUrl, maintainerPath, aPath, bPath, cPath, outDir] = args.filter(
-    (argument) => argument !== WAIT_SEAL_FLAG,
-  );
-  if (
-    baseUrl === undefined ||
-    maintainerPath === undefined ||
-    aPath === undefined ||
-    bPath === undefined ||
-    cPath === undefined ||
-    outDir === undefined
-  ) {
+  const plan = checkpointPlan(process.argv.slice(2));
+  if (plan === null) {
     console.error(USAGE);
     process.exit(2);
   }
+  const { baseUrl, maintainerPath, aPath, bPath, cPath, outDir, waitSeal, signPath } =
+    plan;
 
   const io: ValidatorIo = {
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   };
-  let code = 1;
-  try {
-    const result = await runCheckpoint({
-      baseUrl,
-      keys: {
-        maintainer: await readKeyFile(maintainerPath),
-        fixtures: [
-          await readKeyFile(aPath),
-          await readKeyFile(bPath),
-          await readKeyFile(cPath),
-        ],
-      },
-      deps: {
-        http: new WebHttpClient(),
-        fetcher: new WebFetcher(),
-        now: new Date(),
-        io,
-        outDir,
-        waitSeal,
-      },
-    });
-    code = result.ok ? 0 : 1;
-  } catch (error) {
-    io.stderr(`checkpoint: ${reasonOf(error)}`);
-  }
-  process.exit(code);
+  const now = new Date();
+  process.exit(
+    await runCommand({ name: "checkpoint", baseUrl, io }, async () => {
+      const result = await runCheckpoint({
+        baseUrl,
+        keys: {
+          maintainer: await readKeyFile(maintainerPath),
+          fixtures: [
+            await readKeyFile(aPath),
+            await readKeyFile(bPath),
+            await readKeyFile(cPath),
+          ],
+        },
+        deps: {
+          http:
+            signPath === null
+              ? new WebHttpClient()
+              : signingHttp(
+                  new WebHttpClient(),
+                  await readKeyFile(signPath),
+                  // Live, not `now`: the wait for a seal spends minutes and a
+                  // read stamped at process start is 401 `clock_skew` by then.
+                  () => new Date(),
+                ),
+          fetcher: new WebFetcher(),
+          now,
+          io,
+          outDir,
+          waitSeal,
+        },
+      });
+      return result.ok ? 0 : 1;
+    }),
+  );
 }
 /* c8 ignore stop */

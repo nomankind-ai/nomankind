@@ -60,6 +60,7 @@ import { snapshotHash } from "../normalize.js";
 import { NORM_VERSION, REPRODUCTION_RUNS } from "../policy.js";
 import { signRecord } from "../records.js";
 import { signRequest } from "../request.js";
+import { runCommand } from "./main.js";
 
 export interface ValidatorIo {
   stdout: (line: string) => void;
@@ -128,12 +129,36 @@ export interface ValidatorKey {
   readonly privateKey: CryptoKey;
 }
 
+/**
+ * A source of the current instant: a fixed one, or a function asked for it.
+ *
+ * A run that signs one request signs it at the instant it started and the two
+ * are the same thing. A run that signs a read now and another one six minutes
+ * from now is not: `REQUEST_CLOCK_SKEW_SECONDS` is 300, so the second read
+ * carries a timestamp the door refuses (the QA of 2026-09-13). Hence the
+ * function: a command passes `() => new Date()` and every request it makes is
+ * stamped when it is made, and a test passes the fixed instant it wants.
+ */
+export type Clock = Date | (() => Date);
+
+/** The instant a clock says it is, whichever of the two forms it is. */
+export function instantOf(clock: Clock): Date {
+  return typeof clock === "function" ? clock() : clock;
+}
+
 /** Everything a run needs besides its arguments. All of it injected. */
 export interface ValidatorDeps {
   readonly http: HttpClient;
   readonly fetcher: SnapshotFetcher;
   readonly now: Date;
   readonly key: ValidatorKey;
+  /**
+   * What the signed reads are stamped by, when it is not `now`. A command
+   * passes the live clock so a long run's later reads are not stamped at the
+   * instant it started; absent, the fixed `now` stands, which is what a test
+   * and a one-request run both want.
+   */
+  readonly clock?: () => Date;
 }
 
 /** An absolute URL for a path against a base. */
@@ -167,6 +192,14 @@ export async function getJson(
  * string, a null body, and a fresh nonce per request, which is why the headers
  * are built inside `fetch` rather than once.
  *
+ * The timestamp is asked of the clock inside `fetch` for the same reason. A
+ * fixed instant stamped at process start is a signature that ages: a walk that
+ * waits for the sweep to seal — `checkpoint --wait-seal` spends a whole
+ * SEAL_INTERVAL_MINUTES budget — reads again minutes later, and a timestamp
+ * more than `REQUEST_CLOCK_SKEW_SECONDS` old is 401 `clock_skew` (the QA of
+ * 2026-09-13). So a command passes `() => new Date()` and every read it makes
+ * carries the instant it was made; a test passes the fixed instant it wants.
+ *
  * Reads only. A write carries its own signature over its own body, made by the
  * key that is entitled to make it, and a wrapper that replaced those headers
  * with a GET-shaped signature would refuse every write door there is.
@@ -174,7 +207,7 @@ export async function getJson(
 export function signingHttp(
   http: HttpClient,
   key: ValidatorKey,
-  now: Date,
+  clock: Clock,
 ): HttpClient {
   return {
     async fetch(request: Request): Promise<Response> {
@@ -186,7 +219,7 @@ export function signingHttp(
         body: null,
         agentId: key.agentId,
         privateKey: key.privateKey,
-        timestamp: now.toISOString(),
+        timestamp: instantOf(clock).toISOString(),
       });
       const headers = new Headers(request.headers);
       for (const [name, value] of Object.entries(signed)) {
@@ -526,7 +559,7 @@ export async function runValidator(input: {
   // bound to a registered operator, and a validator is exactly that reader —
   // the people who have to judge an entry are the ones the window is not for.
   const read = await getJson(
-    signingHttp(deps.http, deps.key, deps.now),
+    signingHttp(deps.http, deps.key, deps.clock ?? deps.now),
     input.baseUrl,
     `/entries/${encodeURIComponent(input.entryId)}`,
   );
@@ -771,28 +804,27 @@ if (
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   };
-  let code = 1;
-  try {
-    const run = await runValidator({
-      baseUrl,
-      entryId,
-      assigned,
-      duplicateOf,
-      io,
-      deps: {
-        http: new WebHttpClient(),
-        fetcher: new WebFetcher(),
-        now: new Date(),
-        key: await readKeyFile(keyPath),
-      },
-    });
-    if (!run.ok && run.status === null) {
-      io.stderr(`${entryId}: ${run.error ?? "unknown error"}`);
-    }
-    code = run.ok ? 0 : 1;
-  } catch (error) {
-    io.stderr(`${entryId}: ${reasonOf(error)}`);
-  }
-  process.exit(code);
+  process.exit(
+    await runCommand({ name: entryId, baseUrl, io }, async () => {
+      const run = await runValidator({
+        baseUrl,
+        entryId,
+        assigned,
+        duplicateOf,
+        io,
+        deps: {
+          http: new WebHttpClient(),
+          fetcher: new WebFetcher(),
+          now: new Date(),
+          clock: () => new Date(),
+          key: await readKeyFile(keyPath),
+        },
+      });
+      if (!run.ok && run.status === null) {
+        io.stderr(`${entryId}: ${run.error ?? "unknown error"}`);
+      }
+      return run.ok ? 0 : 1;
+    }),
+  );
 }
 /* c8 ignore stop */

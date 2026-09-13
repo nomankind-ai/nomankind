@@ -14,6 +14,7 @@ import {
   APP_CSS_HREF,
   CONTACT_EMAIL,
   CONTENT_SECURITY_POLICY,
+  STRICT_TRANSPORT_SECURITY,
   badge,
   cssResponse,
   escapeHtml,
@@ -320,6 +321,13 @@ describe("htmlResponse", () => {
     expect(response.headers.get("vary")).toBe("Accept");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    // The transport rule joined the other three in the QA of 2026-09-12: a
+    // year, this host alone, and no promise about anybody's subdomains.
+    expect(response.headers.get("strict-transport-security")).toBe(
+      "max-age=31536000",
+    );
+    expect(STRICT_TRANSPORT_SECURITY).not.toContain("includeSubDomains");
+    expect(STRICT_TRANSPORT_SECURITY).not.toContain("preload");
   });
 
   it("carries exactly the policy that forbids script", () => {
@@ -347,6 +355,9 @@ describe("cssResponse", () => {
     expect(response.headers.get("content-type")).toBe("text/css; charset=utf-8");
     expect(response.headers.get("cache-control")).toBe("public, max-age=3600");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("strict-transport-security")).toBe(
+      STRICT_TRANSPORT_SECURITY,
+    );
   });
 });
 

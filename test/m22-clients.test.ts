@@ -532,6 +532,7 @@ describe("the attest command", () => {
       attestation: null,
       answersPath: null,
       drift: false,
+      signPath: null,
     });
     expect(attestPlan(["answer", "k.json", TEST_ORIGIN, "att_x", "--drift"])).toEqual(
       {
@@ -541,6 +542,7 @@ describe("the attest command", () => {
         attestation: "att_x",
         answersPath: null,
         drift: true,
+        signPath: null,
       },
     );
     // Two different answers to the same probes; a run naming both would have to

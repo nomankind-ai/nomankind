@@ -34,11 +34,13 @@ import {
   keyedHttp,
   readKeyFile,
   signingHttp,
+  type Clock,
   urlFor,
   WebHttpClient,
   type HttpClient,
   type ValidatorIo,
 } from "./validator.js";
+import { runCommand, unreachableLine } from "./main.js";
 
 const USAGE =
   "usage: export <base-url> <entry-id> <out-dir> [--key <api key>] [--sign <key.json>]";
@@ -414,7 +416,8 @@ export async function exportEntry(
     result = await buildExport({ baseUrl, entryId, http, now });
   } catch (error) {
     io.stderr(
-      `${entryId}: ${error instanceof Error ? error.message : String(error)}`,
+      unreachableLine(baseUrl, error) ??
+        `${entryId}: ${error instanceof Error ? error.message : String(error)}`,
     );
     return 1;
   }
@@ -439,11 +442,11 @@ export async function exportEntry(
 export async function exportClient(
   http: HttpClient,
   plan: ExportPlan,
-  now: Date,
+  clock: Clock,
 ): Promise<HttpClient> {
   if (plan.key !== null) return keyedHttp(http, plan.key);
   if (plan.signPath !== null) {
-    return signingHttp(http, await readKeyFile(plan.signPath), now);
+    return signingHttp(http, await readKeyFile(plan.signPath), clock);
   }
   return http;
 }
@@ -459,17 +462,20 @@ if (
     process.exit(2);
   }
   const now = new Date();
+  const io: ValidatorIo = {
+    stdout: (line: string) => console.log(line),
+    stderr: (line: string) => console.error(line),
+  };
   process.exit(
-    await exportEntry(
-      plan.baseUrl,
-      plan.entryId,
-      plan.outDir,
-      {
-        stdout: (line: string) => console.log(line),
-        stderr: (line: string) => console.error(line),
-      },
-      await exportClient(new WebHttpClient(), plan, now),
-      now,
+    await runCommand({ name: "export", baseUrl: plan.baseUrl, io }, async () =>
+      exportEntry(
+        plan.baseUrl,
+        plan.entryId,
+        plan.outDir,
+        io,
+        await exportClient(new WebHttpClient(), plan, () => new Date()),
+        now,
+      ),
     ),
   );
 }

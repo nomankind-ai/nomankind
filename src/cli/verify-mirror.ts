@@ -119,6 +119,7 @@ import {
   type Registry,
 } from "../verify.js";
 import { captureHashes } from "./export.js";
+import { runCommand } from "./main.js";
 import {
   getJson,
   WebHttpClient,
@@ -1402,11 +1403,22 @@ if (
   process.argv[1] !== undefined &&
   import.meta.filename === resolve(process.argv[1])
 ) {
+  const io: ValidatorIo = {
+    stdout: (line: string) => console.log(line),
+    stderr: (line: string) => console.error(line),
+  };
+  // Through the one wrapper every entry point goes through (src/cli/main.ts).
+  // A `--captures` base is the one URL this command fetches, so it is the one
+  // the unreachable line names; a run with none reads its captures from
+  // mirror.json's own base, which the wrapper has no way to know until the
+  // directory is read and which the verifier's own catch already reports.
+  const captures = mirrorVerifyPlan(process.argv.slice(2))?.captures ?? null;
+  const baseUrl =
+    captures !== null && captureSource(captures).base !== null ? captures : null;
   process.exit(
-    await verifyMirror(process.argv.slice(2), {
-      stdout: (line: string) => console.log(line),
-      stderr: (line: string) => console.error(line),
-    }),
+    await runCommand({ name: "verify-mirror", baseUrl, io }, () =>
+      verifyMirror(process.argv.slice(2), io),
+    ),
   );
 }
 /* c8 ignore stop */

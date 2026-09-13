@@ -80,6 +80,7 @@ import type { D1Like } from "../storage/d1.js";
 import { eventsAfter, getEntry, sealCovering } from "../storage/repository.js";
 import { keyHash, looksLikeKey, type KeyRecord } from "../keys.js";
 import { keyByHash } from "../storage/keys.js";
+import { STRICT_TRANSPORT_SECURITY } from "../ui/html.js";
 import type { Env } from "./env.js";
 import {
   guardDatabase,
@@ -415,7 +416,10 @@ async function unsubscribe(
   await disableAlertEndpoint(db, id, now.toISOString());
   return new Response(null, {
     status: 204,
-    headers: { "cache-control": "no-store" },
+    headers: {
+      "cache-control": "no-store",
+      "strict-transport-security": STRICT_TRANSPORT_SECURITY,
+    },
   });
 }
 

@@ -32,6 +32,7 @@ import { appendEvent, type Attestation, type Event } from "../events.js";
 import { publicKeyFromAgentId } from "../identity.js";
 import { utcDay } from "../anchor.js";
 import { quotaScopeForClient } from "../keys.js";
+import { checkParameters, readLimit } from "../params.js";
 import {
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
@@ -56,6 +57,7 @@ import {
   type JoinRefusal,
   type RegistrationRefusal,
 } from "../registry.js";
+import { STRICT_TRANSPORT_SECURITY } from "../ui/html.js";
 import {
   HEADER_AGENT,
   HEADER_NONCE,
@@ -87,6 +89,7 @@ import {
   type AgentRecord,
   type OperatorRecord,
 } from "../storage/repository.js";
+import { maintainerAgentId } from "./config.js";
 import type { Env } from "./env.js";
 
 /**
@@ -115,6 +118,9 @@ export function json(
   const headers = new Headers(extraHeaders);
   headers.set("content-type", "application/json");
   headers.set("cache-control", "no-store");
+  // The transport rule, beside the page's own security headers and for the same
+  // reason (the QA of 2026-09-12): a JSON door is reached by a browser too.
+  headers.set("strict-transport-security", STRICT_TRANSPORT_SECURITY);
   return new Response(JSON.stringify(body), { status, headers });
 }
 
@@ -739,9 +745,18 @@ export async function authenticate(
   return { ok: true, agent: verdict.agentId, body };
 }
 
-/** The maintainer's agent id, or null when none is configured. */
+/**
+ * The maintainer's agent id, or null when none is configured.
+ *
+ * Read through `maintainerAgentId` (src/worker/config.ts), which treats an
+ * unset binding and an empty one as the same absence. The `=== ""` test this
+ * replaced let an unset var through as `undefined`, so a deployment that had
+ * configured no maintainer at all answered the genesis door 403
+ * `not_maintainer` — "you are not the maintainer", about a maintainer nobody
+ * named — instead of 503 `maintainer_not_configured` (the QA of 2026-09-12).
+ */
 function maintainerOf(env: Env): string | null {
-  return env.MAINTAINER_AGENT_ID === "" ? null : env.MAINTAINER_AGENT_ID;
+  return maintainerAgentId(env);
 }
 
 /** The log's last event, or nothing when the log is empty. */
@@ -805,6 +820,7 @@ async function register(
     maintainerAgentId: maintainerOf(env),
     operatorExists: (await getOperator(env.DB, operator)) !== null,
     agentOperator: await operatorForAgent(env.DB, agent),
+    now: deps.now,
   });
   if (!check.ok) {
     return refuse(REGISTRATION_STATUS[check.reason], check.reason);
@@ -851,6 +867,7 @@ async function register(
       maintainerAgentId: maintainerOf(env),
       operatorExists: (await getOperator(env.DB, operator)) !== null,
       agentOperator: await operatorForAgent(env.DB, agent),
+      now: deps.now,
     });
     if (!settled.ok) {
       return refuse(REGISTRATION_STATUS[settled.reason], settled.reason);
@@ -964,6 +981,7 @@ async function joinDomain(
     attestation,
     registered: true,
     domains: held.map((row) => row.domain),
+    now: deps.now,
   });
   if (!check.ok) return refuse(JOIN_STATUS[check.reason], check.reason);
 
@@ -1161,18 +1179,38 @@ async function genesis(
 // Reads
 // ---------------------------------------------------------------------------
 
-/** A positive integer page size, at most LIST_PAGE_LIMIT. */
-const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
+/** The one parameter the operator listing takes, and nothing else. */
+const LIST_QUERY_PARAMETERS: readonly string[] = Object.freeze(["limit"]);
 
+/** The one word this door refuses a query it cannot read in. */
+const LIST_QUERY_WORDS = {
+  unknown: "bad_query",
+  repeated: "bad_query",
+} as const;
+
+/**
+ * The registry, a page at a time.
+ *
+ * Through the one reader every other listing goes through (src/params.ts). It
+ * had its own copy of the page-size rule and no rule at all about the rest of
+ * the query, so `/operators?limt=5` and `/operators?limit=5&limit=50` were both
+ * answered as if nothing had been asked (the QA of 2026-09-13) — a caller who
+ * mistyped the parameter got the default page back and believed they had named
+ * one. Now the two shared rules apply here in the word this door already used.
+ */
 async function list(url: URL, env: Env): Promise<Response> {
-  const raw = url.searchParams.get("limit");
-  let limit = LIST_PAGE_LIMIT;
-  if (raw !== null) {
-    if (!POSITIVE_INTEGER.test(raw)) return refuse(400, "bad_query");
-    limit = Number(raw);
-    if (limit > LIST_PAGE_LIMIT) return refuse(400, "bad_query");
-  }
-  return json({ operators: await listOperators(env.DB, { limit }) }, 200);
+  const checked = checkParameters(
+    url.searchParams,
+    LIST_QUERY_PARAMETERS,
+    LIST_QUERY_WORDS,
+  );
+  if (!checked.ok) return refuse(400, checked.reason);
+  const limit = readLimit(url.searchParams, LIST_PAGE_LIMIT, LIST_QUERY_WORDS);
+  if (!limit.ok) return refuse(400, limit.reason);
+  return json(
+    { operators: await listOperators(env.DB, { limit: limit.value }) },
+    200,
+  );
 }
 
 async function operatorById(env: Env, id: string): Promise<Response> {

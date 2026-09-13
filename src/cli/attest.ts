@@ -47,16 +47,31 @@ import {
   readKeyFile,
   reasonOf,
   signedPost,
+  signingHttp,
+  type Clock,
   type HttpClient,
   type ValidatorIo,
   type ValidatorKey,
 } from "./validator.js";
+import { runCommand } from "./main.js";
 
 const USAGE = [
-  "usage: attest request <key.json> <base-url>",
-  "       attest answer <key.json> <base-url> <id> [--answers <file.json>] [--drift]",
-  "       attest score <key.json> <base-url> <id>",
+  "usage: attest request <key.json> <base-url> [--sign <key.json>]",
+  "       attest answer <key.json> <base-url> <id> [--answers <file.json>] [--drift] [--sign <key.json>]",
+  "       attest score <key.json> <base-url> <id> [--sign <key.json>]",
 ].join("\n");
+
+/**
+ * What a run is told when the entry behind a probe is still inside the window.
+ *
+ * The D-102 gap, on this command: the scorer reads each probed entry's own
+ * claim, and a claim inside the release window (decision D-100) is not served
+ * to a free reader at all — the envelope carries the proof and the day it
+ * opens, and no words. Scoring a model against a claim nobody was shown would
+ * be scoring nothing, so the run stops and names the flag that reaches inside.
+ */
+export const WITHHELD_REFUSAL =
+  "withheld inside the release window; pass --sign <key.json>";
 
 /** The exit codes, named where they are decided. */
 const OK = 0;
@@ -247,13 +262,19 @@ async function claimOf(
   deps: AttestDeps,
   baseUrl: string,
   entryId: string,
-): Promise<string | null> {
+): Promise<string | "withheld" | null> {
   const { status, body } = await getJson(
     deps.http,
     baseUrl,
     `/entries/${encodeURIComponent(entryId)}`,
   );
   if (status !== 200 || !isRecord(body)) return null;
+  // The withheld view (src/release.ts): the proof under `proof`, the day the
+  // content opens beside it, and no claim anywhere. A different answer from an
+  // entry that could not be read, so it gets a different sentence.
+  if (isRecord(body["proof"]) && typeof body["release_date"] === "string") {
+    return "withheld";
+  }
   const claim = body["claim"];
   return typeof claim === "string" ? claim : null;
 }
@@ -291,6 +312,9 @@ export async function runAnswer(input: {
         continue;
       }
       const claim = await claimOf(deps, input.baseUrl, probe.entry_id);
+      if (claim === "withheld") {
+        return stopped(WITHHELD_REFUSAL, input.attestation);
+      }
       if (claim === null) return stopped("entry_unreadable", input.attestation);
       built.push({ entry_id: probe.entry_id, answer: claim });
     }
@@ -357,6 +381,9 @@ export async function runScore(input: {
   let agreed = 0;
   for (const probe of probes) {
     const claim = await claimOf(deps, input.baseUrl, probe.entry_id);
+    if (claim === "withheld") {
+      return stopped(WITHHELD_REFUSAL, input.attestation);
+    }
     if (claim === null) return stopped("entry_unreadable", input.attestation);
     const answer = said.get(probe.entry_id);
     if (answer === undefined) continue;
@@ -416,6 +443,15 @@ export interface AttestPlan {
   readonly attestation: string | null;
   readonly answersPath: string | null;
   readonly drift: boolean;
+  /**
+   * The key file every read this run makes is signed with, or null.
+   *
+   * Separate from `keyPath`, which is the key that signs the records this
+   * command posts: an operator may well sign both with the same file, and
+   * saying so is one repetition on a command line rather than a rule about
+   * which of two keys the reads quietly borrowed.
+   */
+  readonly signPath: string | null;
 }
 
 /**
@@ -428,14 +464,20 @@ export function attestPlan(argv: readonly string[]): AttestPlan | null {
   const drift = argv.includes("--drift");
   const answersAt = argv.indexOf("--answers");
   let answersPath: string | null = null;
+  let signPath: string | null = null;
   const positional: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index] as string;
     if (argument === "--drift") continue;
-    if (argument === "--answers") {
+    if (argument === "--answers" || argument === "--sign") {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) return null;
-      answersPath = value;
+      if (argument === "--sign") {
+        if (signPath !== null) return null;
+        signPath = value;
+      } else {
+        answersPath = value;
+      }
       index += 1;
       continue;
     }
@@ -455,6 +497,7 @@ export function attestPlan(argv: readonly string[]): AttestPlan | null {
       attestation: null,
       answersPath: null,
       drift: false,
+      signPath,
     };
   }
   if (subcommand === "answer" || subcommand === "score") {
@@ -463,9 +506,34 @@ export function attestPlan(argv: readonly string[]): AttestPlan | null {
     // Answers from a file and a drifted model are two different answers to the
     // same probes, and a run naming both would have to pick one silently.
     if (answersPath !== null && drift) return null;
-    return { subcommand, keyPath, baseUrl, attestation, answersPath, drift };
+    return {
+      subcommand,
+      keyPath,
+      baseUrl,
+      attestation,
+      answersPath,
+      drift,
+      signPath,
+    };
   }
   return null;
+}
+
+/**
+ * The client one run reads through: the caller's own, or the caller's with an
+ * operator signature on every GET it makes (decision D-100).
+ *
+ * One place, so the attestation read and every probed entry's claim go out
+ * under the same credential — a run that reached inside the window for one and
+ * not the other would score half a model.
+ */
+export async function attestClient(
+  http: HttpClient,
+  plan: AttestPlan,
+  clock: Clock,
+): Promise<HttpClient> {
+  if (plan.signPath === null) return http;
+  return signingHttp(http, await readKeyFile(plan.signPath), clock);
 }
 
 /** Run whichever door the plan named. */
@@ -529,21 +597,24 @@ if (
     }
   }
 
-  let code: number = FAILED;
-  try {
-    const run = await runAttest({
-      plan,
-      key: await readKeyFile(plan.keyPath),
-      ...(answers === undefined ? {} : { answers }),
-      deps: { http: new WebHttpClient(), now: new Date(), io },
-    });
-    if (!run.ok && run.status === null) {
-      io.stderr(`attest: ${run.error ?? "unknown error"}`);
-    }
-    code = run.code;
-  } catch (error) {
-    io.stderr(`attest: ${reasonOf(error)}`);
-  }
-  process.exit(code);
+  const now = new Date();
+  process.exit(
+    await runCommand({ name: "attest", baseUrl: plan.baseUrl, io }, async () => {
+      const run = await runAttest({
+        plan,
+        key: await readKeyFile(plan.keyPath),
+        ...(answers === undefined ? {} : { answers }),
+        deps: {
+          http: await attestClient(new WebHttpClient(), plan, () => new Date()),
+          now,
+          io,
+        },
+      });
+      if (!run.ok && run.status === null) {
+        io.stderr(`attest: ${run.error ?? "unknown error"}`);
+      }
+      return run.code;
+    }),
+  );
 }
 /* c8 ignore stop */

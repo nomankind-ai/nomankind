@@ -31,6 +31,7 @@ import entrySchema from "../schema/nomankind-entry-schema.json" with { type: "js
 import { utcDay } from "./anchor.js";
 import type { EntryStatus, Sidecar } from "./derive.js";
 import type { EvidenceTier } from "./evidence.js";
+import { checkParameters } from "./params.js";
 import type { Category } from "./policy.js";
 import type { Entry } from "./schema.js";
 import {
@@ -95,6 +96,7 @@ export type ReadQuery =
 /** Every reason a read query can be refused, in the order they are checked. */
 export const READ_QUERY_REFUSALS = [
   "unknown_parameter",
+  "repeated_parameter",
   "bad_entry_id",
   "mixed_query",
   "missing_subject",
@@ -118,6 +120,12 @@ const ENTRY_ID_PATTERN = /^nmk_[0-9a-f]{32}$/;
 /** A non-negative safe integer written in plain decimal, with no sign or padding. */
 const MAX_AGE_PATTERN = /^(0|[1-9][0-9]*)$/;
 
+/** The two words this door refuses a malformed query in. */
+const READ_QUERY_WORDS = {
+  unknown: "unknown_parameter",
+  repeated: "repeated_parameter",
+} as const;
+
 /** A unit constant, not a policy number: a day, stated in milliseconds. */
 const MILLISECONDS_PER_DAY = 86_400_000;
 
@@ -133,9 +141,14 @@ const MILLISECONDS_PER_DAY = 86_400_000;
  * the same reason.
  */
 export function parseReadQuery(params: URLSearchParams): ReadQueryResult {
-  const known = new Set(READ_QUERY_PARAMETERS);
-  for (const key of params.keys()) {
-    if (!known.has(key)) return { ok: false, reason: "unknown_parameter" };
+  // Unknown and repeated, in that order, by the one reader every door shares
+  // (src/params.ts). The repeated check is new (the QA of 2026-09-12): this
+  // door took the first of `?min_tier=stated&min_tier=observed` where the delta
+  // stream refuses it, so one reader asking two questions was answered one of
+  // them, chosen by the order they happened to be written in.
+  const checked = checkParameters(params, READ_QUERY_PARAMETERS, READ_QUERY_WORDS);
+  if (!checked.ok) {
+    return { ok: false, reason: checked.reason as ReadQueryRefusal };
   }
 
   const entryId = params.get("entry_id");
