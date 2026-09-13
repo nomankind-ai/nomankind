@@ -66,7 +66,6 @@ import {
   chargeReads,
   nextKeyCounter,
   readerAccess,
-  resolveAccess,
   type Access,
   type ReaderAccess,
   type ReaderRefusal,
@@ -442,11 +441,10 @@ export function refusalResponse(refusal: ReaderRefusal): Response {
  *
  * `readerAccess` is called exactly once, here, and its answer is passed down to
  * every check below it, so no two checks in one request can disagree about who
- * is asking (decision D-100). It carries the resolved tier only on the keyed
- * branch, which is the branch that has one to carry; a free or operator read is
- * metered on the free tier exactly as it is today, so the gate is asked for
- * that tier's day here and the answer cannot refuse, because `readerAccess`
- * just asked it the same question.
+ * is asking (decision D-100). It carries the day it resolved on every branch —
+ * the key's tier, the operator's own bucket, or the free tier — so the bucket
+ * this request is charged against is the bucket its cap was checked against,
+ * and the gate is never asked a second question whose answer could differ.
  */
 async function gate(
   db: D1Like,
@@ -461,13 +459,7 @@ async function gate(
   if (!granted.ok) {
     return { ok: false, response: refusalResponse(granted.refusal) };
   }
-  const reader = granted.reader;
-  if (reader.kind === "key") {
-    return { ok: true, reader, access: reader.key };
-  }
-  const free = await resolveAccess(db, request, now);
-  if (!free.ok) return { ok: false, response: refusalResponse(free.refusal) };
-  return { ok: true, reader, access: free.access };
+  return { ok: true, reader: granted.reader, access: granted.reader.access };
 }
 
 async function route(

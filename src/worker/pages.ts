@@ -151,7 +151,11 @@ import type {
   StatusData,
   WithheldView,
 } from "../ui/types.js";
-import { readerAccess, type ReaderAccess } from "./access.js";
+import {
+  readerAccess,
+  unmeteredFreeReader,
+  type ReaderAccess,
+} from "./access.js";
 import type { Env } from "./env.js";
 import {
   READ_METHODS,
@@ -286,7 +290,7 @@ async function readerOf(
   now: Date,
 ): Promise<ReaderAccess> {
   const answer = await readerAccess(request, env, db, now);
-  return answer.ok ? answer.reader : { kind: "free" };
+  return answer.ok ? answer.reader : unmeteredFreeReader(now);
 }
 
 /**

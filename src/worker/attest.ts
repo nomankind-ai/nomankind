@@ -238,16 +238,15 @@ async function request_(
   deps: AttestDeps,
   path: string,
 ): Promise<Response> {
+  const auth = await authenticate(request, env, deps, path);
+  if (!auth.ok) return auth.response;
+  const db = env.DB;
+
   // One thing is asked for and one only: the domain to attest in (decision
   // D-071). The probes are drawn by public randomness and the scorers with
   // them, so a body carrying anything beyond the domain is a request about
   // something this door does not do.
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await request.clone().text());
-  } catch {
-    return refuse(400, "bad_body");
-  }
+  const raw = auth.body;
   if (!isRecord(raw)) return refuse(400, "bad_body");
   for (const key of Object.keys(raw)) {
     if (key !== "domain") return refuse(400, "bad_body");
@@ -256,10 +255,6 @@ async function request_(
   const domain = asked === undefined ? DEFAULT_DOMAIN : asked;
   if (typeof domain !== "string") return refuse(400, "bad_body");
   if (!isRegisteredDomain(domain)) return refuse(422, "unregistered_domain");
-
-  const auth = await authenticate(request, env, deps, path);
-  if (!auth.ok) return auth.response;
-  const db = env.DB;
 
   // One at a time: a model with an attestation still running does not get a
   // second, or its operator could keep redrawing until it liked the questions.
@@ -406,17 +401,11 @@ async function answer(
 ): Promise<Response> {
   if (!ATTESTATION_ID_PATTERN.test(id)) return refuse(400, "bad_id");
 
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await request.clone().text());
-  } catch {
-    return refuse(400, "bad_body");
-  }
-  const answers = parseAnswersBody(raw);
-  if (answers === null) return refuse(400, "bad_body");
-
   const auth = await authenticate(request, env, deps, path);
   if (!auth.ok) return auth.response;
+
+  const answers = parseAnswersBody(auth.body);
+  if (answers === null) return refuse(400, "bad_body");
   const db = env.DB;
 
   const found = await derivedAttestation(db, id, deps);
@@ -525,17 +514,11 @@ async function score(
 ): Promise<Response> {
   if (!ATTESTATION_ID_PATTERN.test(id)) return refuse(400, "bad_id");
 
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await request.clone().text());
-  } catch {
-    return refuse(400, "bad_body");
-  }
-  const body = parseScoreBody(raw);
-  if (body === null) return refuse(400, "bad_body");
-
   const auth = await authenticate(request, env, deps, path);
   if (!auth.ok) return auth.response;
+
+  const body = parseScoreBody(auth.body);
+  if (body === null) return refuse(400, "bad_body");
   const db = env.DB;
 
   const found = await derivedAttestation(db, id, deps);

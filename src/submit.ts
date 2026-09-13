@@ -39,6 +39,8 @@ import {
   isRegisteredDomain,
   isVersionStalenessCategory,
   versionedSubjectOf,
+  CORE_TEXT_MAX_CHARS,
+  EVIDENCE_MAX_BYTES,
   NORM_VERSION,
   REQUEST_CLOCK_SKEW_SECONDS,
 } from "./policy.js";
@@ -360,4 +362,72 @@ export function checkSubmission(
   }
 
   return checkCoreEvidence(core);
+}
+
+// ---------------------------------------------------------------------------
+// The ceilings on what a core may carry
+// ---------------------------------------------------------------------------
+
+/**
+ * The core fields a text ceiling applies to, in the order they are checked.
+ *
+ * The four free-text ones the author writes: the claim itself, what it says the
+ * value was and became, and the URL it rests on. Every other core key is a
+ * bounded shape already — an id, a slug, a date, a hash, an agent id — and a
+ * ceiling on one of those would be a second place its own rule lived.
+ */
+export const CORE_TEXT_FIELDS: readonly string[] = Object.freeze([
+  "claim",
+  "before",
+  "after",
+  "citation",
+]);
+
+/** The core fields an object ceiling applies to, in check order. */
+export const CORE_OBJECT_FIELDS: readonly string[] = Object.freeze([
+  "evidence",
+  "observation",
+]);
+
+/** Accepted, or refused with the field whose size decided it. */
+export type CoreSizeVerdict =
+  | { ok: true }
+  | { ok: false; reason: "core_too_large"; field: string };
+
+const sizeEncoder = new TextEncoder();
+
+/**
+ * Whether a signed core is small enough to enter the log.
+ *
+ * Nothing in the schema bounds a core's text, so before this a one-megabyte
+ * claim signed, verified, sealed and served exactly as a one-line one did — a
+ * permanent row, a permanent export line and a permanent page, bought with one
+ * request. This is the ceiling, and it is a door rule rather than a schema
+ * change on purpose: every entry already in the log stays valid and readable as
+ * it is, and no stored bytes are reinterpreted.
+ *
+ * The two objects are measured over their RFC 8785 canonical form, because those
+ * are the bytes that are hashed, archived and re-canonicalized by every verifier
+ * that ever checks this entry: bounding what is hashed is bounding the work.
+ * Text is measured in characters, which is what an author counts.
+ *
+ * Pure: no clock, no network, no storage. The door calls it before it fetches
+ * anything, so an oversized core costs no capture, no archive write and no row.
+ */
+export function checkCoreSize(core: Core): CoreSizeVerdict {
+  for (const field of CORE_TEXT_FIELDS) {
+    const value = (core as Record<string, unknown>)[field];
+    if (typeof value === "string" && value.length > CORE_TEXT_MAX_CHARS) {
+      return { ok: false, reason: "core_too_large", field };
+    }
+  }
+  for (const field of CORE_OBJECT_FIELDS) {
+    const value = (core as Record<string, unknown>)[field];
+    if (value === null || value === undefined) continue;
+    const bytes = sizeEncoder.encode(canonicalize(value)).byteLength;
+    if (bytes > EVIDENCE_MAX_BYTES) {
+      return { ok: false, reason: "core_too_large", field };
+    }
+  }
+  return { ok: true };
 }

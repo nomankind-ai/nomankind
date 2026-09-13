@@ -45,7 +45,7 @@ import {
 } from "../artifact.js";
 import { CORE_KEYS, domainOf, extractCore, type Core } from "../core.js";
 import { deriveEntry, type DerivedEntry } from "../derive.js";
-import { checkDuplicate, type DuplicateCandidate } from "../duplicate.js";
+import { duplicateKeyHash } from "../duplicate.js";
 import { appendEvent, type Event } from "../events.js";
 import { isTranscriptCategory } from "../evidence.js";
 import { canonicalize, sha256Hex } from "../hash.js";
@@ -53,7 +53,7 @@ import { archiveAddress, mediaType, snapshotHash } from "../normalize.js";
 import {
   disclosureWindowDays,
   isDisclosureCategory,
-  LIST_PAGE_LIMIT,
+  CAPTURE_MAX_BYTES,
 } from "../policy.js";
 import { withholdEntry } from "../release.js";
 import { validateEntry } from "../schema.js";
@@ -63,13 +63,12 @@ import {
   capturesForHash,
   eventBySeq,
   eventsForEntry,
-  entriesNewestFirst,
   getEntry,
   headSeq,
+  liveDuplicateOf,
   operatorForAgent,
   submitEntry,
   type CaptureRecord,
-  type StoredEntry,
 } from "../storage/repository.js";
 import {
   archiveCapture,
@@ -78,7 +77,7 @@ import {
   type R2Like,
   type Sidecar,
 } from "../storage/r2.js";
-import { checkSubmission, entryIdFor } from "../submit.js";
+import { checkCoreSize, checkSubmission, entryIdFor } from "../submit.js";
 import { checkSupersedes } from "../supersede.js";
 import { readerAccess, type ReaderAccess } from "./access.js";
 import type { Env } from "./env.js";
@@ -371,6 +370,17 @@ async function capturedFromUrl(
   const fetched = await deps.fetcher.fetch(target);
   if (!fetched.ok) return { ok: false, reason: fetched.reason };
 
+  // The capture ceiling, at the door as well as inside the adapter (the QA of
+  // 2026-09-12). CAPTURE_MAX_BYTES was enforced only by src/adapters/fetch.ts,
+  // so it held for the one fetcher that obeys it and for no other — an adapter
+  // written for a fork, or a fixture in a test, could hand back a gigabyte and
+  // this route would hash it, archive it and store its size. The rule belongs to
+  // the log rather than to the way out to the network, so it is checked on what
+  // actually came back, before anything is hashed or written.
+  if (fetched.bytes.byteLength > CAPTURE_MAX_BYTES) {
+    return { ok: false, reason: "too_large" };
+  }
+
   const contentType = fetched.headers["content-type"] ?? null;
   const hashed = await snapshotHash(fetched.bytes, contentType);
   if (!hashed.ok) return { ok: false, reason: hashed.reason };
@@ -659,60 +669,6 @@ export type SubmissionAttempt =
   | { ok: true; prepared: PreparedSubmission }
   | { ok: false; response: Response };
 
-/** One stored row in the shape `checkDuplicate` reads. */
-function asCandidate(stored: StoredEntry): DuplicateCandidate {
-  return {
-    id: stored.entry["id"] as string,
-    core: extractCore(stored.entry),
-    status: String(stored.entry["status"]),
-  };
-}
-
-/**
- * Every entry this core could be a duplicate of, newest submission first.
- *
- * The read is `entriesNewestFirst` rather than `readCandidates`: that one
- * answers reads and so returns `status = 'verified'` only, by design
- * (Section 8), while this door must also see the drafts, which hold their
- * claim just as much as a verified entry does.
- *
- * One page is not enough. A subject and category may hold more entries than a
- * page, and a truncated page would let the hundred-and-first duplicate through,
- * so this pages down by submitted_seq until the pages run out. It stops early
- * on the first page that yields a verdict: the candidates arrive newest first
- * and every page before this one was checked in the same order, so the match
- * found here is the newest live one holding the key, which is the entry the
- * submitter is told to look at. What is returned is everything read so far,
- * still in order, so the caller's own `checkDuplicate` reaches exactly that
- * entry and names it.
- *
- * Exported because the dispute door runs the same check at its own place in
- * its own order.
- */
-export async function duplicateCandidates(
-  db: D1Like,
-  core: Core,
-): Promise<DuplicateCandidate[]> {
-  const seen: DuplicateCandidate[] = [];
-  let beforeSubmittedSeq: number | undefined = undefined;
-
-  for (;;) {
-    const page = await entriesNewestFirst(db, {
-      domain: domainOf(core),
-      subject: core["subject"] as string,
-      category: core["category"] as string,
-      limit: LIST_PAGE_LIMIT,
-      ...(beforeSubmittedSeq === undefined ? {} : { beforeSubmittedSeq }),
-    });
-    const candidates = page.map(asCandidate);
-    seen.push(...candidates);
-
-    if (page.length < LIST_PAGE_LIMIT) return seen;
-    if (!checkDuplicate(core, candidates).ok) return seen;
-    beforeSubmittedSeq = page[page.length - 1]!.submittedSeq;
-  }
-}
-
 /**
  * The whole POST /entries pipeline, from the parsed body to a submission ready
  * to write.
@@ -757,7 +713,8 @@ export async function duplicateCandidates(
  * `skipDuplicateCheck` is that same door's other exception: D-066 put
  * `dispute_open` ahead of everything a second challenge could be wrong about,
  * so the dispute door turns the duplicate lookup off here and runs it itself,
- * after its filing refusals, with `duplicateCandidates` over the same query.
+ * after its filing refusals, with `liveDuplicateOf` over the same key and the
+ * same two exemptions.
  */
 export async function prepareSubmission(
   env: Env,
@@ -800,6 +757,16 @@ export async function prepareSubmission(
     return refused(refuse(status, submission.reason));
   }
 
+  // The ceilings on what a core may carry (src/submit.ts). Pure, so it sits with
+  // the other pure checks and before every read, every fetch and every write: an
+  // entry whose claim or whose evidence is too big to keep forever costs the log
+  // no capture, no archive object and no row. The field is named, because a
+  // submitter who is told only "too large" has eighteen keys to guess among.
+  const size = checkCoreSize(core);
+  if (!size.ok) {
+    return refused(json({ error: size.reason, field: size.field }, 422));
+  }
+
   const id = core["id"] as string;
 
   const supersedes = core["supersedes"];
@@ -835,27 +802,24 @@ export async function prepareSubmission(
   // no read and before anything is fetched or archived, because a duplicate
   // that costs the log a capture has already cost it something.
   //
-  // The entries checked against are this core's own domain, subject and
-  // category — the rest of the key is the normalized value, compared in
-  // src/duplicate.ts — read newest first and paged to the end by
-  // `duplicateCandidates` above, so a subject with more live entries than one
-  // page cannot hide one.
+  // One indexed seek and not a scan. This used to read the subject's entire
+  // live history per submission — every row, every entry_json, paged down by
+  // submitted_seq — to ask what the database can answer from the
+  // `duplicate_key` column: is there a live entry holding this key, and which
+  // is the newest? `liveDuplicateOf` is that statement
+  // (src/storage/repository.ts), and the two exemptions it cannot know are
+  // applied here: an entry is never a duplicate of itself, and never of the
+  // entry it supersedes.
   //
   // The dispute door hands its correction entry to this same function, but
   // with `skipDuplicateCheck`: its own filing refusals are older than this one
   // (D-066 put `dispute_open` ahead of everything a second challenge could be
   // wrong about), so it runs the same check itself, after them.
   if (!options.skipDuplicateCheck) {
-    const duplicate = checkDuplicate(
-      core,
-      await duplicateCandidates(env.DB, core),
-    );
-    if (!duplicate.ok) {
+    const held = await liveDuplicateOf(env.DB, await duplicateKeyHash(core));
+    if (held !== null && held !== id && held !== supersedes) {
       return refused(
-        json(
-          { error: duplicate.reason, duplicate_of: duplicate.duplicate_of },
-          422,
-        ),
+        json({ error: "duplicate_claim", duplicate_of: held }, 422),
       );
     }
   }

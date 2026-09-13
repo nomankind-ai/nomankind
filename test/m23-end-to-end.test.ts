@@ -600,8 +600,12 @@ describe("the step's place in the run", () => {
       "payout",
       "attestation",
       // M25: the counters step, after the standing step so the trusted count is
-      // the run's, and last in the list because it is the last step to run.
+      // the run's.
       "counters",
+      // M25: the duplicate-key backfill (migration 0019), last in the list
+      // because it is the last step to run — it reads no seal and, once the
+      // backlog is caught up, makes one bounded read that finds nothing.
+      "duplicates",
     ]);
     const rows = await sweepSteps(store.db);
     expect(rows).toHaveLength(SWEEP_STEPS.length);

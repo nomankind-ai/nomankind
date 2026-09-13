@@ -200,20 +200,15 @@ async function reconfirm(
 ): Promise<Response> {
   if (!ENTRY_ID_PATTERN.test(id)) return refuse(400, "bad_id");
 
-  // The shape, before the envelope: a body that is not a reconfirmation is a
-  // 400 whoever signed it. The clone is what lets the body be read twice — once
-  // here and once by the verifier, which signs over the canonical form of it.
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await request.clone().text());
-  } catch {
-    return refuse(400, "bad_body");
-  }
-  const body = parseReconfirmBody(raw);
-  if (body === null) return refuse(400, "bad_body");
-
+  // The envelope, before the shape: `authenticate` checks the signing headers
+  // before the body is read, caps and reads it once, and charges the day's
+  // write, so an unsigned body costs nothing and the shape below is checked on a
+  // body somebody has proved they sent.
   const auth = await authenticate(request, env, deps, path);
   if (!auth.ok) return auth.response;
+
+  const body = parseReconfirmBody(auth.body);
+  if (body === null) return refuse(400, "bad_body");
 
   const stored = await getEntry(env.DB, id);
   if (stored === null) return refuse(404, "not_found");

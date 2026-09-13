@@ -364,6 +364,12 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         "How long an assigned validator has to respond. A miss costs standing and the next sweep draws a replacement.",
     },
     {
+      name: "DRAW_DRAFT_MAX_AGE_DAYS",
+      value: `${policy.DRAW_DRAFT_MAX_AGE_DAYS} days`,
+      means:
+        "How old a draft may be, counted from its submitted_at to the sweep's own clock, and still be drawn a validator. Past it the draft leaves the draw queue and stops costing every run: it is still a draft, still in the log, still readable, and a volunteer may still validate it — what it stops getting is a draw. The cutoff is on submitted_at, which nothing moves, so a validation does not put an older draft back in the queue.",
+    },
+    {
       name: "BEACON.endpoint",
       value: policy.BEACON.endpoint,
       means:
@@ -512,6 +518,18 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       value: policy.FREE_TIER,
       means:
         "Which of the tiers above is the one a request with no key is served on.",
+    },
+    {
+      name: "FREE_READS_PER_DAY_GLOBAL",
+      value: `${policy.FREE_READS_PER_DAY_GLOBAL} reads per day`,
+      means:
+        "The free tier's ceiling across every client in one UTC day, counted in a scope of its own and checked before the per-client cap above. The per-client cap bounds one reader; this bounds all of them together, so a crowd of addresses each under their own cap cannot be the whole day's budget. It bounds the free tier only: a paid key and a registered operator are counted under their own caps and are never refused because strangers were reading. Past it the answer is 429 rate_limited with scope: global beside the usual fields.",
+    },
+    {
+      name: "OPERATOR_READS_PER_DAY",
+      value: `${policy.OPERATOR_READS_PER_DAY} reads per day`,
+      means:
+        "How many reads one registered operator's signed requests are served in a UTC day. A signed request names who is asking, so it is metered under that name — its own bucket, keyed by operator id — rather than in the anonymous bucket of whatever address it came from, where a validator walking the log used to spend the free tier for everybody behind it. The served response carries x-nomankind-tier: operator with this limit and what is left of it.",
     },
     {
       name: "ALERT_ENDPOINTS_PER_KEY",
@@ -762,6 +780,12 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       value: String(policy.LEDGER_ENTRIES_PER_RUN),
       means:
         "How many of a published day's entries one run of the ledger step prices. A longer day is not dropped: the next run resumes it where this one stopped, and the day's reconciliation is written only once every entry of it has been priced.",
+    },
+    {
+      name: "DUPLICATE_BACKFILL_PER_RUN",
+      value: String(policy.DUPLICATE_BACKFILL_PER_RUN),
+      means:
+        "How many entries written before the duplicate key was a column (migration 0019) one run of the backfill step gives their key. The key is normalized text, which SQL cannot compute, so it is recomputed in code from each entry's own signed core; a longer backlog is not dropped, the next run continues it, and once nothing is left the step is a single bounded read that finds nothing.",
     },
     {
       name: "WITNESS_FILE_TAIL_BYTES",

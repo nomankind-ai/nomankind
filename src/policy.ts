@@ -33,6 +33,27 @@ export const VERIFICATION_MIN_OUTSIDE_OPERATORS = 3;
 export const ASSIGNMENT_WINDOW_HOURS = 72;
 
 /**
+ * Lifecycle of an entry. How old a draft may be, counted from its
+ * `submitted_at` to the run's own clock, and still be drawn a validator.
+ *
+ * The QA of 2026-09-12: the sweep's draws step paged every draft in the table
+ * on every run, so a draft nobody ever validated stayed in the working set
+ * forever and every run paid for it again — a cost that grows with the log and
+ * is spent on entries the log has already given up drawing for.
+ *
+ * A bound on the queue and not a status: an abandoned draft is still a draft,
+ * it is still in the log, it is still readable, and a volunteer may still
+ * validate it. What it stops getting is a draw. Nothing about this is
+ * recomputed onto the row and nothing derives from it — the rule is read at
+ * run time against the run's clock, so moving the number moves the queue and
+ * rewrites no history.
+ *
+ * The paper names no cutoff, so this is the maintainer's own placeholder (M25,
+ * the retrospective's M2 rule), moving only by a later decision.
+ */
+export const DRAW_DRAFT_MAX_AGE_DAYS = 30;
+
+/**
  * The evidence rule (n-of-k). A validator's reproduction runs the frozen prompt
  * n times; the claim holds when the predicate held in at least k of them.
  */
@@ -1653,7 +1674,7 @@ export interface RateTier {
 }
 
 export const RATE_TIERS: Readonly<Record<string, RateTier>> = Object.freeze({
-  free: Object.freeze({ name: "Free", reads_per_day: 1_000, key: false }),
+  free: Object.freeze({ name: "Free", reads_per_day: 200, key: false }),
   standard: Object.freeze({
     name: "Standard",
     reads_per_day: 100_000,
@@ -1664,6 +1685,48 @@ export const RATE_TIERS: Readonly<Record<string, RateTier>> = Object.freeze({
 
 /** The slug of the tier a reader gets without asking for anything. */
 export const FREE_TIER = "free";
+
+/**
+ * Incentives / Money: "free to read at low volume, forever" is a promise about
+ * a reader, and this is the promise the log makes to itself about all of them
+ * at once.
+ *
+ * The QA of 2026-09-12: the free tier is counted per client address, so a
+ * hundred addresses at the per-client cap were the whole account's daily
+ * request budget and the free tier had no ceiling at all — the per-client cap
+ * bounded one reader and nothing bounded the crowd. This is the ceiling: how
+ * many free reads the whole log serves across every client in one UTC day,
+ * counted in a scope of its own and checked before the per-client cap, so the
+ * reader who crosses it is told `rate_limited` in the gate's own word rather
+ * than meeting an outage.
+ *
+ * It bounds the free tier only. A paid key is counted against its own tier's
+ * cap and a registered operator against OPERATOR_READS_PER_DAY below, and
+ * neither is refused because strangers were reading: a cap that let anonymous
+ * volume refuse a paying reader would sell throughput nobody could rely on.
+ *
+ * The paper names no ceiling, so this is the maintainer's own placeholder (M25,
+ * the retrospective's M2 rule), moving only by a later decision.
+ */
+export const FREE_READS_PER_DAY_GLOBAL = 50_000;
+
+/**
+ * Incentives / Money, and Section 5's operators: how many reads one registered
+ * operator's signed requests are served in a UTC day.
+ *
+ * The QA of 2026-09-12: an operator's signed read was metered in the anonymous
+ * client bucket, so a validator walking the log for the entries it has to
+ * reproduce spent the free tier of whatever address it happened to come from —
+ * and exhausted it for every other reader behind that address. A signed request
+ * names who is asking, so it is counted under that name: its own bucket, keyed
+ * by operator id, with its own cap, and the free tier's ceiling above says
+ * nothing about it.
+ *
+ * Larger than the free tier because the work is larger: the people who have to
+ * reproduce an observation read more than a stranger does, and the paper asks
+ * them to. A placeholder like the rows above, moving only by a later decision.
+ */
+export const OPERATOR_READS_PER_DAY = 10_000;
 
 /** Whether a slug names a registered tier that a key is bought for. */
 export function isPaidTier(slug: unknown): slug is string {
@@ -1821,6 +1884,103 @@ export const MIRROR: Readonly<{
   license: "CC0-1.0",
 });
 
+// ---------------------------------------------------------------------------
+// What a write costs at the door
+// ---------------------------------------------------------------------------
+
+/**
+ * How many writes one signing agent may make in a UTC day.
+ *
+ * Whitepaper Section 5 lets anyone submit with a bare agent key and Section 9
+ * prices spam through the paid loop, and both stay true: a key costs nothing to
+ * mint, so the free write path needs a ceiling of its own or one process can
+ * mint a key per request and spend the log's fetches, its archive and its rows
+ * without ever paying for any of it. A day is the same window every read cap is
+ * measured over, counted in the same table under its own scope prefix.
+ *
+ * A placeholder until the paper publishes the number: high enough that no real
+ * validator, reconfirmer or scorer meets it in a day's work, low enough that a
+ * single key cannot walk the archive up by itself.
+ */
+export const WRITES_PER_AGENT_PER_DAY = 100;
+
+/**
+ * How many writes one client address may make in a UTC day, across every agent
+ * it signs as.
+ *
+ * The per-agent cap alone buys nothing against a caller that mints a fresh key
+ * per request, which is exactly what a bare key makes free. This is the bucket
+ * that counts the caller rather than the name they signed under, keyed by the
+ * same hashed client scope the read path already counts a keyless reader under
+ * (src/keys.ts) — hashed, because a counter that stored addresses would be a
+ * record of who wrote what.
+ *
+ * Higher than the per-agent cap, because one address legitimately carries an
+ * operator's several agents. A placeholder, like the number above it.
+ */
+export const WRITES_PER_CLIENT_PER_DAY = 300;
+
+/**
+ * The largest request body any door will read, in bytes.
+ *
+ * Every write door reads its body before it can verify anything about it — the
+ * signature is over the canonical body — so the body is the one thing a caller
+ * can make arbitrarily expensive before proving anything at all. The cap is
+ * checked against `Content-Length` before a byte is read and enforced again
+ * against what actually arrives, so a body that declares nothing is refused at
+ * the cap plus one byte rather than buffered whole.
+ *
+ * A placeholder. 256 KiB is far above the largest real submission — a signed
+ * core with a frozen transcript — and far below the point where parsing costs
+ * anything worth attacking with.
+ */
+export const REQUEST_MAX_BODY_BYTES = 262144;
+
+/**
+ * The longest a free-text core field may be, in characters.
+ *
+ * `claim`, `before`, `after` and `citation` are signed, sealed, derived over and
+ * served forever, and nothing in the schema bounds them: a one-megabyte claim is
+ * a permanent row, a permanent export line and a permanent page. The ceiling is
+ * a door rule and not a schema change, so every entry already in the log stays
+ * valid and readable exactly as it is.
+ *
+ * A placeholder. Long enough for a paragraph of what changed and a URL, short
+ * enough that a claim is a claim.
+ */
+export const CORE_TEXT_MAX_CHARS = 4000;
+
+/**
+ * The largest `evidence` or `observation` a core may carry, as the byte length
+ * of its RFC 8785 canonical form.
+ *
+ * Measured over the canonical bytes because those are the bytes that are hashed,
+ * archived and re-canonicalized by every verifier: bounding what is hashed is
+ * bounding the work, where bounding a key count or a depth would not be.
+ *
+ * A placeholder. 64 KiB holds a full transcript artifact with room to spare.
+ */
+export const EVIDENCE_MAX_BYTES = 65536;
+
+/**
+ * How many pre-0019 rows one sweep run gives a `duplicate_key`.
+ *
+ * Migration 0019 materialised the duplicate rule as a column and an index, but
+ * the key is Unicode normalization and whitespace folding over arbitrary text,
+ * which SQL cannot run: the backfill is code, and the sweep is where code runs
+ * on a clock. So the step recomputes the key from each row's own entry_json
+ * through the same function the door uses, this many rows at a time, and the
+ * next run resumes with whatever is left — the same bound, for the same reason,
+ * as LEDGER_ENTRIES_PER_RUN and ALERT_EVENTS_PER_RUN.
+ *
+ * A row written since 0019 carries its key by construction, so on a log with
+ * nothing left to fill the step is one bounded SELECT that comes back empty and
+ * writes nothing. The number only has to be large enough to finish a migrated
+ * log in a reasonable number of runs and small enough to leave a run's other
+ * steps their subrequests.
+ */
+export const DUPLICATE_BACKFILL_PER_RUN = 200;
+
 /** Every policy number, collected and frozen. */
 export const POLICY = Object.freeze({
   TRUSTED_POOL_SWITCH,
@@ -1829,6 +1989,7 @@ export const POLICY = Object.freeze({
   REJECTIONS_TO_REJECT,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
   ASSIGNMENT_WINDOW_HOURS,
+  DRAW_DRAFT_MAX_AGE_DAYS,
   REPRODUCTION_RUNS,
   REPRODUCTION_HOLDS,
   DOMAINS,
@@ -1869,6 +2030,8 @@ export const POLICY = Object.freeze({
   RELEASE_WINDOW_DAYS,
   RATE_TIERS,
   FREE_TIER,
+  FREE_READS_PER_DAY_GLOBAL,
+  OPERATOR_READS_PER_DAY,
   CONTRIBUTOR_SHARE_FLOOR_PERCENT,
   STRIPE,
   ALERT_ENDPOINTS_PER_KEY,
@@ -1900,4 +2063,12 @@ export const POLICY = Object.freeze({
   PAGE_CACHE_SECONDS,
   PAGE_CACHE_STALE_SECONDS,
   BEACON,
+  // What a write costs at the door.
+  WRITES_PER_AGENT_PER_DAY,
+  WRITES_PER_CLIENT_PER_DAY,
+  REQUEST_MAX_BODY_BYTES,
+  CORE_TEXT_MAX_CHARS,
+  EVIDENCE_MAX_BYTES,
+  // What one sweep run backfills.
+  DUPLICATE_BACKFILL_PER_RUN,
 });

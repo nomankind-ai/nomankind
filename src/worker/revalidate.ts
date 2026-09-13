@@ -141,18 +141,12 @@ async function request_(
   // "No citation is needed; the request only asks for a check." So the body is
   // empty, and a body carrying anything at all is a request about something
   // this door does not do.
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await request.clone().text());
-  } catch {
-    return refuse(400, "bad_body");
-  }
-  if (!isRecord(raw) || Object.keys(raw).length > 0) {
-    return refuse(400, "bad_body");
-  }
-
   const auth = await authenticate(request, env, deps, path);
   if (!auth.ok) return auth.response;
+
+  if (!isRecord(auth.body) || Object.keys(auth.body).length > 0) {
+    return refuse(400, "bad_body");
+  }
 
   if ((await getEntry(env.DB, id)) === null) return refuse(404, "not_found");
 
@@ -343,17 +337,11 @@ async function resolve(
 ): Promise<Response> {
   if (!ENTRY_ID_PATTERN.test(id)) return refuse(400, "bad_id");
 
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await request.clone().text());
-  } catch {
-    return refuse(400, "bad_body");
-  }
-  const body = parseResolveBody(raw);
-  if (body === null) return refuse(400, "bad_body");
-
   const auth = await authenticate(request, env, deps, path);
   if (!auth.ok) return auth.response;
+
+  const body = parseResolveBody(auth.body);
+  if (body === null) return refuse(400, "bad_body");
 
   if ((await getEntry(env.DB, id)) === null) return refuse(404, "not_found");
 
