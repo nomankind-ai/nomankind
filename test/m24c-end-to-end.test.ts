@@ -146,9 +146,22 @@ let author: TestAgent;
 /** Registered into ai-governance, and trusted: the two that judge there. */
 let g1: Party;
 let g2: Party;
-/** Registered into ai-safety, and trusted: the two that judge there. */
+/**
+ * Registered into ai-safety, and trusted: two that judge there, and a third
+ * that never signs anything.
+ *
+ * The third is the verification precondition (the QA of 2026-09-12): "three
+ * verified operators outside the submitter's own", counted over the operators
+ * that could actually sign THIS entry — attested in its domain, not an excluded
+ * party of it, not under its subject's authority. Two attested operators in
+ * ai-safety is a world in which no safety entry can ever clear it, however many
+ * operators the registry holds elsewhere. ai-governance already has three that
+ * way round (g1, g2 and `authority`, which registers there); ai-safety needs
+ * one, and `s3` is it.
+ */
 let s1: Party;
 let s2: Party;
+let s3: Party;
 /** Attested in ai-ecosystem alone, which is what makes it refusable elsewhere. */
 let eco: Party;
 /** Registered in ai-ecosystem and joined to both new domains afterwards. */
@@ -380,6 +393,7 @@ beforeAll(async () => {
   g2 = { operator: "g2.example", agent: await makeAgent() };
   s1 = { operator: "s1.example", agent: await makeAgent() };
   s2 = { operator: "s2.example", agent: await makeAgent() };
+  s3 = { operator: "s3.example", agent: await makeAgent() };
   eco = { operator: "k3.example", agent: await makeAgent() };
   joiner = { operator: "k1.example", agent: await makeAgent() };
   // Its registrable domain is an official host of the `eu` authority row, which
@@ -389,7 +403,7 @@ beforeAll(async () => {
     operator: "maintainer.example",
     agent: maintainer,
   };
-  const parties = [g1, g2, s1, s2, eco, joiner, authority, maintainerParty];
+  const parties = [g1, g2, s1, s2, s3, eco, joiner, authority, maintainerParty];
 
   const records: Record<string, string[]> = {};
   for (const party of parties) {
@@ -419,6 +433,7 @@ beforeAll(async () => {
     [g2, GOVERNANCE],
     [s1, SAFETY],
     [s2, SAFETY],
+    [s3, SAFETY],
     [eco, DEFAULT_DOMAIN],
     [joiner, DEFAULT_DOMAIN],
     // Registered in the domain whose record it is a party to: the subject's own

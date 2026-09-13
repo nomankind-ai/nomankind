@@ -402,14 +402,17 @@ describe("a submission names its domain, or the door refuses before it writes", 
     const core = await legacyCore(author);
     expect(coreVersion(core)).toBe("v0.6");
 
-    // The body shape refuses it first -- POST /entries takes exactly the
-    // eighteen core keys and a signature -- so the door never gets as far as
-    // the kernel's own word for it. The kernel's word is pinned below, on the
-    // one core that reaches it: a body carrying all eighteen keys with the
-    // domain explicitly absent is not expressible in JSON, so `missing_domain`
-    // is reached through `checkSubmission` and not through this route.
+    // The door says the kernel's own word for it (the QA of 2026-09-12). The
+    // body shape used to count the keys and answer `bad_body`, which told an
+    // author their body was malformed when what it was missing was a domain;
+    // `domain` is now the one key a body may leave out, so this core reaches
+    // `checkSubmission` and is refused by name. The same verdict is pinned
+    // below on the kernel itself, which is where the rule lives.
     const answer = await submit(author, core);
-    expect([answer.status, answer.body["error"]]).toEqual([400, "bad_body"]);
+    expect([answer.status, answer.body["error"]]).toEqual([
+      422,
+      "missing_domain",
+    ]);
     expect(await head()).toBe(before);
 
     const verdict = checkSubmission(core, {
@@ -1025,14 +1028,38 @@ describe("the revalidation door reads the entry's own domain", () => {
     });
     foreignId = core["id"] as string;
     const signature = await signCore(core, author.privateKey);
-    let log = await appendEvent(await allEvents(), {
+    let log = await allEvents();
+    const staged: Event[] = [];
+
+    // The registry this domain would have if it existed, seeded the same way
+    // the entry is and for the same reason: no door registers an operator into
+    // a domain nobody published. Three of them, because verification's
+    // precondition is "three verified operators outside the submitter's own"
+    // and, since the QA of 2026-09-12, that counts the operators that could
+    // actually sign THIS entry -- attested in its own domain (D-071) -- rather
+    // than every operator in the registry. Two sign; the third never does. k1,
+    // k2 and k3 stay where they are, in the default domain, which is what makes
+    // k3 the operator the door below has to refuse.
+    const foreigners: Party[] = [];
+    for (const name of ["b1.example", "b2.example", "b3.example"]) {
+      foreigners.push({ operator: name, agent: await makeAgent() });
+      log = await appendEvent(log, {
+        at: AT,
+        type: "operator_registered",
+        entry_id: null,
+        payload: { operator: name, maintainer: false, domain: UNREGISTERED },
+      });
+      staged.push(log[log.length - 1] as Event);
+    }
+
+    log = await appendEvent(log, {
       at: AT,
       type: "entry_submitted",
       entry_id: foreignId,
       payload: { core, signature },
     });
-    const staged: Event[] = [log[log.length - 1] as Event];
-    for (const party of [k1, k2]) {
+    staged.push(log[log.length - 1] as Event);
+    for (const party of foreigners.slice(0, 2)) {
       const record = {
         agent: party.agent.agentId,
         operator: party.operator,

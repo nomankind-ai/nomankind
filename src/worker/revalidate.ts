@@ -52,7 +52,7 @@ import {
   openRevalidation,
   requestsByOperatorInWindow,
 } from "../dispute.js";
-import type { ReconfirmationRecord } from "../events.js";
+import type { Event, ReconfirmationRecord } from "../events.js";
 import {
   LIST_PAGE_LIMIT,
   REQUEST_CLOCK_SKEW_SECONDS,
@@ -328,6 +328,41 @@ function parseResolveBody(body: unknown): ResolveBody | null {
   return { record: record as unknown as ReconfirmationRecord, signature, held };
 }
 
+/**
+ * The deadline of the newest draw this request ever made to this agent, or null
+ * when the draw never named it.
+ *
+ * Open or closed, deliberately, and for the reason the validate door has its own
+ * copy of this (src/worker/validate.ts, `drawnDeadlineFor`, the QA of
+ * 2026-09-12): the `assignments` row a door reads for `not_assigned` stops being
+ * open the moment the sweep seals the `revalidation_missed`, so a door that read
+ * only that row answered a late checker two different things depending on
+ * whether a sweep had happened to run since the draw — `not_assigned` once one
+ * had, and nothing at all before, which let the check be resolved days late and
+ * the requester's stake settled off it. The draw's own instant is in the log
+ * either way, so this reads that instead and the sweep's timing stops being part
+ * of the answer.
+ *
+ * Scoped to the open request's own position: an entry checked before carries
+ * older assignments, and an old draw's deadline must not close a fresh request.
+ */
+function drawnDeadlineFor(
+  events: readonly Event[],
+  entryId: string,
+  requestSeq: number,
+  agent: string,
+): string | null {
+  let deadline: string | null = null;
+  for (const event of [...events].sort((left, right) => left.seq - right.seq)) {
+    if (event.type !== "revalidation_assigned") continue;
+    if (event.entry_id !== entryId) continue;
+    const payload = (event as Event<"revalidation_assigned">).payload;
+    if (payload.request_seq !== requestSeq || payload.agent !== agent) continue;
+    deadline = payload.deadline;
+  }
+  return deadline;
+}
+
 async function resolve(
   request: Request,
   env: Env,
@@ -348,6 +383,25 @@ async function resolve(
   const world = await entryWorld(env.DB, id);
   const open = openRevalidation(world.entryEvents);
   if (open === null) return refuse(422, "no_open_request");
+
+  // Section 6, and the window the draw wrote into its own event: the drawn
+  // checker answers inside it or it is a miss. Read before the assignment row
+  // below, and off the draw rather than off that row, so the answer is the same
+  // whether or not a sweep has closed the assignment since — the hole the
+  // validate door had, in the same shape. Strictly past, exactly as the sweep's
+  // own miss is, so the deadline instant itself is still inside.
+  const drawnDeadline = drawnDeadlineFor(
+    world.entryEvents,
+    id,
+    open.seq,
+    auth.agent,
+  );
+  if (
+    drawnDeadline !== null &&
+    deps.now.getTime() > Date.parse(drawnDeadline)
+  ) {
+    return refuse(422, "deadline_passed");
+  }
 
   // Section 6: the request "is assigned at random to a trusted operator". Only
   // that operator's drawn agent answers it: a check anyone could answer would be

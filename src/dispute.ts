@@ -73,6 +73,36 @@ export interface DisputeTarget {
   readonly id: string;
   readonly subject: string;
   readonly status: EntryStatus;
+  /**
+   * The agent that authored the entry being challenged, from its signed core.
+   * Null only where the log holds no author for it, which no stored entry does.
+   */
+  readonly author: string | null;
+}
+
+/**
+ * Whether this filing is the target's own author challenging itself.
+ *
+ * Both identities are asked because both can name the filer: the key that signed
+ * the envelope, and the author the correction's own core names. The door makes
+ * them the same key before it accepts anything — that is `author_mismatch` — but
+ * the rule must not depend on which of the two a caller went through, or the
+ * envelope would be a way around it (the QA of 2026-09-12).
+ *
+ * Section 6 gives the challenge its stake, its reward and its power to overturn.
+ * An author challenging its own entry is not a challenge: it is the author
+ * changing its mind, which the log already has a word for — a superseding entry,
+ * submitted under the same rules, judged by the same validators, and costing
+ * nobody a stake for a dispute nobody disputes.
+ */
+export function isSelfDispute(
+  targetAuthor: unknown,
+  ...filers: readonly unknown[]
+): boolean {
+  if (typeof targetAuthor !== "string" || targetAuthor.length === 0) {
+    return false;
+  }
+  return filers.some((filer) => filer === targetAuthor);
 }
 
 /** Everything the check needs, gathered by the caller at the filing's position. */
@@ -133,11 +163,15 @@ export function checkDisputeFiling(
     return refuseDispute("subject_mismatch");
   }
 
-  // 5. The challenger is the author of the challenge. Filing under someone
-  // else's correction would put another agent's stake and standing at risk on a
-  // dispute they did not choose to file, and would credit the reward to the
-  // wrong key when it is upheld.
-  if (correctionCore["author"] !== context.challenger) {
+  // 5. Nobody challenges their own entry. Before the QA of 2026-09-12 this rule
+  // read the other way round — it asked whether the correction's author was the
+  // challenger, which the door has already answered with `author_mismatch` and a
+  // 403 by the time anything gets here, so `self_dispute` was a word the log
+  // could not say and an author really could file against itself. Both
+  // identities are asked, so the envelope is no way around it.
+  if (
+    isSelfDispute(target.author, context.challenger, correctionCore["author"])
+  ) {
     return refuseDispute("self_dispute");
   }
 

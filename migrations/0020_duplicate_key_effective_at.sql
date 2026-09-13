@@ -1,0 +1,54 @@
+-- 0020_duplicate_key_effective_at: the duplicate key gains `effective_at`, so
+-- every key computed without it is thrown away and made again (the QA of
+-- 2026-09-12, whitepaper Section 6 "Submit", decision D-085).
+--
+-- Decision D-022 and the PoC retrospective's DEPLOY-1: migrations are numbered,
+-- forward-only, applied by the deploy workflow with wrangler before the Worker
+-- goes live, and never edited after merge. 0001 through 0019 are closed; this
+-- file adds and never reshapes.
+--
+-- No IF NOT EXISTS anywhere: idempotence belongs to the d1_migrations tracking
+-- table, not to the SQL. A migration that ran twice is a bug in the runner, and
+-- IF NOT EXISTS would hide it.
+--
+-- What changed above this file. The rule 0019 materialised was four fields:
+-- domain, subject, category and the normalized `after`. The QA of 2026-09-12
+-- found that key refusing, at the door with `duplicate_claim`, a refiling of
+-- the same value at a different `effective_at` -- which is precisely the case
+-- the registry document and the whitepaper hand to the validators: "Everything
+-- the key cannot decide -- two entries saying the same thing in different
+-- words, or at a different `effective_at` -- is a validator's judgment." So
+-- `effective_at` is the fifth field of the key (src/duplicate.ts,
+-- `duplicateKey` and `duplicateKeyHash`), and two dates are two claims.
+--
+-- Why null rather than an UPDATE. The key is a SHA-256 over the RFC 8785
+-- canonical JSON of five fields, two of them put through Unicode normalization
+-- and whitespace folding: SQL cannot compute it, which is why 0019's own
+-- backfill is code. Null is the one value that column already has a meaning
+-- for, and it is exactly this meaning -- "a row whose key has not been computed
+-- under the current rule" -- so setting every row back to it puts the whole
+-- table through the machinery 0019 already built and tested:
+-- `backfillDuplicateKeys` in src/storage/repository.ts recomputes each row's
+-- key from its own entry_json through the same function the door uses, and the
+-- sweep's `duplicates` step (src/worker/sweep.ts) fills at most
+-- DUPLICATE_BACKFILL_PER_RUN rows a run until none is left.
+--
+-- Bounded and idempotent, therefore, in the only two senses that matter: this
+-- statement is one write per row and touches no JSON, and the refill that
+-- follows it is the paged, resumable one the sweep has been running since
+-- 0019. Demo holds ten rows and production none, so the catch-up is a single
+-- run in practice; a log of a hundred thousand catches up over its runs and
+-- serves reads the whole time, because a null key makes a row invisible to the
+-- duplicate index and to nothing else.
+--
+-- The window in between is a door that refuses less, never more: a row whose
+-- key is null holds no claim against a new submission, so for the few runs
+-- before the refill lands the mechanical duplicate may be let through to the
+-- validators. That is the safe direction -- the judgment case is theirs
+-- already -- and it is the same window 0019 itself opened on every log migrated
+-- into it.
+--
+-- Nothing here is a source of truth. Section 3: the log is the record. The
+-- column is a function of the entry's own signed core, recomputed on every
+-- write of the row; that is what makes it safe to empty.
+UPDATE entries SET duplicate_key = NULL;

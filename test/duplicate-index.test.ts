@@ -3,7 +3,9 @@
  * decision D-085, migration 0019).
  *
  * "Two entries are the same claim when they name the same domain, the same
- * subject and the same category and assert the same value." That rule lived
+ * subject and the same category and assert the same value" as of the same
+ * `effective_at` -- the fifth field the QA of 2026-09-12 added, and the reason
+ * migration 0020 empties the column so every key is computed again. That rule lived
  * only in src/duplicate.ts, so the door had to bring it the rows: the QA of
  * 2026-09-12 found it reading a subject's whole live history on every
  * submission — 669 rows at 667 live entries, about 130 MB of JSON at a hundred
@@ -59,26 +61,34 @@ afterAll(async () => {
 const SUBJECT = "openai/gpt-5";
 const CATEGORY = "pricing";
 const AT = "2026-09-11T12:00:00.000Z";
+const EFFECTIVE_AT = "2026-09-01";
 
-/** A core carrying the four fields the duplicate key is made of. */
-function coreOf(id: string, after: string): Core {
+/** A core carrying the five fields the duplicate key is made of. */
+function coreOf(id: string, after: string, effectiveAt = EFFECTIVE_AT): Core {
   return {
     id,
     subject: SUBJECT,
     category: CATEGORY,
     domain: DEFAULT_DOMAIN,
     after,
+    effective_at: effectiveAt,
   } as unknown as Core;
 }
 
 /** The entry row's shape, as the store writes one. */
-function entryOf(id: string, after: string, status: string): Entry {
+function entryOf(
+  id: string,
+  after: string,
+  status: string,
+  effectiveAt = EFFECTIVE_AT,
+): Entry {
   return {
     id,
     subject: SUBJECT,
     category: CATEGORY,
     domain: DEFAULT_DOMAIN,
     after,
+    effective_at: effectiveAt,
     status,
     submitted_at: AT,
     author: "nmk_agent_test",
@@ -97,8 +107,17 @@ function rawEntry(
   status: string,
   submittedSeq: number,
   duplicateKeyValue: string | null,
+  effectiveAt = EFFECTIVE_AT,
 ): D1LikeStatement {
-  return rawEntryOn(db, id, after, status, submittedSeq, duplicateKeyValue);
+  return rawEntryOn(
+    db,
+    id,
+    after,
+    status,
+    submittedSeq,
+    duplicateKeyValue,
+    effectiveAt,
+  );
 }
 
 /** The same insert, against a database the caller names. */
@@ -109,6 +128,7 @@ function rawEntryOn(
   status: string,
   submittedSeq: number,
   duplicateKeyValue: string | null,
+  effectiveAt = EFFECTIVE_AT,
 ): D1LikeStatement {
   return target
     .prepare(
@@ -127,7 +147,7 @@ function rawEntryOn(
       AT,
       submittedSeq,
       "nmk_agent_test",
-      JSON.stringify(entryOf(id, after, status)),
+      JSON.stringify(entryOf(id, after, status, effectiveAt)),
       submittedSeq,
       duplicateKeyValue,
     );
@@ -206,6 +226,28 @@ describe("liveDuplicateOf", () => {
     ]);
     expect(await liveDuplicateOf(db, await duplicateKeyHash(coreOf("z", nfd)))).toBe(
       id,
+    );
+  });
+
+  it("does not find the row through the same value at a different date", async () => {
+    // The QA of 2026-09-12: `effective_at` is the fifth field of the key, so
+    // the same value as of another date is another claim and the index says so.
+    // The door then lets it through to the validators, which is where the
+    // registry document and whitepaper Section 6 put that judgment.
+    expect(
+      await liveDuplicateOf(db, await duplicateKeyHash(coreOf("x", VALUE, "2026-12-01"))),
+    ).toBeNull();
+    // And the date's own row is found by its own key, so the two coexist.
+    const later = `nmk_${"9".repeat(32)}`;
+    await db.batch([
+      rawEntry(later, VALUE, "draft", 103, await duplicateKeyHash(coreOf(later, VALUE, "2026-12-01")), "2026-12-01"),
+    ]);
+    expect(
+      await liveDuplicateOf(db, await duplicateKeyHash(coreOf("x", VALUE, "2026-12-01"))),
+    ).toBe(later);
+    // The original date is untouched: narrowing the key did not weaken it.
+    expect(await liveDuplicateOf(db, await duplicateKeyHash(coreOf("x", VALUE)))).toBe(
+      HELD,
     );
   });
 
@@ -454,6 +496,65 @@ describe("the sweep's duplicates step", () => {
         beacon: new FixtureBeacon("duplicates"),
       });
       expect(again.duplicates).toEqual({ filled: 0 });
+    } finally {
+      await world.dispose();
+    }
+  }, 600_000);
+
+  it("refills a row migration 0020 nulled, with the key that carries effective_at", async () => {
+    // 0020 is one statement -- `UPDATE entries SET duplicate_key = NULL` --
+    // because the key is a SHA-256 over RFC 8785 canonical JSON of normalized
+    // text and SQL cannot compute it. What it leaves behind is exactly the
+    // state 0019's backfill already knows how to close, which is the whole
+    // reason the migration is allowed to be that short.
+    const world = await openTestDatabase();
+    try {
+      const env: Env = {
+        DB: world.db,
+        CAPTURES: world.captures,
+        ENVIRONMENT: "local",
+        MAINTAINER_AGENT_ID: "1F916:maintainer",
+      };
+      const id = `nmk_${"3".repeat(32)}`;
+      const value = "40 per million";
+
+      const events: Event[] = await appendEvent([], {
+        at: AT,
+        type: "entry_submitted",
+        entry_id: id,
+        payload: { core: coreOf(id, value), signature: "sig" },
+      } as never);
+      await appendEvents(world.db, events);
+      await putEntry(world.db, entryOf(id, value, "draft"), SIDECAR, events[0]!.seq);
+
+      // The store wrote the current key. 0020 then empties the column for every
+      // row, which is what a deployment sees the moment the migration runs.
+      expect(
+        await world.db
+          .prepare(`SELECT duplicate_key FROM entries WHERE id = ?`)
+          .bind(id)
+          .first<{ duplicate_key: string | null }>(),
+      ).toEqual({ duplicate_key: await duplicateKeyHash(coreOf(id, value)) });
+      await world.db.prepare(`UPDATE entries SET duplicate_key = NULL`).run();
+      expect(await liveDuplicateOf(world.db, await duplicateKeyHash(coreOf(id, value)))).toBeNull();
+
+      const report = await runSweep(env, {
+        now: new Date("2026-09-11T13:00:00.000Z"),
+        beacon: new FixtureBeacon("duplicates"),
+      });
+      expect(report.duplicates).toEqual({ filled: 1 });
+
+      // The key it comes back with is the five-field one: the same claim at
+      // another date does not find it, and its own date does.
+      expect(await liveDuplicateOf(world.db, await duplicateKeyHash(coreOf(id, value)))).toBe(
+        id,
+      );
+      expect(
+        await liveDuplicateOf(
+          world.db,
+          await duplicateKeyHash(coreOf(id, value, "2027-01-01")),
+        ),
+      ).toBeNull();
     } finally {
       await world.dispose();
     }

@@ -99,7 +99,6 @@ import {
 import {
   assignmentDeadline,
   buildAssignment,
-  authorityExclusions,
   buildAssignmentMissed,
   drawChecker,
   drawDue,
@@ -116,6 +115,7 @@ import { coreVersion, domainOf, extractCore } from "../core.js";
 import type { BountyAccrual } from "../bounty.js";
 import {
   deriveEntry,
+  mayValidateEntry,
   operatorDomainsAt,
   registeredOperatorsAt,
   type EntryStatus,
@@ -146,7 +146,6 @@ import {
   type ReadShareSlotState,
 } from "../ledger.js";
 import {
-  authorityHostsFor,
   DEFAULT_DOMAIN,
   DOMAIN_SLUGS,
   DRAW_DRAFT_MAX_AGE_DAYS,
@@ -201,6 +200,7 @@ import {
   dueAssignments,
   dueAttestations,
   dueRevalidationAssignments,
+  disputeOf,
   earliestReadReceiptDay,
   firstSealedDayIn,
   entriesThrough,
@@ -2689,16 +2689,24 @@ export async function countersStep(
 }
 
 /**
- * (j3) Give the rows written before migration 0019 their duplicate key.
+ * (j3) Give the rows carrying no duplicate key theirs.
  *
  * Decision D-085 and migration 0019: the duplicate rule — domain, subject,
- * category and the normalized `after` — is a column and an index, and both
- * doors ask it with one seek (`liveDuplicateOf`). A row written before that
- * migration carries a null key, which is invisible to the index, so until it is
- * filled the log would take a second copy of a claim it already holds. SQL
- * cannot compute the key — the norm rule is Unicode normalization and
- * whitespace folding over arbitrary text — so the backfill is code, and this is
- * where code runs on a clock rather than on somebody's request.
+ * category, the normalized `after` and, since the QA of 2026-09-12, the
+ * normalized `effective_at` — is a column and an index, and both doors ask it
+ * with one seek (`liveDuplicateOf`). A row whose key has not been computed
+ * under the rule in force carries null, which is invisible to the index, so
+ * until it is filled the log would take a second copy of a claim it already
+ * holds. SQL cannot compute the key — the norm rule is Unicode normalization
+ * and whitespace folding over arbitrary text — so the backfill is code, and
+ * this is where code runs on a clock rather than on somebody's request.
+ *
+ * Two migrations feed it and it cannot tell them apart, which is the point:
+ * 0019 added the column to rows that never had one, and 0020 set every row back
+ * to null so `effective_at` could join the key. Both are "this row's key is not
+ * current", both are answered by recomputing from the row's own signed core,
+ * and the next change to the rule is one more `UPDATE ... SET duplicate_key =
+ * NULL` and no new code at all.
  *
  * Bounded like every other step: at most DUPLICATE_BACKFILL_PER_RUN rows a run,
  * and the next run continues from whatever is left, because a table that only
@@ -3128,31 +3136,53 @@ export async function runSweep(
           continue;
         }
 
-        // The dispute's own exclusions, plus every pool operator that never
-        // attested in this entry's domain (decision D-071). The entry's domain is
-        // read off its stored copy, which carries the signed core's `domain`
-        // verbatim; a legacy v0.6 entry has none and reads as ai-ecosystem.
+        // Who could not judge this entry if they were drawn. The QA of
+        // 2026-09-12: drawing an operator the validation door would refuse is
+        // drawing nobody — the seventy-two hours run out, the miss costs that
+        // operator standing for a decision it was never allowed to make, and the
+        // entry waits for a replacement draw to make the same mistake. So the
+        // draw asks the one eligibility predicate derivation and the door ask
+        // (src/derive.ts, `mayValidateEntry`), over the whole registry and the
+        // challenged entry's own events, rather than restating a subset of the
+        // rules here. `exclusionsFor` stays beside it because it answers a
+        // different question — who has already signed, and who has already
+        // missed — which is a fact about this entry's history and not about
+        // eligibility.
+        //
+        // The entry's domain and subject are read off its stored copy, which
+        // carries the signed core verbatim; a legacy v0.6 entry names no domain
+        // and reads as ai-ecosystem.
+        const target = {
+          id: entryId,
+          authorOperator:
+            ((stored.entry as Record<string, unknown>)["author_operator"] as
+              | string
+              | null) ?? null,
+          domain: domainOf(stored.entry),
+          subject: (stored.entry as Record<string, unknown>)["subject"],
+        };
+        // A challenge's extra exclusion (Section 6) is carried by the CHALLENGED
+        // entry's events — the `dispute_filed` event is scoped to the target —
+        // so those are fetched when, and only when, this entry is a challenge.
+        const disputed = await disputeOf(db, entryId);
+        const eligibilityEvents =
+          disputed === null
+            ? all
+            : [...all, ...(await eventsForEntry(db, disputed))];
         const draw = await drawValidator({
           entryId,
           snapshot: pool,
           beacon: round,
           exclude: [
             ...exclusionsFor(all, entryId),
-            ...outsideDomain(
-              operatorDomainsAt(registry, headPosition(registry)),
-              pool.operators,
-              domainOf(stored.entry),
-            ),
-            // Decision D-096: and every pool operator under an official host of
-            // the authority this entry's subject names. Empty for ai-ecosystem
-            // and for every subject with no authority row, so the draw an older
-            // entry gets is the draw it always got.
-            ...authorityExclusions(
-              pool.operators,
-              authorityHostsFor(
-                domainOf(stored.entry),
-                (stored.entry as Record<string, unknown>)["subject"],
-              ),
+            ...pool.operators.filter(
+              (operator) =>
+                !mayValidateEntry(
+                  eligibilityEvents,
+                  headPosition(eligibilityEvents),
+                  target,
+                  operator,
+                ),
             ),
           ],
         });

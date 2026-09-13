@@ -167,6 +167,7 @@ import {
   refuse,
 } from "./registry.js";
 import { logCounters, statusInput } from "./status.js";
+import { clocked } from "./world.js";
 
 /**
  * The ids nomankind mints, exactly as src/worker/read.ts narrows the schema's
@@ -246,9 +247,21 @@ function field(source: Record<string, unknown>, name: string): string {
  * `tier` is the sidecar's `effective_tier` and never the core's `evidence_tier`
  * (Section 4): the tier a reader is shown is the one the entry actually verified
  * at. `sealed` is whether the entry carries a seal object at all.
+ *
+ * `stale` is the clock's answer and never the column's: the row is put through
+ * `clocked` (src/worker/world.ts) exactly as the read door puts its own answer,
+ * so a listing and a read taken at the same instant cannot disagree about
+ * whether a window has closed.
  */
-function toRow(stored: StoredEntry, withheld: WithheldView | null): EntryRow {
-  const entry = stored.entry as unknown as Record<string, unknown>;
+function toRow(
+  stored: StoredEntry,
+  withheld: WithheldView | null,
+  now: Date,
+): EntryRow {
+  const entry = clocked(stored.entry, now) as unknown as Record<
+    string,
+    unknown
+  >;
   const expires = entry["expires_at"];
   return {
     id: field(entry, "id"),
@@ -507,6 +520,7 @@ async function home(
         toRow(
           stored,
           withheldFor(reader, sealedAtOf(covering, stored.submittedSeq), now),
+          now,
         ),
       ),
     }),
@@ -572,6 +586,7 @@ async function entries(
     toRow(
       stored,
       withheldFor(reader, sealedAtOf(covering, stored.submittedSeq), now),
+      now,
     ),
   );
   // The cursor is the last row *read*, not the last row kept: a page whose
@@ -609,6 +624,14 @@ async function entry(
 
   const events = await eventsForEntry(db, id);
   const seal = await sealCovering(db, stored.submittedSeq);
+  // `stale` against the router's own clock rather than the column's last
+  // writer, by the same `clocked` the read door and the listing use: the page
+  // and `GET /read/{id}` are two doors onto one entry, and an entry past its
+  // window has to read stale on both before any sweep rewrites the row. Taken
+  // here, above the window, so the withheld proof carries the clocked answer
+  // too — `stale` is proof and not content, and the hash is over the core,
+  // which `stale` is not part of.
+  const shown = clocked(stored.entry, now);
   // The window (D-100). The reader is resolved once, and when the content is
   // not theirs yet the record this page is built from is `withholdEntry`'s
   // proof — every content field null, every proof field untouched — so nothing
@@ -629,10 +652,10 @@ async function entry(
   let record: Record<string, unknown>;
   let view: WithheldView | null = withheld;
   if (withheld === null) {
-    record = stored.entry as unknown as Record<string, unknown>;
+    record = shown as unknown as Record<string, unknown>;
   } else {
     const held = await withholdEntry(
-      stored.entry,
+      shown,
       stored.sidecar,
       withheld.releaseDate ?? "",
     );
@@ -787,7 +810,7 @@ async function entry(
       // window, which is a question about an instant, and the instant is the
       // router's own — the same one the JSON endpoint answers at.
       confidenceInputs: confidenceInputs({
-        entry: stored.entry,
+        entry: shown,
         sidecar: stored.sidecar,
         now: now.toISOString(),
       }),

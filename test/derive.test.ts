@@ -150,6 +150,19 @@ function submit(log: Log, id: string, overrides: Record<string, unknown> = {}) {
   });
 }
 
+/** Two rejections from distinct operators: enough to reject in any pool. */
+function rejectIt(log: Log, id: string, first: string, second: string) {
+  for (const [index, signedAt] of [first, second].entries()) {
+    log.add("validation", id, {
+      record: approval(VALIDATORS[index] as string, signedAt, {
+        decision: "reject",
+        reason: "the source does not say this",
+      }),
+      signature: SIGNATURE,
+    });
+  }
+}
+
 /** Two approvals from distinct operators: enough to verify in a small pool. */
 function verifyIt(log: Log, id: string, first: string, second: string) {
   log.add("validation", id, {
@@ -373,6 +386,52 @@ describe("supersession and disputes", () => {
     const derived = deriveEntry(log.events, FIRST, clock).derived;
     expect(derived.status).toBe("overturned");
     expect(derived.overturned_by).toBe(CORRECTION);
+  });
+
+  it("drops the supersession pointer when the entry is overturned", () => {
+    // The QA of 2026-09-12: an entry that was superseded and then overturned
+    // carried both pointers, so the record said at once "this was replaced by
+    // the current fact" and "this was never true". Only the dispute's is the
+    // verdict, and `superseded_by` means a successor stands in this entry's
+    // place -- which an upheld challenge says nothing does. A rejected entry
+    // never carried one, and this makes the two answers the same answer.
+    const log = supersessionLog();
+    verifyIt(log, SECOND, "2026-09-03T01:00:00Z", "2026-09-03T02:00:00Z");
+    expect(deriveEntry(log.events, FIRST, clock).derived.superseded_by).toBe(
+      SECOND,
+    );
+
+    log.add("dispute_upheld", FIRST, { correction_entry_id: CORRECTION });
+    const derived = deriveEntry(log.events, FIRST, clock).derived;
+    expect(derived.status).toBe("overturned");
+    expect(derived.overturned_by).toBe(CORRECTION);
+    expect(derived.superseded_by).toBeNull();
+    // And the entry's own JSON says the same, since that is what a reader sees.
+    expect(
+      deriveEntry(log.events, FIRST, clock).entry["superseded_by"],
+    ).toBeNull();
+    // Nothing is lost: the superseding entry still names its target in its own
+    // signed core, and it is still verified.
+    expect(deriveEntry(log.events, SECOND, clock).entry["supersedes"]).toBe(
+      FIRST,
+    );
+    expect(deriveEntry(log.events, SECOND, clock).derived.status).toBe(
+      "verified",
+    );
+  });
+
+  it("leaves a rejected entry without one, as it always did", () => {
+    // The other half of the same sentence: a pointer is written only where a
+    // successor stands in the entry's place, and nothing stands in a rejected
+    // entry's place either.
+    const log = baseLog();
+    submit(log, FIRST);
+    rejectIt(log, FIRST, "2026-09-02T01:00:00Z", "2026-09-02T02:00:00Z");
+    submit(log, SECOND, { supersedes: FIRST });
+    verifyIt(log, SECOND, "2026-09-03T01:00:00Z", "2026-09-03T02:00:00Z");
+    const derived = deriveEntry(log.events, FIRST, clock).derived;
+    expect(derived.status).toBe("rejected");
+    expect(derived.superseded_by).toBeNull();
   });
 });
 

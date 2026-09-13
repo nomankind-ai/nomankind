@@ -193,7 +193,11 @@ move only by a later decision.
 **Name.** AI governance.
 
 **Categories.** `in_force`, `amended`, `repealed`, `guidance_issued`,
-`enforcement_action`.
+`enforcement_action`, `correction`.
+
+`correction` is every domain's, and is ai-ecosystem's row unchanged: a challenge
+is filed as a correction entry in the domain of the entry it challenges, so a
+domain without it is a domain whose record cannot be disputed at all.
 
 **Staleness window per category**, in days from the last-confirmed date; `null`
 means the category carries no window, because once the thing happened it stays
@@ -208,6 +212,7 @@ that cadence:
 | repealed | null |
 | guidance_issued | 365 |
 | enforcement_action | null |
+| correction | null |
 
 Both windows are the maintainer's own placeholders, not whitepaper numbers, and
 move only by a later decision.
@@ -246,7 +251,9 @@ and not of a domain. What this domain publishes is its own three tables.
 amended or repealed, and what guidance was issued under it are the issuing
 body's own to state. `enforcement_action` is not official-required: an
 enforcement is recorded by a court or a regulator, which the recognized list
-covers.
+covers. Neither is `correction`, exactly as in ai-ecosystem: the rule that binds
+a challenge is the one its target carries, and the dispute door runs that check
+against the challenged entry's own domain and category.
 
 *The authorities table.* The subject convention is `<jurisdiction or
 body>/<instrument slug>`, so the first segment keys this table. Every host below
@@ -280,7 +287,13 @@ curia.europa.eu, supremecourt.gov, edpb.europa.eu
 
 **Categories.** `commitment_published`, `commitment_changed`,
 `commitment_withdrawn`, `conduct_observed`, `refusal_behavior`,
-`filter_behavior`, `safety_eval`, `incident`.
+`filter_behavior`, `safety_eval`, `incident`, `correction`.
+
+`correction` is every domain's, and is ai-ecosystem's row unchanged: a challenge
+is filed as a correction entry in the domain of the entry it challenges, so a
+domain without it is a domain whose record cannot be disputed at all. It carries
+no transcript, and neither the delayed-disclosure nor the version-staleness rule
+below, both of which are about what a system does.
 
 **Staleness window per category**, in days from the last-confirmed date; `null`
 means the category carries no window. What a system does is as volatile as
@@ -297,6 +310,7 @@ more slowly, so it carries a quarter rather than a month:
 | filter_behavior | 30 |
 | safety_eval | 90 |
 | incident | null |
+| correction | null |
 
 The four windows are the maintainer's own placeholders, not whitepaper numbers,
 and move only by a later decision.
@@ -347,7 +361,10 @@ automate are ai-ecosystem's above, unchanged.
 *Official-required categories.* `commitment_published`, `commitment_changed`,
 `commitment_withdrawn`. What a party committed to, changed, or withdrew is that
 party's own to state. Conduct, a refusal, a filter, an evaluation and an
-incident are not: they are what somebody else found.
+incident are not: they are what somebody else found. Nor is a `correction`,
+exactly as in ai-ecosystem: the rule that binds a challenge is the one its
+target carries, and the dispute door runs that check against the challenged
+entry's own domain and category.
 
 *The authorities table.* Every ai-ecosystem authority row above, unchanged — a
 provider's own pages are authoritative about the provider's own commitments —
@@ -422,12 +439,19 @@ reconfirmation cannot clear it, because the version it observed is gone.
 The same fact filed twice is worth nothing twice, and the rule that says so is
 the same in every domain, so it is written here once rather than per domain.
 
-A duplicate is a claim with the same **domain, subject, category and normalized
-value** as one already in the log — the value being the entry's `after` put
-through the norm-v1.2 text normalization, so the same number written with a
-different amount of whitespace is the same value. Nothing else in the core is
-part of the key: two entries with the same value at a different `effective_at`
-are not duplicates by this rule.
+A duplicate is a claim with the same **domain, subject, category, normalized
+value and `effective_at`** as one already in the log — the value being the
+entry's `after` put through the norm-v1.2 text normalization, so the same number
+written with a different amount of whitespace is the same value, and the date
+being the core's own `effective_at` put through the same normalization, so it is
+compared as the signed bytes wrote it and never as a parsed calendar date.
+
+Nothing else in the core is part of the key. `effective_at` is in it because the
+key must not answer a question this document gives to the validators: two
+entries with the same value at a different `effective_at` are **not** duplicates
+by this rule, so the later filing reaches the validators rather than being
+refused at the door. Whether it restates the earlier fact or observes a new one
+is judged below, in the published rejection form.
 
 The rule reads against the **live** statuses only, `draft` and `verified`. A
 `rejected`, `superseded` or `overturned` entry is not live, and a fact may

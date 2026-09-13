@@ -400,7 +400,12 @@ describe("a read_count event in a verified world", () => {
   it("leaves verifyOffline answering ok with no diffs", async () => {
     const world = await buildVerifyWorld();
     const before = await verifyOffline(world.entry, world.bundle);
-    expect(before).toEqual({ ok: true, entry_id: world.entryId, diffs: [] });
+    expect(before).toEqual({
+      ok: true,
+      entry_id: world.entryId,
+      diffs: [],
+      withheld: 0,
+    });
 
     const events: Event[] = await appendEvent(world.bundle.events, {
       at: world.bundle.as_of,
@@ -418,7 +423,12 @@ describe("a read_count event in a verified world", () => {
       ...world.bundle,
       events,
     });
-    expect(after).toEqual({ ok: true, entry_id: world.entryId, diffs: [] });
+    expect(after).toEqual({
+      ok: true,
+      entry_id: world.entryId,
+      diffs: [],
+      withheld: 0,
+    });
   });
 });
 

@@ -364,10 +364,16 @@ export interface StoredEntry {
  * to fold, so the empty list is the same answer rederiving would give.
  *
  * `source` arrived in M23b (decision D-080) and is defaulted the same way, for
- * the same reason and with the same guarantee: the class is a pure function of
- * the stored core's domain, subject and citation, so computing it here from the
- * row's own entry gives the identical answer `deriveEntry` would. No migration,
- * and a page never sees the key missing.
+ * the same reason: a page never sees the key missing, and no migration writes
+ * one. The default is the citation's own class, which is all a row can be asked
+ * for — where the capture landed is the submission event's `final_url`, and a
+ * row is not the log. That is why it is a default and not the answer: a stored
+ * `source` is kept exactly as written, and the door that wrote it took the
+ * weaker of the citation's class and the capture's (`capturedSourceClass`, the
+ * QA of 2026-09-13). Recomputing here could therefore only ever hand back the
+ * stronger of the two, so it is reached only where there is nothing stored at
+ * all — a row written before the key existed, whose log predates `final_url`
+ * too, and for which the citation's class is exactly what derivation answers.
  *
  * The same default carries D-081's rename: a row written between M23b and that
  * decision holds `source.provider` and no `authority`, so the key check is for
@@ -554,9 +560,11 @@ async function entryStatement(
  * What this does not know is the caller's own exemptions — an entry is not a
  * duplicate of itself, and never of the entry it supersedes — so the caller
  * compares the id it gets back against its own and against its `supersedes`
- * before it refuses. A row written before 0019 and not yet backfilled carries a
- * null key and is invisible here; `backfillDuplicateKeys` below is what closes
- * that, and every row written since carries its key by construction.
+ * before it refuses. A row whose key has not been computed under the rule in
+ * force carries null and is invisible here — a row written before 0019, or any
+ * row at all in the runs after 0020 emptied the column so `effective_at` could
+ * join the key; `backfillDuplicateKeys` below is what closes that, and every
+ * row written since carries its key by construction.
  */
 export async function liveDuplicateOf(
   db: D1Like,
@@ -575,8 +583,16 @@ export async function liveDuplicateOf(
 }
 
 /**
- * Fill in `duplicate_key` for every row written before 0019, and say how many
- * it filled.
+ * Fill in `duplicate_key` for every row that carries none, and say how many it
+ * filled.
+ *
+ * Null means one thing: a row whose key has not been computed under the rule in
+ * force. That is a row written before 0019, and — since the QA of 2026-09-12
+ * put `effective_at` in the key — every row at all, because 0020 set the column
+ * back to null rather than trying to recompute a SHA-256 over normalized text
+ * in SQL. Both are the same job and this is the one function that does it, so a
+ * change to the rule costs a migration of one `UPDATE` and however many sweeps
+ * the refill takes.
  *
  * The norm rule is Unicode normalization and whitespace folding over arbitrary
  * text, which SQL cannot run, so this backfill is code rather than an `UPDATE`

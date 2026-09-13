@@ -17,7 +17,8 @@
  *
  * Order matters and is deliberate. The id, the shape, the envelope signature,
  * the entry, the identity, the entry's own state, the record's timestamp, the
- * record signature, then the two kernel checks, then derivation and the schema.
+ * record signature, the deadline of the draw this operator was given, then the
+ * two kernel checks, then derivation and the schema.
  * Nothing is written until every one of them has passed: a refused decision
  * leaves the log exactly where it was, and a refused record is not a record.
  *
@@ -261,6 +262,33 @@ function priorRecordsOf(
 }
 
 /**
+ * The deadline of the newest assignment this entry ever made to this operator,
+ * or null when the draw never named it.
+ *
+ * Open or closed, deliberately (the QA of 2026-09-12). `openAssignment` answers
+ * null once the sweep has sealed the `assignment_missed`, so a door that read
+ * only the open one gave the same late decision two different answers depending
+ * on whether a sweep had happened to run since the draw: `assigned_random`
+ * accepted when none had, `assigned_random_without_assignment` when one had. The
+ * draw's own instant is in the log either way, so the door reads that instead
+ * and the sweep's timing stops being part of the answer.
+ */
+function drawnDeadlineFor(
+  events: readonly Event[],
+  entryId: string,
+  operator: string,
+): string | null {
+  let deadline: string | null = null;
+  for (const event of [...events].sort((left, right) => left.seq - right.seq)) {
+    if (event.type !== "assignment" || event.entry_id !== entryId) continue;
+    const payload = (event as Event<"assignment">).payload;
+    if (payload.operator !== operator) continue;
+    deadline = payload.deadline;
+  }
+  return deadline;
+}
+
+/**
  * The world of the entry this one declares it supersedes, or null when it
  * declares none or the declared target is not in the log.
  *
@@ -499,6 +527,21 @@ async function validate(
     };
   }
   const open = openAssignmentOf(entryEvents, id);
+
+  // Section 6, and the seventy-two hours of ASSIGNMENT_WINDOW_HOURS the draw
+  // wrote into its own event: a drawn validator answers inside the window or it
+  // is a miss. The sweep says so about the log; this says so to the operator
+  // still trying to answer, and it says it whether or not a sweep has run since
+  // the draw, because it reads the assignment the draw made rather than the one
+  // the sweep has not closed yet. Strictly past, exactly as `isAssignmentMissed`
+  // and `checkAnswer` are, so the deadline instant itself is still inside.
+  const drawnDeadline = drawnDeadlineFor(entryEvents, id, record.operator);
+  if (
+    drawnDeadline !== null &&
+    deps.now.getTime() > Date.parse(drawnDeadline)
+  ) {
+    return refuse(422, "deadline_passed");
+  }
 
   // Section 6, "Dispute": a challenge "passes through the same validation
   // process with one extra exclusion: no operator that signed the original,

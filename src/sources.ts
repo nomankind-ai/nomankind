@@ -280,6 +280,63 @@ export function checkSource(
 }
 
 /**
+ * The class a capture actually earned: the weaker of the citation's and the
+ * final URL's (the QA of 2026-09-12).
+ *
+ * The class was read off the citation alone, and a citation is a request rather
+ * than an answer. An official host that redirects to a third party, or down to
+ * http, handed its badge to whatever the chain ended at: the bytes in the
+ * archive came from the final URL, the sidecar says so, and calling them the
+ * authority's own page was the one thing the class must never say. So the chain
+ * is read as well as the request, and the weaker of the two is the truth about
+ * the bytes -- weaker and never stronger, because a redirect cannot promote a
+ * stranger's citation either.
+ *
+ * `final` being null, or the same URL, is the ordinary case and answers exactly
+ * what the citation did: nothing redirected, so there is nothing else to read.
+ */
+export function capturedSourceClass(
+  domain: string,
+  subject: unknown,
+  citation: unknown,
+  final: string | null,
+): SourceClassification {
+  const cited = sourceClassOf(domain, subject, citation);
+  if (final === null || final === citation) return cited;
+
+  const landed = sourceClassOf(domain, subject, final);
+  return SOURCE_CLASS_ORDER[landed.class] < SOURCE_CLASS_ORDER[cited.class]
+    ? landed
+    : cited;
+}
+
+/**
+ * The source gate again, on the capture rather than on the citation.
+ *
+ * `checkSource` runs before anything is fetched and is the gate that keeps an
+ * unfetchable claim from costing the log a capture; this is the same rule asked
+ * again of what came back, and it is the one that cannot be asked earlier
+ * because nobody knows where a URL lands until it is followed.
+ *
+ * Only `source_not_official` can be answered here: `unknown_authority` is a fact
+ * about the subject, which a redirect cannot change, and the earlier call has
+ * already refused it.
+ */
+export function checkCapturedSource(
+  domain: string,
+  category: unknown,
+  subject: unknown,
+  citation: unknown,
+  final: string | null,
+): SourceVerdict {
+  if (!isOfficialRequiredCategory(domain, category)) return { ok: true };
+  if (capturedSourceClass(domain, subject, citation, final).class !== "official") {
+    return { ok: false, reason: "source_not_official" };
+  }
+  return { ok: true };
+}
+
+/**
  * Whether a class meets a reader's minimum demand.
  *
  * No demand is met by anything, including by a class the log could not work out.

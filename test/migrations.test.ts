@@ -165,6 +165,7 @@ describe("wrangler d1 migrations apply", () => {
         "0017_standing_cursor.sql",
         "0018_counters.sql",
         "0019_duplicate_key.sql",
+        "0020_duplicate_key_effective_at.sql",
       ]);
       expect(oursApplied.results.map((row) => row.name)).toEqual(
         applied.results.map((row) => row.name),

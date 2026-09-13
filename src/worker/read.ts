@@ -71,6 +71,7 @@ import {
   type ReaderRefusal,
 } from "./access.js";
 import type { Env } from "./env.js";
+import { clocked } from "./world.js";
 import {
   StorageUnreachable,
   guardDatabase,
@@ -256,6 +257,12 @@ async function issueReceipt(
  * The receipt is persisted before the response is built, so there is no path on
  * which a reader holds a receipt the table does not. The seal is read after, and
  * is null while nothing has sealed the entry's submission yet.
+ *
+ * The entry is clocked before either: `stale` is read against `now` rather than
+ * taken from the row (above). The receipt is unaffected by construction — it is
+ * signed over the entry's core, and `stale` is derived and not part of it — so
+ * the reader's receipt names the same entry hash whichever side of the window
+ * the read falls on.
  */
 async function serve(
   db: D1Like,
@@ -267,7 +274,8 @@ async function serve(
   const signer = await signerFor(env.SEALING_AGENT_KEY);
   if (signer === null) return refuse(503, "receipts_not_configured");
 
-  const receipt = await issueReceipt(db, stored.entry, signer, access, now);
+  const entry = clocked(stored.entry, now);
+  const receipt = await issueReceipt(db, entry, signer, access, now);
   if (receipt === null) return refuse(503, "receipt_conflict");
 
   const seal = await sealCovering(db, stored.submittedSeq);
@@ -276,7 +284,7 @@ async function serve(
   await chargeReads(db, access, 1);
   return json(
     {
-      entry: stored.entry,
+      entry,
       sidecar: stored.sidecar,
       seal,
       receipt,

@@ -52,6 +52,8 @@ const TARGET = "nmk_01TARGET";
 const CORRECTION = "nmk_01CORRECT";
 const SUBJECT = "openai/gpt-5";
 const CHALLENGER = "1F916:Y2hhbGxlbmdlcg";
+/** The author of the entry being challenged: never the challenger. */
+const AUTHOR = "1F916:dGFyZ2V0QXV0aG9y";
 const REPORTER = "1F916:cmVwb3J0ZXI";
 const CITATION = "https://platform.openai.com/docs/pricing";
 const HASH = `sha256:${"c".repeat(64)}`;
@@ -84,10 +86,17 @@ function correctionCore(overrides: Record<string, unknown> = {}): Core {
   } as Core;
 }
 
+/**
+ * The entry a challenge is filed against. Its author is somebody other than the
+ * challenger, because an author challenging its own entry is `self_dispute` (the
+ * QA of 2026-09-12) and every other case here is about a challenge that is a
+ * challenge.
+ */
 const VERIFIED_TARGET = {
   id: TARGET,
   subject: SUBJECT,
   status: "verified" as const,
+  author: AUTHOR as string | null,
 };
 
 function filingContext(overrides: Record<string, unknown> = {}) {
@@ -137,10 +146,12 @@ describe("checkDisputeFiling", () => {
       context: filingContext(),
     },
     {
+      // The target's own author, filing against itself. Both identities are put
+      // to the rule, so naming the challenger in the core does not get it in.
       reason: "self_dispute",
-      core: correctionCore({ author: "1F916:c29tZWJvZHlFbHNl" }),
+      core: correctionCore({ author: AUTHOR }),
       target: VERIFIED_TARGET,
-      context: filingContext(),
+      context: filingContext({ challenger: AUTHOR }),
     },
     {
       reason: "dispute_open",

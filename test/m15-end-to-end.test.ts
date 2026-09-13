@@ -440,6 +440,28 @@ async function fetched(
   return (await response.json()) as Record<string, unknown>;
 }
 
+/**
+ * The same entry as the browsing UI draws it, at one instant.
+ *
+ * Signed by a registered operator's agent like `fetched`, and asking for HTML:
+ * inside the release window (decision D-100) a free reader is drawn the
+ * withheld view, and what is under test here is the full page.
+ */
+async function entryPage(entryId: string, now: Date = NOW): Promise<string> {
+  const signed = await signedGet(a1.agent, {
+    path: `/entries/${entryId}`,
+    timestamp: now.toISOString(),
+  });
+  const headers = new Headers(signed.headers);
+  headers.set("accept", "text/html");
+  const response = await send(
+    new Request(signed.url, { method: "GET", headers }),
+    now,
+  );
+  expect(response.status).toBe(200);
+  return response.text();
+}
+
 /** Run the sweep the cron trigger runs, at the instant the caller names. */
 async function sweep(at: Date): Promise<SweepReport> {
   const beacon = new FixtureBeacon("m15");
@@ -679,12 +701,28 @@ describe("the sweep's staleness step", () => {
   const STALE_DAY = WINDOW_DAYS + 1;
 
   it("leaves the stored row fresh until something rewrites it", async () => {
-    const entry = await fetched(checkpoint["id"] as string, day(STALE_DAY));
-
     // Nothing has been written since the approvals, so the stored copy still
     // says what it said on the day it was derived.
-    expect(entry["stale"]).toBe(false);
+    const row = await stored(checkpoint["id"] as string);
+    expect(row["stale"]).toBe(false);
+    expect(row["expires_at"]).toBe(dayDate(WINDOW_DAYS));
+
+    // And every door already answers the calendar rather than the column
+    // (src/worker/world.ts, `clocked`): the JSON twin at `GET /entries/{id}`
+    // and the page at the same path say stale on day 91, before any sweep has
+    // touched the row. A field the schema calls derived must not wait for a
+    // background job.
+    const entry = await fetched(checkpoint["id"] as string, day(STALE_DAY));
+    expect(entry["stale"]).toBe(true);
     expect(entry["expires_at"]).toBe(dayDate(WINDOW_DAYS));
+    // Section 7: past its window an entry stays verified but shows as stale.
+    expect(entry["status"]).toBe("verified");
+
+    const page = await entryPage(checkpoint["id"] as string, day(STALE_DAY));
+    expect(page).toContain('<span class="warn">stale</span>');
+
+    // The read derived an answer; it did not write one.
+    expect((await stored(checkpoint["id"] as string))["stale"]).toBe(false);
   });
 
   it("rewrites the entries the day turned on, appending no event", async () => {

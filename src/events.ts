@@ -149,8 +149,22 @@ export type EventPayloads = {
   };
   /** Sorted trusted pool at this position in the log (M4 draws assignments from it). */
   pool_snapshot: { operators: string[] };
-  /** The sealed submission: the immutable core and the author's signature over it. */
-  entry_submitted: { core: Core; signature: string };
+  /**
+   * The sealed submission: the immutable core, the author's signature over it,
+   * and where the citation actually landed.
+   *
+   * `final_url` is outside the core and outside the signature on purpose — it
+   * is not the submitter's claim but the door's observation, the end of the
+   * redirect chain the snapshot capture followed (src/adapters/fetch.ts). It is
+   * in the log because the class a capture earned is the weaker of the
+   * citation's and the final URL's (decision D-080, `capturedSourceClass`), and
+   * a class derivation could not recompute would be a class that disagreed with
+   * the refusal the door made off the same two URLs. Null where nothing was
+   * fetched — a transcript's artifact — and absent on every event sealed before
+   * the QA of 2026-09-13, which derivation reads as "nothing else to read", the
+   * answer the citation alone already gave.
+   */
+  entry_submitted: { core: Core; signature: string; final_url?: string | null };
   assignment: {
     agent: string;
     operator: string;
