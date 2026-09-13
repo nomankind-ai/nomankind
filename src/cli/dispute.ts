@@ -210,6 +210,12 @@ export interface DisputeDeps {
   readonly http: HttpClient;
   readonly fetcher: SnapshotFetcher;
   readonly now: Date;
+  /**
+   * What the signed reads are stamped by, when it is not `now`: the live clock
+   * a command passes, so a read made minutes in is not stamped at the instant
+   * the run started (the QA of 2026-09-13). Absent, the fixed `now` stands.
+   */
+  readonly clock?: () => Date;
   readonly io: ValidatorIo;
 }
 
@@ -259,7 +265,7 @@ export async function runDispute(input: {
   // bound to a registered operator, and a validator is exactly that reader —
   // the people who have to judge an entry are the ones the window is not for.
   const read = await getJson(
-    signingHttp(deps.http, input.key, deps.now),
+    signingHttp(deps.http, input.key, deps.clock ?? deps.now),
     input.baseUrl,
     `/entries/${encodeURIComponent(input.targetId)}`,
   );
@@ -387,6 +393,7 @@ if (
         http: new WebHttpClient(),
         fetcher: new WebFetcher(),
         now: new Date(),
+        clock: () => new Date(),
         io,
       },
     });

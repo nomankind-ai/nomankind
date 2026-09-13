@@ -77,6 +77,7 @@ import {
   type ValidatorIo,
   type ValidatorKey,
 } from "./validator.js";
+import { runCommand, unreachableLine } from "./main.js";
 
 const USAGE =
   "usage: mirror <base-url> <out-dir> [--key <api key>] [--sign <key.json>]";
@@ -690,7 +691,8 @@ export async function runMirror(
       return FAILED;
     }
     io.stderr(
-      `mirror failed ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
+      unreachableLine(plan.baseUrl, error) ??
+        `mirror failed ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
     );
     return FAILED;
   }
@@ -708,11 +710,15 @@ if (
   process.argv[1] !== undefined &&
   import.meta.filename === resolve(process.argv[1])
 ) {
+  const args = process.argv.slice(2);
+  const io: ValidatorIo = {
+    stdout: (line: string) => console.log(line),
+    stderr: (line: string) => console.error(line),
+  };
   process.exit(
-    await runMirror(process.argv.slice(2), {
-      stdout: (line: string) => console.log(line),
-      stderr: (line: string) => console.error(line),
-    }),
+    await runCommand({ name: "mirror", baseUrl: args[0] ?? null, io }, () =>
+      runMirror(args, io),
+    ),
   );
 }
 /* c8 ignore stop */

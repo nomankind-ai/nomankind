@@ -9,3 +9,15 @@ coverage/
 *.log
 .DS_Store
 .env*
+
+# Keys never enter the repository (D-016). `npm run keygen` writes outside the
+# working tree by default -- ~/.nomankind/keys/<name>.json -- so nothing below
+# should ever match. These are the braces to that belt: the patterns the tools
+# write and the guides name, so a key put here by `--out`, by a fork's own
+# script or by hand cannot be picked up by `git add .`. The cost of the one
+# that gets through is a private key nobody can withdraw.
+*.key.json
+*-key.json
+key.json
+keys/
+.nomankind/

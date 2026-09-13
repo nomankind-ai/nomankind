@@ -38,6 +38,7 @@ import {
   isDomainCategory,
   isRegisteredDomain,
   isTranscriptCategory,
+  REQUEST_CLOCK_SKEW_SECONDS,
   stalenessWindowDays,
 } from "../src/policy.js";
 import {
@@ -375,6 +376,7 @@ describe("checkDomainJoin", () => {
       attestation: attestation as unknown,
       registered: true,
       domains: [] as readonly string[],
+      now: new Date(SIGNED_AT),
       ...overrides,
     });
 
@@ -404,6 +406,40 @@ describe("checkDomainJoin", () => {
     ).toEqual({ ok: false, reason: "bad_attestation" });
   });
 
+  it("bounds the attestation's own timestamp (the QA of 2026-09-12)", async () => {
+    // The same window the bind door and a registration hold one to. A join is
+    // signed by an agent the operator already has, so nothing but this says the
+    // sentence for the new domain was made now rather than found.
+    const attestation = await signAttestation(agent.privateKey, {
+      operator: OPERATOR,
+      agent: agent.id,
+      signed_at: SIGNED_AT,
+    });
+    const skew = REQUEST_CLOCK_SKEW_SECONDS * 1000;
+    const at = new Date(SIGNED_AT).getTime();
+    const join = (now: Date) => ({
+      operator: OPERATOR,
+      agent: agent.id,
+      domain: DEFAULT_DOMAIN,
+      attestation: attestation as unknown,
+      registered: true,
+      domains: [] as readonly string[],
+      now,
+    });
+
+    expect(await checkDomainJoin(join(new Date(at + skew)))).toEqual({
+      ok: true,
+    });
+    expect(await checkDomainJoin(join(new Date(at + skew + 1000)))).toEqual({
+      ok: false,
+      reason: "bad_attestation",
+    });
+    expect(await checkDomainJoin(join(new Date(at - skew - 1000)))).toEqual({
+      ok: false,
+      reason: "bad_attestation",
+    });
+  });
+
   it("takes a legacy record as the ai-ecosystem attestation and admits the join", async () => {
     // attestation_domain_mismatch is the last refusal in the order pinned
     // above, and it cannot be reached while exactly one domain is registered: a
@@ -422,6 +458,7 @@ describe("checkDomainJoin", () => {
         attestation: legacy,
         registered: true,
         domains: [],
+        now: new Date(SIGNED_AT),
       }),
     ).toEqual({ ok: true });
   });

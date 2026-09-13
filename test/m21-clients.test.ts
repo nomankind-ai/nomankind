@@ -331,8 +331,8 @@ describe("the standing command", () => {
     expect(await runStanding([TEST_ORIGIN], new InProcessHttp(), io)).toBe(2);
     expect(await runStanding([], new InProcessHttp(), io)).toBe(2);
     expect(out).toEqual([
-      "usage: standing <base-url> <operator>",
-      "usage: standing <base-url> <operator>",
+      "usage: standing <base-url> <operator> [--sign <key.json>]",
+      "usage: standing <base-url> <operator> [--sign <key.json>]",
     ]);
   });
 

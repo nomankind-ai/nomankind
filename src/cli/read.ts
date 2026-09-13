@@ -49,10 +49,12 @@ import {
   getJson,
   readKeyFile,
   signingHttp,
+  type Clock,
   WebHttpClient,
   type HttpClient,
   type ValidatorIo,
 } from "./validator.js";
+import { runCommand } from "./main.js";
 
 const USAGE =
   "usage: read <base-url> <entry-id> [--key <secret>] [--sign <key.json>] | read <base-url> --subject <subject> --category <category> [--domain <slug>] [--min-tier <tier>] [--max-age <days>] [--key <secret>] [--sign <key.json>]";
@@ -263,7 +265,7 @@ export async function runRead(
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   },
-  now: Date = new Date(),
+  clock: Clock = () => new Date(),
 ): Promise<number> {
   const path = readPath(args);
   if (path === null) {
@@ -278,7 +280,7 @@ export async function runRead(
   const client =
     signPath === null
       ? withKey(http, readKey(args))
-      : signingHttp(http, await readKeyFile(signPath), now);
+      : signingHttp(http, await readKeyFile(signPath), clock);
 
   const answer = await getJson(client, baseUrl, path);
   if (answer.status !== 200) {
@@ -361,6 +363,15 @@ if (
   process.argv[1] !== undefined &&
   import.meta.filename === resolve(process.argv[1])
 ) {
-  process.exit(await runRead(process.argv.slice(2), new WebHttpClient()));
+  const args = process.argv.slice(2);
+  const io: ValidatorIo = {
+    stdout: (line: string) => console.log(line),
+    stderr: (line: string) => console.error(line),
+  };
+  process.exit(
+    await runCommand({ name: "read", baseUrl: args[0] ?? null, io }, () =>
+      runRead(args, new WebHttpClient(), io),
+    ),
+  );
 }
 /* c8 ignore stop */

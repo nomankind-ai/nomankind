@@ -127,6 +127,12 @@ export interface RevalidateDeps {
   readonly http: HttpClient;
   readonly fetcher: SnapshotFetcher;
   readonly now: Date;
+  /**
+   * What the signed reads are stamped by, when it is not `now`: the live clock
+   * a command passes, so a read made minutes in is not stamped at the instant
+   * the run started (the QA of 2026-09-13). Absent, the fixed `now` stands.
+   */
+  readonly clock?: () => Date;
   readonly io: ValidatorIo;
 }
 
@@ -156,7 +162,7 @@ async function readCore(
   // entry inside the release window is served to a signed request from an agent
   // bound to a registered operator, and a revalidator is exactly that reader.
   const read = await getJson(
-    signingHttp(deps.http, key, deps.now),
+    signingHttp(deps.http, key, deps.clock ?? deps.now),
     baseUrl,
     `/entries/${encodeURIComponent(entryId)}`,
   );
@@ -343,6 +349,7 @@ if (
         http: new WebHttpClient(),
         fetcher: new WebFetcher(),
         now: new Date(),
+        clock: () => new Date(),
         io,
       },
     });

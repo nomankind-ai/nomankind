@@ -51,6 +51,7 @@ import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import { paymentsAdapterFor, type PaymentsAdapter } from "../adapters/stripe.js";
 import type { AnchorAdapter } from "../anchor.js";
 import { SWEEP_INTERVAL_MINUTES } from "../policy.js";
+import { maintainerAgentId } from "./config.js";
 import type { Env } from "./env.js";
 import { json } from "./registry.js";
 import { runSweep, type PinnedWitnesses, type SweepDeps } from "./sweep.js";
@@ -135,8 +136,8 @@ export async function sweepDepsFor(
   const ineligible =
     deps?.ineligibleAgents ??
     new Set(
-      [env.MAINTAINER_AGENT_ID, await sealingAgentIdFor(env)].filter(
-        (agent): agent is string => typeof agent === "string" && agent !== "",
+      [maintainerAgentId(env), await sealingAgentIdFor(env)].filter(
+        (agent): agent is string => agent !== null,
       ),
     );
   return {

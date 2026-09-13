@@ -82,6 +82,8 @@ import {
 import { checkCoreSize, checkSubmission, entryIdFor } from "../submit.js";
 import { checkSupersedes } from "../supersede.js";
 import { readerAccess, type ReaderAccess } from "./access.js";
+import { STRICT_TRANSPORT_SECURITY } from "../ui/html.js";
+import { fetcherAgentId } from "./config.js";
 import type { Env } from "./env.js";
 import { entryRelease, refusalResponse } from "./read.js";
 import {
@@ -108,8 +110,19 @@ export interface SubmitDeps {
   readonly fetcher: SnapshotFetcher;
 }
 
-/** The schema's own id and hash patterns. The schema is the only source. */
-const ENTRY_ID_PATTERN = new RegExp(entrySchema.properties.id.pattern);
+/**
+ * The ids this log actually mints, and the schema's own hash pattern.
+ *
+ * The hash pattern is the schema's verbatim, because the schema is exact about
+ * it. The id pattern is not: the schema says `^nmk_[A-Za-z0-9]+$`, which bounds
+ * the character set and not the length, so `/entries/nmk_<31 hex>` and
+ * `nmk_<33 hex>` reached storage as lookups for ids that cannot exist (the QA
+ * of 2026-09-12). `entryIdFor` (src/submit.ts) mints `nmk_` and exactly
+ * thirty-two lowercase hex, and this is that shape — the same narrowing
+ * src/read.ts and src/worker/read.ts already made, so all three doors refuse
+ * the same strings in the same word.
+ */
+const ENTRY_ID_PATTERN = /^nmk_[0-9a-f]{32}$/;
 const HASH_PATTERN = new RegExp(entrySchema.properties.snapshot_hash.pattern);
 
 /**
@@ -142,6 +155,7 @@ const HASH_PREFIX = "sha256:";
 const CAPTURE_INERT_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   "x-content-type-options": "nosniff",
   "content-security-policy": "default-src 'none'; sandbox",
+  "strict-transport-security": STRICT_TRANSPORT_SECURITY,
 });
 
 /** An archive address as a filename: its hex, without the algorithm prefix. */
@@ -857,8 +871,8 @@ export async function prepareSubmission(
   // Before the duplicate lookup, because a log that cannot take a capture at
   // all has nothing to say about this particular claim: an environment shaped
   // like production answers 503 first, whatever the claim is.
-  const fetcher = env.MAINTAINER_AGENT_ID;
-  if (fetcher === "") return refused(refuse(503, "fetcher_not_configured"));
+  const fetcher = fetcherAgentId(env);
+  if (fetcher === null) return refused(refuse(503, "fetcher_not_configured"));
 
   // The same fact filed twice (decision D-085). After the refusals that need
   // no read and before anything is fetched or archived, because a duplicate

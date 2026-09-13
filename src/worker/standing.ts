@@ -58,6 +58,7 @@ import {
   storedStandingOf,
   storedStandings,
 } from "../storage/repository.js";
+import { checkParameters } from "../params.js";
 import type { Env } from "./env.js";
 import {
   StorageUnreachable,
@@ -257,33 +258,55 @@ function operatorPath(path: string, leaf: string): string | null {
   }
 }
 
+/**
+ * The word these four reads refuse a query in.
+ *
+ * None of them takes one: each answers a whole fold, or one operator's, and
+ * there is nothing on any of them to narrow. A parameter here used to be
+ * dropped silently, so `?limit=5` on the ledger looked like a page of five and
+ * was the whole hundred (the QA of 2026-09-12). `bad_query` is the word every
+ * other listing here already refuses in.
+ */
+const NO_QUERY_WORDS = {
+  unknown: "bad_query",
+  repeated: "bad_query",
+} as const;
+
 async function route(
   request: Request,
   db: D1Like,
   deps: StandingDeps,
 ): Promise<Response | null> {
-  const { pathname } = new URL(request.url);
+  const url = new URL(request.url);
+  const { pathname } = url;
+
+  /** Read, method checked, and nothing asked of it but its own path. */
+  const plain = (): Response | null => {
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
+    const checked = checkParameters(url.searchParams, [], NO_QUERY_WORDS);
+    return checked.ok ? null : refuse(400, checked.reason);
+  };
 
   if (pathname === "/standing") {
-    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
-    return standing(db);
+    const refused = plain();
+    return refused ?? standing(db);
   }
 
   if (pathname === "/ledger") {
-    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
-    return ledger(db);
+    const refused = plain();
+    return refused ?? ledger(db);
   }
 
   const forStanding = operatorPath(pathname, "standing");
   if (forStanding !== null) {
-    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
-    return operatorStanding(db, forStanding);
+    const refused = plain();
+    return refused ?? operatorStanding(db, forStanding);
   }
 
   const forLedger = operatorPath(pathname, "ledger");
   if (forLedger !== null) {
-    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
-    return operatorLedger(db, forLedger, deps.now);
+    const refused = plain();
+    return refused ?? operatorLedger(db, forLedger, deps.now);
   }
 
   return null;

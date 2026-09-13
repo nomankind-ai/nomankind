@@ -98,7 +98,8 @@ const READ_PATH: readonly Endpoint[] = [
     parameters: "—",
     answers:
       "Whether this deployment is up and can reach storage: ok, environment, storage.",
-    refusals: "503 when storage is unreachable; 405 with Allow: GET otherwise.",
+    refusals:
+      "503 environment_misconfigured when the ENVIRONMENT var is not one of local, demo or production, with the value it was given; 503 when storage is unreachable; 405 with Allow: GET otherwise.",
   },
   {
     method: "GET",
@@ -129,10 +130,11 @@ const READ_PATH: readonly Endpoint[] = [
   {
     method: "GET",
     path: "/events",
-    parameters: `after=<seq>, limit=<1..${LIST_PAGE_LIMIT}>`,
+    parameters: `after=<seq>, limit=<1..${LIST_PAGE_LIMIT}>, and nothing else`,
     answers:
       "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. An event whose release date has not arrived goes to a free reader as a hash line — seq, at, type, entry_id, prev_hash, hash, payload null and withheld true — so the chain still links and the seal's root is still over the same leaves. One page is one read: it is charged one unit against the caller's own bucket after the page is built, and carries the same three x-nomankind headers every other door does.",
-    refusals: "400 bad_query; 401 and 402 as the key gate gives them; 429 rate_limited past the cap.",
+    refusals:
+      "400 bad_query for a parameter this door does not take, a parameter given twice, an after that is not a position, or a limit outside the page size; 401 and 402 as the key gate gives them; 429 rate_limited past the cap.",
   },
   {
     method: "GET",
@@ -145,9 +147,10 @@ const READ_PATH: readonly Endpoint[] = [
   {
     method: "GET",
     path: "/seals",
-    parameters: `after=<seal seq>, limit=<1..${LIST_PAGE_LIMIT}>`,
+    parameters: `after=<seal seq>, limit=<1..${LIST_PAGE_LIMIT}>, and nothing else`,
     answers: "The seal chain in seq order, with its head.",
-    refusals: "400 bad_query.",
+    refusals:
+      "400 bad_query for an unknown or repeated parameter, a bad position, or a limit outside the page size.",
   },
   {
     method: "GET",
@@ -160,26 +163,27 @@ const READ_PATH: readonly Endpoint[] = [
   {
     method: "GET",
     path: "/anchors",
-    parameters: `after=<date>, limit=<1..${LIST_PAGE_LIMIT}>`,
+    parameters: `after=<UTC date>, limit=<1..${LIST_PAGE_LIMIT}>, and nothing else`,
     answers:
       "The daily anchors over the previous day's seal roots, which is what makes the existence proof independent of the identity layer.",
-    refusals: "400 bad_query.",
+    refusals:
+      "400 bad_query for an unknown or repeated parameter, a limit outside the page size, or an after that is not a day the calendar has — 2026-13-45 is a refusal and not an empty page.",
   },
   {
     method: "GET",
     path: "/anchors/{date}",
     parameters: "—",
     answers: "One UTC day's anchor.",
-    refusals: "404 not_found.",
+    refusals: "400 bad_id for anything that is not a day the calendar has; 404 not_found.",
   },
   {
     method: "GET",
     path: "/read/{id}",
-    parameters: "—",
+    parameters: "— (the entry is named in the path; this door takes no query)",
     answers:
       "The frozen reader's single signed fact: entry, sidecar, seal, receipt. Only a verified entry is served with a receipt, stale or not.",
     refusals:
-      "400 bad_id; 402 unreleased with release_date, to a reader with neither a key nor an operator signature, while the entry's content is inside the release window; 404 not_found; 409 entry_not_verified with status and superseded_by, which issues no receipt and moves no counter; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter and repeated_parameter — a demand this door cannot apply is refused rather than dropped, exactly as on the query twin — then 400 bad_id; 402 unreleased with release_date, to a reader with neither a key nor an operator signature, while the entry's content is inside the release window; 404 not_found; 409 entry_not_verified with status and superseded_by, which issues no receipt and moves no counter; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
@@ -189,7 +193,7 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed; min_source is the lowest source class the reader will take, official above recognized above other, compared against the class the sidecar derived from the entry's own citation; and the age is whole UTC days against last_confirmed.",
     refusals:
-      "400 unknown_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_max_age; 402 unreleased with release_date, as above; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, repeated_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_max_age; 402 unreleased with release_date, as above; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
@@ -259,7 +263,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters: "—",
     answers:
       "Every operator's standing as the sweep last folded it: position — the position the sweep folded to, at or behind the sealed head — formula (the policy names the fold applies, in the order it applies them), operators (each with operator, earned, burned, locked, standing, available, counts, position), which is every registered operator — one registered since the last fold is on the list at zero at that position rather than absent. The published number is the sweep's at its position, and the recompute is the command: npm run standing folds the log itself and is what settles a disagreement. Before the sweep has ever folded there is nothing stored and the log is folded here.",
-    refusals: "405 with Allow: GET.",
+    refusals: "400 bad_query for any parameter at all: this door takes none. 405 with Allow: GET.",
   },
   {
     method: "GET",
@@ -267,7 +271,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters: "—",
     answers:
       "One operator's standing from the same stored fold: operator, position, earned, burned, locked, standing, available, counts, formula, and stored — the cached { standing, seq } off the operator row, or null when the formula has never been run for it. What is served is the sweep's answer at its position, never a fold of the log per request; npm run standing is the recompute, and the log is what decides if the two disagree.",
-    refusals: "404 not_found.",
+    refusals: "400 bad_query for any parameter at all; 404 not_found.",
   },
   {
     method: "GET",
@@ -275,7 +279,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters: "—",
     answers:
       `One operator's money: operator, balance (accrued, held, released, clawed_back, paid, carried_forward, all in micro-USD), and rows — the newest ${LIST_PAGE_LIMIT} ledger rows, newest first, each with id, kind, entry_id, operator, role, date, reads, unit, amount, available_at, seq, at, ref. A read_share row's ref carries price_micros_per_read, share_percent, stale, the entry's evidence tier as tier, and on a slot holder's row measured — whether that holder's own signed record carried a passing measurement, which is what decides between the two validator rates. A dispute_reward row's ref carries the stake record it was written as, the ids of the clawbacks its amount was read off as clawbacks, and their sum as clawed_back.`,
-    refusals: "404 not_found.",
+    refusals: "400 bad_query for any parameter at all; 404 not_found.",
   },
   {
     method: "GET",
@@ -283,7 +287,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters: "—",
     answers:
       "The money side of the log as a whole: reconciliations (each day's published read count against what the ledger accrued for it), payouts (what has left, under the provider's own reference), and policy — READ_PRICE_MICROS_PER_READ, PAYOUT_MINIMUM_MICROS, PAYOUT_CYCLE, HOLDBACK_DAYS, read from the same module the policy page reads.",
-    refusals: "405 with Allow: GET.",
+    refusals: "400 bad_query for any parameter at all; 405 with Allow: GET.",
   },
 ];
 
@@ -296,7 +300,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the operator record: id, maintainer, provider, registered_seq, details (registered_by, attestation, trusted, trusted_seq, named_by, payout_status), agents, domains. The events operator_registered and agent_bound are appended atomically with the rows.",
     refusals:
-      "400 bad body shape; 401 authentication; 422 bad_domain, unregistered_domain, provider_operator (decided against that domain's excluded parties), missing_attestation, bad_attestation, attestation_domain_mismatch; 409 operator_exists, agent_bound (the name check is re-read on every rebuild, so a twin registering the same name in the same tick is told operator_exists rather than handed a 503); 422 dns_no_record, dns_mismatch and 503 dns_unavailable; 422 payout_not_verified and 503 payout_unavailable; 503 chain_conflict.",
+      "400 bad body shape; 401 authentication; 422 bad_domain (a domain that is not a lowercase hostname of at least two labels, an IP address written as a dotted quad or in brackets, or a name whose last label is all digits), unregistered_domain, provider_operator (decided against that domain's excluded parties), missing_attestation, bad_attestation (which is also a signed_at outside REQUEST_CLOCK_SKEW_SECONDS of the request clock: on a first registration the request and the attestation are signed by the same key, so one fresh signature must not stand for two), attestation_domain_mismatch; 409 operator_exists, agent_bound (the name check is re-read on every rebuild, so a twin registering the same name in the same tick is told operator_exists rather than handed a 503); 422 dns_no_record, dns_mismatch and 503 dns_unavailable; 422 payout_not_verified and 503 payout_unavailable; 503 chain_conflict.",
   },
   {
     method: "GET",
@@ -321,7 +325,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the operator record, its domains now including this one. The event operator_joined_domain is appended atomically with the row. The attestation is per domain and never per operator: an operator signs the sentence of the domain it is joining, so joining a second domain is signing a second attestation and nothing about the first changes.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 agent_mismatch; then 422 unregistered_operator, unregistered_domain, 403 excluded_party, 409 already_joined, 422 missing_attestation, bad_attestation, attestation_domain_mismatch.",
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 agent_mismatch; then 422 unregistered_operator, unregistered_domain, 403 excluded_party, 409 already_joined, 422 missing_attestation, bad_attestation — which is also a signed_at outside REQUEST_CLOCK_SKEW_SECONDS of the request clock, the same window the agent-bind door holds an attestation to, because the request here is signed by a key the operator already has and nothing else says the sentence was made now — attestation_domain_mismatch.",
   },
   {
     method: "POST",
@@ -676,6 +680,44 @@ export function renderApi(ctx: PageContext): string {
           cache and never stored in it: what it is answered depends on who is
           asking.
         </p>
+        <p class="note">
+          A query is read by one rule on every door. A parameter the door does
+          not take and a parameter given twice are both refusals, never a
+          shrug — a caller who mistyped a filter and got the unfiltered answer
+          would believe they had filtered it, and two values for one parameter
+          are two questions of which picking one is guessing. A door that names
+          its subject in the path takes no query at all, so a parameter on
+          <span class="mono">/read/{id}</span>,
+          <span class="mono">/standing</span>, <span class="mono">/ledger</span>
+          or either operator read is refused too. A day is checked against the
+          calendar and not against a shape, so
+          <span class="mono">?after=2026-13-45</span> is a refusal rather than an
+          empty page, and a <span class="mono">limit</span> above
+          ${LIST_PAGE_LIMIT} is refused rather than clamped. The listings say
+          <span class="mono">bad_query</span>; the frozen reader and the entries
+          listing say <span class="mono">unknown_parameter</span> and
+          <span class="mono">repeated_parameter</span>, the words they have
+          always used.
+        </p>
+        <p class="note">
+          Every response carries
+          <span class="mono">strict-transport-security: max-age=31536000</span> —
+          pages, JSON and refusals alike, with no
+          <span class="mono">includeSubDomains</span> and no
+          <span class="mono">preload</span> — beside the
+          <span class="mono">x-content-type-options</span>,
+          <span class="mono">referrer-policy</span> and
+          <span class="mono">content-security-policy</span> the pages carry. And
+          every door on a deployment whose <span class="mono">ENVIRONMENT</span>
+          var is not <span class="mono">local</span>,
+          <span class="mono">demo</span> or
+          <span class="mono">production</span> answers 503
+          <span class="mono">environment_misconfigured</span> with the value it
+          was given, <span class="mono">GET /health</span> included, and the
+          sweep does nothing but record that reason on every step: the name
+          chooses the payout, payment and witness adapters, so a typo must not
+          be able to select the mocks quietly.
+        </p>
       </section>
 
       ${endpoints(
@@ -731,9 +773,19 @@ POST
         </p>
         <p class="note">
           Make a key with
-          <span class="mono">npm run keygen -- &lt;path&gt;</span>, which writes a
-          0600 JSON file holding agent_id, public_key, private_key_pkcs8 and
-          created_at. An entry's own <span class="mono">signature</span> field is
+          <span class="mono">npm run keygen -- [&lt;name&gt; | --out &lt;path&gt;]</span>,
+          which writes a 0600 JSON file holding agent_id, public_key,
+          private_key_pkcs8 and created_at. The argument is a name and not a
+          path (D-016): the file lands at
+          <span class="mono">~/.nomankind/keys/&lt;name&gt;.json</span>,
+          <span class="mono">default.json</span> when no name is given, in a
+          per-user directory made 0700 and outside any checkout, so no
+          <span class="mono">git add .</span> in a clone can commit a private
+          key. <span class="mono">--out &lt;path&gt;</span> writes somewhere else
+          when that is what you mean, in place of the name rather than beside
+          it — the two together are a usage error; either way the command prints the path and
+          the agent id, never the private half, and refuses rather than
+          overwriting a key that is already there. An entry's own <span class="mono">signature</span> field is
           separate: base64 Ed25519 over the JCS of the
           ${CORE_KEYS.length}-key core, verified against the key in
           <span class="mono">author</span>. A core sealed under schema v0.6
@@ -895,9 +947,19 @@ POST
           when the answer and the entry's claim match under the published
           normalization rule, signs the record and posts it.
         </p>
-        <pre class="block mono">npm run attest -- request &lt;model-key.json&gt; ${origin}
-npm run attest -- answer &lt;model-key.json&gt; ${origin} &lt;attestation-id&gt; [--answers &lt;file.json&gt;] [--drift]
-npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt;</pre>
+        <pre class="block mono">npm run attest -- request &lt;model-key.json&gt; ${origin} [--sign &lt;key.json&gt;]
+npm run attest -- answer &lt;model-key.json&gt; ${origin} &lt;attestation-id&gt; [--answers &lt;file.json&gt;] [--drift] [--sign &lt;key.json&gt;]
+npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt; [--sign &lt;key.json&gt;]</pre>
+        <p class="note">
+          <span class="mono">--sign &lt;key.json&gt;</span> signs every read the
+          run makes with an operator's agent key (decision D-100). The answer
+          and the score both read each probed entry's own claim, and a claim
+          whose covering seal is still inside the release window is not served
+          to a free reader at all, so an unsigned run stops on one named line —
+          <span class="mono">withheld inside the release window; pass --sign
+          &lt;key.json&gt;</span> — rather than scoring a model against content
+          it never saw.
+        </p>
         <p class="note">
           The submit command gained the other half of an observed entry:
           <span class="mono">--receipt</span> takes the receipt artifact, checks
@@ -1334,6 +1396,7 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
           <span class="mono">payout_unavailable</span>,
           <span class="mono">maintainer_not_configured</span>,
           <span class="mono">fetcher_not_configured</span>,
+          <span class="mono">environment_misconfigured</span>,
           <span class="mono">archive_unreachable</span>,
           <span class="mono">receipts_not_configured</span>,
           <span class="mono">receipt_conflict</span>,
@@ -1352,7 +1415,26 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
           line.
         </p>
         <pre class="block mono">npm run export -- ${origin} &lt;entry-id&gt; ./bundle [--key &lt;api key&gt; | --sign &lt;key.json&gt;]
-npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
+npm run verify -- ./bundle/entry.json ./bundle/log.json
+npm run checkpoint -- [--wait-seal] ${origin} &lt;maintainer-key.json&gt; &lt;fixture-a.json&gt; &lt;fixture-b.json&gt; &lt;fixture-c.json&gt; &lt;out-dir&gt; [--sign &lt;key.json&gt;]</pre>
+        <p class="note">
+          The checkpoint is the whole walk in one command: three fixture
+          operators join and are named to the trusted pool, one entry is
+          submitted and validated by all three, the two files are exported and
+          the verifier is run on them.
+          <span class="mono">--wait-seal</span> polls
+          <span class="mono">GET /seals</span> until the head seal covers the
+          entry, so the export carries an inclusion proof rather than a seal not
+          yet made, and <span class="mono">--sign &lt;key.json&gt;</span> signs
+          every read it makes — the entry it just made is minutes old and so
+          inside the release window, and a free export of it is the released
+          view, on which the verifier answers
+          <span class="mono">entry_withheld</span>. Without the flag the walk
+          says so in one line —
+          <span class="mono">withheld inside the release window; pass --sign
+          &lt;key.json&gt;</span> — rather than printing a diff that means the
+          same thing.
+        </p>
         <p class="note">
           <span class="mono">--sign</span> signs the export's reads with an
           operator's agent key and <span class="mono">--key</span> presents an
@@ -1387,7 +1469,16 @@ npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT} [--domain &lt;slug
           endpoint's, so a standing nobody can recompute is a standing that fails
           here rather than one a reader has to take on trust.
         </p>
-        <pre class="block mono">npm run standing -- ${origin} &lt;operator&gt;</pre>
+        <pre class="block mono">npm run standing -- ${origin} &lt;operator&gt; [--sign &lt;key.json&gt;]</pre>
+        <p class="note">
+          The fold is over the sealed events, and an event inside the release
+          window goes to a free reader as a hash line with its payload nulled,
+          which is nothing to fold. So this command takes
+          <span class="mono">--sign &lt;key.json&gt;</span> too, and run without
+          it against a log the window still holds it stops on the same line —
+          <span class="mono">withheld inside the release window; pass --sign
+          &lt;key.json&gt;</span> — rather than folding a null.
+        </p>
         <p class="note">
           The whole log has a command of its own too: the daily CC0 mirror
           below, which exports every entry, event, seal, anchor and index at the

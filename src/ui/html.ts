@@ -398,6 +398,23 @@ export const CONTENT_SECURITY_POLICY =
   "form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 /**
+ * The transport rule every response carries, verbatim.
+ *
+ * A year, and this host alone: no `includeSubDomains`, because the apex serves
+ * the landing page and app serves the log and a fork may run anything else
+ * under the same name, and no `preload`, because a preload list is a promise
+ * about every subdomain forever that nobody here is in a position to make. What
+ * it does say is the whole of what it needs to: once a browser has seen this
+ * origin it never asks for it over plain HTTP again, so a link pasted as
+ * `http://` cannot be answered by anybody but us.
+ *
+ * On every answer and not only on the pages (the QA of 2026-09-12): a JSON door
+ * and a refusal are reached by a browser too, and a header that is only on the
+ * documents is a header a reader can miss by asking for the wrong one first.
+ */
+export const STRICT_TRANSPORT_SECURITY = "max-age=31536000";
+
+/**
  * Serve a rendered document.
  *
  * `no-store`, because every page is a view of a log that moves and a cached
@@ -417,6 +434,7 @@ export function htmlResponse(
   headers.set("x-content-type-options", "nosniff");
   headers.set("referrer-policy", "no-referrer");
   headers.set("content-security-policy", CONTENT_SECURITY_POLICY);
+  headers.set("strict-transport-security", STRICT_TRANSPORT_SECURITY);
   return new Response(document, { status, headers });
 }
 
@@ -433,6 +451,7 @@ export function cssResponse(css: string): Response {
       "content-type": "text/css; charset=utf-8",
       "cache-control": "public, max-age=3600",
       "x-content-type-options": "nosniff",
+      "strict-transport-security": STRICT_TRANSPORT_SECURITY,
     },
   });
 }

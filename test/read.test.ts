@@ -121,9 +121,10 @@ describe("parseReadQuery", () => {
     );
   });
 
-  it("names its ten refusals in the order it checks them", () => {
+  it("names its eleven refusals in the order it checks them", () => {
     expect(READ_QUERY_REFUSALS).toEqual([
       "unknown_parameter",
+      "repeated_parameter",
       "bad_entry_id",
       "mixed_query",
       "missing_subject",

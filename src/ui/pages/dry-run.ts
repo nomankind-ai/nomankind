@@ -118,7 +118,18 @@ export function renderDryRun(ctx: PageContext): string {
             created_at, and it refuses to overwrite a file that is already
             there rather than destroying a key someone is using.
           </p>
-          <pre class="block mono">npm run keygen -- ./demo-key.json</pre>
+          <pre class="block mono">npm run keygen -- demo</pre>
+          <p class="note">
+            The argument is a name, not a path. The key lands in
+            <span class="mono">~/.nomankind/keys/demo.json</span> — a per-user
+            directory made 0700 the first time, outside the clone entirely, so
+            no <span class="mono">git add .</span> in the repository can ever
+            pick a private key up. The command prints the full path it wrote.
+            <span class="mono">--out &lt;path&gt;</span> puts the key somewhere
+            else when you mean to, in place of the name rather than beside it; the commands below take a path either way, so
+            substitute yours wherever they say
+            <span class="mono">~/.nomankind/keys/demo.json</span>.
+          </p>
           <p class="note">
             The private half never leaves your machine. Nothing on this site ever
             asks for it, nothing in these commands sends it, and every request it
@@ -161,7 +172,7 @@ export function renderDryRun(ctx: PageContext): string {
             independence attestation for the domain you are joining with your own
             key, and posts the registration.
           </p>
-          <pre class="block mono">npm run register -- ./demo-key.json ${origin} &lt;your domain&gt; [--domain ${DEFAULT_DOMAIN}]</pre>
+          <pre class="block mono">npm run register -- ~/.nomankind/keys/demo.json ${origin} &lt;your domain&gt; [--domain ${DEFAULT_DOMAIN}]</pre>
           <p class="note">
             No <span class="mono">--genesis</span>. That flag posts the
             maintainer's one-time naming of a founding operator, and it is signed
@@ -197,7 +208,7 @@ export function renderDryRun(ctx: PageContext): string {
             <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a> and ask for a
             seeded one to judge. Then run the validator against it.
           </p>
-          <pre class="block mono">npm run validate -- ./demo-key.json ${origin} &lt;entry-id&gt; [--assigned] [--duplicate-of &lt;entry-id&gt;]</pre>
+          <pre class="block mono">npm run validate -- ~/.nomankind/keys/demo.json ${origin} &lt;entry-id&gt; [--assigned] [--duplicate-of &lt;entry-id&gt;]</pre>
           <p class="note">
             The decision is yours and the evidence is your own. The command does
             not take the submission's snapshot on faith: it fetches the cited
@@ -275,7 +286,7 @@ export function renderDryRun(ctx: PageContext): string {
             captures the snapshot hashes point at; the verifier runs its checks
             in order and exits 0 clean, or 1 with one named difference per line.
           </p>
-          <pre class="block mono">npm run export -- ${origin} &lt;entry-id&gt; ./bundle --sign ./demo-key.json
+          <pre class="block mono">npm run export -- ${origin} &lt;entry-id&gt; ./bundle --sign ~/.nomankind/keys/demo.json
 npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
           <p class="note">
             <span class="mono">--sign</span> signs the export's reads with the

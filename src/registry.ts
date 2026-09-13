@@ -261,6 +261,9 @@ export const DNS_NAME_MAX_LENGTH = 253;
 
 const LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
+/** A label with nothing in it but digits. */
+const ALL_DIGITS = /^\d+$/;
+
 /**
  * Whether a value is a domain an operator can register under, which is also
  * the operator's id: Section 5 makes the domain the thing proved, so the
@@ -270,6 +273,17 @@ const LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
  * folded here: the operator id is a key in the log and two spellings of one
  * domain must never be two operators, so the one accepted spelling is the
  * lowercase one and anything else is refused rather than repaired.
+ *
+ * An address written as one is refused too — it is not something a TXT record
+ * can prove control of, and not a name a reader can look up to see who stands
+ * behind an operator — and the rules already here are what refuse it, which is
+ * why there is no separate address test (the QA of 2026-09-13 found the one
+ * that had been added unreachable, every test still passing with it disabled).
+ * `198.51.100.7` is refused by the all-digits rule on the last label, and every
+ * IPv6 spelling by the label pattern and the two-label minimum: `::1` and
+ * `2001:db8::1` are one label, and `[2001:db8::1]` is one label with a colon
+ * and a bracket in it. The test above them (test/registry.test.ts) names both
+ * forms, so a rule that stopped refusing them would fail there.
  */
 export function isOperatorDomain(value: unknown): value is string {
   if (typeof value !== "string") return false;
@@ -277,6 +291,12 @@ export function isOperatorDomain(value: unknown): value is string {
   if (value.endsWith(".")) return false;
   const labels = value.split(".");
   if (labels.length < 2) return false;
+  // The top-level label may not be all digits. It is the rule that makes
+  // `1.2.3.4` a name nobody can register even written with more labels, and it
+  // is the one place the digits test belongs: `01.ai` is a real registrable
+  // domain and `123.example.com` is a real host, so refusing every numeric
+  // label would refuse names that exist.
+  if (ALL_DIGITS.test(labels[labels.length - 1]!)) return false;
   return labels.every(
     (label) => label.length <= DNS_LABEL_MAX_LENGTH && LABEL.test(label),
   );
@@ -529,6 +549,8 @@ export interface RegistrationInput {
   /** The operator this agent is already bound to, or null when it is free. */
   readonly agentOperator: string | null;
   readonly providers?: readonly string[];
+  /** The instant the request is served at. Injected; nothing here reads a clock. */
+  readonly now: Date;
 }
 
 export type RegistrationCheck =
@@ -549,6 +571,14 @@ export type RegistrationCheck =
  * `maintainer` marks nomankind's own registration. It is the acting agent being
  * the configured maintainer agent and nothing else: no request can claim it,
  * because the field is not read from one.
+ *
+ * The attestation's own timestamp is held to REQUEST_CLOCK_SKEW_SECONDS of the
+ * request clock, exactly as the bind door holds it (the QA of 2026-09-12).
+ * Without it a sentence signed years ago — by a key that has since been sold
+ * with the domain, or published in a fixture — would still register an operator
+ * today, and the request signature does not stand for it: on a first
+ * registration the request is signed by the very key the attestation is, so one
+ * fresh signature was being taken as proof of two.
  */
 export async function checkRegistration(
   input: RegistrationInput,
@@ -572,6 +602,9 @@ export async function checkRegistration(
     input.attestation,
   );
   if (!signed) {
+    return { ok: false, reason: "bad_attestation" };
+  }
+  if (!withinSkew(input.attestation, input.now)) {
     return { ok: false, reason: "bad_attestation" };
   }
   if (attestationDomain(input.attestation) !== domain) {
@@ -623,6 +656,8 @@ export interface DomainJoinInput {
   /** The domains it is already attested in (src/derive.ts, operatorDomainsAt). */
   readonly domains: readonly string[];
   readonly providers?: readonly string[];
+  /** The instant the request is served at. Injected; nothing here reads a clock. */
+  readonly now: Date;
 }
 
 export type DomainJoinCheck = { ok: true } | { ok: false; reason: JoinRefusal };
@@ -640,6 +675,11 @@ export type DomainJoinCheck = { ok: true } | { ok: false; reason: JoinRefusal };
  *
  * The exclusion is keyed by the domain being joined and by nothing else, which
  * is what makes an operator excluded in one domain eligible in another.
+ *
+ * The attestation's `signed_at` is held to the same window the bind door and a
+ * registration hold it to (the QA of 2026-09-12): the request here is signed by
+ * an agent the operator already has, so nothing but this says the sentence for
+ * the new domain was made now rather than found.
  */
 export async function checkDomainJoin(
   input: DomainJoinInput,
@@ -665,6 +705,9 @@ export async function checkDomainJoin(
     input.attestation,
   );
   if (!signed) {
+    return { ok: false, reason: "bad_attestation" };
+  }
+  if (!withinSkew(input.attestation, input.now)) {
     return { ok: false, reason: "bad_attestation" };
   }
   if (attestationDomain(input.attestation) !== input.domain) {

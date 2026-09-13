@@ -70,7 +70,11 @@
  * bare integers are HTTP status codes, and the cache's two are
  * PAGE_CACHE_SECONDS and PAGE_CACHE_STALE_SECONDS from src/policy.ts. No
  * environment-specific branch lives here either: `ENVIRONMENT` is read from the
- * binding and echoed back.
+ * binding and echoed back. What is asked of it, above everything else in this
+ * file, is only that it is one of the three names this code knows
+ * (src/worker/config.ts) — an unknown one is 503 `environment_misconfigured` on
+ * every door, health included, because the name silently chooses the payout,
+ * payment and witness adapters and a typo would have chosen the mocks.
  */
 
 import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
@@ -85,6 +89,10 @@ import { PAGE_CACHE_SECONDS, PAGE_CACHE_STALE_SECONDS } from "../policy.js";
 import { HEADER_AGENT } from "../request.js";
 import { htmlResponse } from "../ui/html.js";
 import { renderNotFound } from "../ui/pages/errors.js";
+import {
+  ENVIRONMENT_MISCONFIGURED,
+  environmentConfigured,
+} from "./config.js";
 import type { Env } from "./env.js";
 import { handleAlerts } from "./alerts.js";
 import { handleAttest } from "./attest.js";
@@ -161,9 +169,10 @@ export interface RequestDeps {
   readonly fetcher?: SnapshotFetcher;
   /**
    * Where the attestation door reads public randomness (M22). The deployed
-   * Worker passes none and gets the real drand reader, exactly as the cron
-   * door's sweep does; the fixture beacon is for tests and is never reachable
-   * from here (decision D-013 as amended).
+   * Worker passes none and gets the real drand reader, exactly as the sweep on
+   * the Sweeper's own alarm does — the cron door arms that alarm and sweeps
+   * nothing itself; the fixture beacon is for tests and is never reachable from
+   * here (decision D-013 as amended).
    */
   readonly beacon?: BeaconReader;
   /**
@@ -387,6 +396,27 @@ function forPageCache(response: Response): Response {
 }
 
 /**
+ * The one answer a misconfigured deployment gives, on every path.
+ *
+ * 503 and not 500: nothing is wrong with the request, and nothing the caller
+ * can do will fix it. The reason travels in `error` so an agent can parse it
+ * and beside `environment`, which is the value that is wrong — it is a `vars`
+ * entry from wrangler.jsonc and never a secret, so naming it is what turns a
+ * dead deployment into a typo somebody can see.
+ */
+function misconfigured(env: Env): Response {
+  return json(
+    {
+      ok: false,
+      error: ENVIRONMENT_MISCONFIGURED,
+      environment: env.ENVIRONMENT,
+      storage: "unknown",
+    },
+    503,
+  );
+}
+
+/**
  * The router. Exported by name so tests can call it without a fetch stack.
  *
  * Three things happen around the dispatch below and nowhere else in the system:
@@ -401,6 +431,20 @@ export async function handleRequest(
   deps?: RequestDeps,
 ): Promise<Response> {
   const url = new URL(request.url);
+
+  // Before the cache, before the router, and before the health probe: a
+  // deployment whose `ENVIRONMENT` is not one of the three names this code
+  // knows is misconfigured, and every door says so (the QA of 2026-09-12). It
+  // is checked here rather than where the name is used because the name picks
+  // the payout, payment and witness adapters, and every one of them chooses its
+  // mock by asking whether the name is `production` — so a var misspelt
+  // `prodcution` would have run a real deployment on mocks, silently. A cached
+  // page is not served past it either: an answer stored before the var was
+  // broken is still an answer from a deployment that is now broken.
+  if (!environmentConfigured(env)) {
+    return forMethod(request, misconfigured(env));
+  }
+
   const cache = deps?.cache;
   const key =
     cache !== undefined && cacheable(request, url)

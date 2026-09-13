@@ -38,6 +38,13 @@ import {
 } from "../storage/repository.js";
 import type { Env } from "./env.js";
 import {
+  checkParameters,
+  isCalendarDate,
+  readDate,
+  readLimit,
+  readPosition,
+} from "../params.js";
+import {
   StorageUnreachable,
   guardDatabase,
   json,
@@ -49,12 +56,6 @@ import {
 
 /** A non-negative integer position, in the log or in the seal chain. */
 const NON_NEGATIVE_INTEGER = /^(?:0|[1-9][0-9]*)$/;
-
-/** A positive integer page size. */
-const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
-
-/** A UTC calendar day, exactly as an anchor is keyed by one. */
-const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * `after` is exclusive and seq 0 is a real position, so the start of the chain
@@ -68,27 +69,45 @@ const BEFORE_ANY_DAY = "";
 /** The `after` and `limit` a listing takes, or the refusal they earned. */
 type Page = { after: string; limit: number } | Response;
 
+/** Every parameter either listing takes, and nothing else. */
+const LISTING_QUERY_PARAMETERS: readonly string[] = Object.freeze([
+  "after",
+  "limit",
+]);
+
+/** Both listings have one word for a query they cannot read. */
+const LISTING_QUERY_WORDS = {
+  unknown: "bad_query",
+  repeated: "bad_query",
+} as const;
+
+/**
+ * The two parameters, read the one way (the QA of 2026-09-12).
+ *
+ * The seal chain pages by a position and the anchors by a day, so `integer`
+ * picks which of the two `after` is. Everything else is shared, and two things
+ * are new: a parameter this door does not take and a parameter given twice are
+ * refused rather than ignored, and a day is checked against the calendar rather
+ * than against a shape — `?after=2026-13-45` is four digits, two digits and two
+ * digits, and it answered an empty page about a day that does not exist.
+ */
 function pageOf(url: URL, first: string, integer: boolean): Page {
-  const rawAfter = url.searchParams.get("after");
-  let after = first;
-  if (rawAfter !== null) {
-    const shape = integer ? NON_NEGATIVE_INTEGER : CALENDAR_DATE;
-    if (!shape.test(rawAfter)) return refuse(400, "bad_query");
-    if (integer && !Number.isSafeInteger(Number(rawAfter))) {
-      return refuse(400, "bad_query");
-    }
-    after = rawAfter;
-  }
+  const checked = checkParameters(
+    url.searchParams,
+    LISTING_QUERY_PARAMETERS,
+    LISTING_QUERY_WORDS,
+  );
+  if (!checked.ok) return refuse(400, checked.reason);
 
-  const rawLimit = url.searchParams.get("limit");
-  let limit = LIST_PAGE_LIMIT;
-  if (rawLimit !== null) {
-    if (!POSITIVE_INTEGER.test(rawLimit)) return refuse(400, "bad_query");
-    limit = Number(rawLimit);
-    if (limit > LIST_PAGE_LIMIT) return refuse(400, "bad_query");
-  }
+  const after = integer
+    ? readPosition(url.searchParams, "after", Number(first), LISTING_QUERY_WORDS)
+    : readDate(url.searchParams, "after", first, LISTING_QUERY_WORDS);
+  if (!after.ok) return refuse(400, after.reason);
 
-  return { after, limit };
+  const limit = readLimit(url.searchParams, LIST_PAGE_LIMIT, LISTING_QUERY_WORDS);
+  if (!limit.ok) return refuse(400, limit.reason);
+
+  return { after: String(after.value), limit: limit.value };
 }
 
 /**
@@ -202,7 +221,10 @@ async function anchors(url: URL, db: D1Like): Promise<Response> {
 
 /** One day's anchor. */
 async function anchor(raw: string, db: D1Like): Promise<Response> {
-  if (!CALENDAR_DATE.test(raw)) return refuse(400, "bad_id");
+  // A day the calendar has, and not merely a string shaped like one: the path
+  // and the `after` parameter ask the same question and now answer it the same
+  // way (the QA of 2026-09-12).
+  if (!isCalendarDate(raw)) return refuse(400, "bad_id");
   const found = await getAnchor(db, raw);
   if (found === null) return refuse(404, "not_found");
   return json(found, 200);

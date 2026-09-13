@@ -37,6 +37,7 @@ import {
   type Access,
 } from "./access.js";
 import type { Env } from "./env.js";
+import { checkParameters, readLimit, readPosition } from "../params.js";
 import { refusalResponse } from "./read.js";
 import {
   StorageUnreachable,
@@ -48,17 +49,30 @@ import {
   refuse,
 } from "./registry.js";
 
-/** A non-negative integer position in the log. */
-const NON_NEGATIVE_INTEGER = /^(?:0|[1-9][0-9]*)$/;
-
-/** A positive integer page size. */
-const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
+/**
+ * Every parameter this door takes, and nothing else.
+ *
+ * It used to take anything and read two of them, so `?limt=5` was served as an
+ * unbounded page and `?after=1&after=900` was served as the first of the two —
+ * where the delta stream and the entries listing both refuse each (the QA of
+ * 2026-09-12). One reader, `checkParameters`, applies both rules now.
+ */
+const EVENTS_QUERY_PARAMETERS: readonly string[] = Object.freeze([
+  "after",
+  "limit",
+]);
 
 /**
  * `after` is exclusive and seq 0 is a real position, so the start of the log is
  * "after -1". A caller never writes that: they omit `after` instead.
  */
 const BEFORE_THE_LOG = -1;
+
+/** This door has one word for a query it cannot read, and has always had it. */
+const EVENTS_QUERY_WORDS = {
+  unknown: "bad_query",
+  repeated: "bad_query",
+} as const;
 
 /**
  * The page as a free reader sees it: every event whose covering seal has not
@@ -93,21 +107,25 @@ async function page(
   free: boolean,
   now: Date,
 ): Promise<Response> {
-  const rawAfter = url.searchParams.get("after");
-  let after = BEFORE_THE_LOG;
-  if (rawAfter !== null) {
-    if (!NON_NEGATIVE_INTEGER.test(rawAfter)) return refuse(400, "bad_query");
-    after = Number(rawAfter);
-    if (!Number.isSafeInteger(after)) return refuse(400, "bad_query");
-  }
+  const checked = checkParameters(
+    url.searchParams,
+    EVENTS_QUERY_PARAMETERS,
+    EVENTS_QUERY_WORDS,
+  );
+  if (!checked.ok) return refuse(400, checked.reason);
 
-  const rawLimit = url.searchParams.get("limit");
-  let limit = LIST_PAGE_LIMIT;
-  if (rawLimit !== null) {
-    if (!POSITIVE_INTEGER.test(rawLimit)) return refuse(400, "bad_query");
-    limit = Number(rawLimit);
-    if (limit > LIST_PAGE_LIMIT) return refuse(400, "bad_query");
-  }
+  const position = readPosition(
+    url.searchParams,
+    "after",
+    BEFORE_THE_LOG,
+    EVENTS_QUERY_WORDS,
+  );
+  if (!position.ok) return refuse(400, position.reason);
+  const after = position.value;
+
+  const page = readLimit(url.searchParams, LIST_PAGE_LIMIT, EVENTS_QUERY_WORDS);
+  if (!page.ok) return refuse(400, page.reason);
+  const limit = page.value;
 
   const events = await eventsAfter(env.DB, after, limit);
   // The seals covering exactly the events on this page, read once: a page is a

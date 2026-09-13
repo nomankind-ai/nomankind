@@ -4,7 +4,17 @@ import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { keygen } from "../src/cli/keygen.js";
+import {
+  DEFAULT_KEY_NAME,
+  USAGE,
+  KEY_DIRECTORY_MODE,
+  defaultKeyPath,
+  isKeyName,
+  keyDirectory,
+  keyExistsMessage,
+  keygen,
+  keygenPlan,
+} from "../src/cli/keygen.js";
 import { base64urlDecode } from "../src/encoding.js";
 import {
   agentIdFromPublicKey,
@@ -118,5 +128,73 @@ describe("keygen (D-016)", () => {
     // The original key is untouched.
     const file = await readKeyFile(path);
     expect(file.agent_id).toBe(first.agentId);
+  });
+
+  it("names the refusal rather than throwing a bare EEXIST", async () => {
+    const path = join(directory, "named.json");
+    const written = await keygen(path, capture().io);
+    // One sentence a caller can read, carrying the path and no errno and no
+    // stack: the second run is told what is in the way, not how the write
+    // failed.
+    await expect(keygen(path, capture().io)).rejects.toThrow(
+      keyExistsMessage(written.path),
+    );
+  });
+
+  it("makes the directory it writes into, 0700", async () => {
+    const parent = join(directory, "made", "deeper");
+    const { io } = capture();
+    await keygen(join(parent, "key.json"), io);
+    const stats = await stat(parent);
+    expect(stats.mode & 0o777).toBe(KEY_DIRECTORY_MODE);
+  });
+});
+
+describe("where keygen writes (D-016)", () => {
+  const home = "/home/somebody";
+
+  it("defaults to the per-user directory and never the working tree", () => {
+    const plan = keygenPlan([], home);
+    expect(plan).toEqual({
+      path: `${home}/.nomankind/keys/${DEFAULT_KEY_NAME}.json`,
+      explicit: false,
+    });
+    // The point of the decision: nothing a default run writes is under a
+    // checkout, so no `git add .` anywhere can commit a private key.
+    expect(keyDirectory(home).startsWith(home)).toBe(true);
+    expect(plan!.path).not.toContain("./");
+  });
+
+  it("takes a name and puts it in that directory", () => {
+    expect(keygenPlan(["demo"], home)).toEqual({
+      path: defaultKeyPath("demo", home),
+      explicit: false,
+    });
+  });
+
+  it("takes --out for a path the caller means", () => {
+    expect(keygenPlan(["--out", "./demo-key.json"], home)).toEqual({
+      path: "./demo-key.json",
+      explicit: true,
+    });
+  });
+
+  it("refuses a name that is a path, so nothing climbs out of the directory", () => {
+    for (const name of ["../escape", "a/b", "/absolute", ".hidden", "a..b"]) {
+      expect(isKeyName(name)).toBe(false);
+      expect(keygenPlan([name], home)).toBeNull();
+    }
+  });
+
+  it("refuses a command line that means two things at once", () => {
+    // A name and an explicit path: the name would have no bearing on anything,
+    // which is why the usage line spells the two as a choice.
+    expect(USAGE).toBe("usage: keygen [<name> | --out <path>]");
+    expect(keygenPlan(["demo", "--out", "./k.json"], home)).toBeNull();
+    expect(keygenPlan(["--out", "./a.json", "--out", "./b.json"], home)).toBeNull();
+    expect(keygenPlan(["--out"], home)).toBeNull();
+    expect(keygenPlan(["--out", "--sign"], home)).toBeNull();
+    expect(keygenPlan(["--bogus"], home)).toBeNull();
+    expect(keygenPlan(["one", "two"], home)).toBeNull();
   });
 });

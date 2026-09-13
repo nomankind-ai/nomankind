@@ -279,6 +279,10 @@ import {
 import { keyById } from "../storage/keys.js";
 import { checkWitnesses, witnessedCount, type Witness } from "../witness.js";
 import { runAlertStep, type AlertStepReport } from "./alerts.js";
+import {
+  ENVIRONMENT_MISCONFIGURED,
+  environmentConfigured,
+} from "./config.js";
 import type { Env } from "./env.js";
 import {
   entryWorld,
@@ -2941,6 +2945,8 @@ export async function runSweep(
   let mirrorDetail: string | null = null;
   /** The step the run threw in, or null while nothing has thrown. */
   let failedStep: string | null = null;
+  /** Whether this run started at all. False only when it refused to. */
+  let ran = true;
 
   // One registry reading for the whole run. Every step below that gathers an
   // entry's world asks the registry for it, and the registry is the same for all
@@ -2951,6 +2957,23 @@ export async function runSweep(
   const cache = worldCache();
 
   try {
+    // Before anything is read, and before any adapter is asked for anything: a
+    // deployment whose `ENVIRONMENT` is not one of the names this code knows
+    // must not sweep (the QA of 2026-09-12). The name chooses the payout, the
+    // payment and the witness adapters, and each picks its mock by asking
+    // whether the name is `production` — so a var misspelt `prodcution` would
+    // have countersigned real seals with a published test key and paid nobody,
+    // quietly. The run does nothing at all and records the reason on every
+    // step, which is how /status shows it rather than showing a clockwork that
+    // looks like it is running.
+    if (!environmentConfigured(env)) {
+      ran = false;
+      for (const step of SWEEP_STEPS) noteSkip(step, ENVIRONMENT_MISCONFIGURED);
+      skipped[ENVIRONMENT_MISCONFIGURED] = SWEEP_STEPS.length;
+      report = nothingSwept(at, skipped, durations);
+      return report;
+    }
+
     enter("snapshot");
     // (a) The pool snapshot. Committed before any draw, and never by a draw: the
     // commitment has to be in the log before the beacon round that uses it.
@@ -3667,9 +3690,50 @@ export async function runSweep(
         beaconNeeded: beaconRead,
         mirrorDetail,
         failedStep,
+        ran,
       }),
     );
   }
+}
+
+/**
+ * The report of a run that did nothing.
+ *
+ * Every field at its empty value, so a caller reading a report cannot tell a
+ * misconfigured run from a busy one by its shape — only by `skipped`, which is
+ * where the reason is. It is the report a run returns when it refuses to start,
+ * and there is exactly one such refusal today.
+ */
+function nothingSwept(
+  at: string,
+  skipped: Readonly<Record<string, number>>,
+  durations: Readonly<Record<string, number>>,
+): SweepReport {
+  return {
+    at,
+    snapshot: null,
+    missed: [],
+    drawn: [],
+    revalidation_drawn: [],
+    revalidation_missed: [],
+    staled: [],
+    published: [],
+    attestations: { expired: [] },
+    sealed: null,
+    witnessed: [],
+    anchored: null,
+    upgraded: null,
+    mirror: null,
+    ledger: null,
+    metered: { keys: 0, reads: 0 },
+    alerts: { created: 0, delivered: 0, failed: 0, retried: 0 },
+    standing: null,
+    counters: null,
+    payouts: [],
+    duplicates: null,
+    skipped,
+    durations,
+  };
 }
 
 /** The sealing deps, or null when this caller asked for the sweep without them. */
@@ -3720,6 +3784,15 @@ interface Board {
   readonly mirrorDetail: string | null;
   /** The step the run threw in, or null when it finished. */
   readonly failedStep: string | null;
+  /**
+   * Whether the run started at all.
+   *
+   * False only for a run that refused to start — today, a deployment whose
+   * `ENVIRONMENT` is not a name this code knows. It is what keeps the draws
+   * exemption below honest: "a run that owed no draw did what the rule said"
+   * is true of a run that looked, and not of one that never got that far.
+   */
+  readonly ran?: boolean;
 }
 
 /**
@@ -3828,7 +3901,7 @@ function stepRows(
       step,
       last_run_at: at,
       last_ok_at:
-        step === "draws"
+        step === "draws" && board.ran !== false
           ? beacon === null && beaconNeeded
             ? null
             : at

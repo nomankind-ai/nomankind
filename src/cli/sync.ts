@@ -48,10 +48,12 @@ import {
   getJson,
   readKeyFile,
   signingHttp,
+  type Clock,
   WebHttpClient,
   type HttpClient,
   type ValidatorIo,
 } from "./validator.js";
+import { runCommand } from "./main.js";
 
 const USAGE =
   "usage: sync <base-url> [--from <n>] [--limit <n>] [--domain <slug>] [--flatten] [--min-tier <tier>] [--key <secret>] [--sign <key.json>] [--twice]";
@@ -416,7 +418,7 @@ export async function runSync(
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   },
-  now: Date = new Date(),
+  clock: Clock = () => new Date(),
 ): Promise<number> {
   const plan = syncPlan(args);
   if (plan === null) {
@@ -432,7 +434,7 @@ export async function runSync(
   const client =
     signPath === null
       ? withKey(http, readKey(args))
-      : signingHttp(http, await readKeyFile(signPath), now);
+      : signingHttp(http, await readKeyFile(signPath), clock);
 
   const answer = await getJson(client, baseUrl, plan.path);
   if (answer.status !== 200) {
@@ -503,6 +505,15 @@ if (
   process.argv[1] !== undefined &&
   import.meta.filename === resolve(process.argv[1])
 ) {
-  process.exit(await runSync(process.argv.slice(2), new WebHttpClient()));
+  const args = process.argv.slice(2);
+  const io: ValidatorIo = {
+    stdout: (line: string) => console.log(line),
+    stderr: (line: string) => console.error(line),
+  };
+  process.exit(
+    await runCommand({ name: "sync", baseUrl: args[0] ?? null, io }, () =>
+      runSync(args, new WebHttpClient(), io),
+    ),
+  );
 }
 /* c8 ignore stop */

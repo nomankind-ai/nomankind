@@ -88,6 +88,7 @@ function registration(overrides: Partial<Parameters<typeof checkRegistration>[0]
     maintainerAgentId: maintainerAgent.id,
     operatorExists: false,
     agentOperator: null,
+    now: new Date(SIGNED_AT),
     ...overrides,
   };
 }
@@ -246,6 +247,35 @@ describe("domain control", () => {
       ["example.com"],
     ]) {
       expect(isOperatorDomain(bad)).toBe(false);
+    }
+  });
+
+  it("refuses an IP address written as one (the QA of 2026-09-12)", () => {
+    // An address is not something a TXT record can prove control of, and not
+    // something a reader can look up to see who stands behind an operator.
+    for (const address of [
+      "198.51.100.7",
+      "203.0.113.42",
+      "0.0.0.0",
+      "255.255.255.255",
+      "[2001:db8::1]",
+      "2001:db8::1",
+      "::1",
+    ]) {
+      expect([address, isOperatorDomain(address)]).toEqual([address, false]);
+    }
+  });
+
+  it("refuses a name whose last label is all digits, and keeps 01.ai", () => {
+    // The top-level label is the one place the digits rule belongs: it is what
+    // makes `1.2.3.4` unregistrable however many labels it is written with,
+    // while `01.ai` is a real registrable domain and `123.example.com` a real
+    // host, and refusing every numeric label would refuse names that exist.
+    for (const bad of ["1.2", "12345.67890", "example.123", "a.b.42"]) {
+      expect([bad, isOperatorDomain(bad)]).toEqual([bad, false]);
+    }
+    for (const good of ["01.ai", "123.example.com", "9to5.example"]) {
+      expect([good, isOperatorDomain(good)]).toEqual([good, true]);
     }
   });
 
@@ -468,6 +498,27 @@ describe("checkRegistration", () => {
       expect(await checkRegistration(registration({ attestation: bad }))).toEqual(
         { ok: false, reason: "bad_attestation" },
       );
+    }
+  });
+
+  it("bounds the attestation's own timestamp (the QA of 2026-09-12)", async () => {
+    // The bind door already held `signed_at` to the request window; a
+    // registration did not. On a first registration the request and the
+    // attestation are signed by the same key, so without this one fresh
+    // signature stood for both and a sentence signed years ago — by a key that
+    // has since changed hands, or published in a fixture — still registered an
+    // operator today.
+    const skew = REQUEST_CLOCK_SKEW_SECONDS * 1000;
+    const at = new Date(SIGNED_AT).getTime();
+
+    for (const now of [new Date(at + skew), new Date(at - skew)]) {
+      expect([now.toISOString(), await checkRegistration(registration({ now }))])
+        .toEqual([now.toISOString(), { ok: true, domain: DEFAULT_DOMAIN, maintainer: false }]);
+    }
+
+    for (const now of [new Date(at + skew + 1000), new Date(at - skew - 1000)]) {
+      expect([now.toISOString(), await checkRegistration(registration({ now }))])
+        .toEqual([now.toISOString(), { ok: false, reason: "bad_attestation" }]);
     }
   });
 

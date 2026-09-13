@@ -561,6 +561,7 @@ describe("an operator is registered into a domain", () => {
       attestation: null,
       registered: true,
       domains: [DEFAULT_DOMAIN],
+      now: new Date(),
     });
     expect(unreachable.ok ? null : unreachable.reason).toBe("already_joined");
     expect([...JOIN_REFUSALS]).toEqual([
