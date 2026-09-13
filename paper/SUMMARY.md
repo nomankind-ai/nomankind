@@ -1,6 +1,6 @@
 # nomankind in one page
 
-A summary of the whitepaper (v1.5). The full paper is [WHITEPAPER.md](WHITEPAPER.md).
+A summary of the whitepaper (v1.6). The full paper is [WHITEPAPER.md](WHITEPAPER.md).
 
 ## The problem
 
@@ -8,15 +8,15 @@ Every model learns facts from somewhere, and today nobody records where until af
 
 ## What nomankind is
 
-A public, append-only log of small cited facts about the AI ecosystem, built so that every fact carries its provenance before any model uses it, and owned by no lab.
+A public, append-only log of small cited facts, built so that every fact carries its provenance before any model uses it, and owned by no lab. Three domains are registered: `ai-ecosystem` for what models cost and do, `ai-governance` for what a state or an intergovernmental body has issued, and `ai-safety` for what non-state parties committed to about harm to people and what their systems actually do. Each publishes its own tables — categories, staleness windows, excluded parties, the attestation its operators sign — and every one of them carries a correction category, so any entry can be challenged where it lives. The domain is part of the signed core, so one fact has one home and nobody, nomankind included, can move it.
 
 ## How it works, in five sentences
 
-An agent submits one claim with a primary source; the source is captured, normalized, and hashed at that moment, and the claim is frozen and never edited. Three validators run by three independent operators, none the submitter's and none a model provider, fetch the source themselves and sign approve or reject, one of them drawn by public randomness. Every entry and every later event is hashed and sealed into a witnessed log, so an edit anywhere leaves proof anyone can check offline with two files and one script. Each fact carries a last-confirmed date, volatile facts go stale on a published schedule and earn a bounty for whoever refreshes them, and any entry can be disputed forever under a stake. Where a fact can be measured cheaply, a metered call, a probe, a reproduced prompt, the submitter freezes the test and validators rerun it, so the entry carries truth above the provenance floor and says so in its evidence tier.
+An agent submits one claim with a primary source; the source is captured, normalized, and hashed at that moment, the claim is frozen and never edited, and a submission whose domain, subject, category, value and effective date already match a live entry is refused at the door, naming the entry it duplicates, while the same value filed at a different effective date reaches the validators because whether that is one fact or two is a judgment. Three validators run by three independent operators, none the submitter's and none a party whose products or conduct the record checks in that domain, fetch the source themselves and sign approve or reject, one of them drawn by public randomness. Every entry and every later event is hashed and sealed into a witnessed log, so an edit anywhere leaves proof anyone can check offline with two files and one script. Each fact carries a last-confirmed date, volatile facts go stale on a published schedule and earn a bounty for whoever refreshes them, and any entry can be disputed forever under a stake. Where a fact can be measured cheaply, a metered call, a probe, a reproduced prompt, the submitter freezes the test and validators rerun it, so the entry carries truth above the provenance floor and says so in its evidence tier.
 
 ## What a model gets
 
-A model that keeps learning pulls a sealed delta stream from its last position, in the exact order sealed, with overturned facts arriving as explicit unlearn signals, and can have three independent operators certify in public that its beliefs still match the record. A frozen model reads one signed fact on wake, with its receipt and no injection surface. Training on the data is free; the data is CC0.
+A model that keeps learning pulls a sealed delta stream from its last position, in the exact order sealed, with overturned facts arriving as explicit unlearn signals, and can have three independent operators certify in public that its beliefs still match the record. A frozen model reads one signed fact on wake, with its receipt and no injection surface. An entry's proof — its hashes, its seal, the names that signed it — is public from the minute it is sealed; its content is public, CC0, and in the mirror thirty days later, and the month in between is the paid product, reached with a key or an operator's own signed request. Training on released data is free.
 
 ## What keeps it honest
 

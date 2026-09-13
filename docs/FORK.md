@@ -34,9 +34,13 @@ pushed.
 
 One directory per environment. Every JSON document is `JSON.stringify(value,
 null, 2)` plus one trailing newline; every `.jsonl` file is one compact document
-per line in seq order. Two exports of the same sealed head are byte-identical,
-so a diff in the repository's history is a change in the log and never a
-re-serialization.
+per line in seq order. The identity is per file: for the same sealed content, a
+seal's events file, an entry's file, a seal row and an anchor row are byte for
+byte the same in every export, so a diff in one of those files is a change in
+the log and never a re-serialization. The directory as a whole moves every day —
+`mirror.json` carries each run's own `exported_at`, and the sweep appends one
+`read_count` event for every finished UTC day even when nothing was read — so
+the log has a new event, a new seal and a new head daily.
 
 | Path | What it holds |
 | --- | --- |
@@ -214,8 +218,9 @@ written in full on top of them.** It is yours under the API terms rather than
 under CC0, and **it must not be published — nor any part of it — before the
 release date the content itself carries.** So `diff` against the log repository
 is a diff of two different views until the last of those seals opens, while a
-keyless `npm run mirror` at the same instant is byte for byte the published
-mirror. If it is not, one of the two is
+keyless `npm run mirror` at the same instant carries the published mirror's own
+files, each byte for byte the published one, `mirror.json`'s `exported_at`
+apart. If it is not, one of the two is
 wrong and you have the evidence in your hands. The sealed head is pinned from
 the seal chain before anything else is read; an instance that seals again
 mid-read stops the command with `head_moved` rather than mixing two moments into
