@@ -21,10 +21,14 @@
  *
  * Pure and synchronous: no I/O, no clock, no policy numbers, and it never
  * throws. A refusal is a value, so a caller can report it to the submitter
- * unchanged.
+ * unchanged. The one exception is `duplicateKeyHash` at the bottom, which is
+ * async because WebCrypto is: it is still a pure function of its argument, and
+ * it is here rather than in the store so that the key the index holds and the
+ * key the rule compares are the same key by construction.
  */
 
 import { domainOf, type Core } from "./core.js";
+import { canonicalize, sha256Hex } from "./hash.js";
 import { normalizeText } from "./normalize.js";
 
 /**
@@ -130,4 +134,42 @@ export function checkDuplicate(
   }
 
   return { ok: true };
+}
+
+/**
+ * The key of one core as one string: the SHA-256, in lowercase hex, of the JCS
+ * of `{category, domain, subject, value}` — the same four fields
+ * `sameDuplicateKey` compares, with `value` normalized under step 4 of
+ * norm-v1.2 exactly as `duplicateKey` normalizes it.
+ *
+ * Why a hash and not the four fields in four columns: the QA of 2026-09-12
+ * found the duplicate door reading a subject's whole live history on every
+ * submission — 669 rows at 667 live entries, about 130 MB at a hundred thousand
+ * — because the rule it had to apply lived in this file and not in the database.
+ * Now it lives in both, and this function is the bridge: one column, one index,
+ * one seek. A hash rather than the concatenation because `value` is arbitrary
+ * text of arbitrary length, and a key made by joining fields with a separator
+ * is a key two different claims can collide in.
+ *
+ * RFC 8785 because every other canonical form in this system is, so the bytes
+ * hashed here are decided by the same rule that decides an entry hash, in one
+ * place, for every runtime: a fork that recomputes this key gets the same hex.
+ * The normalization is `duplicateKey`'s own and is never repeated here — two
+ * copies of the norm rule would be exactly the drift this column exists to make
+ * impossible.
+ */
+export async function duplicateKeyHash(core: Core): Promise<string> {
+  return duplicateKeyHashOf(duplicateKey(core));
+}
+
+/** The same hash, over a key already computed. */
+export async function duplicateKeyHashOf(key: DuplicateKey): Promise<string> {
+  return sha256Hex(
+    canonicalize({
+      category: key.category,
+      domain: key.domain,
+      subject: key.subject,
+      value: key.value,
+    }),
+  );
 }

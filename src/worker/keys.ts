@@ -67,13 +67,14 @@ import {
 import type { Env } from "./env.js";
 import { wantsHtml } from "./pages.js";
 import {
-  StorageUnreachable,
   guardDatabase,
-  json,
-  READ_METHODS,
   isRead,
+  json,
   methodNotAllowed,
+  READ_METHODS,
+  readCappedBody,
   refuse,
+  StorageUnreachable,
 } from "./registry.js";
 
 /** What the deps this door takes: the instant, and the payment provider. */
@@ -126,10 +127,14 @@ async function keyOf(
   if (header === null) {
     return { ok: false, response: refuse(401, "missing_key") };
   }
+  // `Bearer <key>` and nothing else (RFC 7235). A header with another scheme, or
+  // with no scheme at all, is `bad_key` rather than read as a bare secret: one
+  // documented wire format, the same at every door that takes a key.
   const PREFIX = "bearer ";
-  const presented = header.toLowerCase().startsWith(PREFIX)
-    ? header.slice(PREFIX.length).trim()
-    : header.trim();
+  if (!header.toLowerCase().startsWith(PREFIX)) {
+    return { ok: false, response: refuse(401, "bad_key") };
+  }
+  const presented = header.slice(PREFIX.length).trim();
   if (!looksLikeKey(presented)) {
     return { ok: false, response: refuse(401, "bad_key") };
   }
@@ -305,9 +310,15 @@ async function checkout(
   deps: KeysDeps,
   url: URL,
 ): Promise<Response> {
+  // The cap before the read, and the read before the parse: this door takes a
+  // key rather than a signature, but a body is a body and no door parses one it
+  // has not bounded first.
+  const read = await readCappedBody(request);
+  if (!read.ok) return read.response;
+
   let body: unknown;
   try {
-    body = JSON.parse(await request.text());
+    body = JSON.parse(read.text);
   } catch {
     return refuse(400, "bad_body");
   }

@@ -20,7 +20,11 @@
 
 import { utcDay, type Anchor, type AnchorExternal } from "../anchor.js";
 import type { OpenAssignment } from "../assign.js";
-import { domainOf } from "../core.js";
+import { domainOf, type Core } from "../core.js";
+import {
+  duplicateKeyHash,
+  LIVE_STATUSES,
+} from "../duplicate.js";
 import {
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
@@ -460,7 +464,9 @@ export async function putEntry(
   derivedThroughSeq: number,
 ): Promise<void> {
   const submittedSeq = await submittedSeqOf(db, entryField(entry, "id"));
-  await entryStatement(db, entry, sidecar, submittedSeq, derivedThroughSeq).run();
+  await (
+    await entryStatement(db, entry, sidecar, submittedSeq, derivedThroughSeq)
+  ).run();
 }
 
 /**
@@ -468,21 +474,28 @@ export async function putEntry(
  * than run on the spot so a submission can write the entry, its events and its
  * captures in one atomic batch (`submitEntry` below), and so both paths write
  * exactly the same row.
+ *
+ * Async only because `duplicate_key` is a SHA-256 and WebCrypto is (0019). The
+ * column is computed here, by `duplicateKeyHash` and nowhere else, so every
+ * write of an entries row — a submission, a validation, a rederivation under a
+ * seal, an import — leaves the index agreeing with the entry beside it. A path
+ * that wrote the JSON without the column would be a second source of truth
+ * about what a claim is.
  */
-function entryStatement(
+async function entryStatement(
   db: D1Like,
   entry: Entry,
   sidecar: Sidecar,
   submittedSeq: number,
   derivedThroughSeq: number,
-): D1LikeStatement {
+): Promise<D1LikeStatement> {
   return db
     .prepare(
       `INSERT INTO entries (
          id, subject, category, domain, status, submitted_at, submitted_seq,
          author, stale, expires_at, supersedes,
-         entry_json, sidecar_json, derived_through_seq
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         entry_json, sidecar_json, derived_through_seq, duplicate_key
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          subject = excluded.subject,
          category = excluded.category,
@@ -496,7 +509,8 @@ function entryStatement(
          supersedes = excluded.supersedes,
          entry_json = excluded.entry_json,
          sidecar_json = excluded.sidecar_json,
-         derived_through_seq = excluded.derived_through_seq`,
+         derived_through_seq = excluded.derived_through_seq,
+         duplicate_key = excluded.duplicate_key`,
     )
     .bind(
       entryField(entry, "id"),
@@ -515,7 +529,98 @@ function entryStatement(
       writeJson(entry),
       writeJson(sidecar),
       derivedThroughSeq,
+      // The derived entry carries the signed core's own fields, so the key the
+      // index holds is the key the door computes from the core it is checking.
+      await duplicateKeyHash(entry as unknown as Core),
     );
+}
+
+/**
+ * The newest live entry holding one duplicate key, or null when none does.
+ *
+ * The duplicate door's whole question (decision D-085), in one statement. The
+ * QA of 2026-09-12 found the door reading a subject's entire live history per
+ * submission — every row, every entry_json, paged down by submitted_seq — to
+ * ask something the database can answer from an index: is there a draft or a
+ * verified entry with this key, and which is the newest? One seek on
+ * `entries_duplicate_key` (0019), one column back, and no JSON parsed at all.
+ *
+ * Live is src/duplicate.ts's own list and is never spelled out here: `draft`
+ * and `verified` hold a claim, and `rejected`, `superseded` and `overturned`
+ * release it, so a status added to that list changes this query with it.
+ *
+ * Newest by submitted_seq, because that is the entry a submitter is told to
+ * look at and the one `checkDuplicate` names when it walks candidates in order.
+ * What this does not know is the caller's own exemptions — an entry is not a
+ * duplicate of itself, and never of the entry it supersedes — so the caller
+ * compares the id it gets back against its own and against its `supersedes`
+ * before it refuses. A row written before 0019 and not yet backfilled carries a
+ * null key and is invisible here; `backfillDuplicateKeys` below is what closes
+ * that, and every row written since carries its key by construction.
+ */
+export async function liveDuplicateOf(
+  db: D1Like,
+  key: string,
+): Promise<string | null> {
+  const placeholders = LIVE_STATUSES.map(() => "?").join(", ");
+  const row = await db
+    .prepare(
+      `SELECT id FROM entries
+       WHERE duplicate_key = ? AND status IN (${placeholders})
+       ORDER BY submitted_seq DESC ${ONE_ROW}`,
+    )
+    .bind(key, ...LIVE_STATUSES)
+    .first<Row>();
+  return row === null ? null : readText(row, "id");
+}
+
+/**
+ * Fill in `duplicate_key` for every row written before 0019, and say how many
+ * it filled.
+ *
+ * The norm rule is Unicode normalization and whitespace folding over arbitrary
+ * text, which SQL cannot run, so this backfill is code rather than an `UPDATE`
+ * in the migration: each row's key is recomputed from its own `entry_json` by
+ * the same `duplicateKeyHash` the door and `entryStatement` use, so a backfilled
+ * row and a row written today are indistinguishable.
+ *
+ * Idempotent by its own WHERE: a row that already carries a key is never
+ * touched, so running it twice is running it once, and a run that was
+ * interrupted resumes where it stopped. Paged rather than one statement, for the
+ * reason every other sweep is paged — a table that only grows must not be read
+ * whole in one request.
+ *
+ * The caller is the sweep's `duplicates` step (src/worker/sweep.ts), which asks
+ * for DUPLICATE_BACKFILL_PER_RUN rows once a run and lets the next run continue,
+ * so a migrated log catches up over its runs. Once none is left this is a single
+ * bounded SELECT that comes back empty and writes nothing.
+ */
+export async function backfillDuplicateKeys(
+  db: D1Like,
+  limit: number,
+): Promise<number> {
+  const rows = await db
+    .prepare(
+      `SELECT id, entry_json FROM entries WHERE duplicate_key IS NULL LIMIT ?`,
+    )
+    .bind(limit)
+    .all<Row>();
+  if (rows.results.length === 0) return 0;
+
+  const statements: D1LikeStatement[] = [];
+  for (const row of rows.results) {
+    const entry = readJson<Record<string, unknown>>(row, "entry_json");
+    statements.push(
+      db
+        .prepare(`UPDATE entries SET duplicate_key = ? WHERE id = ?`)
+        .bind(
+          await duplicateKeyHash(entry as unknown as Core),
+          readText(row, "id"),
+        ),
+    );
+  }
+  await db.batch(statements);
+  return statements.length;
 }
 
 /** One entry by id, with its sidecar, or null. */
@@ -541,6 +646,15 @@ export interface ListEntriesQuery {
   readonly limit: number;
   /** Resume strictly after this submitted_seq; omit for the first page. */
   readonly afterSubmittedSeq?: number;
+  /**
+   * Only entries submitted at or after this instant, as the ISO-8601 string the
+   * column holds. The sweep's draws step is the caller: its queue is the drafts
+   * young enough to still be drawn a validator (DRAW_DRAFT_MAX_AGE_DAYS), and a
+   * bound the database applies is what keeps an abandoned draft out of the
+   * working set rather than paged past on every run. No default: a listing that
+   * does not ask is not bounded.
+   */
+  readonly submittedAtOrAfter?: string;
 }
 
 /**
@@ -576,6 +690,13 @@ export async function listEntries(
   if (query.afterSubmittedSeq !== undefined) {
     conditions.push("submitted_seq > ?");
     bindings.push(query.afterSubmittedSeq);
+  }
+  if (query.submittedAtOrAfter !== undefined) {
+    // A text comparison on an ISO-8601 instant, which is a chronological
+    // comparison because the format sorts that way; served by
+    // `entries_status_submitted_at` (0019) when the status is named with it.
+    conditions.push("submitted_at >= ?");
+    bindings.push(query.submittedAtOrAfter);
   }
   bindings.push(query.limit);
 
@@ -940,7 +1061,7 @@ export async function submitEntry(
 
   const statements = eventStatements(db, input.events, await head(db));
   statements.push(
-    entryStatement(
+    await entryStatement(
       db,
       input.entry,
       input.sidecar,
@@ -1821,7 +1942,7 @@ export async function recordValidation(
 
   const stored = input.stored(validation);
   statements.push(
-    entryStatement(
+    await entryStatement(
       db,
       stored.entry,
       stored.sidecar,
@@ -1832,7 +1953,7 @@ export async function recordValidation(
   if (input.also !== undefined) {
     for (const other of input.also(validation, extra)) {
       statements.push(
-        entryStatement(
+        await entryStatement(
           db,
           other.entry,
           other.sidecar,
@@ -1961,7 +2082,7 @@ export async function recordReconfirmation(
 
   const stored = input.stored(reconfirmation);
   statements.push(
-    entryStatement(
+    await entryStatement(
       db,
       stored.entry,
       stored.sidecar,
@@ -2140,7 +2261,7 @@ export async function recordDisputeFiling(
 
   const correction = input.correction.stored(submitted, filed);
   statements.push(
-    entryStatement(
+    await entryStatement(
       db,
       correction.entry,
       correction.sidecar,
@@ -2163,7 +2284,7 @@ export async function recordDisputeFiling(
 
   const target = input.target(submitted, filed, also);
   statements.push(
-    entryStatement(
+    await entryStatement(
       db,
       target.entry,
       target.sidecar,
@@ -2223,7 +2344,7 @@ async function recordRevalidationEvent<T extends EventType>(
   const stored = input.stored?.(sealed);
   if (stored !== undefined) {
     statements.push(
-      entryStatement(
+      await entryStatement(
         db,
         stored.entry,
         stored.sidecar,
@@ -2398,7 +2519,7 @@ export async function recordFailureReport(
   const stored = input.stored?.(report, opened);
   if (stored !== undefined) {
     statements.push(
-      entryStatement(
+      await entryStatement(
         db,
         stored.entry,
         stored.sidecar,
@@ -3916,7 +4037,7 @@ async function rewriteStatements(
   for (const { id, submittedSeq } of covered) {
     const stored = await rederive(id, seal, now);
     statements.push(
-      entryStatement(
+      await entryStatement(
         db,
         stored.entry,
         stored.sidecar,

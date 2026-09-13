@@ -185,12 +185,21 @@ function pricing(
   };
 }
 
-/** Submit one entry through the door; it must be accepted as a draft. */
+/**
+ * Submit one entry through the door; it must be accepted as a draft.
+ *
+ * `signer` is the bare key that signs it and defaults to alice's. A caller that
+ * files more entries in a day than WRITES_PER_AGENT_PER_DAY allows passes a
+ * fresh one per filing — Section 5 lets anyone submit with a bare agent key, and
+ * the duplicate key is the domain, subject, category and value rather than the
+ * author, so who signed changes nothing about what is under test.
+ */
 async function submit(
   proposal: Omit<SubmissionProposal, "author">,
+  signer: TestAgent = alice,
 ): Promise<Core> {
-  const core = await submittedCore(alice, proposal);
-  const response = await send(await submission(alice, { core }));
+  const core = await submittedCore(signer, proposal);
+  const response = await send(await submission(signer, { core }));
   expect([response.status, await response.json()]).toEqual([
     201,
     expect.objectContaining({ id: core["id"], status: "draft" }),
@@ -516,11 +525,17 @@ describe("a subject holding more entries than one page", () => {
     // page size of its own, and a number a test chose would not be the bound
     // the defect was about.
     for (let n = 0; n <= LIST_PAGE_LIMIT + 1; n += 1) {
+      // A fresh bare key for every filing after the first: this is more entries
+      // in one day than one agent's write quota allows, and the rule under test
+      // is about how many live entries a subject holds rather than about who
+      // filed them. The first stays alice's, because the test below rebuilds
+      // that very core to name it.
       newest = await submit(
         pricing(SUBJECT, {
           claim: `${SUBJECT} seat pricing rose to ${priced(n)}`,
           after: priced(n),
         }),
+        n === 0 ? alice : await makeAgent(),
       );
     }
   }, 600_000);

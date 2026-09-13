@@ -160,6 +160,51 @@ export async function quotaScopeForClient(ip: string | null): Promise<string> {
 }
 
 /**
+ * The quota scope one registered operator's signed reads are counted under.
+ *
+ * The operator id in the clear, because it is already public: the registry
+ * publishes it, every record it signs names it, and a counter under it records
+ * how much that operator read and never what it read. A client address is
+ * hashed for the opposite reason — nobody published it.
+ */
+export function quotaScopeForOperator(operator: string): string {
+  return `operator:${operator}`;
+}
+
+/**
+ * The one scope every free read is counted under as well as its own client's:
+ * the whole log's free tier, for one UTC day.
+ *
+ * A scope and not a column, so the global ceiling is the same counter, the same
+ * table and the same statement the per-client cap already is, and a day's free
+ * total is one keyed read rather than a sum over every client that asked.
+ */
+export const QUOTA_SCOPE_FREE_GLOBAL = "free:global";
+
+/**
+ * The scope the HTML pages' fallback reader carries, which nothing counts.
+ *
+ * A name of its own and not the global free scope: the pages meter nothing and
+ * charge nothing (src/worker/access.ts, `unmeteredFreeReader`), and a reader
+ * carrying the global scope would be one mistaken `spendReads` away from
+ * charging the whole log's free budget for a page view nobody was ever meant to
+ * pay for. No counter is ever keyed by this string; it exists so that a charge
+ * against this reader would land in a bucket of its own and be visible as the
+ * bug it is.
+ */
+export const QUOTA_SCOPE_PAGES_UNMETERED = "pages:unmetered";
+
+/**
+ * The tier a registered operator's signed read is served on.
+ *
+ * Not a row in RATE_TIERS: a tier there is something a key is bought for, and
+ * this is something a registration earns. It is a name rather than a policy
+ * number, so it lives beside the scopes it is counted with; the cap it carries
+ * is OPERATOR_READS_PER_DAY in src/policy.ts, like every other cap.
+ */
+export const OPERATOR_TIER = "operator";
+
+/**
  * The daily cap of a tier, and 0 for a slug no tier is registered under — a
  * cap of zero refuses, which is the right answer for a key whose tier was
  * retired from policy.

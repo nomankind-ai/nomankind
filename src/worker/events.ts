@@ -16,6 +16,11 @@
  * stored, hash chain and all, because a reader that cannot recompute the chain
  * cannot check anything.
  *
+ * A page is a read and is charged as one: the caller's own bucket, one unit,
+ * after the page was built, and the same 429 every other door gives when the
+ * bucket is empty. The inclusion proof beside it is not — proof is public from
+ * the first minute, whoever is asking.
+ *
  * No policy number lives here: the bare integers are HTTP status codes and the
  * page size is LIST_PAGE_LIMIT from src/policy.ts.
  */
@@ -25,7 +30,12 @@ import { LIST_PAGE_LIMIT } from "../policy.js";
 import { isReleased, withholdEvent, type WithheldEvent } from "../release.js";
 import type { Seal } from "../seal.js";
 import { eventsAfter, headSeq, sealsBetween } from "../storage/repository.js";
-import { readerAccess } from "./access.js";
+import {
+  accessHeaders,
+  chargeReads,
+  readerAccess,
+  type Access,
+} from "./access.js";
 import type { Env } from "./env.js";
 import { refusalResponse } from "./read.js";
 import {
@@ -79,6 +89,7 @@ function withhold(
 async function page(
   url: URL,
   env: Env,
+  access: Access,
   free: boolean,
   now: Date,
 ): Promise<Response> {
@@ -113,12 +124,21 @@ async function page(
   // event's seq is caught up on a log that had not moved on underneath them.
   // It is the true head whoever is asking: a position is proof, and proof is
   // public from the first minute.
+  const head = await headSeq(env.DB);
+  // One unit for the page, charged after it was built and never before it, like
+  // every other door (the QA of 2026-09-12: this one was free, so a walk of the
+  // whole log cost a reader nothing and the log everything). The page and not
+  // the events on it, because a page is what the caller asked for and what the
+  // read cost; `GET /events/{seq}/proof` and the entry's own page stay
+  // uncharged, because proof is public from the first minute.
+  await chargeReads(env.DB, access, 1);
   return json(
     {
       events: free ? withhold(events, seals, now) : events,
-      head: await headSeq(env.DB),
+      head,
     },
     200,
+    accessHeaders(access, access.limit - access.used - 1),
   );
 }
 
@@ -143,7 +163,13 @@ export async function handleEvents(
     // is 401 `bad_signature`, never a quiet free read of the hash lines.
     const granted = await readerAccess(request, guarded, guarded.DB, deps.now);
     if (!granted.ok) return refusalResponse(granted.refusal);
-    return await page(url, guarded, granted.reader.kind === "free", deps.now);
+    return await page(
+      url,
+      guarded,
+      granted.reader.access,
+      granted.reader.kind === "free",
+      deps.now,
+    );
   } catch (error) {
     if (error instanceof StorageUnreachable) {
       // The message only: no binding contents, no request data.

@@ -233,17 +233,14 @@ async function report(
 ): Promise<Response> {
   if (!ENTRY_ID_PATTERN.test(id)) return refuse(400, "bad_id");
 
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await request.clone().text());
-  } catch {
-    return refuse(400, "bad_body");
-  }
-  const body = parseReportBody(raw);
-  if (body === null) return refuse(400, "bad_body");
-
+  // The envelope first: the signing headers are checked before the body is read,
+  // the body is capped and read once, and the day's write is charged — so an
+  // unsigned report costs nothing at all.
   const auth = await authenticate(request, env, deps, path);
   if (!auth.ok) return auth.response;
+
+  const body = parseReportBody(auth.body);
+  if (body === null) return refuse(400, "bad_body");
 
   const stored = await getEntry(env.DB, id);
   if (stored === null) return refuse(404, "not_found");

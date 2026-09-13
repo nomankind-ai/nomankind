@@ -30,13 +30,21 @@
 
 import { utcDay } from "../anchor.js";
 import { publicKeyFromAgentId } from "../identity.js";
-import { FREE_TIER } from "../policy.js";
+import {
+  FREE_READS_PER_DAY_GLOBAL,
+  FREE_TIER,
+  OPERATOR_READS_PER_DAY,
+} from "../policy.js";
 import {
   KEY_REFUSALS,
+  OPERATOR_TIER,
+  QUOTA_SCOPE_FREE_GLOBAL,
+  QUOTA_SCOPE_PAGES_UNMETERED,
   keyHash,
   looksLikeKey,
   quotaScopeForClient,
   quotaScopeForKey,
+  quotaScopeForOperator,
   tierLimit,
   type KeyRecord,
 } from "../keys.js";
@@ -59,6 +67,13 @@ export interface Access {
   readonly tier: string;
   readonly key: KeyRecord | null;
   readonly scope: string;
+  /**
+   * The second scope this read is also counted under, or null when there is
+   * none: the whole log's free tier, on a free read only. A paid key and a
+   * registered operator are counted under their own scope and nothing else,
+   * because the ceiling bounds the free tier and not the people who are known.
+   */
+  readonly globalScope: string | null;
   /** The UTC day of `now`, captured so the charge lands on the day of the read. */
   readonly day: string;
   readonly limit: number;
@@ -87,12 +102,26 @@ function resetsAt(day: string): string {
   return new Date(start + MILLISECONDS_PER_DAY).toISOString();
 }
 
-/** The bearer secret on a request, or null when the header names none. */
-function bearer(request: Request): string | null {
+/**
+ * The bearer secret on a request: null when there is no header at all, and
+ * "bad_scheme" when the header is not `Bearer <key>`.
+ *
+ * RFC 7235 says a credential names its scheme, and before this the gate took the
+ * whole header as the secret whenever the scheme was missing or was somebody
+ * else's (the QA of 2026-09-12): `Authorization: <key>` authenticated, and so
+ * would `Basic <key>` or `Token <key>`. That is a second wire format nobody
+ * documented and nobody can withdraw. One form is accepted now, and anything
+ * else is `bad_key` rather than a quiet attempt to read it as a key — a caller
+ * sending the wrong scheme is told which rule refused them.
+ *
+ * The scheme is matched case-insensitively, because RFC 7235 says it is
+ * case-insensitive; the secret after it is not touched.
+ */
+function bearer(request: Request): string | null | "bad_scheme" {
   const header = request.headers.get("authorization");
   if (header === null) return null;
   const PREFIX = "bearer ";
-  if (!header.toLowerCase().startsWith(PREFIX)) return header.trim();
+  if (!header.toLowerCase().startsWith(PREFIX)) return "bad_scheme";
   return header.slice(PREFIX.length).trim();
 }
 
@@ -112,6 +141,7 @@ export async function resolveAccess(
 ): Promise<{ ok: true; access: Access } | { ok: false; refusal: AccessRefusal }> {
   const day = utcDay(now.toISOString());
   const presented = bearer(request);
+  if (presented === "bad_scheme") return refusal(401, "bad_key");
 
   let key: KeyRecord | null = null;
   let tier = FREE_TIER;
@@ -124,6 +154,22 @@ export async function resolveAccess(
     tier = key.tier;
   }
 
+  // The whole log's free tier, before this client's own share of it (the QA of
+  // 2026-09-12). A hundred clients each under the per-client cap were the whole
+  // account's daily budget, because nothing counted them together; this counts
+  // them together. Checked first so the reader who crosses the ceiling is
+  // refused in the gate's own word rather than by whatever fails next, and
+  // asked only on the free tier: a key that is paid for is not refused because
+  // strangers were reading.
+  if (key === null) {
+    const global = await quotaOn(db, QUOTA_SCOPE_FREE_GLOBAL, day);
+    if (global >= FREE_READS_PER_DAY_GLOBAL) {
+      return rateRefusal(tier, FREE_READS_PER_DAY_GLOBAL, global, day, now, {
+        scope: "global",
+      });
+    }
+  }
+
   const scope =
     key === null
       ? await quotaScopeForClient(request.headers.get("cf-connecting-ip"))
@@ -131,29 +177,100 @@ export async function resolveAccess(
   const limit = tierLimit(tier);
   const used = await quotaOn(db, scope, day);
 
-  if (used >= limit) {
-    const resets = resetsAt(day);
-    return {
-      ok: false,
-      refusal: {
-        status: 429,
-        reason: "rate_limited",
-        body: {
-          error: "rate_limited",
-          tier,
-          limit,
-          used,
-          resets_at: resets,
-        },
-        retryAfter: Math.max(
-          1,
-          Math.ceil((Date.parse(resets) - now.getTime()) / 1000),
-        ),
-      },
-    };
-  }
+  if (used >= limit) return rateRefusal(tier, limit, used, day, now);
 
-  return { ok: true, access: { tier, key, scope, day, limit, used } };
+  return {
+    ok: true,
+    access: {
+      tier,
+      key,
+      scope,
+      globalScope: key === null ? QUOTA_SCOPE_FREE_GLOBAL : null,
+      day,
+      limit,
+      used,
+    },
+  };
+}
+
+/**
+ * The 429 every cap in this file refuses with: the tier, the cap, what was
+ * used, when it resets, and the seconds until then.
+ *
+ * One shape for the per-client cap, the global ceiling and the operator bucket,
+ * because a reader parsing a refusal should not have to know which of the three
+ * stopped them to read the same four fields. `extra` is the one field the
+ * ceiling adds — `scope: "global"` — so a reader who is inside their own cap
+ * can tell why they were refused anyway.
+ */
+function rateRefusal(
+  tier: string,
+  limit: number,
+  used: number,
+  day: string,
+  now: Date,
+  extra: Record<string, unknown> = {},
+): { ok: false; refusal: AccessRefusal } {
+  const resets = resetsAt(day);
+  return {
+    ok: false,
+    refusal: {
+      status: 429,
+      reason: "rate_limited",
+      body: {
+        error: "rate_limited",
+        tier,
+        limit,
+        used,
+        resets_at: resets,
+        ...extra,
+      },
+      retryAfter: Math.max(
+        1,
+        Math.ceil((Date.parse(resets) - now.getTime()) / 1000),
+      ),
+    },
+  };
+}
+
+/**
+ * One registered operator's own day: their bucket, their cap, and what they
+ * have spent of it.
+ *
+ * The QA of 2026-09-12: a signed read was metered in the anonymous client
+ * bucket, so a validator walking the log for the entries it has to reproduce
+ * exhausted the free tier of whatever address it came from, for itself and for
+ * every stranger behind that address. A signed request names who is asking, so
+ * it is counted under that name and under nothing else — no client bucket, and
+ * no share of the free tier's ceiling.
+ *
+ * The tier it reports is `operator`, which is not a row in RATE_TIERS because
+ * it is not a thing anyone buys; the headers are the same three headers, so a
+ * reader watching `x-nomankind-remaining` sees their own bucket drain.
+ */
+async function operatorAccess(
+  db: D1Like,
+  operator: string,
+  now: Date,
+): Promise<{ ok: true; access: Access } | { ok: false; refusal: AccessRefusal }> {
+  const day = utcDay(now.toISOString());
+  const scope = quotaScopeForOperator(operator);
+  const used = await quotaOn(db, scope, day);
+  if (used >= OPERATOR_READS_PER_DAY) {
+    return rateRefusal(OPERATOR_TIER, OPERATOR_READS_PER_DAY, used, day, now);
+  }
+  return {
+    ok: true,
+    access: {
+      tier: OPERATOR_TIER,
+      key: null,
+      scope,
+      globalScope: null,
+      day,
+      limit: OPERATOR_READS_PER_DAY,
+      used,
+    },
+  };
 }
 
 /**
@@ -163,6 +280,10 @@ export async function resolveAccess(
  * here, so a request that straddles midnight is counted on the day it was let
  * in on — the same day its cap was checked against. Zero charges nothing: a
  * sync page that delivered no verified entry delivered no read.
+ *
+ * A free read lands in two counters, its client's and the whole log's, and the
+ * second is what makes the ceiling above a number rather than a hope: the
+ * counter the next request is checked against is the one this one moved.
  */
 export async function chargeReads(
   db: D1Like,
@@ -171,6 +292,9 @@ export async function chargeReads(
 ): Promise<void> {
   if (reads <= 0) return;
   await addQuota(db, access.scope, access.day, reads);
+  if (access.globalScope !== null) {
+    await addQuota(db, access.globalScope, access.day, reads);
+  }
 }
 
 /**
@@ -241,9 +365,14 @@ export function accessHeaders(
  * showed them less than they asked for.
  */
 export type ReaderAccess =
-  | { readonly kind: "key"; readonly key: Access }
-  | { readonly kind: "operator"; readonly operator: string; readonly agent: string }
-  | { readonly kind: "free" };
+  | { readonly kind: "key"; readonly key: Access; readonly access: Access }
+  | {
+      readonly kind: "operator";
+      readonly operator: string;
+      readonly agent: string;
+      readonly access: Access;
+    }
+  | { readonly kind: "free"; readonly access: Access };
 
 /**
  * What a reader can be refused with: the key gate's own refusals, and the one
@@ -264,6 +393,36 @@ export type ReaderRefusal =
       readonly reason: "bad_signature";
       readonly body: Record<string, unknown>;
     };
+
+/**
+ * The free reader a page falls back to when the gate refused, for the routes
+ * that meter nothing and charge nothing (src/worker/pages.ts).
+ *
+ * It carries an access because every reader does, and the access is spent: the
+ * cap and the use are both zero, so anything that tried to charge it or to
+ * print a remainder for it would be charging a bucket nobody reads and printing
+ * zero. The HTML pages do neither — they issue no receipt and move no counter —
+ * and this is the shape that says so rather than a second kind of reader.
+ *
+ * The scope is `QUOTA_SCOPE_PAGES_UNMETERED` and deliberately not the global
+ * free scope: nothing keys a counter by it, so a charge that reached this
+ * reader by mistake would spend a bucket of its own instead of the whole log's
+ * free tier for the day.
+ */
+export function unmeteredFreeReader(now: Date): ReaderAccess {
+  return {
+    kind: "free",
+    access: {
+      tier: FREE_TIER,
+      key: null,
+      scope: QUOTA_SCOPE_PAGES_UNMETERED,
+      globalScope: null,
+      day: utcDay(now.toISOString()),
+      limit: 0,
+      used: 0,
+    },
+  };
+}
 
 /**
  * The four M2 headers off a request, lowercased, as `verifyRequest` reads them.
@@ -318,13 +477,25 @@ async function signedOperator(
 }
 
 /**
- * The reader behind one request, resolved once per request.
+ * The reader behind one request, resolved once per request, with the day they
+ * are metered on.
  *
  * The key first, because a key is the cheaper and the commoner answer and
  * because its refusals are the ones a reader has paid to be told; then the
  * signature, which costs a nonce write; then free. Every door the window touches
  * calls this exactly once and passes the answer down, so two checks in one
  * request can never disagree about who is asking.
+ *
+ * Who is asking is settled before any bucket is read, which is the ordering the
+ * QA of 2026-09-12 asked for: an operator's signed read is refused when the
+ * operator's own bucket is empty and never because the address it came from had
+ * spent the free tier. So a request with no `Authorization` header at all is
+ * checked for a signature first and metered on the free tier only when it
+ * carries none.
+ *
+ * Every branch carries the `access` it was resolved under, so a door meters the
+ * reader this function identified rather than asking the gate a second question
+ * whose answer could name a different bucket.
  */
 export async function readerAccess(
   request: Request,
@@ -334,10 +505,13 @@ export async function readerAccess(
 ): Promise<
   { ok: true; reader: ReaderAccess } | { ok: false; refusal: ReaderRefusal }
 > {
-  const resolved = await resolveAccess(db, request, now);
-  if (!resolved.ok) return resolved;
-  if (resolved.access.key !== null) {
-    return { ok: true, reader: { kind: "key", key: resolved.access } };
+  if (bearer(request) !== null) {
+    const resolved = await resolveAccess(db, request, now);
+    if (!resolved.ok) return resolved;
+    return {
+      ok: true,
+      reader: { kind: "key", key: resolved.access, access: resolved.access },
+    };
   }
 
   const signed = await signedOperator(request, env, now);
@@ -352,10 +526,20 @@ export async function readerAccess(
     };
   }
   if (signed !== null) {
+    const metered = await operatorAccess(db, signed.operator, now);
+    if (!metered.ok) return metered;
     return {
       ok: true,
-      reader: { kind: "operator", operator: signed.operator, agent: signed.agent },
+      reader: {
+        kind: "operator",
+        operator: signed.operator,
+        agent: signed.agent,
+        access: metered.access,
+      },
     };
   }
-  return { ok: true, reader: { kind: "free" } };
+
+  const free = await resolveAccess(db, request, now);
+  if (!free.ok) return free;
+  return { ok: true, reader: { kind: "free", access: free.access } };
 }

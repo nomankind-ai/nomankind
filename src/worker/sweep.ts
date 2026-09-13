@@ -60,6 +60,12 @@
  * promise that anyone can recompute standing and reconcile a payout against the
  * log would be worth nothing. Before the first seal they refuse with `unsealed`.
  *
+ * The last one is not the paper's at all: it is the index's. Migration 0019
+ * made the duplicate rule a column, and the rows written before it carry none,
+ * so a bounded page of them is recomputed from their own signed cores each run
+ * until the log has none left. It appends nothing, reads no seal, and once the
+ * backlog is caught up it is one read that finds nothing.
+ *
  * Nothing here decides anything. Whether a snapshot is owed, whether a draw is
  * owed, who is drawn, which operators are excluded, and when a window has run
  * out are all src/assign.ts's pure functions; the writers in
@@ -143,6 +149,8 @@ import {
   authorityHostsFor,
   DEFAULT_DOMAIN,
   DOMAIN_SLUGS,
+  DRAW_DRAFT_MAX_AGE_DAYS,
+  DUPLICATE_BACKFILL_PER_RUN,
   LEDGER_ENTRIES_PER_RUN,
   LIST_PAGE_LIMIT,
   RELEASE_WINDOW_DAYS,
@@ -180,6 +188,7 @@ import {
   agentsForOperator,
   anchorsAfter,
   appendEvents,
+  backfillDuplicateKeys,
   bountiesForEntry,
   bountyPoolRows,
   completeSealRewrites,
@@ -385,6 +394,7 @@ export const SWEEP_STEPS: readonly string[] = Object.freeze([
   "payout",
   "attestation",
   "counters",
+  "duplicates",
 ]);
 
 /** The four sealing deps, once they are known to be there. */
@@ -616,6 +626,15 @@ export interface SweepReport {
     readonly amount: number;
     readonly transfer: string;
   }[];
+  /**
+   * How many rows written before migration 0019 this run gave a duplicate key,
+   * or null when the step refused.
+   *
+   * Zero on every run of a log that has none left, which is every log that was
+   * never migrated and every migrated one once the backlog is caught up: a row
+   * written since 0019 carries its key by construction.
+   */
+  readonly duplicates: { readonly filled: number } | null;
   /** One count per reason nothing was done, keyed by the reason's own name. */
   readonly skipped: Readonly<Record<string, number>>;
   /**
@@ -2670,6 +2689,47 @@ export async function countersStep(
 }
 
 /**
+ * (j3) Give the rows written before migration 0019 their duplicate key.
+ *
+ * Decision D-085 and migration 0019: the duplicate rule — domain, subject,
+ * category and the normalized `after` — is a column and an index, and both
+ * doors ask it with one seek (`liveDuplicateOf`). A row written before that
+ * migration carries a null key, which is invisible to the index, so until it is
+ * filled the log would take a second copy of a claim it already holds. SQL
+ * cannot compute the key — the norm rule is Unicode normalization and
+ * whitespace folding over arbitrary text — so the backfill is code, and this is
+ * where code runs on a clock rather than on somebody's request.
+ *
+ * Bounded like every other step: at most DUPLICATE_BACKFILL_PER_RUN rows a run,
+ * and the next run continues from whatever is left, because a table that only
+ * grows must not be rewritten whole inside one request. `backfillDuplicateKeys`
+ * is idempotent by its own WHERE, so a run interrupted halfway costs nothing.
+ *
+ * Idle once there is nothing left to fill: the one statement it makes is the
+ * bounded SELECT for null keys, which comes back empty, and it writes nothing.
+ * That is the state every deployment reaches a few runs after the migration and
+ * stays in forever, which is why it is last in the run and why it appends no
+ * event — nothing here is a fact about the record, only about the index over
+ * it.
+ *
+ * A normal skip when it fails, for the same reason the counters step is: the
+ * column is a function of the entry's own signed core and never a source of
+ * truth, so a run that could not fill a row has still swept.
+ */
+export async function duplicateBackfillStep(
+  db: D1Like,
+  skip: Skip,
+): Promise<SweepReport["duplicates"]> {
+  try {
+    const filled = await backfillDuplicateKeys(db, DUPLICATE_BACKFILL_PER_RUN);
+    return { filled };
+  } catch {
+    skip("duplicate_backfill_failed");
+    return null;
+  }
+}
+
+/**
  * One operator's cycle: what is released, whether it clears the floor, and the
  * transfer that took it out.
  *
@@ -3010,15 +3070,27 @@ export async function runSweep(
       return beacon;
     };
 
+    // The queue's own bound (the QA of 2026-09-12): the drafts submitted within
+    // DRAW_DRAFT_MAX_AGE_DAYS of this run's clock, and not every draft the log
+    // has ever held. An abandoned draft leaves the working set on the day it
+    // ages out, so a run's cost follows how much was submitted lately rather
+    // than how much was ever submitted. It is a bound on the queue and not on
+    // the entry: the draft is still a draft, still readable, and a volunteer
+    // may still validate it — what it stops getting is a draw, and a validation
+    // does not put it back, because the cutoff is on `submitted_at` and nothing
+    // moves that.
+    const drawnSince = new Date(
+      Date.parse(at) - DRAW_DRAFT_MAX_AGE_DAYS * MILLISECONDS_PER_DAY,
+    ).toISOString();
     const drawn: SweepDraw[] = [];
     let afterSubmittedSeq: number | undefined;
     for (;;) {
-      const page = await listEntries(
-        db,
-        afterSubmittedSeq === undefined
-          ? { status: "draft", limit: LIST_PAGE_LIMIT }
-          : { status: "draft", limit: LIST_PAGE_LIMIT, afterSubmittedSeq },
-      );
+      const page = await listEntries(db, {
+        status: "draft",
+        limit: LIST_PAGE_LIMIT,
+        submittedAtOrAfter: drawnSince,
+        ...(afterSubmittedSeq === undefined ? {} : { afterSubmittedSeq }),
+      });
       if (page.length === 0) break;
 
       for (const stored of page) {
@@ -3483,6 +3555,13 @@ export async function runSweep(
       skip,
     );
 
+    // (j3) The duplicate-key backfill, last and outside every wall: it reads no
+    // seal, appends nothing, and on a log with nothing left to fill it is one
+    // bounded read that finds nothing. Last so that a migrated log catching up
+    // spends what is left of a run rather than what the steps above it need.
+    enter("duplicates");
+    const duplicates = await duplicateBackfillStep(db, skip);
+
     closeStep();
     report = {
       at,
@@ -3505,6 +3584,7 @@ export async function runSweep(
       standing,
       payouts,
       counters,
+      duplicates,
       skipped,
       durations,
     };
@@ -3697,6 +3777,10 @@ function stepRows(
           attestation: { expired: report.attestations.expired.length },
           counters:
             report.counters === null ? { position: null } : { ...report.counters },
+          duplicates:
+            report.duplicates === null
+              ? { filled: null }
+              : { ...report.duplicates },
         };
 
   const failedAt =

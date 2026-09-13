@@ -69,7 +69,6 @@ import {
   chargeReads,
   nextKeyCounter,
   readerAccess,
-  resolveAccess,
   type Access,
   type ReaderAccess,
 } from "./access.js";
@@ -604,17 +603,12 @@ async function route(
   if (!granted.ok) return refusalResponse(granted.refusal);
   const reader = granted.reader;
 
-  // The keyed branch carries the tier it resolved; a free or an operator page
-  // is metered on the free tier exactly as it is today, so the gate is asked
-  // for that tier's day here.
-  let access: Access;
-  if (reader.kind === "key") {
-    access = reader.key;
-  } else {
-    const free = await resolveAccess(db, request, now);
-    if (!free.ok) return refusalResponse(free.refusal);
-    access = free.access;
-  }
+  // Every branch carries the day it was resolved on: the key's tier, the
+  // operator's own bucket, or the free tier. The page is charged against the
+  // bucket its cap was checked against, which is what stops a trainer's signed
+  // walk of the log from spending an address's free tier (the QA of
+  // 2026-09-12).
+  const access: Access = reader.access;
 
   // Before any read: a deployment that cannot sign a receipt cannot serve a
   // page, and saying so costs nothing rather than a page's worth of queries.

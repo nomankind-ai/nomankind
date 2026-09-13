@@ -239,15 +239,23 @@ describe("registry routes when storage is unreachable", () => {
     await expectUnreachable(new Request("https://nomankind.ai/agents/x"));
   });
 
-  it("answers a write the same way, before it can even check the nonce", async () => {
-    // Unsigned, so this would be a 401 on a database that answered: the nonce
-    // store is D1, so the storage failure is what this request meets first.
-    await expectUnreachable(
+  it("answers an unsigned write 401 without touching storage at all", async () => {
+    // Not 503, and deliberately. The write gate checks the four signing headers
+    // on headers alone before it reads a body, opens the nonce store or asks the
+    // registry anything, so a request carrying no signature is refused without
+    // the database being reached — which is the whole point of putting that
+    // check first. A signed write on an unreachable database still answers 503:
+    // the nonce store is D1, and that is the first thing a real one meets.
+    const response = await handleRequest(
       new Request("https://nomankind.ai/operators", {
         method: "POST",
         body: JSON.stringify({}),
       }),
+      env,
     );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "missing_header" });
   });
 
   it("answers GET /events the same way", async () => {
@@ -264,10 +272,10 @@ describe("registry routes when storage is unreachable", () => {
     );
   });
 
-  it("answers a validation the same way", async () => {
-    // Well formed and unsigned: the entry lookup and the nonce store are both
-    // D1, so the storage failure is what this request meets first.
-    await expectUnreachable(
+  it("answers an unsigned validation the same way", async () => {
+    // Well formed and unsigned, and so refused on its headers before the entry
+    // lookup or the nonce store is reached, exactly as the registry door above.
+    const response = await handleRequest(
       new Request("https://nomankind.ai/entries/nmk_01ABC/validate", {
         method: "POST",
         body: JSON.stringify({
@@ -281,7 +289,11 @@ describe("registry routes when storage is unreachable", () => {
           signature: "x",
         }),
       }),
+      env,
     );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "missing_header" });
   });
 });
 

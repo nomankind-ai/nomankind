@@ -30,7 +30,16 @@ import type { DnsResolver } from "../adapters/dns.js";
 import type { PayoutAdapter } from "../adapters/payout.js";
 import { appendEvent, type Attestation, type Event } from "../events.js";
 import { publicKeyFromAgentId } from "../identity.js";
-import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "../policy.js";
+import { utcDay } from "../anchor.js";
+import { quotaScopeForClient } from "../keys.js";
+import {
+  DEFAULT_DOMAIN,
+  LIST_PAGE_LIMIT,
+  REQUEST_CLOCK_SKEW_SECONDS,
+  REQUEST_MAX_BODY_BYTES,
+  WRITES_PER_AGENT_PER_DAY,
+  WRITES_PER_CLIENT_PER_DAY,
+} from "../policy.js";
 import {
   checkAgentBind,
   checkDomainJoin,
@@ -47,13 +56,20 @@ import {
   type JoinRefusal,
   type RegistrationRefusal,
 } from "../registry.js";
-import { HEADER_AGENT, verifyRequest } from "../request.js";
+import {
+  HEADER_AGENT,
+  HEADER_NONCE,
+  HEADER_SIGNATURE,
+  HEADER_TIMESTAMP,
+  verifyRequest,
+} from "../request.js";
 import type {
   D1Like,
   D1LikeExecResult,
   D1LikeResult,
   D1LikeStatement,
 } from "../storage/d1.js";
+import { addQuota, quotaOn } from "../storage/keys.js";
 import { D1NonceStore } from "../storage/nonces.js";
 import {
   EventAppendError,
@@ -421,6 +437,230 @@ function headerMap(request: Request): Record<string, string> {
   return headers;
 }
 
+/** ISO 8601 date-time with a seconds field and an explicit offset or Z. */
+const ISO_DATE_TIME =
+  /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
+
+/** How many milliseconds a second is. Not a policy number. */
+const MILLISECONDS_PER_SECOND = 1000;
+
+/** How many milliseconds a day is. Not a policy number: it is what a day is. */
+const MILLISECONDS_IN_A_DAY = 86_400_000;
+
+/**
+ * Everything the verifier can decide about a signed request without its body.
+ *
+ * The four headers' presence, the agent header naming a real key, and the
+ * timestamp being a timestamp inside the skew window — exactly the checks
+ * `verifyRequest` makes before it ever looks at the body, in the same order and
+ * answering in the same words, so a caller is told the same thing whichever of
+ * the two reached the verdict.
+ *
+ * It exists because the body is the expensive part. The signature covers the
+ * canonical body and so cannot be checked without it, but nothing above it can:
+ * an unsigned request has no business costing this Worker a twelve-megabyte read
+ * and a parse before it is told it was never signed. So this runs first, on
+ * headers alone, and the body is read only for a request that got this far.
+ *
+ * The nonce is not checked here, only that it is present: spending a nonce is a
+ * write, and a request that has not been read yet has not been served.
+ */
+function headerVerdict(
+  headers: Record<string, string>,
+  now: Date,
+): { ok: true; publicKey: Uint8Array } | { ok: false; reason: string } {
+  const present = (name: string): string | undefined => {
+    const value = headers[name];
+    return value === undefined || value === "" ? undefined : value;
+  };
+
+  const agentHeader = present(HEADER_AGENT);
+  const timestamp = present(HEADER_TIMESTAMP);
+  if (
+    agentHeader === undefined ||
+    timestamp === undefined ||
+    present(HEADER_NONCE) === undefined ||
+    present(HEADER_SIGNATURE) === undefined
+  ) {
+    return { ok: false, reason: "missing_header" };
+  }
+
+  let publicKey: Uint8Array;
+  try {
+    publicKey = publicKeyFromAgentId(agentHeader);
+  } catch {
+    return { ok: false, reason: "agent_mismatch" };
+  }
+
+  if (!ISO_DATE_TIME.test(timestamp)) {
+    return { ok: false, reason: "bad_timestamp" };
+  }
+  const signedAt = Date.parse(timestamp);
+  if (Number.isNaN(signedAt)) return { ok: false, reason: "bad_timestamp" };
+  const skew = Math.abs(now.getTime() - signedAt) / MILLISECONDS_PER_SECOND;
+  if (skew > REQUEST_CLOCK_SKEW_SECONDS) {
+    return { ok: false, reason: "clock_skew" };
+  }
+
+  return { ok: true, publicKey };
+}
+
+/**
+ * The request's body, or the refusal its size earned.
+ *
+ * Two checks and not one. `Content-Length` above the cap is refused before a
+ * byte is read, which is what makes an oversized body cost nothing at all; a
+ * body that declares no length is read through its own stream and abandoned at
+ * the cap plus one byte, which is what stops a chunked body from being the way
+ * around the first check. Either way nothing above REQUEST_MAX_BODY_BYTES is
+ * ever held in this isolate, and no JSON parse happens anywhere before this.
+ *
+ * One helper for every write door, because thirteen copies of a cap would be
+ * thirteen chances for a door to be the one that forgot.
+ */
+export async function readCappedBody(
+  request: Request,
+): Promise<{ ok: true; text: string } | { ok: false; response: Response }> {
+  const tooLarge = {
+    ok: false as const,
+    response: refuse(413, "body_too_large"),
+  };
+
+  const declared = request.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (Number.isFinite(length) && length > REQUEST_MAX_BODY_BYTES) {
+      return tooLarge;
+    }
+  }
+
+  const stream = request.body;
+  if (stream === null) return { ok: true, text: await request.text() };
+
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done === true) break;
+    if (value === undefined) continue;
+    total += value.byteLength;
+    if (total > REQUEST_MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      return tooLarge;
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(bytes) };
+}
+
+/**
+ * The scope one agent's writes are counted under.
+ *
+ * The agent id in the clear, because it is already public: it is in every
+ * signed request's headers and in every event the agent's writes produce, and a
+ * counter under it records how much that key wrote and never what it wrote.
+ */
+export function writeScopeForAgent(agent: string): string {
+  return `write:agent:${agent}`;
+}
+
+/**
+ * The scope one client address's writes are counted under: the same hashed
+ * client scope the read path counts a keyless reader under, under this side's
+ * own prefix so a day's reads and a day's writes are never the same row.
+ */
+export async function writeScopeForClient(request: Request): Promise<string> {
+  return `write:${await quotaScopeForClient(
+    request.headers.get("cf-connecting-ip"),
+  )}`;
+}
+
+/** The start of the day after this one, which is when a write cap resets. */
+function writeQuotaResetsAt(day: string): string {
+  const start = Date.parse(`${day}T00:00:00.000Z`);
+  return new Date(start + MILLISECONDS_IN_A_DAY).toISOString();
+}
+
+/**
+ * Charge one write against the two buckets that bound the free write path, or
+ * refuse when either is spent.
+ *
+ * Whitepaper Section 5 lets anyone submit with a bare agent key and Section 9
+ * prices spam through the paid loop. Both hold here, and the second is why the
+ * first can: a self-generated key is free, so the agent bucket alone would be
+ * bounded by nothing at all — a caller that mints a key per request spends a
+ * fresh cap every time. The client bucket is the one that counts the caller
+ * rather than the name they signed under, keyed by the same hashed client scope
+ * the read path counts a keyless reader under, so the two together bound both
+ * the busy key and the key factory.
+ *
+ * Charged after the signature verifies and before any fetch, DNS lookup,
+ * archive write or derivation: a write is the cheapest thing to refuse before
+ * the expensive part of a door, and it is charged whether or not the door goes
+ * on to refuse the request on its own merits. That is deliberate and matches
+ * what the nonce already does — a request that authenticated and was then
+ * refused has spent this Worker's attention, and a caller who could make a
+ * hundred doomed submissions for free would have found the hole this closes.
+ *
+ * The same table the read quota uses, under its own scope prefix, so there is
+ * one place a day's usage lives and one UPSERT that the database does the
+ * arithmetic of.
+ */
+export async function chargeWrite(
+  db: D1Like,
+  request: Request,
+  agent: string,
+  now: Date,
+): Promise<{ ok: true } | { ok: false; response: Response }> {
+  const day = utcDay(now.toISOString());
+  const agentScope = writeScopeForAgent(agent);
+  const clientScope = await writeScopeForClient(request);
+
+  const agentUsed = await quotaOn(db, agentScope, day);
+  const clientUsed = await quotaOn(db, clientScope, day);
+
+  const spent = (
+    bucket: "agent" | "client",
+    limit: number,
+    used: number,
+  ): { ok: false; response: Response } => ({
+    ok: false,
+    response: json(
+      {
+        error: "write_quota",
+        bucket,
+        limit,
+        used,
+        resets_at: writeQuotaResetsAt(day),
+      },
+      429,
+      {
+        "x-nomankind-write-limit": String(limit),
+        "x-nomankind-write-remaining": "0",
+      },
+    ),
+  });
+
+  if (agentUsed >= WRITES_PER_AGENT_PER_DAY) {
+    return spent("agent", WRITES_PER_AGENT_PER_DAY, agentUsed);
+  }
+  if (clientUsed >= WRITES_PER_CLIENT_PER_DAY) {
+    return spent("client", WRITES_PER_CLIENT_PER_DAY, clientUsed);
+  }
+
+  await addQuota(db, agentScope, day, 1);
+  await addQuota(db, clientScope, day, 1);
+  return { ok: true };
+}
+
 /**
  * Read the body and prove who sent it (decision D-014).
  *
@@ -431,38 +671,49 @@ function headerMap(request: Request): Record<string, string> {
  * before the check, so retention is measured against the injected clock and
  * never against a wall clock read down here.
  *
- * The public key comes from the agent header, and the verifier is then asked
- * whether the signature belongs to it. A header that is not an agent id is
- * agent_mismatch — the same answer the verifier itself gives — and a header
- * that is absent is left to the verifier, which reports missing_header.
+ * The order is what a refusal costs, cheapest first, and it is the same order at
+ * every write door because every write door is this function:
+ *
+ * 1. the four headers' presence and shape and the timestamp's skew, on headers
+ *    alone (401 missing_header, agent_mismatch, bad_timestamp, clock_skew), so
+ *    an unsigned body is never read at all;
+ * 2. the body against REQUEST_MAX_BODY_BYTES (413 body_too_large), declared
+ *    length first and the arriving bytes second;
+ * 3. the parse, and the object shape a signed body must have (400 bad_body) —
+ *    the first JSON.parse anywhere on the write path, and it is after the cap;
+ * 4. the nonce and the signature, which need the canonical body (401 replay,
+ *    bad_signature);
+ * 5. one write charged against the day's two buckets (429 write_quota).
+ *
+ * Only then does the door get its turn, with a body it does not have to read
+ * again. The genesis door is the one that charges nothing: it is the
+ * maintainer's own key naming the first trusted operators once, and a cap on it
+ * would be a cap on ourselves.
  */
 export async function authenticate(
   request: Request,
   env: Env,
   deps: { readonly now: Date },
   path: string,
+  options: { readonly charge?: boolean } = {},
 ): Promise<Authenticated> {
+  const headers = headerMap(request);
+  const precheck = headerVerdict(headers, deps.now);
+  if (!precheck.ok) {
+    return { ok: false, response: refuse(401, precheck.reason) };
+  }
+
+  const read = await readCappedBody(request);
+  if (!read.ok) return { ok: false, response: read.response };
+
   let body: unknown;
   try {
-    body = JSON.parse(await request.text());
+    body = JSON.parse(read.text);
   } catch {
     return { ok: false, response: refuse(400, "bad_body") };
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return { ok: false, response: refuse(400, "bad_body") };
-  }
-
-  const headers = headerMap(request);
-  const agentHeader = headers[HEADER_AGENT];
-  // No header at all: hand the verifier empty key bytes and let it report the
-  // missing header, rather than guessing at a reason on its behalf.
-  let publicKey: Uint8Array = new Uint8Array();
-  if (agentHeader !== undefined && agentHeader !== "") {
-    try {
-      publicKey = publicKeyFromAgentId(agentHeader);
-    } catch {
-      return { ok: false, response: refuse(401, "agent_mismatch") };
-    }
   }
 
   const nonces = new D1NonceStore(env.DB);
@@ -472,13 +723,19 @@ export async function authenticate(
     path,
     body,
     headers,
-    publicKey,
+    publicKey: precheck.publicKey,
     now: deps.now,
     nonces,
   });
   if (!verdict.ok) {
     return { ok: false, response: refuse(401, verdict.reason) };
   }
+
+  if (options.charge !== false) {
+    const charged = await chargeWrite(env.DB, request, verdict.agentId, deps.now);
+    if (!charged.ok) return { ok: false, response: charged.response };
+  }
+
   return { ok: true, agent: verdict.agentId, body };
 }
 
@@ -837,7 +1094,12 @@ async function genesis(
   deps: RegistryDeps,
   path: string,
 ): Promise<Response> {
-  const auth = await authenticate(request, env, deps, path);
+  // The one write door that charges no write. Section 11's genesis is the
+  // maintainer's own key naming the first trusted operators, refused to every
+  // other key by `checkGenesisNaming` below, so a daily cap on it would be a cap
+  // on ourselves and nothing else. Every other rule above still applies: the
+  // headers, the body cap, the parse and the signature.
+  const auth = await authenticate(request, env, deps, path, { charge: false });
   if (!auth.ok) return auth.response;
 
   const parsed = parseGenesisBody(auth.body);

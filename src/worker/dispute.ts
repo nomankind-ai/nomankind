@@ -49,7 +49,7 @@ import {
   openDispute,
   openRevalidation,
 } from "../dispute.js";
-import { checkDuplicate } from "../duplicate.js";
+import { duplicateKeyHash } from "../duplicate.js";
 import type { Event, EventInput } from "../events.js";
 import { DISPUTE_STAKE_STANDING, LIST_PAGE_LIMIT } from "../policy.js";
 import { validateEntry, type ValidationError } from "../schema.js";
@@ -57,6 +57,7 @@ import { checkSource } from "../sources.js";
 import { disputeStake, revalidationOutcomeStakes } from "../stake.js";
 import {
   getEntry,
+  liveDuplicateOf,
   openRevalidationAssignment,
   openStakeRowsForOperator,
   operatorStanding,
@@ -76,7 +77,6 @@ import {
 import {
   ArchiveUnreachable,
   archivePrepared,
-  duplicateCandidates,
   prepareSubmission,
   type SubmitDeps,
 } from "./submit.js";
@@ -254,20 +254,15 @@ async function file(
 ): Promise<Response> {
   if (!ENTRY_ID_PATTERN.test(id)) return refuse(400, "bad_id");
 
-  // The shape, before the envelope: a body that is not a filing is a 400
-  // whoever signed it. The clone is what lets the body be read twice — once
-  // here and once by the verifier, which signs over the canonical form of it.
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await request.clone().text());
-  } catch {
-    return refuse(400, "bad_body");
-  }
-  const body = parseDisputeBody(raw);
-  if (body === null) return refuse(400, "bad_body");
-
+  // The envelope, before the shape: `authenticate` checks the signing headers
+  // before the body is read, caps and reads it once, and charges the day's
+  // write, so an unsigned filing costs nothing and the shape below is checked on
+  // a body somebody has proved they sent.
   const auth = await authenticate(request, env, deps, path);
   if (!auth.ok) return auth.response;
+
+  const body = parseDisputeBody(auth.body);
+  if (body === null) return refuse(400, "bad_body");
 
   const stored = await getEntry(env.DB, id);
   if (stored === null) return refuse(404, "not_found");
@@ -334,19 +329,23 @@ async function file(
   // challenge while one is open is still `dispute_open` (D-066), and before
   // anything is written, exactly like the source gate below.
   //
-  // The candidates are the correction's own domain, subject and category, read
-  // with the submit door's own query and put in the submit door's own order, so
-  // a correction that repeats a live correction of the same subject is refused
-  // in the same words the submit door would have used.
-  const duplicate = checkDuplicate(
-    prepared.core,
-    await duplicateCandidates(env.DB, prepared.core),
+  // One indexed seek and not a scan, the same statement the submit door makes:
+  // the correction's own duplicate key, looked up in the `duplicate_key` index
+  // (migration 0019) for the newest live entry holding it. The two exemptions
+  // the index cannot know are applied here exactly as the door applies them —
+  // an entry is never a duplicate of itself, and never of the entry it
+  // supersedes — so a correction that repeats a live correction of the same
+  // subject is refused in the same words the submit door would have used.
+  const held = await liveDuplicateOf(
+    env.DB,
+    await duplicateKeyHash(prepared.core),
   );
-  if (!duplicate.ok) {
-    return json(
-      { error: duplicate.reason, duplicate_of: duplicate.duplicate_of },
-      422,
-    );
+  if (
+    held !== null &&
+    held !== prepared.core["id"] &&
+    held !== prepared.core["supersedes"]
+  ) {
+    return json({ error: "duplicate_claim", duplicate_of: held }, 422);
   }
 
   // Section 4 and decision D-080: a category with an authoritative source by

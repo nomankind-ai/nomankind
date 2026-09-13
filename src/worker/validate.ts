@@ -428,20 +428,16 @@ async function validate(
 ): Promise<Response> {
   if (!ENTRY_ID_PATTERN.test(id)) return refuse(400, "bad_id");
 
-  // The shape, before the envelope: a body that is not a decision is a 400
-  // whoever signed it. The clone is what lets the body be read twice — once
-  // here and once by the verifier, which signs over the canonical form of it.
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await request.clone().text());
-  } catch {
-    return refuse(400, "bad_body");
-  }
-  const body = parseValidateBody(raw);
-  if (body === null) return refuse(400, "bad_body");
-
+  // The envelope, before the shape. `authenticate` checks the four signing
+  // headers on headers alone, caps and reads the body once, parses it, verifies
+  // the signature over its canonical form and charges the day's write — so an
+  // unsigned body is never read at all and the shape below is checked on a body
+  // somebody has proved they sent.
   const auth = await authenticate(request, env, deps, path);
   if (!auth.ok) return auth.response;
+
+  const body = parseValidateBody(auth.body);
+  if (body === null) return refuse(400, "bad_body");
 
   const stored = await getEntry(env.DB, id);
   if (stored === null) return refuse(404, "not_found");

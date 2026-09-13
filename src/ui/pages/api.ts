@@ -23,16 +23,22 @@ import {
   CONTRIBUTOR_SHARE_FLOOR_PERCENT,
   CONTRIBUTOR_SHARE_PERCENT,
   DISPUTE_FILING_FEE_CENTS,
+  DRAW_DRAFT_MAX_AGE_DAYS,
+  FREE_READS_PER_DAY_GLOBAL,
   FREE_TIER,
   LIST_PAGE_LIMIT,
+  OPERATOR_READS_PER_DAY,
   PAGE_CACHE_SECONDS,
   PAGE_CACHE_STALE_SECONDS,
   RATE_TIERS,
   READ_PRICE_MICROS_PER_READ,
   READ_SHARE_SPLIT,
   RELEASE_WINDOW_DAYS,
+  REQUEST_MAX_BODY_BYTES,
   SCHEMA_VERSION,
   STRIPE,
+  WRITES_PER_AGENT_PER_DAY,
+  WRITES_PER_CLIENT_PER_DAY,
 } from "../../policy.js";
 import { STAGE_COUNT } from "../../status.js";
 import type { Safe } from "../html.js";
@@ -125,8 +131,8 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/events",
     parameters: `after=<seq>, limit=<1..${LIST_PAGE_LIMIT}>`,
     answers:
-      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. An event whose release date has not arrived goes to a free reader as a hash line — seq, at, type, entry_id, prev_hash, hash, payload null and withheld true — so the chain still links and the seal's root is still over the same leaves.",
-    refusals: "400 bad_query.",
+      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. An event whose release date has not arrived goes to a free reader as a hash line — seq, at, type, entry_id, prev_hash, hash, payload null and withheld true — so the chain still links and the seal's root is still over the same leaves. One page is one read: it is charged one unit against the caller's own bucket after the page is built, and carries the same three x-nomankind headers every other door does.",
+    refusals: "400 bad_query; 401 and 402 as the key gate gives them; 429 rate_limited past the cap.",
   },
   {
     method: "GET",
@@ -351,7 +357,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the derived entry and a Location header. The entry is draft: status is recomputed from the log and is never sent in. The Worker fetches the citation itself under the norm rule and refuses unless what it fetched hashes to the snapshot_hash the author signed.",
     refusals:
-      "400 bad_body; 401 authentication then bad_signature; 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, bad_subject_version (the category's subject carries a version as its third segment in this domain, and the entry's has none), unknown_authority (the subject's primary party has no row in this domain's authorities table and the category needs an official source), source_not_official (the category has an authoritative source by nature and the citation is not it), bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 duplicate_claim (the answer carries duplicate_of: the same domain, subject, category and normalized value is already live as a draft or a verified entry and this entry does not supersede it; refused before anything is fetched or written, on the dispute door as well as this one), snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large, bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 disclosure_missing (a redaction placeholder with no pointer to its original, or a disclosure body on an entry whose domain and category publish no disclosure rule) and disclosure_mismatch (the disclosed value does not hash to the placeholder), both before anything is written; 422 schema_invalid; 503 chain_conflict when three rebuilds in a row lose the log's next position to another writer.",
+      "400 bad_body; 401 authentication then bad_signature; 422 core_too_large (the answer names the field: claim, before, after or citation longer than CORE_TEXT_MAX_CHARS, or evidence or observation whose canonical form is longer than EVIDENCE_MAX_BYTES — checked before anything is fetched, so an entry too big to keep forever costs the log no capture and no row); 422 bad_id, bad_norm_version, missing_domain (a seventeen-key core sealed under schema v0.6: a new entry names the domain its author signs), unregistered_domain, category_not_in_domain, bad_subject_version (the category's subject carries a version as its third segment in this domain, and the entry's has none), unknown_authority (the subject's primary party has no row in this domain's authorities table and the category needs an official source), source_not_official (the category has an authoritative source by nature and the citation is not it), bad_submitted_at, author_operator_mismatch, provider_statement_mismatch, no_predicate and 403 author_mismatch; 422 self_supersession, target_missing, subject_mismatch, category_mismatch; 409 duplicate_entry; 503 fetcher_not_configured; 422 duplicate_claim (the answer carries duplicate_of: the same domain, subject, category and normalized value is already live as a draft or a verified entry and this entry does not supersede it; refused before anything is fetched or written, on the dispute door as well as this one), snapshot_mismatch, unsupported_citation, fetch_failed, too_many_redirects, timeout, too_large (CAPTURE_MAX_BYTES, checked at the door on the bytes that came back as well as inside the fetch adapter, so the ceiling holds for any fetcher), bad_status, invalid_json, needs_javascript, missing_receipt, receipt_mismatch; 422 disclosure_missing (a redaction placeholder with no pointer to its original, or a disclosure body on an entry whose domain and category publish no disclosure rule) and disclosure_mismatch (the disclosed value does not hash to the placeholder), both before anything is written; 422 schema_invalid; 503 chain_conflict when three rebuilds in a row lose the log's next position to another writer.",
   },
   {
     method: "POST",
@@ -359,7 +365,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     parameters:
       "record (exactly the schema's approvers item) and signature (nomankind-record-v1, kind validation); signed by the record's own agent",
     answers:
-      "201 with the derived entry. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation. A validator that judges the entry a duplicate of one it does not supersede rejects in the published form, the reason duplicate_claim:<entry id>, which is taken as any other reason is: nothing new is signed, and the entry page and the confidence inputs read the id back out of it.",
+      `201 with the derived entry. A draft is drawn a validator by the sweep only while it is within DRAW_DRAFT_MAX_AGE_DAYS of its own submitted_at — ${DRAW_DRAFT_MAX_AGE_DAYS} days: past that it leaves the draw queue, and it is still a draft, still readable, and still open to a volunteer — a validation makes it draw-eligible again only if it is inside the window, because the cutoff is on submitted_at and nothing moves that. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation. A validator that judges the entry a duplicate of one it does not supersede rejects in the published form, the reason duplicate_claim:<entry id>, which is taken as any other reason is: nothing new is signed, and the entry page and the confidence inputs read the id back out of it.`,
     refusals:
       "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, subject_authority (the operator's own domain is, or is under, an official host of the entry's subject's authority row, in a domain whose registry says a subject excludes its own authority), operator_not_in_domain (the operator is not attested in the entry's own domain), missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, schema_invalid.",
   },
@@ -739,7 +745,40 @@ POST
       ${endpoints(
         "Write path",
         html`Every row is a signed request. Nothing is written unless every check
-        passes, and status is never sent in: it is recomputed from the log.`,
+        passes, and status is never sent in: it is recomputed from the log.
+        <br /><br />
+        Every one of them begins the same way, in this order, because it is one
+        shared gate and not thirteen copies of one. First the four
+        <span class="mono">x-nomankind-*</span> headers — present, the agent
+        header naming a real key, the timestamp a timestamp inside
+        <span class="mono">REQUEST_CLOCK_SKEW_SECONDS</span> — checked on headers
+        alone, answering 401 <span class="mono">missing_header</span>,
+        <span class="mono">agent_mismatch</span>,
+        <span class="mono">bad_timestamp</span> or
+        <span class="mono">clock_skew</span>; so an unsigned body is refused
+        without being read, whatever its size. Then the body against
+        <span class="mono">${REQUEST_MAX_BODY_BYTES}</span> bytes
+        (<span class="mono">REQUEST_MAX_BODY_BYTES</span>): a
+        <span class="mono">Content-Length</span> above it is 413
+        <span class="mono">body_too_large</span> before a byte is read, and a
+        body that declares no length is abandoned at the cap plus one byte and
+        refused the same way. Then the parse (400
+        <span class="mono">bad_body</span>), which is the first
+        <span class="mono">JSON.parse</span> anywhere on the write path and is
+        always after the cap. Then the nonce and the signature over the canonical
+        body (401 <span class="mono">replay</span>,
+        <span class="mono">bad_signature</span>). Then one write charged against
+        the day's two buckets — <span class="mono">${WRITES_PER_AGENT_PER_DAY}</span>
+        per signing agent and <span class="mono">${WRITES_PER_CLIENT_PER_DAY}</span>
+        per client address, per UTC day — answering 429
+        <span class="mono">write_quota</span> with
+        <span class="mono">x-nomankind-write-limit</span> and
+        <span class="mono">x-nomankind-write-remaining</span> when either is
+        spent. A request that authenticated and is then refused on its own merits
+        has still spent its nonce and its write. Only then does the row's own
+        column below begin. <span class="mono">POST /genesis</span> is the one
+        door that charges no write: it is the maintainer's own key, refused to
+        everybody else anyway.`,
         WRITE_PATH,
       )}
 
@@ -962,6 +1001,24 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           it, counted against the address it came from. A paid read sends the key
           as a bearer token, on <span class="mono">/read</span>,
           <span class="mono">/sync</span> and the account doors below.
+        </p>
+        <p class="note">
+          Two more caps beside the per-client one, both on
+          <a href="/policy">policy</a>. The free tier has a ceiling across every
+          client together — <span class="mono">FREE_READS_PER_DAY_GLOBAL</span>,
+          ${FREE_READS_PER_DAY_GLOBAL} reads per UTC day — checked before the
+          per-client cap and counted in a scope of its own, so a crowd of
+          addresses each inside their own cap cannot be the whole day's budget;
+          past it the 429 body carries
+          <span class="mono">"scope": "global"</span> beside the usual fields. It
+          bounds the free tier only: a key is never refused because strangers
+          were reading. And a read carrying the four signed-request headers from
+          an agent bound to a registered operator is metered in that operator's
+          own bucket — <span class="mono">OPERATOR_READS_PER_DAY</span>,
+          ${OPERATOR_READS_PER_DAY} reads per UTC day, keyed by operator id — and
+          answers <span class="mono">x-nomankind-tier: operator</span> with that
+          limit and what is left of it. A validator walking the log spends its
+          own day and never the free tier of the address it came from.
         </p>
         <pre class="block mono">Authorization: Bearer nmk_&lt;43 characters&gt;</pre>
         <p class="note">
