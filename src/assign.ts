@@ -557,8 +557,9 @@ function wasAnswered(
  * assignment already standing is the draw, so a second would supersede a
  * validator still inside their seventy-two hours. Only then does the log say
  * which draw is owed: the first one, the replacement for a miss, or the
- * replacement the 2-1 split calls for. Anything else is an entry waiting on its
- * volunteers, which no draw fixes.
+ * replacement the 2-1 split calls for — and a split reached on volunteers alone
+ * is owed that replacement even though nothing was ever assigned. Anything else
+ * is an entry waiting on its volunteers, which no draw fixes.
  *
  * Pure, and never throws.
  */
@@ -577,7 +578,14 @@ export function drawDue(input: {
   }
 
   const assignment = newestAssignment(input.events, input.entryId);
-  if (assignment === null) return { due: true, replacement: false };
+  if (assignment === null) {
+    // Nothing was ever assigned, so this is the first draw — but "two approvals
+    // against one rejection draw one replacement validator" is about the split
+    // and not about how many draws came before it. An entry that reached its
+    // split on volunteers alone is owed the replacement the split calls for,
+    // and it is recorded as one, so the log says which rule drew it.
+    return { due: true, replacement: input.needsReplacement };
+  }
 
   if (wasMissed(input.events, input.entryId, assignment)) {
     return { due: true, replacement: true };

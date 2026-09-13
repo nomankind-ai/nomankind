@@ -217,6 +217,35 @@ export interface VerifyReport {
   withheld: number;
 }
 
+/**
+ * Whether one edit to the core would account for the whole report.
+ *
+ * A hand-edited content field fails several checks at once and they are one
+ * fault: the signature is over the core, so changing a field of it breaks the
+ * signature, and the same change is a mismatch against what the log sealed —
+ * the core itself for a core field, the snapshot for the captured source. (The
+ * derived view is recomputed from the core, so it usually differs too; it is
+ * not what this is decided on, because a derived difference alone is a question
+ * about the log.) A reader who has not read src/verify.ts counts the lines and
+ * goes looking for that many causes.
+ *
+ * So the checks stay exactly as they are — each one really did fail, and a
+ * report that hid two of them would be a report that decided which one mattered
+ * — and the caller is given one sentence to print beside them. True only when
+ * both halves are there: a bad signature with no mismatch behind it is a key
+ * question, and a mismatch with a good signature is a log question, and neither
+ * is the edit this names.
+ */
+export function oneEditExplains(report: VerifyReport): boolean {
+  const signature = report.diffs.some(
+    (diff) => diff.check === "signature" && diff.reason === "bad_signature",
+  );
+  const content = report.diffs.some(
+    (diff) => diff.check === "core" || diff.check === "snapshot",
+  );
+  return signature && content;
+}
+
 /** How much of a canonical form a diff may carry. */
 const BRIEF_LIMIT = 120;
 

@@ -38,6 +38,7 @@ import { resolve } from "node:path";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { DEFAULT_DOMAIN } from "../policy.js";
 import { signCore } from "../sign.js";
+import { runCommand } from "./main.js";
 import { buildAuthoredCore } from "./submit.js";
 import {
   errorOf,
@@ -380,30 +381,31 @@ if (
     process.exit(BAD_ARGUMENTS);
   }
 
-  let code: number = FAILED;
-  try {
-    const run = await runDispute({
-      key: await readKeyFile(plan.keyPath),
-      baseUrl: plan.baseUrl,
-      targetId: plan.targetId,
-      fields,
-      fromReport: plan.fromReport,
-      fromRevalidation: plan.fromRevalidation,
-      deps: {
-        http: new WebHttpClient(),
-        fetcher: new WebFetcher(),
-        now: new Date(),
-        clock: () => new Date(),
-        io,
+  process.exit(
+    await runCommand(
+      { name: "dispute", baseUrl: plan.baseUrl, io },
+      async () => {
+        const run = await runDispute({
+          key: await readKeyFile(plan.keyPath),
+          baseUrl: plan.baseUrl,
+          targetId: plan.targetId,
+          fields,
+          fromReport: plan.fromReport,
+          fromRevalidation: plan.fromRevalidation,
+          deps: {
+            http: new WebHttpClient(),
+            fetcher: new WebFetcher(),
+            now: new Date(),
+            clock: () => new Date(),
+            io,
+          },
+        });
+        if (!run.ok && run.status === null) {
+          io.stderr(`dispute: ${run.error ?? "unknown error"}`);
+        }
+        return run.ok ? OK : FAILED;
       },
-    });
-    if (!run.ok && run.status === null) {
-      io.stderr(`dispute: ${run.error ?? "unknown error"}`);
-    }
-    code = run.ok ? OK : FAILED;
-  } catch (error) {
-    io.stderr(`dispute: ${reasonOf(error)}`);
-  }
-  process.exit(code);
+    ),
+  );
 }
 /* c8 ignore stop */

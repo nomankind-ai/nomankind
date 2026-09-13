@@ -132,7 +132,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/events",
     parameters: `after=<seq>, limit=<1..${LIST_PAGE_LIMIT}>, and nothing else`,
     answers:
-      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. An event whose release date has not arrived goes to a free reader as a hash line — seq, at, type, entry_id, prev_hash, hash, payload null and withheld true — so the chain still links and the seal's root is still over the same leaves. One page is one read: it is charged one unit against the caller's own bucket after the page is built, and carries the same three x-nomankind headers every other door does.",
+      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. An event about an entry whose release date has not arrived goes to a free reader as a hash line — seq, at, type, entry_id, prev_hash, hash, payload null and withheld true — so the chain still links and the seal's root is still over the same leaves. The registry is never withheld: operator_registered, operator_trusted, operator_untrusted, agent_bound, operator_joined_domain and pool_snapshot go out in full the moment a seal covers them, because GET /operators publishes the same facts from the first minute. One page is one read: it is charged one unit against the caller's own bucket after the page is built, and carries the same three x-nomankind headers every other door does.",
     refusals:
       "400 bad_query for a parameter this door does not take, a parameter given twice, an after that is not a position, or a limit outside the page size; 401 and 402 as the key gate gives them; 429 rate_limited past the cap.",
   },
@@ -1024,7 +1024,9 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           number in <a href="/policy">policy</a> and one rule everywhere: an
           event's release date is its covering seal's
           <span class="mono">sealed_at</span> plus that many days, an entry's is
-          its submission event's, and an unsealed event is not released at all.
+          its submission event's, and an unsealed event is not released at all —
+          except that the six registry events are never withheld at all, and are
+          served in full the moment a seal covers them.
         </p>
         <p class="note">
           Section 9: "The log is free to read at low volume, forever. Revenue

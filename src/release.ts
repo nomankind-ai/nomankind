@@ -10,6 +10,11 @@
  * date is its `entry_submitted` event's, and an unsealed event is not released
  * at all. The same rule on every environment, with no override anywhere.
  *
+ * One carve-out, and it is about the registry rather than about the window: the
+ * six events that say who the operators are are released the moment they are
+ * sealed (`REGISTRY_EVENT_TYPES`, `isEventReleased`). Everything about an entry
+ * keeps the window exactly as it is.
+ *
  * What the window covers is content and only content. The proof is public from
  * the first minute and this module never touches it: every event keeps its seq,
  * instant, type, entry id, prev_hash and hash, and every entry keeps its id,
@@ -101,6 +106,54 @@ export function isReleased(sealedAt: string | null, now: Date): boolean {
   return now.getTime() >= Date.parse(releaseDateOf(sealedAt));
 }
 
+/**
+ * The six event types that are the registry rather than a claim about the
+ * world, and are therefore public from the moment a seal covers them.
+ *
+ * D-100 already promises the operator record is open from the first minute, and
+ * `GET /operators` keeps that promise: it names an operator trusted on the day
+ * the pool trusts them. The naming's own event was a hash line for thirty days
+ * all the same, so one door withheld what the door beside it published, and a
+ * fork rebuilding the registry out of the log could not see the genesis naming
+ * that the site had been showing since the genesis.
+ *
+ * So these six do not wait. What the window is for is the content of entries —
+ * the claims, the reasons, the evidence, which are the thing the paid product
+ * sells early — and none of that is in here: every payload below says who may
+ * act, never what is true.
+ */
+export const REGISTRY_EVENT_TYPES: readonly Event["type"][] = Object.freeze([
+  "operator_registered",
+  "operator_trusted",
+  "operator_untrusted",
+  "agent_bound",
+  "operator_joined_domain",
+  "pool_snapshot",
+]);
+
+/**
+ * Whether one sealed event's payload is public at `now`: the one rule the
+ * events door and the mirror export both apply.
+ *
+ * Written once and called twice, because a free reader who pages `GET /events`
+ * and a fork that clones the mirror must be handed the same log — the QA of
+ * 2026-09-12 found the window implemented in both places, and a carve-out
+ * implemented in one of them would be the same bug with a new shape.
+ *
+ * Unsealed is still unreleased, registry or not: the window starts at the seal,
+ * and an event nothing has committed to is a row that could still be rolled
+ * back rather than a fact about who the operators are.
+ */
+export function isEventReleased(
+  event: Pick<Event, "type">,
+  sealedAt: string | null,
+  now: Date,
+): boolean {
+  if (sealedAt === null) return false;
+  if (REGISTRY_EVENT_TYPES.includes(event.type)) return true;
+  return isReleased(sealedAt, now);
+}
+
 /** The fields of a seal this module needs: when it was made, and what it covers. */
 export type ReleaseSeal = Pick<Seal, "last_seq" | "sealed_at">;
 
@@ -112,6 +165,12 @@ export type ReleaseSeal = Pick<Seal, "last_seq" | "sealed_at">;
  * takes the newest seal by seq: a caller that paged the chain out of two reads
  * could hand it over in any order, and the boundary a free reader is served to
  * must not depend on that.
+ *
+ * By the seal and never by the event, which the registry carve-out does not
+ * change: this is the position the delta stream stops a free trainer at and the
+ * position the mirror folds its standing and its ledger at, and both of those
+ * are about entry content. A seal whose registry lines went out early is not a
+ * seal a fold may run through — the entry payloads under it are still holes.
  */
 export function releasedHead(
   seals: readonly ReleaseSeal[],

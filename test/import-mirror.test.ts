@@ -58,9 +58,14 @@ import {
   type Probe,
 } from "../src/events.js";
 import { entryHash } from "../src/hash.js";
+import { REGISTRY_EVENT_TYPES, withholdEvent } from "../src/release.js";
 import { exportPrivateKeyPkcs8, generateKeypair } from "../src/identity.js";
 import { ImportRefusal } from "../src/import.js";
-import { sealFileName } from "../src/mirror.js";
+import {
+  mirrorLedgerRows,
+  mirrorStanding,
+  sealFileName,
+} from "../src/mirror.js";
 import {
   importArguments,
   importMirror,
@@ -79,7 +84,7 @@ import {
 import { answersHash, probeSetHash, type ProbeAnswer } from "../src/probe.js";
 import { signRecord } from "../src/records.js";
 import type { Entry } from "../src/schema.js";
-import type { Seal } from "../src/seal.js";
+import { buildSeal, sealsForEntries, type Seal } from "../src/seal.js";
 import { signCore } from "../src/sign.js";
 import { entryIdFor } from "../src/submit.js";
 import {
@@ -1145,18 +1150,29 @@ describe("a v1 mirror is still an exit", () => {
  * to replay, and is told so in one word.
  */
 describe("an export made inside the window", () => {
-  it("writes the seal as hash lines and no entry file", () => {
+  it("writes the seal's entry events as hash lines and no entry file", () => {
     const seal = insideWindow.get(sealFileName(released.seq))!;
     const lines = seal
       .split("\n")
       .filter((line) => line.length > 0)
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(lines).toHaveLength(released.size);
+    let held = 0;
     for (const line of lines) {
+      expect(typeof line["hash"]).toBe("string");
+      // The registry is public from the first minute and is written whole, so
+      // a fork can name the operators on the day it takes the clone; the rest
+      // of the seal waits for its window.
+      if (REGISTRY_EVENT_TYPES.includes(line["type"] as Event["type"])) {
+        expect(line["payload"]).not.toBeNull();
+        expect(line["withheld"]).toBeUndefined();
+        continue;
+      }
+      held += 1;
       expect(line["payload"]).toBeNull();
       expect(line["withheld"]).toBe(true);
-      expect(typeof line["hash"]).toBe("string");
     }
+    expect(held).toBeGreaterThan(0);
     expect(
       [...insideWindow.keys()].filter((path) => path.startsWith("entries/")),
     ).toEqual([]);
@@ -1220,6 +1236,369 @@ describe("an export made inside the window", () => {
 
 // ---------------------------------------------------------------------------
 // The layout before the window
+// ---------------------------------------------------------------------------
+// A seal released in part
+// ---------------------------------------------------------------------------
+
+/**
+ * A mirror whose newest seal is inside its window and begins with the registry.
+ *
+ * The shape the registry carve-out made possible (src/release.ts,
+ * `REGISTRY_EVENT_TYPES`): a sweep appends its `pool_snapshot` and then seals,
+ * so the seal it makes can open with a registry event written in full and carry
+ * every entry event after it as a hash line. Built by re-sealing this log's own
+ * events one position earlier, so the boundary falls between a full registry
+ * line and the hash lines behind it rather than on a seal edge.
+ *
+ * Nothing is invented: the events are the origin's, the roots are `buildSeal`'s
+ * over the same leaves, and the three families are re-folded at the head the new
+ * partition makes public, which is what an export of this partition would have
+ * written.
+ */
+async function partlyReleasedMirrorFiles(): Promise<Map<string, string>> {
+  const files = new Map(mirrorFiles());
+  const lines: Event[] = [];
+  for (const path of [...files.keys()].sort()) {
+    if (!path.startsWith("events/")) continue;
+    for (const line of files.get(path)!.split("\n")) {
+      if (line.length > 0) lines.push(JSON.parse(line) as Event);
+    }
+    files.delete(path);
+  }
+  lines.sort((left, right) => left.seq - right.seq);
+
+  // One position earlier than the real seal, so the event it used to end on --
+  // the sweep's own `pool_snapshot` -- opens the seal that is still inside its
+  // window instead.
+  const cut = released.last_seq;
+  const opener = lines[cut]!;
+  expect(REGISTRY_EVENT_TYPES.includes(opener.type)).toBe(true);
+  expect(lines[cut + 1]!.payload).toBeNull();
+
+  const manifest = JSON.parse(files.get("mirror.json")!) as Record<
+    string,
+    unknown
+  >;
+  const first = await buildSeal(lines.slice(0, cut), null, {
+    now: released.sealed_at,
+  });
+  if (!first.ok) throw new Error(`partlyReleased: buildSeal ${first.reason}`);
+  const second = await buildSeal(lines, first.seal, {
+    now: manifest["as_of"] as string,
+  });
+  if (!second.ok) throw new Error(`partlyReleased: buildSeal ${second.reason}`);
+
+  const jsonl = (rows: readonly unknown[]): string =>
+    rows.map((row) => `${JSON.stringify(row)}\n`).join("");
+  const document = (value: unknown): string =>
+    `${JSON.stringify(value, null, 2)}\n`;
+
+  files.set("seals.jsonl", jsonl([first.seal, second.seal]));
+  files.set(sealFileName(first.seal.seq), jsonl(lines.slice(0, cut)));
+  files.set(sealFileName(second.seal.seq), jsonl(lines.slice(cut)));
+
+  // The three families stand at the head this partition makes public, which is
+  // one position back: the pool snapshot is inside the newest seal now.
+  const head = first.seal.last_seq;
+  const publicEvents = lines.slice(0, cut);
+  files.set("standing.json", document(mirrorStanding(publicEvents, head)));
+  files.set(
+    "ledger.jsonl",
+    jsonl(mirrorLedgerRows(publicEvents, released.sealed_at)),
+  );
+
+  // Every entry file carries its own seal object and inclusion proof, which are
+  // facts about the partition rather than about the entry: re-derived here by
+  // the same functions the verifier uses, so the directory is self-consistent
+  // and this test is about the import boundary and nothing else.
+  const asOf = manifest["as_of"] as string;
+  const proof = lines.map((event) =>
+    event.payload === null && event.type === "entry_submitted"
+      ? ({ ...event, payload: { core: {} } } as unknown as Event)
+      : event,
+  );
+  const entrySeals = await sealsForEntries(proof, [first.seal, second.seal]);
+  for (const path of [...files.keys()]) {
+    if (!path.startsWith("entries/")) continue;
+    const file = JSON.parse(files.get(path)!) as Record<string, unknown>;
+    const id = (file["entry"] as Record<string, unknown>)["id"] as string;
+    const derived = deriveEntry(publicEvents, id, { now: asOf }, entrySeals);
+    files.set(
+      path,
+      document({
+        entry: derived.entry,
+        sidecar: derived.sidecar,
+        entry_hash: file["entry_hash"],
+      }),
+    );
+  }
+
+  // The day's anchor commits to the seal hashes this partition replaced, so it
+  // is dropped rather than forged: an anchor is an external timestamp over a
+  // seal, and nothing here is testing anchors.
+  files.set("anchors.jsonl", "");
+
+  manifest["released_head"] = head;
+  manifest["standing_position"] = head;
+  files.set("mirror.json", document(manifest));
+  return files;
+}
+
+describe("a seal released in part stops the import on the seal", () => {
+  let fork: TestDatabase;
+  let dir = "";
+  let files: Map<string, string> = new Map();
+  let opener = 0;
+
+  beforeAll(async () => {
+    files = await partlyReleasedMirrorFiles();
+    dir = join(workspace, "part", ENVIRONMENT);
+    await writeMirrorDirectory(dir, files);
+    fork = await freshDatabase();
+    opener = released.last_seq;
+  }, 600_000);
+
+  it("carries the registry line in full inside the window", () => {
+    const batch = files
+      .get(sealFileName(1))!
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Event);
+    expect(batch[0]!.seq).toBe(opener);
+    expect(batch[0]!.payload).not.toBeNull();
+    expect(REGISTRY_EVENT_TYPES.includes(batch[0]!.type)).toBe(true);
+    expect(batch.slice(1).every((event) => event.payload === null)).toBe(true);
+  });
+
+  it("verifies as the proof it is", async () => {
+    const io = recorder();
+    expect([
+      await verifyMirror([dir], io.io, new InProcessHttp()),
+      io.out.join("\n"),
+    ]).toEqual([0, io.out.join("\n")]);
+  }, 600_000);
+
+  it("stops at the released seal and leaves the registry line behind", async () => {
+    const summary = await replay(fork, { dir });
+
+    // The boundary is the seal and not the first hash line. Cutting at the hash
+    // line would have replayed the registry event that opens the newest seal --
+    // a position past the head this import claims, covered by no seal it wrote,
+    // which the fork's own sweep would then seal under a seal the origin never
+    // made.
+    expect([summary.head, summary.sealSeq]).toEqual([opener - 1, 0]);
+    expect(await headSeq(fork.db)).toBe(opener - 1);
+    expect(await eventsInRange(fork.db, opener, opener)).toEqual([]);
+
+    // Counted as the events left behind rather than as the hash lines among
+    // them: the registry line was not replayed either.
+    const total = files
+      .get(sealFileName(1))!
+      .split("\n")
+      .filter((line) => line.length > 0).length;
+    expect(summary.withheld).toBe(total);
+
+    // And the fork seals on from there: the seal it stopped at is its newest,
+    // and the sweep's next seal starts at the position after it.
+    const newest = (await latestSeal(fork.db))!;
+    expect([newest.seq, newest.last_seq]).toEqual([0, opener - 1]);
+  }, 600_000);
+});
+
+// ---------------------------------------------------------------------------
+// The release rule, over a stranger's directory
+// ---------------------------------------------------------------------------
+
+/**
+ * `verify-mirror` decides what has released by the export's own clock, and
+ * holds the seal files against that rule from both sides (D-100).
+ *
+ * Fullness is not the rule and cannot be: a seal covering only registry events
+ * is written whole from the day it is sealed (src/release.ts,
+ * `REGISTRY_EVENT_TYPES`), so a genesis seal inside its window is a full file
+ * whose window has not run out. Reading fullness as release put the recomputed
+ * released head past the manifest's, failed an honest directory, and folded the
+ * standing and the ledger past the boundary the export folded them at.
+ *
+ * So the clock says which seals are public, and the content has to agree: a
+ * released seal holds no hash line, and an unreleased one holds its registry
+ * events whole and everything else as a hash line.
+ */
+describe("the release rule over a stranger's directory", () => {
+  /** A genesis directory: one seal, all of it registry, inside its window. */
+  async function genesisFiles(): Promise<Map<string, string>> {
+    const source = mirrorFiles();
+    const lines: Event[] = [];
+    for (const path of [...source.keys()].sort()) {
+      if (!path.startsWith("events/")) continue;
+      for (const line of source.get(path)!.split("\n")) {
+        if (line.length > 0) lines.push(JSON.parse(line) as Event);
+      }
+    }
+    lines.sort((left, right) => left.seq - right.seq);
+
+    // The registry the log opens with, and nothing after it: the first event
+    // that is not one of the six ends the genesis seal.
+    const size = lines.findIndex(
+      (event) => !REGISTRY_EVENT_TYPES.includes(event.type),
+    );
+    expect(size).toBeGreaterThan(1);
+    const batch = lines.slice(0, size);
+
+    // Sealed at the export's own instant, so the window has not run at all.
+    const sealedAt = released.sealed_at;
+    const seal = await buildSeal(batch, null, { now: sealedAt });
+    if (!seal.ok) throw new Error(`genesisFiles: buildSeal ${seal.reason}`);
+
+    const jsonl = (rows: readonly unknown[]): string =>
+      rows.map((row) => `${JSON.stringify(row)}\n`).join("");
+    const document = (value: unknown): string =>
+      `${JSON.stringify(value, null, 2)}\n`;
+
+    const files = new Map<string, string>();
+    files.set("operators.json", source.get("operators.json")!);
+    files.set("seals.jsonl", jsonl([seal.seal]));
+    files.set(sealFileName(seal.seal.seq), jsonl(batch));
+    files.set("anchors.jsonl", "");
+    files.set("index.json", document([]));
+    files.set("standing.json", document(mirrorStanding([], -1)));
+    files.set("ledger.jsonl", "");
+
+    const manifest = JSON.parse(source.get("mirror.json")!) as Record<
+      string,
+      unknown
+    >;
+    manifest["exported_at"] = sealedAt;
+    manifest["as_of"] = sealedAt;
+    manifest["head"] = seal.seal.last_seq;
+    manifest["seal_seq"] = seal.seal.seq;
+    manifest["seals"] = 1;
+    manifest["events"] = seal.seal.size;
+    manifest["entries"] = 0;
+    manifest["attestations"] = 0;
+    manifest["ledger_rows"] = 0;
+    manifest["standing_position"] = -1;
+    // Nothing has released: the window starts at this seal and the export is
+    // its own instant. The file is whole all the same, because it is registry.
+    manifest["released_head"] = null;
+    files.set("mirror.json", document(manifest));
+    return files;
+  }
+
+  it("passes a genesis seal that is whole and still inside its window", async () => {
+    const files = await genesisFiles();
+    const dir = join(workspace, "genesis", ENVIRONMENT);
+    await writeMirrorDirectory(dir, files);
+
+    const batch = files
+      .get(sealFileName(0))!
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Event);
+    // The premise: every line is full, and every one of them is registry.
+    expect(batch.every((event) => event.payload !== null)).toBe(true);
+    expect(
+      batch.every((event) => REGISTRY_EVENT_TYPES.includes(event.type)),
+    ).toBe(true);
+
+    const io = recorder();
+    expect([
+      await verifyMirror([dir], io.io, new InProcessHttp()),
+      io.out.join("\n"),
+    ]).toEqual([0, io.out.join("\n")]);
+    expect(io.out).toContain("ok window");
+    // The released head and the folds stop in front of it, because the clock
+    // says so and not because the file is short of anything.
+    expect(io.out).toContain("ok mirror.json");
+    expect(io.out).toContain("ok standing");
+    expect(
+      JSON.parse(files.get("mirror.json")!)["released_head"] as unknown,
+    ).toBeNull();
+  }, 600_000);
+
+  it("names a registry line withheld inside the window", async () => {
+    const files = await partlyReleasedMirrorFiles();
+    const batch = files
+      .get(sealFileName(1))!
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Event);
+    const opener = batch[0]!;
+    expect(REGISTRY_EVENT_TYPES.includes(opener.type)).toBe(true);
+    // The hash is the log's own either way, so nothing but the window check
+    // has anything to say about this edit.
+    files.set(
+      sealFileName(1),
+      [withholdEvent(opener), ...batch.slice(1)]
+        .map((event) => `${JSON.stringify(event)}\n`)
+        .join(""),
+    );
+
+    const dir = join(workspace, "held-registry", ENVIRONMENT);
+    await writeMirrorDirectory(dir, files);
+    const io = recorder();
+    expect(await verifyMirror([dir], io.io, new InProcessHttp())).toBe(1);
+    expect(io.out).toContain(
+      `FAIL seal/1 window /events/${opener.seq} withheld_registry`,
+    );
+    expect(io.out).toContain("ok events");
+  }, 600_000);
+
+  it("names a line withheld under a seal the window has released", async () => {
+    const files = await partlyReleasedMirrorFiles();
+    const batch = files
+      .get(sealFileName(0))!
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Event);
+    // The far side of the same rule: this seal's window has run out by the
+    // export's own clock, so the export owed every payload under it.
+    const last = batch[batch.length - 1]!;
+    files.set(
+      sealFileName(0),
+      [...batch.slice(0, -1), withholdEvent(last)]
+        .map((event) => `${JSON.stringify(event)}\n`)
+        .join(""),
+    );
+
+    const dir = join(workspace, "held-after-release", ENVIRONMENT);
+    await writeMirrorDirectory(dir, files);
+    const io = recorder();
+    expect(await verifyMirror([dir], io.io, new InProcessHttp())).toBe(1);
+    expect(io.out).toContain(
+      `FAIL seal/0 window /events/${last.seq} withheld_after_release`,
+    );
+  }, 600_000);
+
+  it("names an entry payload published inside the window", async () => {
+    const files = await partlyReleasedMirrorFiles();
+    const batch = files
+      .get(sealFileName(1))!
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const held = batch[1]!;
+    expect(held["payload"]).toBeNull();
+    expect(
+      REGISTRY_EVENT_TYPES.includes(held["type"] as Event["type"]),
+    ).toBe(false);
+    // A line the window says must be a hash line, published with a payload.
+    batch[1] = { ...held, payload: {}, withheld: undefined };
+    files.set(
+      sealFileName(1),
+      batch.map((event) => `${JSON.stringify(event)}\n`).join(""),
+    );
+
+    const dir = join(workspace, "early-payload", ENVIRONMENT);
+    await writeMirrorDirectory(dir, files);
+    const io = recorder();
+    expect(await verifyMirror([dir], io.io, new InProcessHttp())).toBe(1);
+    expect(io.out).toContain(
+      `FAIL seal/1 window /events/${String(held["seq"])} released_early`,
+    );
+  }, 600_000);
+});
+
 // ---------------------------------------------------------------------------
 
 /**

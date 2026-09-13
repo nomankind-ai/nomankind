@@ -103,7 +103,12 @@ import {
   type MirrorFormat,
   type MirrorStanding,
 } from "../mirror.js";
-import { isReleased, isWithheld, releaseDateOf } from "../release.js";
+import {
+  REGISTRY_EVENT_TYPES,
+  isReleased,
+  isWithheld,
+  releaseDateOf,
+} from "../release.js";
 import {
   sealsForEntries,
   verifySeal,
@@ -639,12 +644,8 @@ async function checkChain(
 }
 
 /**
- * The largest position the directory carries in full, or null when it carries
- * none: what `mirror.json`'s `released_head` has to say.
- *
- * Read off the files rather than off a clock, which is the only honest reading
- * of somebody else's directory: a manifest that claims more released than the
- * seal files actually hold is a manifest somebody edited.
+ * The largest released position, or null when nothing has released: what
+ * `mirror.json`'s `released_head` has to say.
  */
 function releasedHeadOf(mirror: Mirror): number | null {
   let head: number | null = null;
@@ -655,21 +656,105 @@ function releasedHeadOf(mirror: Mirror): number | null {
 }
 
 /**
- * The seals whose every event the directory carries in full.
+ * The clock the export judged the window at: `exported_at`, which is the
+ * `now` `buildMirror` was handed, and the newest seal's instant when a
+ * directory carries no honest one.
  *
- * What the offline verifier is handed beside the public events: a seal whose
- * batch is hash lines has a root over leaves this clone still has, but a
- * verifier asked to recompute it from payloads it was not given would call the
- * seal broken. `checkSeals` checks all of them over all the lines, which is
- * where that check belongs.
+ * Not this reader's clock. A directory is a snapshot of the day it was written,
+ * and a verifier that judged it at today's instant would fail somebody else's
+ * copy for the passage of time — which is what `warnStale` warns about and
+ * deliberately does not fail.
+ */
+function exportClock(mirror: Mirror): Date | null {
+  for (const key of ["exported_at", "as_of"]) {
+    const value = mirror.manifest[key];
+    if (typeof value !== "string") continue;
+    const at = Date.parse(value);
+    if (!Number.isNaN(at)) return new Date(at);
+  }
+  return null;
+}
+
+/**
+ * The seals whose content is public, by the rule the export wrote them under.
+ *
+ * By the clock and not by fullness, which is what the registry carve-out made
+ * necessary (src/release.ts, `REGISTRY_EVENT_TYPES`). A seal covering only
+ * registry events — a genesis seal, for one — is written whole from the day it
+ * is sealed, so "every line is full" no longer means "the window has run out":
+ * reading it that way put `released_head` past what the manifest claims, failed
+ * an honest directory on `/released_head`, and folded the standing and the
+ * ledger past the boundary the export folded them at.
+ *
+ * The older layouts have no window and no hash line, so fullness is the whole
+ * of the rule there, and a v3 directory whose manifest carries no instant we
+ * can read falls back to the same reading rather than to no reading at all.
+ *
+ * A manifest cannot buy itself a larger released head by moving that clock:
+ * `checkWindow` holds the seal files against the same rule from both sides, so
+ * a seal this says is released and that carries a hash line is a named failure.
  */
 function releasedSeals(mirror: Mirror): Seal[] {
-  return mirror.seals.filter((seal) => {
+  const clock = mirror.format === "v3" ? exportClock(mirror) : null;
+  if (clock === null) {
+    return mirror.seals.filter((seal) => !holdsAHashLine(mirror, seal));
+  }
+  return mirror.seals.filter((seal) => isReleased(seal.sealed_at, clock));
+}
+
+/** Whether any event this seal covers came over as a hash line. */
+function holdsAHashLine(mirror: Mirror, seal: Seal): boolean {
+  for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
+    if (mirror.withheld.has(seq)) return true;
+  }
+  return false;
+}
+
+/**
+ * Every seal's batch against the release rule, both ways (D-100).
+ *
+ * The two checks that make the clock above safe to read. A released seal holds
+ * no hash line: its window has run out and the export owed every payload.
+ * An unreleased seal holds its registry events in full and every other event as
+ * a hash line: the registry is public from the first minute, and everything an
+ * entry is made of waits. So a directory cannot claim a boundary its files do
+ * not keep, in either direction — a payload published early is as much a broken
+ * promise as a registry line held back.
+ */
+function checkWindow(io: ValidatorIo, tally: Tally, mirror: Mirror): void {
+  if (mirror.format !== "v3") return;
+  const clock = exportClock(mirror);
+  if (clock === null) return;
+
+  const before = tally.failed;
+  const bySeq = new Map<number, Event>();
+  for (const event of mirror.events) bySeq.set(event.seq, event);
+
+  for (const seal of mirror.seals) {
+    const open = isReleased(seal.sealed_at, clock);
     for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
-      if (mirror.withheld.has(seq)) return false;
+      const event = bySeq.get(seq);
+      if (event === undefined) continue;
+      const held = mirror.withheld.has(seq);
+      const registry = REGISTRY_EVENT_TYPES.includes(event.type);
+      const at = `/events/${seq}`;
+      const name = `seal/${seal.seq}`;
+      if (open && held) {
+        fail(io, tally, name, "window", at, "withheld_after_release");
+        continue;
+      }
+      if (open) continue;
+      if (registry && held) {
+        fail(io, tally, name, "window", at, "withheld_registry");
+        continue;
+      }
+      if (!registry && !held) {
+        fail(io, tally, name, "window", at, "released_early");
+      }
     }
-    return true;
-  });
+  }
+
+  if (tally.failed === before) io.stdout("ok window");
 }
 
 /**
@@ -1361,6 +1446,7 @@ export async function verifyMirror(
     checkManifest(io, tally, mirror, recomputed);
     await checkChain(io, tally, mirror);
     await checkSeals(io, tally, mirror);
+    checkWindow(io, tally, mirror);
     await checkAnchors(io, tally, mirror);
     await checkEntries(io, tally, mirror, dir, plan, http);
     // The three families a v1 directory does not carry are not asked of one:

@@ -9,16 +9,18 @@
  * who mistyped a hostname nothing they can act on, and tells anyone reading over
  * their shoulder where the repository lives.
  *
- * So there is one wrapper, and no command leaves the process around it. Most
- * entry points hand their whole run to it — read, sync, standing, export,
- * attest, checkpoint, validator, keygen, mirror, and, since the QA of
- * 2026-09-13 found the two of them routing around it, the mirror import and the
- * mirror verifier. The rest — submit, register, dispute, report, revalidate,
- * reconfirm, the offline verifier — catch their own at the site that knows
- * which file or which field was being read, because a line naming that is
- * better than a line naming the command; every one of them ends the way this
- * does, one named sentence on stderr and exit 1 and never a stack. A fetch that
- * never reached anything is the one failure worth its own sentence, because it
+ * So there is one wrapper, and no command leaves the process around it. Every
+ * entry point hands its whole run to it — read, sync, standing, export, attest,
+ * checkpoint, validator, keygen, mirror, the mirror import and the mirror
+ * verifier, and, since the QA of 2026-09-13 found the six write doors printing
+ * their own last line, submit, register, dispute, report, revalidate and
+ * reconfirm. What those six still catch for themselves is what they understand:
+ * a fields file that will not parse, a refusal the Worker named, an argument
+ * that was never a command — each at the site that knows which file or which
+ * field was being read, because a line naming that is better than a line naming
+ * the command. Only what escapes reaches here. (The offline verifier reads no
+ * URL and keeps its own.) A fetch that never reached anything is the one
+ * failure worth its own sentence, because it
  * is the common one and the fix is always the same: the URL. It prints
  * `unreachable <base-url>: <cause>` — the cause being the errno the platform
  * gave, ECONNREFUSED or ENOTFOUND or a TLS complaint — and exits 1. Anything

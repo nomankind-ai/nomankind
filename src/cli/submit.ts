@@ -62,6 +62,7 @@ import { checkReceiptArtifact, receiptArtifactHash } from "../artifact.js";
 import type { Core } from "../core.js";
 import { signCore } from "../sign.js";
 import { buildSubmittedCore } from "../submit.js";
+import { runCommand } from "./main.js";
 import {
   errorOf,
   fetchAndHash,
@@ -566,27 +567,25 @@ if (
     }
   }
 
-  let code = 1;
-  try {
-    const run = await runSubmit({
-      key: await readKeyFile(keyPath),
-      baseUrl,
-      fields: fields as Record<string, unknown>,
-      ...(receipt === undefined ? {} : { receipt }),
-      deps: {
-        http: new WebHttpClient(),
-        fetcher: new WebFetcher(),
-        now: new Date(),
-        io,
-      },
-    });
-    if (!run.ok && run.status === null && run.code === 1) {
-      io.stderr(`submit: ${run.error ?? "unknown error"}`);
-    }
-    code = run.code;
-  } catch (error) {
-    io.stderr(`submit: ${reasonOf(error)}`);
-  }
-  process.exit(code);
+  process.exit(
+    await runCommand({ name: "submit", baseUrl, io }, async () => {
+      const run = await runSubmit({
+        key: await readKeyFile(keyPath),
+        baseUrl,
+        fields: fields as Record<string, unknown>,
+        ...(receipt === undefined ? {} : { receipt }),
+        deps: {
+          http: new WebHttpClient(),
+          fetcher: new WebFetcher(),
+          now: new Date(),
+          io,
+        },
+      });
+      if (!run.ok && run.status === null && run.code === 1) {
+        io.stderr(`submit: ${run.error ?? "unknown error"}`);
+      }
+      return run.code;
+    }),
+  );
 }
 /* c8 ignore stop */

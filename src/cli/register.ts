@@ -38,10 +38,10 @@ import { resolve } from "node:path";
 import { MOCK_VERIFIED_PREFIX } from "../adapters/payout.js";
 import { DEFAULT_DOMAIN } from "../policy.js";
 import { signAttestation, txtRecordName } from "../registry.js";
+import { runCommand } from "./main.js";
 import {
   errorOf,
   readKeyFile,
-  reasonOf,
   signedPost,
   WebHttpClient,
   type HttpClient,
@@ -449,42 +449,43 @@ if (
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   };
-  let code: number = FAILED;
-  try {
-    const deps = { http: new WebHttpClient(), now: new Date(), io };
-    const run =
-      plan.bindKeyPath !== null
-        ? await runBind({
-            key: await readKeyFile(plan.keyPath),
-            newKey: await readKeyFile(plan.bindKeyPath),
-            baseUrl: plan.baseUrl,
-            domain: plan.domain,
-            recordDomain: plan.recordDomain,
-            deps,
-          })
-        : plan.join === null
-        ? await runRegister({
-            key: await readKeyFile(plan.keyPath),
-            baseUrl: plan.baseUrl,
-            domain: plan.domain,
-            recordDomain: plan.recordDomain,
-            genesisKey:
-              plan.genesisKeyPath === null
-                ? null
-                : await readKeyFile(plan.genesisKeyPath),
-            deps,
-          })
-        : await runJoin({
-            key: await readKeyFile(plan.keyPath),
-            baseUrl: plan.baseUrl,
-            domain: plan.domain,
-            join: plan.join,
-            deps,
-          });
-    code = run.ok ? OK : FAILED;
-  } catch (error) {
-    io.stderr(`register: ${reasonOf(error)}`);
-  }
-  process.exit(code);
+  process.exit(
+    await runCommand(
+      { name: "register", baseUrl: plan.baseUrl, io },
+      async () => {
+        const deps = { http: new WebHttpClient(), now: new Date(), io };
+        const run =
+          plan.bindKeyPath !== null
+            ? await runBind({
+                key: await readKeyFile(plan.keyPath),
+                newKey: await readKeyFile(plan.bindKeyPath),
+                baseUrl: plan.baseUrl,
+                domain: plan.domain,
+                recordDomain: plan.recordDomain,
+                deps,
+              })
+            : plan.join === null
+            ? await runRegister({
+                key: await readKeyFile(plan.keyPath),
+                baseUrl: plan.baseUrl,
+                domain: plan.domain,
+                recordDomain: plan.recordDomain,
+                genesisKey:
+                  plan.genesisKeyPath === null
+                    ? null
+                    : await readKeyFile(plan.genesisKeyPath),
+                deps,
+              })
+            : await runJoin({
+                key: await readKeyFile(plan.keyPath),
+                baseUrl: plan.baseUrl,
+                domain: plan.domain,
+                join: plan.join,
+                deps,
+              });
+        return run.ok ? OK : FAILED;
+      },
+    ),
+  );
 }
 /* c8 ignore stop */

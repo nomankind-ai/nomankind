@@ -34,10 +34,14 @@
  * 6. Exit 0 with one summary line, 1 with the named refusal, 2 on usage. Never
  *    a stack trace: a mirror is a stranger's directory.
  * 7. Only released events are replayed (decision D-100). A v3 mirror carries the
- *    seals inside the window as hash lines, and a hash line cannot be appended —
- *    it has no payload to chain, to derive from or to seal over — so the import
- *    stops at the released head, says how many lines it stopped in front of, and
- *    the fork seals on from there. A mirror with nothing released yet is refused
+ *    entry events of the seals inside the window as hash lines, and a hash line
+ *    cannot be appended — it has no payload to chain, to derive from or to seal
+ *    over — so the import stops at the released head, says how many events it
+ *    stopped in front of, and the fork seals on from there. It stops on the seal
+ *    boundary and not on the first hash line: an in-window seal carries its
+ *    registry events in full, and those wait with the rest of their batch rather
+ *    than being replayed past a head no seal in the import covers. A mirror with
+ *    nothing released yet is refused
  *    with `nothing_released` rather than replayed into an empty log, and a fork
  *    that wants more imports a newer export or reads the content it is entitled
  *    to with a key.
@@ -91,7 +95,7 @@ import {
 import { LIST_PAGE_LIMIT } from "../policy.js";
 import { isWithheld } from "../release.js";
 import type { Entry } from "../schema.js";
-import { sealsForEntries } from "../seal.js";
+import { sealsForEntries, type Seal } from "../seal.js";
 import type { D1Like } from "../storage/d1.js";
 import { applyMigrations, migrationsInOrder } from "../storage/migrate.js";
 import {
@@ -196,7 +200,12 @@ export interface ImportSummary {
   readonly attestations: number;
   readonly ledgerRows: number;
   /**
-   * The hash lines the import stopped in front of (D-100).
+   * The events the import stopped in front of (D-100).
+   *
+   * Every event past the released head and not only the hash lines among them:
+   * an in-window seal's registry lines are full and are still left behind, and
+   * what a forker needs from this number is how much of the mirror was not
+   * replayed rather than how much of it was unreadable.
    *
    * Zero for every v1 and v2 mirror and for a v3 one whose windows have all run
    * out. Above zero, `head` is the released head rather than the mirror's own
@@ -216,26 +225,58 @@ export interface ImportSummary {
  * rule nor derived from nor folded into the standing and the ledger: the import
  * is of the released prefix or it is of nothing. The head is the newest released
  * seal's rather than the last released event's, because an import has to stop on
- * a seal boundary for the fork to seal on from it — and a seal is released whole
- * or not at all, since every event under it shares its `sealed_at`.
+ * a seal boundary for the fork to seal on from it.
+ *
+ * Cut at that seal's `last_seq` and never at the first hash line, which is what
+ * the registry carve-out changed (src/release.ts, `REGISTRY_EVENT_TYPES`). A
+ * seal used to be released whole or not at all; now an in-window seal carries
+ * its registry events in full and its entry events as hash lines, so the first
+ * hash line can land in the middle of one. Cutting there replayed that seal's
+ * leading registry events past the head this import claims, into a fork whose
+ * `seals.jsonl` covers none of them — and the fork's own sweep would then seal
+ * that range under a seal the origin never made. So the boundary is the seal,
+ * and a registry payload inside a partly released seal waits with the rest of
+ * that seal's batch.
+ *
+ * `withheld` counts the events dropped past that head rather than the hash
+ * lines among them: what it tells a forker is how much of the mirror this
+ * import did not replay, and a full registry line left behind on the far side
+ * of the boundary was not replayed either.
  */
 function releasedLayout(layout: MirrorLayout): {
   readonly layout: MirrorLayout;
   readonly withheld: number;
 } {
-  const first = layout.events.findIndex((event) => isWithheld(event));
-  if (first === -1) return { layout, withheld: 0 };
+  if (!layout.events.some((event) => isWithheld(event))) {
+    return { layout, withheld: 0 };
+  }
 
-  const withheld = layout.events.length - first;
-  const through = layout.events[first]!.seq - 1;
-  const seals = layout.seals.filter((seal) => seal.last_seq <= through);
+  // The seals every one of whose events is here in full: a seal with one hash
+  // line in it is a seal this fork cannot derive from or fold over.
+  const held = new Set<number>();
+  for (const event of layout.events) {
+    if (isWithheld(event)) held.add(event.seq);
+  }
+  // The unbroken prefix of them, and not every such seal in the list: an import
+  // is a replay from seq 0, so the first seal that is short of anything is where
+  // it stops, whatever a later seal happens to hold.
+  const seals: Seal[] = [];
+  for (const seal of layout.seals) {
+    let whole = true;
+    for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
+      if (held.has(seq)) whole = false;
+    }
+    if (!whole) break;
+    seals.push(seal);
+  }
   const newest = seals[seals.length - 1];
   if (newest === undefined) {
     throw new ImportRefusal(
       "nothing_released",
-      `the mirror's oldest seal is still inside its window: ${withheld} withheld events`,
+      `the mirror's oldest seal is still inside its window: ${held.size} withheld events`,
     );
   }
+  const events = layout.events.filter((event) => event.seq <= newest.last_seq);
   return {
     layout: {
       ...layout,
@@ -243,9 +284,9 @@ function releasedLayout(layout: MirrorLayout): {
       sealSeq: newest.seq,
       asOf: newest.sealed_at,
       seals,
-      events: layout.events.slice(0, first),
+      events,
     },
-    withheld,
+    withheld: layout.events.length - events.length,
   };
 }
 

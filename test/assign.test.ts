@@ -978,6 +978,18 @@ describe("drawDue", () => {
     });
   });
 
+  it("is a replacement when the split was reached on volunteers alone", () => {
+    // Three volunteers split 2-1 and nothing was ever assigned. The draw this
+    // entry is owed is still the one the split calls for, so it is recorded as
+    // a replacement and not as a first draw.
+    expect(
+      due(poolLog(TRUSTED_POOL_SWITCH), { needsReplacement: true }),
+    ).toEqual({
+      due: true,
+      replacement: true,
+    });
+  });
+
   it("is not due when the answered assignment left no split to resolve", () => {
     const log = poolLog(TRUSTED_POOL_SWITCH);
     assign(log, ASSIGNED);

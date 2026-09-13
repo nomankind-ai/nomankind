@@ -89,10 +89,14 @@ the payloads:
   it took effect, its citation, its evidence and observation, and its validators'
   written reasons.
 
-An unreleased event is written as a hash line: the same fields, with
-`"payload": null` and `"withheld": true`. It chains and seals exactly as it
+An unreleased event about an entry is written as a hash line: the same fields,
+with `"payload": null` and `"withheld": true`. It chains and seals exactly as it
 always did — the hash is the log's own, and it is the leaf the seal's Merkle root
 is over — so the record can be proved complete a month before it can be read.
+The registry is never withheld: `operator_registered`, `operator_trusted`,
+`operator_untrusted`, `agent_bound`, `operator_joined_domain` and `pool_snapshot`
+are written in full from the day they are sealed, so a fork can name the
+operators and their agents out of the events on the day it takes the clone.
 
 A fork that is entitled to the content sooner reads it with a key or with its
 own signed request; see "Building the mirror yourself" below. A fork that is not

@@ -587,6 +587,8 @@ const NOT_CACHED: Readonly<Record<string, string>> = Object.freeze({
     "a stylesheet, already public for an hour with its own version in the href",
   "/static/landing.css":
     "the landing stylesheet, cached the same way for the same reason",
+  "/mirror":
+    "a permanent redirect to /mirror/latest, and never a 200 for a cache to hold",
 });
 
 describe("every page the route serves", () => {
