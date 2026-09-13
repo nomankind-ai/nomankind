@@ -39,6 +39,24 @@ export interface PageContext {
   readonly environment: string;
   readonly path: string;
   readonly origin: string;
+  /**
+   * The one origin every page of this deployment is canonical at — the head's
+   * `<link rel="canonical">` and its `og:url` (decision D-114) — or null when
+   * the deployment does not know one.
+   *
+   * Not `origin`, deliberately, and never derived from it. `origin` is the host
+   * this request happened to arrive at, which is a fact about the reader's URL
+   * bar: a preview host, a workers.dev name and the real host all answer the
+   * same log, and a canonical built from whichever one was used would tell an
+   * indexer that three addresses are three pages. This one is what the
+   * deployment declares itself to be, configured rather than observed, so every
+   * reader's copy of a page points at the same address.
+   *
+   * Null is "we cannot say", and the page then emits no canonical and no
+   * `og:url` at all rather than a guess: a wrong canonical is worse than none,
+   * because it hands an indexer an address that may not serve this page.
+   */
+  readonly canonical_origin: string | null;
 }
 
 /**

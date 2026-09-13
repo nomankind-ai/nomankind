@@ -38,9 +38,17 @@
  * renderer. Nothing else on any page changes, because the window holds back
  * content and never a count, a hash, a seal or a proof.
  *
+ * Four files a crawler reads are served here too (decision D-114): /robots.txt,
+ * /sitemap.xml and the icon on both /favicon.svg and /favicon.ico. They are
+ * pages in every sense that matters to this file — anonymous, the same bytes for
+ * every reader, refused on a wrong method with the handlers' own envelope — and
+ * three of them are answered before the database is reached for, because only
+ * the sitemap is a reading of the log.
+ *
  * No policy number lives here: the bare integers are HTTP status codes, and the
- * page sizes are LIST_PAGE_LIMIT, HOME_LATEST_ENTRIES and LANDING_BAND_SEALS
- * from src/policy.ts. No wall clock either — `deps.now` is the instant the router read once.
+ * page sizes are LIST_PAGE_LIMIT, HOME_LATEST_ENTRIES, LANDING_BAND_SEALS and
+ * SITEMAP_MAX_ENTRIES from src/policy.ts. No wall clock either — `deps.now` is
+ * the instant the router read once.
  */
 
 import { mirrorKindFor } from "../adapters/mirror.js";
@@ -61,6 +69,7 @@ import {
   LIST_PAGE_LIMIT,
   MIRROR,
   POLICY,
+  SITEMAP_MAX_ENTRIES,
   WITNESS_PIN,
 } from "../policy.js";
 import { isReleased, releaseDateOf, withholdEntry } from "../release.js";
@@ -77,6 +86,7 @@ import {
   countSeals,
   countTrustedOperators,
   disputeOf,
+  entryIdsNewestFirst,
   entryLedgerRows,
   eventsForEntry,
   getEntry,
@@ -103,15 +113,21 @@ import {
   supersedersOf,
   validationCountsByOperator,
   validationsByOperator,
+  type EntryLocation,
   type OperatorRecord,
   type OperatorStanding,
   type StoredEntry,
 } from "../storage/repository.js";
 import {
+  APP_CSS_HREF,
   STRICT_TRANSPORT_SECURITY,
   htmlResponse,
   cssResponse,
 } from "../ui/html.js";
+import {
+  FAVICON_CONTENT_TYPE,
+  FAVICON_SVG,
+} from "../ui/favicon.js";
 import { renderApi } from "../ui/pages/api.js";
 import {
   FORK_DOCUMENT,
@@ -133,7 +149,11 @@ import { renderGenesis } from "../ui/pages/genesis.js";
 import { renderHome } from "../ui/pages/home.js";
 import { renderHowItWorks } from "../ui/pages/how-it-works.js";
 import { renderMirror } from "../ui/pages/mirror.js";
-import { LANDING_CSS, renderLanding } from "../ui/pages/landing.js";
+import {
+  LANDING_CSS,
+  LANDING_CSS_HREF,
+  renderLanding,
+} from "../ui/pages/landing.js";
 import { renderOperator } from "../ui/pages/operator.js";
 import { renderOperators } from "../ui/pages/operators.js";
 import { renderPolicy } from "../ui/pages/policy.js";
@@ -211,6 +231,13 @@ const PAGE_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/domains",
   "/static/app.css",
   "/static/landing.css",
+  // The four files a crawler reads (D-114). No door is mounted under any of
+  // them, so a wrong method on one is this route's to refuse, exactly as it is
+  // on the stylesheets beside them.
+  "/robots.txt",
+  "/sitemap.xml",
+  "/favicon.svg",
+  "/favicon.ico",
 ]);
 
 /** Does this request want a page, or a record? */
@@ -1334,8 +1361,294 @@ async function mirror(
 }
 
 // ---------------------------------------------------------------------------
+// The files a crawler reads (decision D-114)
+// ---------------------------------------------------------------------------
+
+/**
+ * The environment that is a rehearsal, spelt here as the payments adapter, the
+ * status board and the landing page each spell their own (the QA of
+ * 2026-09-13): demo holds throwaway keys and practice entries, and a search
+ * result pointing at it would be a copy of the record that is not the record.
+ */
+const DEMO = "demo";
+
+/** Google Fonts, the one external origin the content-security-policy names. */
+const FONT_ORIGIN = "https://fonts.googleapis.com";
+
+/**
+ * The app's own origin: the configured APP_HOST, or the origin this request
+ * arrived on when none is configured.
+ *
+ * Absent is local's situation and is answered with the request's own origin
+ * rather than a guess — a canonical link to a hostname nobody routes is worse
+ * than no canonical link at all.
+ */
+function appOrigin(env: Env, url: URL): string {
+  const app = configured(env.APP_HOST);
+  return app === null ? url.origin : `https://${app}`;
+}
+
+/** Whether this request is the apex's, which serves the front door (D-021). */
+function onApex(env: Env, url: URL): boolean {
+  const apex = configured(env.APEX_HOST);
+  return apex !== null && apex === url.hostname;
+}
+
+/** Whether this path on this host is the landing page rather than the app's. */
+function servesLanding(env: Env, url: URL): boolean {
+  return url.pathname === "/landing" || (url.pathname === "/" && onApex(env, url));
+}
+
+/**
+ * The origin a page names as its own.
+ *
+ * The landing served at the root of the apex is the apex's own page and says
+ * so; everything else is the app's, wherever it was reached — the apex answers
+ * the app's paths too, and two hosts serving one page is exactly what a
+ * canonical origin is for.
+ *
+ * Exported because two pages are rendered outside this file — the key claim
+ * page (src/worker/keys.ts) and the final not-found — and a second rule for
+ * which host a page calls its own would be a second answer to it.
+ */
+export function canonicalOriginFor(env: Env, url: URL): string {
+  return url.pathname === "/" && onApex(env, url)
+    ? `https://${configured(env.APEX_HOST)}`
+    : appOrigin(env, url);
+}
+
+/**
+ * The origin the two files that describe a site are written about: the host
+ * they were asked on. A crawler that fetched nomankind.ai/robots.txt is told
+ * about nomankind.ai's sitemap, which lists nomankind.ai's one page.
+ */
+function siteOrigin(env: Env, url: URL): string {
+  return onApex(env, url)
+    ? `https://${configured(env.APEX_HOST)}`
+    : appOrigin(env, url);
+}
+
+/** The pages a crawler is pointed at that are not one record or one operator. */
+const SITEMAP_STATIC_PATHS: readonly string[] = Object.freeze([
+  "/",
+  "/entries",
+  "/domains",
+  "/operators",
+  "/policy",
+  "/api",
+  "/genesis",
+  "/dry-run",
+  "/how-it-works",
+  "/status",
+  "/docs",
+  "/docs/fork",
+  "/docs/whitepaper",
+  "/docs/summary",
+  "/mirror/latest",
+]);
+
+/** The five characters XML gives meaning to, in a document nobody may inject. */
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/** One `<url>`, with the date it was last written when there is one. */
+function urlElement(location: string, lastmod: string | null): string {
+  const modified =
+    lastmod === null ? "" : `<lastmod>${escapeXml(lastmod)}</lastmod>`;
+  return `  <url><loc>${escapeXml(location)}</loc>${modified}</url>\n`;
+}
+
+/**
+ * The date half of a stored instant, or null when the column does not hold one.
+ *
+ * `<lastmod>` takes a date or a full timestamp; the date is what a crawler acts
+ * on, and it is the stored string's own first ten characters rather than a
+ * parse — no clock and no reformatting, so the sitemap says what the row says.
+ */
+function dateOf(instant: string): string | null {
+  return /^\d{4}-\d{2}-\d{2}/.test(instant) ? instant.slice(0, 10) : null;
+}
+
+/**
+ * Every registered operator's id, read the way the directory reads it: keyset
+ * pages of the caller's own size, resumed by the last id seen.
+ *
+ * Bounded by SITEMAP_MAX_ENTRIES like the entries below, so one document can
+ * never grow without a published limit on it.
+ */
+async function sitemapOperators(db: D1Like): Promise<OperatorRecord[]> {
+  const found: OperatorRecord[] = [];
+  let afterId: string | undefined;
+  while (found.length < SITEMAP_MAX_ENTRIES) {
+    const limit = Math.min(LIST_PAGE_LIMIT, SITEMAP_MAX_ENTRIES - found.length);
+    const page = await listOperators(db, { limit, afterId });
+    for (const record of page) found.push(record);
+    if (page.length < limit) break;
+    afterId = page[page.length - 1]!.id;
+  }
+  return found;
+}
+
+/**
+ * The newest SITEMAP_MAX_ENTRIES entries, newest submission first.
+ *
+ * Keyset pages again, each one the smaller of the list page size and what is
+ * left of the bound, so the last page never overshoots it and nothing here can
+ * read the whole table however long the log gets.
+ */
+async function sitemapEntries(db: D1Like): Promise<EntryLocation[]> {
+  const found: EntryLocation[] = [];
+  let beforeSubmittedSeq: number | undefined;
+  while (found.length < SITEMAP_MAX_ENTRIES) {
+    const limit = Math.min(LIST_PAGE_LIMIT, SITEMAP_MAX_ENTRIES - found.length);
+    const page = await entryIdsNewestFirst(db, { limit, beforeSubmittedSeq });
+    for (const row of page) found.push(row);
+    if (page.length < limit) break;
+    beforeSubmittedSeq = page[page.length - 1]!.submittedSeq;
+  }
+  return found;
+}
+
+/** The headers the three crawler files share: the type, and never a sniff. */
+function fileHeaders(type: string, cacheControl: string): Headers {
+  const headers = new Headers();
+  headers.set("content-type", type);
+  headers.set("cache-control", cacheControl);
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("strict-transport-security", STRICT_TRANSPORT_SECURITY);
+  return headers;
+}
+
+/**
+ * `/robots.txt`.
+ *
+ * Demo is closed to crawlers outright: it is a rehearsal with throwaway keys,
+ * and a search result pointing at it would be a copy of the record that is not
+ * the record. Everywhere else is open, and names the sitemap of the host the
+ * request came in on — the apex's own on the apex, the app's everywhere else.
+ */
+function robots(env: Env, url: URL): Response {
+  const body =
+    env.ENVIRONMENT === DEMO
+      ? "User-agent: *\nDisallow: /\n"
+      : `User-agent: *\nAllow: /\nSitemap: ${siteOrigin(env, url)}/sitemap.xml\n`;
+  // `no-store` like a page, for the same reason and with the same effect: the
+  // edge cache layer (src/worker/index.ts) is what decides the minute these are
+  // held for, and nothing else may hold them longer.
+  return new Response(body, {
+    status: 200,
+    headers: fileHeaders("text/plain; charset=utf-8", "no-store"),
+  });
+}
+
+/**
+ * `/sitemap.xml`, the sitemaps.org urlset.
+ *
+ * On the apex it is one line, because the apex has one page: everything else
+ * lives on the app, and pointing a crawler at the app's paths under the apex's
+ * name is how one record becomes two indexed copies of itself. On the app it is
+ * the static pages, then every registered operator, then the newest
+ * SITEMAP_MAX_ENTRIES entries with the date each was submitted — all of them
+ * absolute on the canonical origin, so the document says the same thing
+ * whichever host it was fetched from.
+ */
+async function sitemap(env: Env, db: D1Like, url: URL): Promise<Response> {
+  const origin = siteOrigin(env, url);
+  const urls: string[] = [];
+  if (onApex(env, url)) {
+    urls.push(urlElement(`${origin}/`, null));
+  } else {
+    for (const path of SITEMAP_STATIC_PATHS) {
+      urls.push(urlElement(`${origin}${path}`, null));
+    }
+    for (const record of await sitemapOperators(db)) {
+      urls.push(
+        urlElement(`${origin}/operators/${encodeURIComponent(record.id)}`, null),
+      );
+    }
+    for (const row of await sitemapEntries(db)) {
+      urls.push(
+        urlElement(
+          `${origin}/entries/${encodeURIComponent(row.id)}`,
+          dateOf(row.submittedAt),
+        ),
+      );
+    }
+  }
+  const body =
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+    `${urls.join("")}</urlset>\n`;
+  return new Response(body, {
+    status: 200,
+    headers: fileHeaders("application/xml; charset=utf-8", "no-store"),
+  });
+}
+
+/**
+ * `/favicon.svg` and `/favicon.ico`, the same bytes on both paths.
+ *
+ * The stylesheets' own hour of public cache (`cssResponse`, src/ui/html.ts) and
+ * for the same reason: it is the same file for every reader and says nothing
+ * about the log.
+ */
+function faviconResponse(): Response {
+  return new Response(FAVICON_SVG, {
+    status: 200,
+    headers: fileHeaders(FAVICON_CONTENT_TYPE, "public, max-age=3600"),
+  });
+}
+
+/**
+ * The `Link` header every HTML answer carries: the stylesheet this page links,
+ * to be fetched before the browser has parsed the markup that asks for it, and
+ * a connection opened to the one font host the CSP names.
+ *
+ * The href is the same versioned one the document links and comes from the same
+ * constant — a second spelling of the version would be a second source of it,
+ * and a preload of a URL the page does not link is a fetch nothing uses.
+ */
+function withResourceHints(response: Response, sheet: string): Response {
+  const type = response.headers.get("content-type") ?? "";
+  if (!type.startsWith("text/html")) return response;
+  const headers = new Headers(response.headers);
+  headers.set(
+    "link",
+    `<${sheet}>; rel=preload; as=style, <${FONT_ORIGIN}>; rel=preconnect`,
+  );
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // The router
 // ---------------------------------------------------------------------------
+
+/**
+ * What every renderer is handed, built in one place.
+ *
+ * `canonical_origin` is the contract with the layout (D-114): the host this page
+ * calls its own, so two hostnames serving one document say which of them a
+ * reader and an indexer should keep. Built here and nowhere else, so no page can
+ * be rendered with a different answer to it.
+ */
+function contextFor(env: Env, url: URL): PageContext {
+  return {
+    environment: env.ENVIRONMENT,
+    path: url.pathname,
+    origin: url.origin,
+    canonical_origin: canonicalOriginFor(env, url),
+  };
+}
 
 async function route(
   request: Request,
@@ -1345,22 +1658,21 @@ async function route(
   now: Date,
 ): Promise<Response | null> {
   const path = url.pathname;
-  const ctx: PageContext = {
-    environment: env.ENVIRONMENT,
-    path,
-    origin: url.origin,
-  };
+  const ctx = contextFor(env, url);
   const wants = wantsHtml(request);
 
   // The apex serves the front door and the app serves the instrument panel
   // (decision D-021). Only production sets APEX_HOST, so local and demo answer
   // the home page at `/` and no request there can be mistaken for the apex.
   if (path === "/") {
-    const apex = configured(env.APEX_HOST);
-    return apex !== null && apex === url.hostname
+    return servesLanding(env, url)
       ? landing(db, ctx)
       : home(request, env, db, ctx, url, now);
   }
+
+  // The crawler's own document, here rather than beside the other three because
+  // it is the one that reads the log.
+  if (path === "/sitemap.xml") return sitemap(env, db, url);
 
   if (path === "/landing") return landing(db, ctx);
 
@@ -1486,10 +1798,28 @@ export async function handlePages(
     return forMethod(request, cssResponse(LANDING_CSS));
   }
 
+  // Three of the four files a crawler reads (D-114). Here beside the
+  // stylesheets and before the database is reached for, because none of them is
+  // a reading of the log: a deployment whose D1 binding is gone still tells a
+  // crawler what it may index and still has a tab icon. The fourth,
+  // /sitemap.xml, is the log and is answered in the router below.
+  if (url.pathname === "/robots.txt") {
+    return forMethod(request, robots(env, url));
+  }
+  if (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico") {
+    return forMethod(request, faviconResponse());
+  }
+
+  // Which stylesheet this host's pages link, and so which one the `Link` header
+  // tells the browser to fetch first: the landing page has its own sheet.
+  const sheet = servesLanding(env, url) ? LANDING_CSS_HREF : APP_CSS_HREF;
+
   const db = guardDatabase(env.DB);
   try {
     const answer = await route(request, env, db, url, deps.now);
-    return answer === null ? null : forMethod(request, answer);
+    return answer === null
+      ? null
+      : forMethod(request, withResourceHints(answer, sheet));
   } catch (error) {
     if (error instanceof StorageUnreachable) {
       // The message only: no binding contents, no request data.
@@ -1497,16 +1827,9 @@ export async function handlePages(
       // The same 503 and the same word either way, because it is the same
       // failure: a browser is handed the page and everything else the record.
       const answer = wantsHtml(request)
-        ? htmlResponse(
-            renderUnavailable({
-              environment: env.ENVIRONMENT,
-              path: url.pathname,
-              origin: url.origin,
-            }),
-            503,
-          )
+        ? htmlResponse(renderUnavailable(contextFor(env, url)), 503)
         : refuse(503, "storage_unreachable");
-      return forMethod(request, answer);
+      return forMethod(request, withResourceHints(answer, sheet));
     }
     throw error;
   }

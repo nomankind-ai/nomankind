@@ -435,6 +435,45 @@ describe("the page cache", () => {
     expect(cache.keys()).toHaveLength(0);
   });
 
+  it("holds the four files a crawler reads (D-114)", async () => {
+    const { db, statements } = countingDatabase();
+    const env = envWith(db);
+    const cache = new TestCache();
+
+    // robots.txt and the sitemap are held for the same minute a page is, and
+    // are served from the cache exactly as they were stored.
+    for (const path of ["/robots.txt", "/sitemap.xml"]) {
+      const first = await send({ path }, env, cache);
+      expect([path, first.status]).toEqual([path, 200]);
+      expect([path, first.headers.get("cache-control")]).toEqual([
+        path,
+        EXPECTED_CACHE_CONTROL,
+      ]);
+      const body = await first.text();
+      const read = statements();
+      const hit = await send({ path }, env, cache);
+      expect([path, await hit.text()]).toEqual([path, body]);
+      // The sitemap is the one of the two that reads the log, and the second
+      // reader did not make it read again.
+      expect([path, statements()]).toEqual([path, read]);
+    }
+
+    // The icon is cached too, and keeps the hour the route gave it: one file,
+    // the same for every reader, exactly like the stylesheets.
+    for (const path of ["/favicon.svg", "/favicon.ico"]) {
+      const response = await send({ path }, env, cache);
+      expect([path, response.headers.get("content-type")]).toEqual([
+        path,
+        "image/svg+xml",
+      ]);
+      expect([path, response.headers.get("cache-control")]).toEqual([
+        path,
+        "public, max-age=3600",
+      ]);
+    }
+    expect(cache.keys()).toHaveLength(4);
+  });
+
   it("leaves the stylesheets' own hour alone", async () => {
     const { db } = countingDatabase();
     const cache = new TestCache();

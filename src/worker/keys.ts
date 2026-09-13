@@ -65,7 +65,7 @@ import {
   receiptsForKey,
 } from "../storage/keys.js";
 import type { Env } from "./env.js";
-import { wantsHtml } from "./pages.js";
+import { canonicalOriginFor, wantsHtml } from "./pages.js";
 import {
   guardDatabase,
   isRead,
@@ -460,6 +460,9 @@ function answerClaim(
     environment: env.ENVIRONMENT,
     path: url.pathname,
     origin: url.origin,
+    // The host this deployment calls its own, by the browsing route's one rule
+    // (D-114) rather than a second copy of it.
+    canonical_origin: canonicalOriginFor(env, url),
   };
 
   if (granted === null) {

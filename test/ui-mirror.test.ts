@@ -27,6 +27,7 @@ const ctx: PageContext = {
   environment: "demo",
   path: "/mirror/latest",
   origin: "https://demo.nomankind.ai",
+  canonical_origin: "https://demo.nomankind.ai",
 };
 
 const REPOSITORY = "https://github.com/nomankind-ai/log";

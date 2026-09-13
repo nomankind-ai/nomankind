@@ -142,7 +142,12 @@
         // A second throwaway key from the same keygen (D-016), distinct from
         // local's: demo is a public environment, and a key it shares with a
         // laptop is a key anyone can claim to be.
-        "MAINTAINER_AGENT_ID": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs"
+        "MAINTAINER_AGENT_ID": "1F916:C-5gOmupEFPPWU-QfHTwvFNG6tdY4mqFdkKCyFPdtjs",
+        // The hostname demo's pages call their own (D-114): what the sitemap
+        // builds its URLs on and what a page names as its canonical origin.
+        // Local sets none — it is reached by whatever host the developer typed,
+        // and answers on the request's own origin instead.
+        "APP_HOST": "demo.nomankind.ai"
       }
     },
     "production": {
@@ -212,7 +217,12 @@
         // app's home (D-021). Production is the only environment that routes
         // two hostnames, so it is the only one that sets this; local and demo
         // have one hostname each and serve the app at `/`.
-        "APEX_HOST": "nomankind.ai"
+        "APEX_HOST": "nomankind.ai",
+        // The app's own hostname (D-114), which is the other half of the same
+        // split: the apex serves the landing page and this serves the log, so
+        // this is the origin every page but the landing names as canonical and
+        // the one the sitemap's URLs are built on.
+        "APP_HOST": "app.nomankind.ai"
       }
     }
   }

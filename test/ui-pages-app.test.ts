@@ -85,6 +85,7 @@ const ctx: PageContext = {
   environment: "local",
   path: "/entries",
   origin: "https://app.nomankind.ai",
+  canonical_origin: "https://app.nomankind.ai",
 };
 
 const ENTRY_ID = "nmk_00112233445566778899aabbccddeeff";

@@ -85,6 +85,7 @@ const ctx: PageContext = {
   environment: "demo",
   path: "/policy",
   origin: "https://demo.nomankind.ai",
+  canonical_origin: "https://demo.nomankind.ai",
 };
 
 /** One count per registered domain, for the tests that only need the page. */
@@ -1688,11 +1689,13 @@ describe("renderDryRun", () => {
     environment: "demo",
     path: "/dry-run",
     origin: LOCAL_DEMO_ORIGIN,
+    canonical_origin: "https://demo.nomankind.ai",
   };
   const productionCtx: PageContext = {
     environment: "production",
     path: "/dry-run",
     origin: PRODUCTION_ORIGIN,
+    canonical_origin: "https://app.nomankind.ai",
   };
 
   const page = renderDryRun(demoCtx);
@@ -1790,7 +1793,16 @@ describe("renderDryRun", () => {
         DEMO_ORIGIN,
       );
     }
-    expect(elsewhere).not.toContain(PRODUCTION_ORIGIN);
+    // Below the head, and only below it. The production log is named nowhere a
+    // reader could copy it from — not in a command, not in prose — but the head
+    // of a page served from production is canonical at production (D-114), so
+    // the one place its origin does appear is the tag that says which address
+    // this page is. Both halves asserted, or the narrowing would hide a leak.
+    const body = elsewhere.slice(elsewhere.indexOf("</head>"));
+    expect(body).not.toContain(PRODUCTION_ORIGIN);
+    expect(elsewhere).toContain(
+      `<link rel="canonical" href="${PRODUCTION_ORIGIN}/dry-run" />`,
+    );
     expect(squeeze(elsewhere)).toContain(
       "This is the production log. The dry run is practiced on demo, so the" +
         " commands below point there.",
@@ -2143,7 +2155,12 @@ describe("renderLanding", () => {
   it("is a whole document of its own with the landing stylesheet", () => {
     expect(page.startsWith("<!doctype html>")).toBe(true);
     expect(page).toContain(`<html lang="en">`);
-    expect(page).toContain("<title>nomankind</title>");
+    // D-114: the title says what the record is, not only what it is called. A
+    // search result and a shared link show this line first, and the bare
+    // wordmark told a first-time reader nothing.
+    expect(page).toContain(
+      "<title>nomankind: verified facts for models that keep learning</title>",
+    );
     expect(page).toContain(`href="${LANDING_CSS_HREF}"`);
     expect(LANDING_CSS_HREF.startsWith("/static/landing.css?v=")).toBe(true);
     expect(page).toContain("fonts.googleapis.com");

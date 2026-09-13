@@ -94,6 +94,23 @@ export type Env = {
    */
   APEX_HOST?: string;
   /**
+   * The hostname this deployment's pages call their own (decision D-114): the
+   * app, demo.nomankind.ai or app.nomankind.ai, which is what `/robots.txt`
+   * points a crawler's sitemap at, what `/sitemap.xml` builds its absolute URLs
+   * on, and what a page names as its canonical origin.
+   *
+   * A var and not a secret — a hostname is public — and optional, read through
+   * `configured` like every other one, so an unset var and an empty one are the
+   * same absence. Absent means "this request's own origin", which is exactly
+   * local's situation: it is reached by whatever host the developer typed, and a
+   * canonical link to a hostname nobody routes would be worse than none.
+   *
+   * The apex is not this: nomankind.ai serves the landing page alone (D-021),
+   * and only the landing at its root names the apex as its canonical origin.
+   * Everything else on the apex host is the app's, and says so.
+   */
+  APP_HOST?: string;
+  /**
    * The credential that writes the daily log mirror (M23, Section 11's "the
    * exit is not a promise, it is a copy"): a token with push access to the
    * repository policy `MIRROR` names.
