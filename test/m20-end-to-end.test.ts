@@ -58,6 +58,8 @@ import {
   entryLedgerRows,
   eventsAfter,
   eventsForEntry,
+  getEntry,
+  headSeq,
   ledgerRowsForEntry,
   ledgerRowsForOperator,
   releasedUnpaidRows,
@@ -458,6 +460,27 @@ async function sweep(at: Date): Promise<SweepReport> {
     anchor: new FakeAnchorAdapter(null),
   });
   // The standing step just overwrote the fixture with what the log says.
+  await fundStanding();
+  return report;
+}
+
+/**
+ * The same sweep, run against a beacon that has no round yet.
+ *
+ * Every deadline-first step still runs — a miss is a question about a clock —
+ * and every draw is skipped, because a draw with no public randomness behind it
+ * is not a draw. It is the ordinary state of a run whose beacon is unreachable,
+ * and it is the one that leaves an assignment closed with nothing in its place.
+ */
+async function sweepWithoutDraw(at: Date): Promise<SweepReport> {
+  const report = await runSweep(world.env, {
+    now: at,
+    beacon: new FixtureBeacon("m20-unavailable"),
+    witness: new FakeWitnessAdapter(),
+    pinned: pinnedSet([]),
+    ineligibleAgents: new Set<string>(),
+    anchor: new FakeAnchorAdapter(null),
+  });
   await fundStanding();
   return report;
 }
@@ -883,10 +906,34 @@ describe("a staked revalidation request", () => {
     // assignment does, and nobody answered inside them.
     const after = hour(8 + ASSIGNMENT_WINDOW_HOURS + 1);
     expect(new Date(firstDeadline).getTime()).toBeLessThan(after.getTime());
-    const late = await sweep(after);
 
-    expect(late.revalidation_missed.length).toBe(1);
-    const miss = late.revalidation_missed[0]!;
+    // The first of the two orders (the QA of 2026-09-13): the window has run
+    // out and no sweep has closed the assignment yet. The resolve door reads
+    // the deadline off the draw rather than off the assignment row, so the late
+    // check is refused instead of being settled — before this, a checker who
+    // waited for a quiet cron could resolve the request days late and settle
+    // the requester's stake off it.
+    const firstChecker = partyOf(first.operator);
+    const beforeSweep = await post(
+      firstChecker.agent,
+      `/entries/${id}/revalidate/resolve`,
+      await resolution(firstChecker, id, after, true),
+      after,
+    );
+    expect([beforeSweep.status, beforeSweep.body["error"]]).toEqual([
+      422,
+      "deadline_passed",
+    ]);
+
+    // The miss sealed on its own, with the draw step skipped: the beacon this
+    // run is given has no round, so the sweep closes the assignment and does
+    // not replace it. That is the state the second order needs — the draw the
+    // door used to read is gone from the assignments table, and nothing has
+    // taken its place.
+    const closed = await sweepWithoutDraw(after);
+
+    expect(closed.revalidation_missed.length).toBe(1);
+    const miss = closed.revalidation_missed[0]!;
     expect([miss.entry_id, miss.request_seq, miss.agent]).toEqual([
       id,
       first.request_seq,
@@ -899,9 +946,28 @@ describe("a staked revalidation request", () => {
     expect(missedEvents.length).toBe(1);
     expect(missedEvents[0]!.seq).toBe(miss.seq);
 
+    // The second order, and the same answer: the sweep has sealed the miss, so
+    // the assignment row the door used to read is closed and nothing is open in
+    // its place. A door that read only that row answered this same late check
+    // `not_assigned` here and settled it above — one act, three verdicts,
+    // decided by whether a sweep had happened to run. The draw's own instant is
+    // in the log either way.
+    const afterSweep = await post(
+      firstChecker.agent,
+      `/entries/${id}/revalidate/resolve`,
+      await resolution(firstChecker, id, after, true),
+      after,
+    );
+    expect([afterSweep.status, afterSweep.body["error"]]).toEqual([
+      422,
+      "deadline_passed",
+    ]);
+
     // A miss closes the draw and never the request, so the check is still owed:
-    // the same run's draw step finds the request open again and redraws it, to
-    // an eligible operator and with a deadline counted from this run.
+    // the next run's draw step finds the request open again and redraws it, to
+    // an eligible operator and with a deadline counted from that run.
+    const late = await sweep(after);
+    expect(late.revalidation_missed).toEqual([]);
     expect(late.revalidation_drawn.length).toBe(1);
     const second = late.revalidation_drawn[0]!;
     expect(second.request_seq).toBe(first.request_seq);
@@ -1286,5 +1352,79 @@ describe("a filing an operator cannot cover", () => {
     await fundStanding();
     const opened = await post(k4.agent, `/entries/${id}/revalidate`, {});
     expect([opened.status, opened.body["error"] ?? null]).toEqual([201, null]);
+  }, 240_000);
+});
+
+// ---------------------------------------------------------------------------
+// (f) The entry's own author, filing against itself
+// ---------------------------------------------------------------------------
+
+/**
+ * `self_dispute`, which the log could not say before the QA of 2026-09-12.
+ *
+ * The rule used to ask whether the correction's author was the challenger --
+ * which the door has already answered with `author_mismatch` and a 403 by the
+ * time the filing rules run, so the word was unreachable and the thing it names
+ * was not refused at all: an entry's own author could file a challenge against
+ * its own entry, stake standing on it, and have its own validators judge it.
+ * Section 6 has another word for an author changing its mind, and it is a
+ * superseding entry.
+ *
+ * Both identities are put to the rule, before the door settles which of them the
+ * filer is, so the envelope is not a way around it.
+ */
+describe("a challenge by the entry's own author", () => {
+  let ownEntry: Core;
+
+  beforeAll(async () => {
+    ownEntry = await verified(
+      "Kestrel-6 seat pricing is $40 per seat per month",
+      "example/kestrel-6",
+    );
+    await fundStanding();
+  }, 240_000);
+
+  it("refuses the author's own filing, writing nothing", async () => {
+    const before = await headSeq(world.store.db);
+    const core = await correction(
+      author,
+      ownEntry,
+      "Kestrel-6 seat pricing is $44 per seat per month, not $40",
+    );
+
+    const filed = await file(author, ownEntry, core);
+
+    expect([filed.status, filed.body["error"]]).toEqual([422, "self_dispute"]);
+    expect(await headSeq(world.store.db)).toBe(before);
+    expect(await getEntry(world.store.db, core["id"] as string)).toBeNull();
+  }, 240_000);
+
+  it("refuses it when the envelope is the author and the core names another", async () => {
+    const before = await headSeq(world.store.db);
+    // The correction names the challenger, so `author_mismatch` is what this
+    // used to be: the 403 answered the envelope and nobody ever asked whose
+    // entry was being challenged.
+    const core = await correction(
+      challenger,
+      ownEntry,
+      "Kestrel-6 seat pricing is $44 per seat per month, filed by proxy",
+    );
+
+    const filed = await file(author, ownEntry, core);
+
+    expect([filed.status, filed.body["error"]]).toEqual([422, "self_dispute"]);
+    expect(await headSeq(world.store.db)).toBe(before);
+  }, 240_000);
+
+  it("still takes another key's challenge against the same entry", async () => {
+    const core = await correction(
+      secondChallenger,
+      ownEntry,
+      "Kestrel-6 seat pricing is $44 per seat per month, not $40, says a reader",
+    );
+
+    const filed = await file(secondChallenger, ownEntry, core);
+
+    expect([filed.status, filed.body["error"] ?? null]).toEqual([201, null]);
   }, 240_000);
 });

@@ -12,6 +12,7 @@
  */
 
 import { CORE_KEYS, domainOf, type Core } from "./core.js";
+import { disputeExclusions } from "./dispute.js";
 import {
   evidenceGate,
   type EvidenceTier,
@@ -20,7 +21,9 @@ import {
 import {
   APPROVALS_TO_VERIFY_LARGE_POOL,
   APPROVALS_TO_VERIFY_SMALL_POOL,
+  authorityHostsFor,
   DEFAULT_DOMAIN,
+  isRegisteredDomain,
   REJECTIONS_TO_REJECT,
   SLOT_COUNT,
   isVersionStalenessCategory,
@@ -29,10 +32,16 @@ import {
   versionedSubjectOf,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
 } from "./policy.js";
+import { isExcludedParty } from "./registry.js";
 import type { Entry } from "./schema.js";
 import type { EntrySeal } from "./seal.js";
-import { sourceClassOf, type SourceClassification } from "./sources.js";
+import {
+  capturedSourceClass,
+  sourceClassOf,
+  type SourceClassification,
+} from "./sources.js";
 import { checkSupersedes } from "./supersede.js";
+import { eligibilityRefusal } from "./eligibility.js";
 import type {
   ApproverRecord,
   Event,
@@ -382,9 +391,12 @@ interface Consensus {
 function consensusFor(
   events: readonly Event[],
   entryId: string,
-  authorOperator: string | null,
   core: Core,
 ): Consensus {
+  // Who may judge this entry at all, in the shape the one eligibility predicate
+  // asks for: the submitter's operator, the domain and the subject, all read off
+  // the signed core and never passed in beside it.
+  const target = eligibilityTargetOf(core);
   const approvers: ApproverRecord[] = [];
   const approvingOperators = new Set<string>();
   const rejectingOperators = new Set<string>();
@@ -420,16 +432,13 @@ function consensusFor(
     const position = event.seq;
     const decision = record as unknown as DecisionFields;
 
-    // Who may validate at all. Lifecycle of an entry, Validate: "Three other
-    // agents, each from a distinct operator and none under the submitter's
-    // own"; Section 5: "Only verified operators can validate"; the schema's
-    // approvers[] $comment adds "none under the submitter's or maintainer's".
-    // A record from anyone else stays in approvers[] (the log is append-only,
-    // and M4's check-validation refuses such a write at the door), but it is
-    // counted by nobody here: derivation stays safe against a log that holds
-    // one anyway. Eligibility is read at the record's own position, like every
-    // other rule here.
-    if (!mayValidate(events, position, authorOperator, decision.operator)) {
+    // Who may validate at all: `mayValidateEntry`'s seven exclusions, the same
+    // seven the door applies, asked here because the log is append-only and
+    // derivation must stay safe against a record the door would have refused.
+    // Such a record stays in approvers[] — nothing is ever removed — and is
+    // counted by nobody. Eligibility is read at the record's own position, like
+    // every other rule here.
+    if (!mayValidateEntry(events, position, target, decision.operator)) {
       continue;
     }
 
@@ -455,7 +464,7 @@ function consensusFor(
     const approvals = approvingOperators.size;
     const rejections = rejectingOperators.size;
 
-    if (preconditionsMet(events, position, authorOperator, trustedCount)) {
+    if (preconditionsMet(events, position, target, trustedCount)) {
       const approvalsToVerify = largePool
         ? APPROVALS_TO_VERIFY_LARGE_POOL
         : APPROVALS_TO_VERIFY_SMALL_POOL;
@@ -586,24 +595,163 @@ function readShareSlotsFor(
 }
 
 /**
- * Whether one operator's decision on this entry counts, as of `position`.
+ * The entry an eligibility question is asked about: its id, its submitter's
+ * operator, and the two core fields the exclusions read.
  *
- * Lifecycle of an entry, Validate, and Section 5: the validators are "three
- * other agents, each from a distinct operator and none under the submitter's
- * own", and "only verified operators can validate". The maintainer is not an
- * outside operator either, so its own operator never counts.
+ * Taken as a shape rather than as a `Core` so a caller holding a stored entry
+ * — the sweep's draw does — asks the same question without reassembling one.
  */
-function mayValidate(
+export interface EligibilityTarget {
+  readonly id: string;
+  readonly authorOperator: string | null;
+  readonly domain: string;
+  readonly subject: unknown;
+}
+
+/** That shape, read off a signed core. */
+export function eligibilityTargetOf(core: Core): EligibilityTarget {
+  return {
+    id: core["id"] as string,
+    authorOperator: (core["author_operator"] as string | null) ?? null,
+    domain: domainOf(core),
+    subject: core["subject"],
+  };
+}
+
+/**
+ * Whether one operator may validate this entry at all, as of `position`.
+ *
+ * The seven exclusions the validation door applies (src/validate.ts,
+ * `checkValidation`), in one predicate, because the QA of 2026-09-12 found
+ * three copies of the rule that did not agree. The door refused all seven;
+ * derivation's own `mayValidate` applied three of them, so a record the door
+ * would never have taken was counted by derivation if the log held one anyway;
+ * and the verification precondition counted every registered non-maintainer
+ * outside the submitter as an eligible operator, so a governance entry passed a
+ * precondition that says three operators could sign it in a world where two
+ * could. One predicate, asked in all three places, is the only shape in which
+ * those cannot drift again.
+ *
+ * The seven, in the door's own order and its own refusal names:
+ *
+ * 1. `unregistered_operator` — Section 5, "only verified operators can
+ *    validate", so an operator the log has not registered at this position is
+ *    nobody.
+ * 2. `submitter_operator` — Identity and operators: "No agent under the
+ *    submitter's operator may validate that submitter's entry." A bare-key
+ *    submitter has no operator and bars none.
+ * 3. `original_signer` — Section 6, "Dispute": a challenge passes through the
+ *    same validation with "one extra exclusion: no operator that signed the
+ *    original, submitter or validator, may validate the challenge against it."
+ *    Empty for an ordinary entry, which is why every entry that is not a
+ *    challenge is judged exactly as it always was.
+ * 4. `maintainer_operator` — Section 5: verification comes from outside the
+ *    maintainer.
+ * 5. `provider_operator` — Section 10 and D-096: the domain's excluded parties
+ *    may not be operators in it at all, so they may not judge its entries.
+ * 6. `subject_authority` — D-096: the authority the entry's subject names is
+ *    the party the entry is about. Empty for every domain whose
+ *    `subject_authority` is false (ai-ecosystem) and for every subject with no
+ *    authority row.
+ * 7. `operator_not_in_domain` — D-071: the independence attestation is per
+ *    domain, so eligibility is too.
+ *
+ * Read at a position like every other rule here (retrospective M8): an
+ * operator's registration, its domains and the dispute it is barred from are
+ * all read as they stood, so a decision keeps its verdict when the registry
+ * later moves.
+ */
+export function mayValidateEntry(
   events: readonly Event[],
   position: number,
-  authorOperator: string | null,
+  target: EligibilityTarget,
   operator: string,
 ): boolean {
   const registered = registeredOperatorsAt(events, position);
-  if (!registered.operators.has(operator)) return false;
-  if (registered.maintainers.has(operator)) return false;
-  if (authorOperator !== null && operator === authorOperator) return false;
-  return true;
+  return (
+    eligibilityRefusal(operator, {
+      // 1.
+      registered: registered.operators.has(operator),
+      // 2.
+      authorOperator: target.authorOperator,
+      // 3. A thunk, because answering it means walking the challenged entry and
+      // an entry that is not a correction has nothing to walk. The predicate
+      // asks it only once the cheaper rules have let the operator through.
+      originalSigners: () =>
+        originalSignersAt(events, position, target.id),
+      // 4.
+      maintainer: registered.maintainers.has(operator),
+      // 5. Pure policy: the domain's own excluded-party list, off
+      // src/registry.ts. Asked only of a registered domain: the submit door
+      // refuses an unregistered one, but a sealed log may hold a core naming a
+      // domain this build does not know, and derivation answers about the log
+      // it is given rather than throwing. A domain with no published
+      // excluded-party list excludes nobody by it.
+      provider:
+        isRegisteredDomain(target.domain) &&
+        isExcludedParty(target.domain, operator),
+      // 6. The hosts of the authority the subject names, off src/policy.ts.
+      authorityHosts: authorityHostsFor(target.domain, target.subject),
+      // 7. Attested in the entry's own domain. A registration sealed before
+      // v0.7 carries no domain and reads as the default one, as
+      // `operatorDomainsAt` says.
+      domain: target.domain,
+      attestedIn: operatorDomainsAt(events, position).get(operator),
+    }) === null
+  );
+}
+
+/**
+ * The operators that signed the entry this one challenges, or none.
+ *
+ * Section 6, "Dispute", through src/dispute.ts's `disputeExclusions`, which is
+ * the one place that says who "signed the original" means: the target's
+ * submitter operator, when it has one, and every operator that signed a
+ * decision on it, approve or reject alike.
+ *
+ * The filing is read as it stood at `position` — a filing already settled by a
+ * `dispute_upheld` or `dispute_failed` is no longer in force — and the target is
+ * read through the filing's own position, because who had signed the original
+ * when the challenge was filed is what the door judged against. A challenged
+ * entry is verified and closed and gains no further approver after it, so the
+ * two answers are the same answer.
+ */
+function originalSignersAt(
+  events: readonly Event[],
+  position: number,
+  correctionId: string,
+): readonly string[] {
+  let filed: Event<"dispute_filed"> | null = null;
+  const settled = new Set<string>();
+  for (const event of inSeqOrder(events)) {
+    if (event.seq > position) break;
+    if (isType(event, "dispute_filed")) {
+      if (event.payload.correction_entry_id === correctionId) filed = event;
+      continue;
+    }
+    if (isType(event, "dispute_upheld") || isType(event, "dispute_failed")) {
+      settled.add(event.payload.correction_entry_id);
+    }
+  }
+  if (filed === null || settled.has(correctionId)) return [];
+  const targetId = filed.entry_id;
+  if (targetId === null) return [];
+
+  let authorOperator: string | null = null;
+  const approvers: ApproverRecord[] = [];
+  for (const event of inSeqOrder(events)) {
+    if (event.seq > filed.seq) break;
+    if (isType(event, "entry_submitted")) {
+      if (event.payload.core["id"] !== targetId) continue;
+      authorOperator =
+        (event.payload.core["author_operator"] as string | null) ?? null;
+      continue;
+    }
+    if (isType(event, "validation") && event.entry_id === targetId) {
+      approvers.push(event.payload.record);
+    }
+  }
+  return disputeExclusions({ author_operator: authorOperator, approvers });
 }
 
 /**
@@ -611,21 +759,29 @@ function mayValidate(
  * operators outside the submitter's own, and a non-empty trusted pool to draw
  * the random validator from."
  *
- * Maintainers are not outside operators: the paper excludes the maintainer's
- * own agents from validating an entry.
+ * "Outside the submitter's own" is not the only thing that puts an operator
+ * outside reach. The QA of 2026-09-12: this counted every registered
+ * non-maintainer that was not the submitter, including operators the entry's
+ * own rules bar from ever signing it — the domain's excluded parties, the
+ * operators under the subject's authority, and everyone not attested in the
+ * entry's domain — so an ai-governance entry could clear a precondition that
+ * promises three possible signers while only two could ever sign. The
+ * precondition now counts the operators that `mayValidateEntry` says could
+ * actually sign this entry, which is the only reading under which the sentence
+ * means anything: a count of validators that cannot validate is not a count of
+ * validators.
  */
 function preconditionsMet(
   events: readonly Event[],
   position: number,
-  authorOperator: string | null,
+  target: EligibilityTarget,
   trustedCount: number,
 ): boolean {
   if (trustedCount === 0) return false;
   const registered = registeredOperatorsAt(events, position);
   let outside = 0;
   for (const operator of registered.operators) {
-    if (registered.maintainers.has(operator)) continue;
-    if (authorOperator !== null && operator === authorOperator) continue;
+    if (!mayValidateEntry(events, position, target, operator)) continue;
     outside += 1;
   }
   return outside >= VERIFICATION_MIN_OUTSIDE_OPERATORS;
@@ -779,12 +935,7 @@ export function isVersionStale(
     if (later.prefix !== own.prefix) continue;
     if (later.version === own.version) continue;
 
-    const consensus = consensusFor(
-      events,
-      otherId,
-      (other["author_operator"] as string | null) ?? null,
-      other,
-    );
+    const consensus = consensusFor(events, otherId, other);
     if (consensus.status === "verified") return true;
   }
   return false;
@@ -816,12 +967,7 @@ function supersededBy(
     const candidateId = core["id"] as string;
     if (candidateId === entryId) continue;
     if (!checkSupersedes(core, lookup).ok) continue;
-    const candidate = consensusFor(
-      events,
-      candidateId,
-      (core["author_operator"] as string | null) ?? null,
-      core,
-    );
+    const candidate = consensusFor(events, candidateId, core);
     if (candidate.status === "verified") return candidateId;
   }
   return null;
@@ -1052,13 +1198,22 @@ export function deriveEntry(
     throw new Error(`deriveEntry: no entry_submitted event for ${entryId}`);
   }
   const core = submission.core;
-  const authorOperator = (core["author_operator"] as string | null) ?? null;
 
-  const consensus = consensusFor(events, entryId, authorOperator, core);
+  const consensus = consensusFor(events, entryId, core);
   const freshness = freshnessOf(events, entryId, core, clock);
   const overturned = overturnedBy(events, entryId);
+  // An overturned entry carries no supersession pointer, and neither does a
+  // rejected one. The QA of 2026-09-12 found the two answered differently: a
+  // rejected entry never reaches `supersededBy` at all, while an entry that was
+  // superseded and then overturned kept the pointer beside its `overturned_by`,
+  // so the record said both "this was replaced by the current fact" and "this
+  // was never true". Those are different claims and only the dispute's is the
+  // verdict. `superseded_by` means a successor stands in this entry's place;
+  // an upheld challenge says nothing stands in it, so the pointer goes with the
+  // status. The supersession is not lost — the superseding entry still names
+  // its target in its own signed core, and the log still holds both events.
   const superseded =
-    consensus.status === "verified"
+    consensus.status === "verified" && overturned === null
       ? supersededBy(events, entryId, core)
       : null;
 
@@ -1090,10 +1245,25 @@ export function deriveEntry(
     trusted_count_at_decision: consensus.trustedCountAtDecision,
     read_share_slots: readShareSlotsFor(events, entryId, consensus),
     revalidations: revalidationsFor(events, entryId),
-    // Read off the signed core and the domain's published tables, so a legacy
-    // v0.6 core -- which names no domain and reads as the default one through
-    // `domainOf` -- is classified exactly as a v0.7 core citing the same page is.
-    source: sourceClassOf(domainOf(core), core["subject"], core["citation"]),
+    // Read off the signed core, the domain's published tables and where the
+    // citation landed, so a legacy v0.6 core -- which names no domain and reads
+    // as the default one through `domainOf` -- is classified exactly as a v0.7
+    // core citing the same page is.
+    //
+    // The landing is the submission event's own `final_url` (decision D-080,
+    // the QA of 2026-09-13): the class was read off the citation alone, so an
+    // official host that redirected to a third party was refused by the door on
+    // the weaker class and then stored under the stronger one — the sidecar and
+    // the refusal disagreed about the same two URLs. `capturedSourceClass`
+    // takes the weaker of the two and never the stronger, and an event with no
+    // `final_url` — everything sealed before that QA, and every artifact
+    // nobody fetched — answers exactly what the citation alone answered.
+    source: capturedSourceClass(
+      domainOf(core),
+      core["subject"],
+      core["citation"],
+      submission.final_url ?? null,
+    ),
   };
 
   const entry: Record<string, unknown> = {};

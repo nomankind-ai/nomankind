@@ -68,7 +68,7 @@ export const REPRODUCTION_HOLDS = 8;
  * enum without splitting the schema.
  */
 export type Category =
-  // ai-ecosystem
+  // ai-ecosystem, and `correction` every domain (the QA of 2026-09-12)
   | "release"
   | "deprecation"
   | "pricing"
@@ -494,6 +494,14 @@ const AI_GOVERNANCE: DomainPolicy = Object.freeze({
     "repealed",
     "guidance_issued",
     "enforcement_action",
+    // The challenge (the QA of 2026-09-12, a D-096 gap). A challenge is filed
+    // as a correction entry in the domain of the entry it challenges, so a
+    // domain without this row is a domain whose record cannot be disputed at
+    // all: the submission dies `category_not_in_domain` and `overturned_by`
+    // and the unlearn signal are unreachable in it. ai-ecosystem's row,
+    // unchanged -- a correction happened, so it carries no window, no
+    // transcript and no official source.
+    "correction",
   ] as const),
   staleness_window_days: Object.freeze({
     /**
@@ -510,6 +518,8 @@ const AI_GOVERNANCE: DomainPolicy = Object.freeze({
     guidance_issued: 365,
     // An enforcement action happened: an event, and no window.
     enforcement_action: null,
+    // A correction happened, exactly as ai-ecosystem's does.
+    correction: null,
   }),
   // Nothing here is measured against a model: every category rests on a
   // document somebody published.
@@ -529,7 +539,10 @@ const AI_GOVERNANCE: DomainPolicy = Object.freeze({
     // What an instrument says, when it took force, when it was amended or
     // repealed, and what guidance was issued under it are the issuing body's
     // own to state. An enforcement action is not: it is recorded by a court or
-    // a regulator, which the recognized list covers.
+    // a regulator, which the recognized list covers. Neither is a correction,
+    // for ai-ecosystem's reason: the rule that binds a challenge is the one
+    // its target carries, which the dispute door checks against the challenged
+    // entry's own domain and category.
     official_required: Object.freeze([
       "in_force",
       "amended",
@@ -615,6 +628,13 @@ const AI_SAFETY: DomainPolicy = Object.freeze({
     "filter_behavior",
     "safety_eval",
     "incident",
+    // The challenge (the QA of 2026-09-12, a D-096 gap), exactly as
+    // ai-governance's: a challenge is filed as a correction entry in the domain
+    // of the entry it challenges, and a domain without this row is a domain
+    // whose record cannot be disputed. ai-ecosystem's row, unchanged -- no
+    // window, no transcript, no official source, and neither the disclosure nor
+    // the version-staleness rule, which are about what a system does.
+    "correction",
   ] as const),
   staleness_window_days: Object.freeze({
     // A commitment published, changed or withdrawn happened, and having
@@ -641,6 +661,8 @@ const AI_SAFETY: DomainPolicy = Object.freeze({
     safety_eval: 90,
     // An incident happened.
     incident: null,
+    // A correction happened, exactly as ai-ecosystem's does.
+    correction: null,
   }),
   // Always observed, always a frozen transcript in `evidence`, exactly as
   // behavior and misbehavior are. `safety_eval` carries its measurement in
@@ -669,7 +691,10 @@ const AI_SAFETY: DomainPolicy = Object.freeze({
   sources: Object.freeze({
     // What a party committed to, changed, or withdrew is that party's own to
     // state. Conduct, a refusal, a filter, an evaluation and an incident are
-    // not: they are what somebody else found.
+    // not: they are what somebody else found. Nor is a correction, for
+    // ai-ecosystem's reason: the rule that binds a challenge is the one its
+    // target carries, which the dispute door checks against the challenged
+    // entry's own domain and category.
     official_required: Object.freeze([
       "commitment_published",
       "commitment_changed",

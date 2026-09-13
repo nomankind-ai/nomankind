@@ -3,9 +3,21 @@
  *
  * Whitepaper section 6, Submit: the log refuses the mechanical case at the
  * door. Two entries are the same claim when they name the same domain, the
- * same subject and the same category and assert the same value — the `after`
- * of the core, normalized under step 4 of norm-v1.2 so that whitespace and
- * case-in-whitespace differences do not buy a second copy of a fact.
+ * same subject and the same category and assert the same value as of the same
+ * date — the `after` and the `effective_at` of the core, normalized under step
+ * 4 of norm-v1.2 so that whitespace and case-in-whitespace differences do not
+ * buy a second copy of a fact.
+ *
+ * `effective_at` is in the key, and the QA of 2026-09-12 is why. Without it the
+ * door refused a refiling of the same value at a different date as
+ * `duplicate_claim` before a validator ever saw it, while the registry document
+ * and whitepaper Section 6 both hand exactly that case to the validators:
+ * "Everything the key cannot decide — two entries saying the same thing in
+ * different words, or at a different `effective_at` — is a validator's
+ * judgment." A key that answered it was a key deciding a question it had been
+ * told not to decide. The two dates are two claims about the world, so they are
+ * two keys, and whether the later one is a restatement or a fresh observation
+ * is judged where the paper puts it.
  *
  * What is deliberately NOT decided here is the judgment case. Whether two
  * differently worded claims mean the same thing, or whether the same value at a
@@ -33,19 +45,23 @@ import { normalizeText } from "./normalize.js";
 
 /**
  * The identity of a claim for the mechanical rule: where it was filed, what it
- * is about, what kind of fact it is, and what it asserts.
+ * is about, what kind of fact it is, what it asserts, and as of when.
  */
 export type DuplicateKey = {
   domain: string;
   subject: string;
   category: string;
   value: string;
+  effective_at: string;
 };
 
 /**
  * The key of one core. `value` is the core's `after` read as a string and
  * normalized under step 4 of norm-v1.2, the same rule the snapshot hash uses,
- * so two claims differing only in whitespace share a key.
+ * so two claims differing only in whitespace share a key. `effective_at` is
+ * read and normalized the same way, so the date is compared as the core wrote
+ * it and never as a parsed instant: a key is a comparison of signed bytes, and
+ * a calendar is not this module's business.
  */
 export function duplicateKey(core: Core): DuplicateKey {
   return {
@@ -53,6 +69,7 @@ export function duplicateKey(core: Core): DuplicateKey {
     subject: String(core["subject"]),
     category: String(core["category"]),
     value: normalizeText(String(core["after"])),
+    effective_at: normalizeText(String(core["effective_at"])),
   };
 }
 
@@ -62,7 +79,8 @@ export function sameDuplicateKey(a: DuplicateKey, b: DuplicateKey): boolean {
     a.domain === b.domain &&
     a.subject === b.subject &&
     a.category === b.category &&
-    a.value === b.value
+    a.value === b.value &&
+    a.effective_at === b.effective_at
   );
 }
 
@@ -138,11 +156,18 @@ export function checkDuplicate(
 
 /**
  * The key of one core as one string: the SHA-256, in lowercase hex, of the JCS
- * of `{category, domain, subject, value}` — the same four fields
- * `sameDuplicateKey` compares, with `value` normalized under step 4 of
- * norm-v1.2 exactly as `duplicateKey` normalizes it.
+ * of `{category, domain, effective_at, subject, value}` — the same five fields
+ * `sameDuplicateKey` compares, with `value` and `effective_at` normalized under
+ * step 4 of norm-v1.2 exactly as `duplicateKey` normalizes them.
  *
- * Why a hash and not the four fields in four columns: the QA of 2026-09-12
+ * Every key stored before `effective_at` joined it was computed over the other
+ * four, so migration 0020 sets the whole column back to null and the sweep's
+ * `duplicates` step fills it again through this function. A key is a function
+ * of the entry's own signed core and never a source of truth, which is exactly
+ * what makes throwing the column away and recomputing it the cheap way to
+ * change the rule.
+ *
+ * Why a hash and not the fields in five columns: the QA of 2026-09-12
  * found the duplicate door reading a subject's whole live history on every
  * submission — 669 rows at 667 live entries, about 130 MB at a hundred thousand
  * — because the rule it had to apply lived in this file and not in the database.
@@ -168,6 +193,7 @@ export async function duplicateKeyHashOf(key: DuplicateKey): Promise<string> {
     canonicalize({
       category: key.category,
       domain: key.domain,
+      effective_at: key.effective_at,
       subject: key.subject,
       value: key.value,
     }),

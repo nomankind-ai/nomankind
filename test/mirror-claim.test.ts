@@ -40,6 +40,7 @@ import { SWEEP_INTERVAL_MINUTES } from "../src/policy.js";
 import type { Seal } from "../src/seal.js";
 import type { D1Like, D1LikeStatement } from "../src/storage/d1.js";
 import { registeredOperatorsAt } from "../src/derive.js";
+import { signAttestation } from "../src/registry.js";
 import {
   appendEvents,
   claimMirror,
@@ -55,7 +56,11 @@ import {
 import { mirrorStep } from "../src/worker/sweep.js";
 import { entryWorld, rederive, worldAt } from "../src/worker/world.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
-import { buildVerifyWorld, type VerifyWorld } from "./helpers/verify-world.js";
+import {
+  buildVerifyWorld,
+  OUTSIDE_OPERATORS,
+  type VerifyWorld,
+} from "./helpers/verify-world.js";
 
 /** The environment directory this export owns. */
 const PREFIX = "demo";
@@ -197,6 +202,33 @@ beforeAll(async () => {
     entry_id: OVERTURNED,
     payload: { correction_entry_id: CHAIN_NEW },
   });
+
+  // The outside operators take ai-safety on before they judge in it. D-071
+  // makes eligibility per domain, and since the QA of 2026-09-12 derivation
+  // applies that rule with the other six the validation door applies -- so a
+  // decision by an operator attested only in ai-ecosystem counts for nothing on
+  // an ai-safety entry, and the verification precondition counts only the
+  // operators that could actually sign it. Signed for the domain they are
+  // joining, by each operator's own agent, exactly as the join door requires.
+  for (const [agent, operator] of Object.entries(world.bundle.registry.agents)) {
+    if (!OUTSIDE_OPERATORS.includes(operator)) continue;
+    events = await appendEvent(events, {
+      at: SEAL_AT,
+      type: "operator_joined_domain",
+      entry_id: null,
+      payload: {
+        operator,
+        agent,
+        domain: "ai-safety",
+        attestation: await signAttestation(world.keys[agent]!.privateKey, {
+          operator,
+          agent,
+          signed_at: SEAL_AT,
+          domain: "ai-safety",
+        }),
+      },
+    });
+  }
 
   await submit(SAFETY_V1, {
     domain: "ai-safety",

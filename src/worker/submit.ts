@@ -38,6 +38,7 @@ import type { SnapshotFetcher } from "../adapters/fetch.js";
 import {
   buildTranscriptArtifact,
   checkReceiptArtifact,
+  checkTranscriptArtifact,
   checkTranscriptRedaction,
   disclosurePlaceholders,
   receiptArtifactHash,
@@ -58,6 +59,7 @@ import {
 import { withholdEntry } from "../release.js";
 import { validateEntry } from "../schema.js";
 import { verifyEntrySignature } from "../sign.js";
+import { checkCapturedSource } from "../sources.js";
 import type { D1Like } from "../storage/d1.js";
 import {
   capturesForHash,
@@ -93,6 +95,7 @@ import {
   methodNotAllowed,
   refuse,
 } from "./registry.js";
+import { clocked } from "./world.js";
 
 /**
  * What these routes are given besides their bindings: the instant this request
@@ -108,6 +111,17 @@ export interface SubmitDeps {
 /** The schema's own id and hash patterns. The schema is the only source. */
 const ENTRY_ID_PATTERN = new RegExp(entrySchema.properties.id.pattern);
 const HASH_PATTERN = new RegExp(entrySchema.properties.snapshot_hash.pattern);
+
+/**
+ * The one core key a body may leave out: the key a v0.6 core never carried.
+ *
+ * Left out is not the same as sent null -- a null `domain` is an eighteen-key
+ * core naming no domain, which is not a shape anybody ever signed -- so the
+ * body check below asks whether the key is there at all, and `extractCore`
+ * returns the seventeen keys it found. The kernel then refuses the core
+ * `missing_domain`, by name, which is the whole point of letting it through.
+ */
+const LEGACY_ABSENT_CORE_KEY = "domain";
 
 /** The archive's own suffix on the capture route. */
 const SIDECAR_PATH = "/sidecar";
@@ -211,10 +225,19 @@ function parseSubmitBody(body: unknown): SubmitBody | null {
   const entry = body["entry"];
   if (!isRecord(entry)) return null;
   const expected = new Set<string>([...CORE_KEYS, "signature"]);
-  const present = Object.keys(entry);
-  if (present.length !== expected.size) return null;
-  for (const key of present) {
+  for (const key of Object.keys(entry)) {
     if (!expected.has(key)) return null;
+  }
+  // Every key but `domain`, which is the one the kernel has its own word for
+  // (the QA of 2026-09-12). A count made `missing_domain` unreachable: a body
+  // carrying all seventeen other core keys and no domain is exactly the v0.6
+  // shape src/submit.ts refuses by name, and answering `bad_body` to it told an
+  // author their body was malformed when what it was missing was a domain. The
+  // shape is still exact -- an unknown key is refused here as it always was,
+  // and a core missing anything else never reaches `extractCore`.
+  for (const key of expected) {
+    if (key === LEGACY_ABSENT_CORE_KEY) continue;
+    if (!(key in entry)) return null;
   }
   if (typeof entry["signature"] !== "string") return null;
 
@@ -274,6 +297,23 @@ function unfetchedSidecar(at: string, fetcher: string): Sidecar {
   };
 }
 
+/**
+ * The object's own keys whose value is defined.
+ *
+ * `buildTranscriptArtifact` names all six keys whatever the evidence held, so a
+ * key the evidence never supplied is present with the value `undefined` -- which
+ * RFC 8785 canonicalization drops, which is why the hash of such an artifact is
+ * the hash of a smaller object. This is the same reading, made explicit, so the
+ * shape check sees the keys the entry really presents.
+ */
+function definedKeysOf(value: object): Record<string, unknown> {
+  const present: Record<string, unknown> = {};
+  for (const [key, held] of Object.entries(value as Record<string, unknown>)) {
+    if (held !== undefined) present[key] = held;
+  }
+  return present;
+}
+
 /** The canonical UTF-8 bytes of an artifact: exactly what its hash covers. */
 function artifactBytes(artifact: unknown): Uint8Array {
   return encoder.encode(canonicalize(artifact));
@@ -308,6 +348,18 @@ async function transcriptCapture(
     disclosure: isDisclosureCategory(domainOf(core), core["category"]),
   });
   if (!redaction.ok) return { ok: false, reason: redaction.reason };
+
+  // The shape, before the hash (the QA of 2026-09-12). `transcript_shape` could
+  // never fire at this door: the artifact is built here, always with the six
+  // keys, so `transcriptArtifactHash`'s own check always passed and a transcript
+  // that carried no `model` at all was refused `snapshot_mismatch` -- an author
+  // was told their hash was wrong when what was wrong was their evidence. What
+  // the entry actually presents is the artifact less the keys its evidence never
+  // supplied, so that is what is checked, and a malformed transcript is refused
+  // in the word that names it.
+  const presented = definedKeysOf(artifact);
+  const shape = checkTranscriptArtifact(presented);
+  if (!shape.ok) return { ok: false, reason: shape.reason };
 
   // The hash is over the artifact as submitted, placeholders included, so the
   // snapshot_hash the author signed verifies against the archived artifact
@@ -629,6 +681,12 @@ async function sealSubmission(
     readonly id: string;
     readonly core: Core;
     readonly signature: string;
+    /**
+     * Where the snapshot capture's citation landed, or null when nothing was
+     * fetched. Sealed with the submission so derivation classifies the source
+     * off the same two URLs the door refused off (decision D-080).
+     */
+    readonly finalUrl: string | null;
   },
 ): Promise<{ readonly event: Event; readonly derived: DerivedEntry }> {
   const previous = await tail(db);
@@ -636,7 +694,11 @@ async function sealSubmission(
     at: input.at,
     type: "entry_submitted",
     entry_id: input.id,
-    payload: { core: input.core, signature: input.signature },
+    payload: {
+      core: input.core,
+      signature: input.signature,
+      final_url: input.finalUrl,
+    },
   });
   const event = appended[appended.length - 1]!;
   const events = [...(await eventsForEntry(db, input.id)), event];
@@ -831,6 +893,23 @@ export async function prepareSubmission(
     ? await transcriptCapture(core, at, fetcher)
     : await fetchedCapture(core, deps, at, fetcher);
   if (!snapshot.ok) return refused(refuse(422, snapshot.reason));
+
+  // Decision D-080, on the capture this time (the QA of 2026-09-12). The gate
+  // inside `checkSubmission` read the citation, which is where a request is
+  // aimed; this reads where it landed. An official host that redirects to a
+  // third party, or down to http, was archiving a stranger's page under the
+  // authority's badge on a category that exists to demand the authority's own
+  // page. The lower of the two classes applies, so nothing here promotes a
+  // citation and a chain that never left the host is unchanged.
+  const landed = checkCapturedSource(
+    domainOf(core),
+    core["category"],
+    core["subject"],
+    core["citation"],
+    snapshot.capture.sidecar.final_url,
+  );
+  if (!landed.ok) return refused(refuse(422, landed.reason));
+
   const captures: PreparedCapture[] = [snapshot.capture];
 
   // The provider statement, after the transcript is accepted and before the
@@ -876,6 +955,7 @@ export async function prepareSubmission(
     id,
     core,
     signature: body.entry["signature"] as string,
+    finalUrl: snapshot.capture.sidecar.final_url,
   });
 
   // The whole object, against the schema, before any write. An entry that does
@@ -962,6 +1042,8 @@ async function submit(
       id: prepared.id,
       core: prepared.core,
       signature: (prepared.event as Event<"entry_submitted">).payload.signature,
+      finalUrl:
+        (prepared.event as Event<"entry_submitted">).payload.final_url ?? null,
     });
     await submitEntry(env.DB, {
       events: [sealed.event],
@@ -991,12 +1073,20 @@ async function entryById(
   const stored = await getEntry(env.DB, id);
   if (stored === null) return refuse(404, "not_found");
 
+  // `stale` against this request's own clock and not the column's last writer,
+  // by the same `clocked` the read door and the pages use (src/worker/world.ts).
+  // This door and `GET /read/{id}` answer the same entry, and until the QA of
+  // 2026-09-13 an entry past its window read stale on one and fresh on the
+  // other until a sweep happened to run. Nothing else about the body moves:
+  // `stale` is derived and outside the core, so the hash below is untouched.
+  const entry = clocked(stored.entry, deps.now);
+
   // A key and a signed operator are served the entry itself, and so is anybody
   // once it has released: the body is the entry object exactly as this route
   // has always answered it, so nothing that parses this door has to change.
-  if (reader.kind !== "free") return json(stored.entry, 200);
+  if (reader.kind !== "free") return json(entry, 200);
   const release = await entryRelease(env.DB, stored.submittedSeq, deps.now);
-  if (release.released) return json(stored.entry, 200);
+  if (release.released) return json(entry, 200);
 
   // Withheld (decision D-100): the proof under its own key, never under
   // `entry`, so a reader cannot mistake a nulled claim for the claim, and the
@@ -1010,7 +1100,7 @@ async function entryById(
   // they are served later against it. Without it the proof names a record
   // nobody outside the door could pin down.
   const withheld = await withholdEntry(
-    stored.entry,
+    entry,
     stored.sidecar,
     release.release_date ?? "",
   );

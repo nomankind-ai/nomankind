@@ -1073,6 +1073,133 @@ describe("a large pool, over the ten-operator switch", () => {
     });
   });
 
+  /**
+   * The deadline at the door, not only in the sweep (the QA of 2026-09-12).
+   *
+   * The window is the draw's, and the sweep is what notices it has run out --
+   * so before this, whether a late decision was taken depended on whether a
+   * sweep happened to have run since the draw. No sweep, and the door saw an
+   * assignment still open and sealed the decision as `assigned_random`; a sweep,
+   * and it saw no assignment and refused `assigned_random_without_assignment`.
+   * Same validator, same instant, two different records. The door reads the
+   * assignment the draw made instead, so the sweep's timing is no longer part of
+   * the answer, and every case below asserts the log's head never moved.
+   */
+  describe("a decision past the draw's own deadline", () => {
+    let lateEntry: Core;
+    let drawnLate: Party;
+    let drawnAt: Date;
+    /** An hour past the window: the same instant every refusal below is asked at. */
+    let past: Date;
+
+    beforeAll(async () => {
+      lateEntry = await submit(world, submitterParty.agent, {
+        ...pricing("Harrier-1 seat pricing went to $30 per seat per month, late"),
+        author_operator: submitterParty.operator,
+      });
+
+      drawnAt = hoursAfter(after(4), 3 * ASSIGNMENT_WINDOW_HOURS);
+      past = hoursAfter(drawnAt, ASSIGNMENT_WINDOW_HOURS + 1);
+      await beacon.advance(drawnAt.toISOString());
+      const report = await runSweep(world.env, { now: drawnAt, beacon });
+      const draw = report.drawn.find(
+        (one) => one.entry_id === lateEntry["id"],
+      );
+      expect(draw).toBeDefined();
+      drawnLate = partyFor(draw!.operator);
+    }, 60_000);
+
+    /** The drawn operator's own decision, signed at `past`. */
+    const lateDecision = (assigned: boolean): Promise<Request> =>
+      validation({
+        entryId: lateEntry["id"] as string,
+        record: decision(drawnLate, {
+          assigned_random: assigned,
+          signed_at: past.toISOString(),
+        }),
+        signingKey: drawnLate.agent,
+        timestamp: past.toISOString(),
+      });
+
+    it("refuses it with no sweep run since the draw", async () => {
+      const before = await head();
+
+      const response = await send(world, await lateDecision(true), {
+        now: past,
+      });
+
+      expect([response.status, await response.json()]).toEqual([
+        422,
+        { error: "deadline_passed" },
+      ]);
+      expect(await head()).toBe(before);
+    });
+
+    it("refuses it in the same words once the sweep has closed the draw", async () => {
+      await beacon.advance(hoursAfter(drawnAt, ASSIGNMENT_WINDOW_HOURS).toISOString());
+      const report = await runSweep(world.env, { now: past, beacon });
+      expect(
+        report.missed.map((miss) => [miss.entry_id, miss.operator]),
+      ).toContainEqual([lateEntry["id"], drawnLate.operator]);
+      const before = await head();
+
+      const response = await send(world, await lateDecision(true), {
+        now: past,
+      });
+
+      // Before this, the sweep having run was the difference between
+      // `assigned_random` accepted and `assigned_random_without_assignment`.
+      expect([response.status, await response.json()]).toEqual([
+        422,
+        { error: "deadline_passed" },
+      ]);
+      expect(await head()).toBe(before);
+    });
+
+    it("refuses the missed operator volunteering after its own window", async () => {
+      const before = await head();
+
+      // The other half of the same hole: with the assignment closed, a decision
+      // that simply drops the flag used to be taken as a volunteer's, from the
+      // one operator whose window had just run out.
+      const response = await send(world, await lateDecision(false), {
+        now: past,
+      });
+
+      expect([response.status, await response.json()]).toEqual([
+        422,
+        { error: "deadline_passed" },
+      ]);
+      expect(await head()).toBe(before);
+    });
+
+    it("still takes the replacement's decision inside its own window", async () => {
+      const replacement = await storedAssignment(
+        world.store.db,
+        lateEntry["id"] as string,
+      );
+      expect(replacement?.operator).not.toBe(drawnLate.operator);
+      const party = partyFor(replacement!.operator);
+      const at = hoursAfter(past, 1);
+
+      const response = await send(
+        world,
+        await validation({
+          entryId: lateEntry["id"] as string,
+          record: decision(party, {
+            assigned_random: true,
+            signed_at: at.toISOString(),
+          }),
+          signingKey: party.agent,
+          timestamp: at.toISOString(),
+        }),
+        { now: at },
+      );
+
+      expect(response.status).toBe(201);
+    });
+  });
+
   describe("the log, paged", () => {
     it("pages in seq order and says where the head is", async () => {
       const response = await send(world, get("/events?limit=3"));

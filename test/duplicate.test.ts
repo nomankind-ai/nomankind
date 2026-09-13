@@ -2,9 +2,14 @@
  * The duplicate rule, at the kernel (decision D-085).
  *
  * The same fact filed twice is refused at the door, and what "the same fact"
- * means is exactly four things: the domain, the subject, the category, and the
- * `after` value normalized under step 4 of norm-v1.2. Everything below is that
- * sentence, read once from each side.
+ * means is exactly five things: the domain, the subject, the category, the
+ * `after` value normalized under step 4 of norm-v1.2, and the `effective_at`
+ * the core names. Everything below is that sentence, read once from each side.
+ *
+ * `effective_at` is the fifth because of the QA of 2026-09-12: without it the
+ * door refused a refiling of the same value at a different date as
+ * `duplicate_claim` before a validator ever saw it, while the registry document
+ * and whitepaper Section 6 both give that case to the validators.
  *
  * Pure: no database, no clock, no keys. The cores here are literals rather than
  * signed cores, because `checkDuplicate` reads five of the eighteen keys and
@@ -59,13 +64,31 @@ function candidate(
 }
 
 describe("the key of a claim", () => {
-  it("is the domain, the subject, the category and the normalized value", () => {
+  it("is the domain, the subject, the category, the value and the date", () => {
     expect(duplicateKey(core())).toEqual({
       domain: DEFAULT_DOMAIN,
       subject: "example/kestrel-2",
       category: "pricing",
       value: "$25 per seat per month",
+      effective_at: "2026-09-01",
     });
+  });
+
+  it("normalizes the date the same way it normalizes the value", () => {
+    // The same step 4, over the same kind of arbitrary signed text: the key
+    // compares the bytes the core carries and never a parsed calendar date.
+    expect(duplicateKey(core({ effective_at: "  2026-09-01 " })).effective_at).toBe(
+      "2026-09-01",
+    );
+  });
+
+  it("separates two dates: the same value at a different effective_at", () => {
+    // The mechanical rule stops here. Whether the later filing restates the
+    // earlier one or observes a fresh fact is a question about meaning, and the
+    // paper gives it to the validators under the published rejection form.
+    expect(duplicateKey(core({ effective_at: "2026-10-01" })).effective_at).not.toBe(
+      duplicateKey(core()).effective_at,
+    );
   });
 
   it("normalizes the value, so whitespace does not buy a second copy", () => {
@@ -120,7 +143,34 @@ describe("checking a new claim against what is already filed", () => {
     });
   });
 
-  it("accepts when the domain, subject, category or value differs", () => {
+  it("accepts the same claim filed at a different effective_at", () => {
+    // The QA of 2026-09-12. The registry document: "Everything the key cannot
+    // decide -- two entries saying the same thing in different words, or at a
+    // different `effective_at` -- is a validator's judgment." So the door lets
+    // it through and the validators judge it; a key that refused it here would
+    // be deciding a question it has been told not to decide.
+    const refiled = core({
+      id: "nmk_0000000000000000000000000000a101",
+      effective_at: "2026-10-01",
+    });
+    expect(checkDuplicate(refiled, [filed])).toEqual({ ok: true });
+  });
+
+  it("still refuses the same claim at the same effective_at", () => {
+    // And the mechanical case is refused exactly as before: the fifth field
+    // narrows the key, it does not weaken it.
+    const same = core({
+      id: "nmk_0000000000000000000000000000a102",
+      effective_at: filed.core["effective_at"],
+    });
+    expect(checkDuplicate(same, [filed])).toEqual({
+      ok: false,
+      reason: "duplicate_claim",
+      duplicate_of: filed.id,
+    });
+  });
+
+  it("accepts when the domain, subject, category, value or date differs", () => {
     const others: DuplicateCandidate[] = [
       candidate("nmk_000000000000000000000000000000c1", "draft", {
         domain: "biosecurity",
@@ -134,11 +184,14 @@ describe("checking a new claim against what is already filed", () => {
       candidate("nmk_000000000000000000000000000000c4", "draft", {
         after: "$26 per seat per month",
       }),
+      candidate("nmk_000000000000000000000000000000c5", "draft", {
+        effective_at: "2026-10-01",
+      }),
     ];
     for (const other of others) {
       expect(checkDuplicate(fresh, [other])).toEqual({ ok: true });
     }
-    // And all four together are still four different claims.
+    // And all five together are still five different claims.
     expect(checkDuplicate(fresh, others)).toEqual({ ok: true });
   });
 

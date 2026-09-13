@@ -613,3 +613,228 @@ function trustedCountNow(log: Log): number {
   }
   return trusted.size;
 }
+
+// ---------------------------------------------------------------------------
+// The seven exclusions, and the precondition that counts them
+// ---------------------------------------------------------------------------
+
+/**
+ * The QA of 2026-09-12: the validation door refused seven kinds of operator and
+ * derivation counted three of them, so a record the door would never have taken
+ * was counted by derivation if the log held one anyway; and the verification
+ * precondition -- "three verified operators outside the submitter's own" --
+ * counted every registered non-maintainer that was not the submitter, including
+ * operators the entry's own rules bar from ever signing it. One predicate,
+ * `mayValidateEntry`, now answers all seven for derivation, for the
+ * precondition, and for the sweep's draw.
+ *
+ * One test per exclusion, each built the same way: a log in which the only
+ * difference is who signs.
+ */
+describe("the seven exclusions one predicate applies", () => {
+  const GOVERNANCE = "ai-governance";
+  /** A subject whose first segment has an authorities row with real hosts. */
+  const EU_INSTRUMENT = "eu/ai-act";
+  /** An operator domain under one of those hosts. */
+  const AUTHORITY_OPERATOR = "europa.eu";
+  /** An excluded party of ai-ecosystem, and so of ai-governance. */
+  const PROVIDER_OPERATOR = "openai.com";
+
+  /** A log whose outside operators are registered in `domain`. */
+  function domainLog(domain: string, operators: readonly string[]): Log {
+    const log = new Log();
+    log.add("operator_registered", null, {
+      operator: MAINTAINER,
+      maintainer: true,
+      domain,
+    });
+    log.add("operator_registered", null, {
+      operator: AUTHOR_OPERATOR,
+      maintainer: false,
+      domain,
+    });
+    for (const operator of operators) {
+      log.add("operator_registered", null, { operator, maintainer: false, domain });
+      log.add("operator_trusted", null, { operator });
+    }
+    return log;
+  }
+
+  /** Submit an entry into `domain` and let `signers` approve it in order. */
+  function judged(
+    log: Log,
+    overrides: Record<string, unknown>,
+    signers: readonly string[],
+  ) {
+    submit(log, ENTRY_ID, overrides);
+    signers.forEach((operator, index) =>
+      validate(log, ENTRY_ID, approve(operator, index + 1)),
+    );
+    return deriveEntry(log.events, ENTRY_ID, CLOCK);
+  }
+
+  it("counts nothing from an operator not attested in the entry's domain", () => {
+    // 7, `operator_not_in_domain` (D-071). Four operators, every one of them
+    // attested in ai-ecosystem alone, and an entry in ai-governance: nobody
+    // here may judge it, so two approvals move nothing.
+    const ecosystem = domainLog(
+      "ai-ecosystem",
+      ["op_v1", "op_v2", "op_v3", "op_v4"],
+    );
+    expect(
+      judged(ecosystem, { domain: GOVERNANCE, subject: "example/ai-act" }, [
+        "op_v1",
+        "op_v2",
+      ]).derived.status,
+    ).toBe("draft");
+
+    // The same log with the same four attested in the entry's own domain: the
+    // small pool's two approvals verify, because now they are approvals.
+    const governance = domainLog(GOVERNANCE, [
+      "op_v1",
+      "op_v2",
+      "op_v3",
+      "op_v4",
+    ]);
+    expect(
+      judged(governance, { domain: GOVERNANCE, subject: "example/ai-act" }, [
+        "op_v1",
+        "op_v2",
+      ]).derived.status,
+    ).toBe("verified");
+  });
+
+  it("counts nothing from an operator under the subject's own authority", () => {
+    // 6, `subject_authority` (D-096): `eu/ai-act` names the authority whose
+    // official hosts include europa.eu, so an operator under one of them is a
+    // party to the record it would be judging.
+    const log = domainLog(GOVERNANCE, [
+      AUTHORITY_OPERATOR,
+      "op_v1",
+      "op_v2",
+      "op_v3",
+    ]);
+    const withAuthority = judged(log, { domain: GOVERNANCE, subject: EU_INSTRUMENT }, [
+      AUTHORITY_OPERATOR,
+      "op_v1",
+    ]);
+    expect(withAuthority.derived.status).toBe("draft");
+    // Its record is on the entry all the same: nothing is ever removed.
+    expect(
+      (withAuthority.entry["approvers"] as readonly Record<string, unknown>[])
+        .length,
+    ).toBe(2);
+
+    // And the same subject judged by two operators outside those hosts.
+    const outside = domainLog(GOVERNANCE, [
+      AUTHORITY_OPERATOR,
+      "op_v1",
+      "op_v2",
+      "op_v3",
+    ]);
+    expect(
+      judged(outside, { domain: GOVERNANCE, subject: EU_INSTRUMENT }, [
+        "op_v1",
+        "op_v2",
+      ]).derived.status,
+    ).toBe("verified");
+  });
+
+  it("counts nothing from an excluded party of the entry's domain", () => {
+    // 5, `provider_operator` (Section 10): a model provider may not be an
+    // operator in ai-ecosystem at all, so a decision carrying its operator is
+    // a decision no door would have taken and derivation counts none.
+    const log = domainLog("ai-ecosystem", [
+      PROVIDER_OPERATOR,
+      "op_v1",
+      "op_v2",
+      "op_v3",
+    ]);
+    expect(
+      judged(log, {}, [PROVIDER_OPERATOR, "op_v1"]).derived.status,
+    ).toBe("draft");
+  });
+
+  it("counts nothing from an operator that signed the challenged entry", () => {
+    // 3, `original_signer` (Section 6, "Dispute"): a challenge passes through
+    // the same validation "with one extra exclusion: no operator that signed
+    // the original, submitter or validator, may validate the challenge against
+    // it." The filing is scoped to the TARGET, so the exclusion is read off the
+    // target's own events.
+    const CORRECTION = "nmk_01J8ZQ2K7C";
+    // Five outside operators, not four: the two that signed the original are
+    // barred from the challenge, and the precondition counts what is left --
+    // three operators that could actually sign it.
+    const build = (signers: readonly string[]) => {
+      const log = domainLog("ai-ecosystem", [
+        "op_v1",
+        "op_v2",
+        "op_v3",
+        "op_v4",
+        "op_v5",
+      ]);
+      submit(log, ENTRY_ID);
+      validate(log, ENTRY_ID, approve("op_v1", 1));
+      validate(log, ENTRY_ID, approve("op_v2", 2));
+      submit(log, CORRECTION, { category: "correction" });
+      log.add("dispute_filed", ENTRY_ID, {
+        correction_entry_id: CORRECTION,
+        challenger: "1F916:agent-challenger",
+        operator: "op_v4",
+        citation: "https://example.test/correction",
+        snapshot_hash: HASH,
+        from_report_seq: null,
+        from_revalidation_seq: null,
+      });
+      signers.forEach((operator, index) =>
+        validate(log, CORRECTION, approve(operator, index + 3)),
+      );
+      return deriveEntry(log.events, CORRECTION, CLOCK);
+    };
+
+    // op_v1 validated the original, so its decision on the challenge counts
+    // for nothing and one approval is left.
+    expect(build(["op_v1", "op_v3"]).derived.status).toBe("draft");
+    // Two operators that signed nothing of the original carry it.
+    expect(build(["op_v3", "op_v4"]).derived.status).toBe("verified");
+  });
+
+  it("keeps counting nothing from the submitter, the maintainer and a stranger", () => {
+    // 1, 2 and 4, unchanged: the three derivation always applied.
+    const log = domainLog("ai-ecosystem", ["op_v1", "op_v2", "op_v3"]);
+    expect(
+      judged(log, {}, [AUTHOR_OPERATOR, MAINTAINER, "op_stranger"]).derived
+        .status,
+    ).toBe("draft");
+  });
+
+  it("counts the precondition over the operators that could actually sign", () => {
+    // The finding itself. Three registered operators outside the submitter, of
+    // which one is the subject's own authority: only two could ever sign this
+    // entry, so the precondition is not met and two approvals leave it draft.
+    const two = domainLog(GOVERNANCE, [AUTHORITY_OPERATOR, "op_v1", "op_v2"]);
+    const held = judged(two, { domain: GOVERNANCE, subject: EU_INSTRUMENT }, [
+      "op_v1",
+      "op_v2",
+    ]);
+    expect(held.derived.status).toBe("draft");
+    expect(held.sidecar.trusted_count_at_decision).toBeNull();
+    // The count is the point, so state it: three registered outside operators,
+    // and the old reading would have promoted on exactly this log.
+    expect(VERIFICATION_MIN_OUTSIDE_OPERATORS).toBe(3);
+
+    // One more operator that could sign it, and the same two approvals verify.
+    const three = domainLog(GOVERNANCE, [
+      AUTHORITY_OPERATOR,
+      "op_v1",
+      "op_v2",
+      "op_v3",
+    ]);
+    expect(
+      judged(three, { domain: GOVERNANCE, subject: EU_INSTRUMENT }, [
+        "op_v1",
+        "op_v2",
+      ]).derived.status,
+    ).toBe("verified");
+  });
+});

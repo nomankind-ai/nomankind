@@ -30,6 +30,7 @@ import {
   LIST_PAGE_LIMIT,
   versionedSubjectOf,
 } from "../policy.js";
+import type { Entry } from "../schema.js";
 import { entrySeal, type EntrySeal } from "../seal.js";
 import type { D1Like } from "../storage/d1.js";
 import {
@@ -87,6 +88,49 @@ export function isRegistryEvent(type: EventType): boolean {
 export function expiredByClock(expiresAt: string | null, now: Date): boolean {
   if (expiresAt === null) return false;
   return now.toISOString().slice(0, 10) > expiresAt;
+}
+
+/**
+ * The stored entry with `stale` read against this request's own clock.
+ *
+ * The schema: `stale` is "true when expires_at is in the past". That is the one
+ * derived field whose answer depends on when it is asked, and the stored column
+ * carries the answer the last writer's clock gave. The QA of 2026-09-12: a row
+ * whose window closed overnight read `"stale": false` at the read door until
+ * the sweep's staleness step got round to rewriting it, so the door served a
+ * fact the entry itself says is out of date and said nothing about it — and the
+ * same entry read a few minutes later, after a sweep that changed no event,
+ * read differently. Derived at the door, the JSON is the same before and after
+ * the sweep, which is what a derived field is supposed to mean.
+ *
+ * It lives here, beside `expiredByClock`, because every door that serves an
+ * entry from its stored row has to answer the same way: `GET /read`, the entry
+ * page and the listing rows beside it, and the JSON twin at `GET /entries/{id}`
+ * (the QA of 2026-09-13 found the last three still handing the column out). One
+ * function, so there is one calendar.
+ *
+ * The column stays exactly where it is. The counters and the ledger's half
+ * shares are counted off it, the sweep goes on rewriting it, and the index on
+ * it is what makes "which entries went stale overnight" a seek. What this says
+ * is only that the number in the column is not the answer a reader is handed
+ * when the clock has moved past it.
+ *
+ * Only ever toward stale, never away from it: `expiredByClock` is the calendar's
+ * half of the rule, and D-096's version staleness — an observation of a model
+ * version another version has replaced — is the log's half, permanent and
+ * invisible to `expires_at`. A stored `true` is therefore kept whatever the
+ * date says, and this adds the calendar's answer to it rather than replacing
+ * it. That is the same rule `GET /sync` and the mirror apply to a row served
+ * from storage, out of the same function.
+ */
+export function clocked(entry: Entry, now: Date): Entry {
+  const fields = entry as unknown as Record<string, unknown>;
+  if (fields["stale"] === true) return entry;
+  const expiresAt = fields["expires_at"];
+  if (!expiredByClock(typeof expiresAt === "string" ? expiresAt : null, now)) {
+    return entry;
+  }
+  return { ...entry, stale: true } as Entry;
 }
 
 /**

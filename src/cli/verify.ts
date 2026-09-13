@@ -11,6 +11,13 @@
  * stranger's file is data, never a crash: an unreadable or unparsable file gets
  * one named line on stderr and never a stack trace.
  *
+ * One answer is neither a pass nor a fault: the entry file `npm run export`
+ * writes for an entry still inside the release window (decision D-100) is the
+ * released view, every content field null. It cannot check out, so the exit
+ * code is 1 as it has always been, and it is printed as the one thing it is —
+ * `entry_withheld` and the day the content opens — rather than as the eight
+ * true-but-useless differences the ordinary checks found in it.
+ *
  * node:fs and node:path are allowed in this CLI file only; the kernel itself
  * stays Workers-safe.
  */
@@ -106,6 +113,30 @@ export async function verify(
   // before it is told the verdict, so "unsupported_schema_version" reads as an
   // answer about versions rather than as a mystery.
   io.stdout(`schema ${SCHEMA_VERSION}`);
+
+  // What the release window kept back from this reader (decision D-100): the
+  // events the bundle carries as hash lines, checked for their place in the
+  // chain and under the seal and read for nothing else. Printed only when there
+  // are any, because a released log — or a keyed export — has nothing to say
+  // here and its two lines are what they have always been.
+  if (report.withheld > 0) {
+    io.stdout(`withheld ${report.withheld}`);
+  }
+
+  // The other half of the window (decision D-100): the entry file itself is the
+  // released view of an entry whose content has not opened, which is not an
+  // entry to check but a promise that one exists. One line naming the day it
+  // opens, rather than a diff whose shape says nothing to the reader who ran
+  // the command. Still exit 1 — nothing was verified.
+  const held = report.diffs.find((diff) => diff.reason === "entry_withheld");
+  if (held !== undefined) {
+    const opens =
+      typeof held.expected === "string"
+        ? held.expected
+        : "the day it is sealed";
+    io.stdout(`entry_withheld ${report.entry_id}: content opens ${opens}`);
+    return 1;
+  }
 
   if (report.ok) {
     io.stdout(`ok ${report.entry_id}`);

@@ -93,6 +93,12 @@ let deps: RequestDeps;
 let fetcher: FixtureFetcher;
 let maintainer: TestAgent;
 let alice: TestAgent;
+/**
+ * A bare key that authors nothing: the challenger in the dispute cases below.
+ * An entry's own author may not challenge it (`self_dispute`, the QA of
+ * 2026-09-12), and alice authors every entry here.
+ */
+let bob: TestAgent;
 let parties: Party[];
 
 beforeAll(async () => {
@@ -100,6 +106,7 @@ beforeAll(async () => {
   store = await openTestDatabase();
   maintainer = await makeAgent();
   alice = await makeAgent();
+  bob = await makeAgent();
 
   parties = [];
   for (const operator of OPERATORS) {
@@ -441,11 +448,11 @@ describe("the dispute door, which asks the same question in its own order", () =
     };
   }
 
-  /** File one signed correction against one target, as the bare key alice. */
+  /** File one signed correction against one target, as the bare key bob. */
   async function file(targetId: string, core: Core): Promise<Response> {
-    const signature = await signCore(core, alice.privateKey);
+    const signature = await signCore(core, bob.privateKey);
     return send(
-      await signedPost(alice, {
+      await signedPost(bob, {
         path: `/entries/${targetId}/dispute`,
         body: { entry: { ...core, signature } },
         timestamp: AT,
@@ -470,7 +477,7 @@ describe("the dispute door, which asks the same question in its own order", () =
     await verify(other);
 
     const first = await submittedCore(
-      alice,
+      bob,
       correction(
         "example/merlin-5",
         "example/merlin-5 is $40 per seat per month, not $30",
@@ -486,7 +493,7 @@ describe("the dispute door, which asks the same question in its own order", () =
     // The same value, a different claim, and a target with no open dispute of
     // its own: the filing refusals pass, and the duplicate rule answers.
     const again = await submittedCore(
-      alice,
+      bob,
       correction(
         "example/merlin-5",
         "example/merlin-5 is really $40 per seat per month",

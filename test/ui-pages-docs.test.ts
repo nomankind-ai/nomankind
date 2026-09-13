@@ -1053,13 +1053,16 @@ describe("renderApi", () => {
       "bad_body",
       "the request verdicts",
       "not_found",
+      // The QA of 2026-09-12: an author does not challenge its own entry, and
+      // the rule is asked before the door settles which key the filer is —
+      // otherwise the envelope is a way around it — so the page says it there.
+      "self_dispute",
       "author_mismatch",
       "POST /entries refusal",
       "entry_not_verified",
       "not_correction",
       "missing_citation",
       "subject_mismatch",
-      "self_dispute",
       "dispute_open",
       // Decision D-080: the source gate is asked a second time here, about the
       // entry being challenged, after the filing rules and before the links.

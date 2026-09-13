@@ -679,6 +679,7 @@ describe("the 0018 backfill on a database written before it", () => {
       expect(await old.rest()).toEqual([
         "0018_counters.sql",
         "0019_duplicate_key.sql",
+        "0020_duplicate_key_effective_at.sql",
       ]);
 
       // The column says exactly what the JSON beside it has always said.

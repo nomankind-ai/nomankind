@@ -19,8 +19,9 @@
  * status.
  *
  * Order matters and is deliberate: the id, the shape, the envelope signature,
- * the target, the identity, the whole submission pipeline on the correction,
- * the filing rules (src/dispute.ts), the source policy read against the entry
+ * the target, the one rule no identity may walk around -- an author does not
+ * challenge its own entry -- the identity, the whole submission pipeline on the
+ * correction, the filing rules (src/dispute.ts), the source policy read against the entry
  * being challenged (src/sources.ts), the two links a filing may claim to be an
  * upgrade of, and last the standing its stake needs (Section 9: standing "gates
  * ... dispute stakes"). Nothing is written until every one of them has passed,
@@ -45,6 +46,7 @@ import type { EntryStatus } from "../derive.js";
 import {
   checkDisputeFiling,
   checkStakeCover,
+  isSelfDispute,
   lockedStanding,
   openDispute,
   openRevalidation,
@@ -267,10 +269,23 @@ async function file(
   const stored = await getEntry(env.DB, id);
   if (stored === null) return refuse(404, "not_found");
 
+  // Nobody challenges their own entry, and this is asked first because it is the
+  // one refusal the envelope could otherwise walk around (the QA of
+  // 2026-09-12). `author_mismatch` below settles which key the filer is, so a
+  // self-dispute asked after it would only ever be asked about the one identity
+  // that survived — and an author filing against itself passes that check by
+  // construction, which is exactly how it used to get in. Both identities are
+  // put to the rule here instead, against the author the target's own stored
+  // entry names, before anything is fetched, prepared or written.
+  const author = body.entry["author"];
+  const target = stored.entry as Record<string, unknown>;
+  if (isSelfDispute(target["author"], auth.agent, author)) {
+    return refuse(422, "self_dispute");
+  }
+
   // The key that signed the request is the challenger, and the challenger is
   // the correction's author: filing under someone else's correction would put
   // their stake and standing at risk on a dispute they never chose to file.
-  const author = body.entry["author"];
   if (typeof author === "string" && author !== auth.agent) {
     return refuse(403, "author_mismatch");
   }
@@ -298,7 +313,6 @@ async function file(
 
   const targetWorld = await entryWorld(env.DB, id);
   const targetEvents = targetWorld.entryEvents;
-  const target = stored.entry as Record<string, unknown>;
 
   const challengerOperator =
     (prepared.core["author_operator"] as string | null) ?? null;
@@ -309,6 +323,7 @@ async function file(
       id,
       subject: target["subject"] as string,
       status: target["status"] as EntryStatus,
+      author: (target["author"] as string | null) ?? null,
     },
     {
       challenger: auth.agent,

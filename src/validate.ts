@@ -19,6 +19,11 @@
  * job (src/derive.ts), which recomputes it from the events every time.
  */
 
+import {
+  eligibilityRefusal,
+  underHost,
+  type EligibilityRefusal,
+} from "./eligibility.js";
 import type { ApproverRecord } from "./events.js";
 import { DEFAULT_DOMAIN } from "./policy.js";
 
@@ -85,14 +90,10 @@ export interface ValidationContext {
 export type ValidationRefusal =
   | "unregistered_agent"
   | "operator_mismatch"
-  | "unregistered_operator"
   | "submitter_agent"
-  | "submitter_operator"
-  | "original_signer"
-  | "maintainer_operator"
-  | "provider_operator"
-  | "subject_authority"
-  | "operator_not_in_domain"
+  // The seven exclusions, named once (src/eligibility.ts): they are the same
+  // strings this door has always answered, and they are that module's to name.
+  | EligibilityRefusal
   | "missing_snapshot_hash"
   | "missing_reason"
   | "duplicate_operator"
@@ -161,59 +162,43 @@ export function checkValidation(
     : undefined;
   if (operator === undefined) return refuse("unregistered_operator");
 
-  // 4-5. Section 5: no agent under the submitter's operator may validate that
-  // submitter's entry, so the signatures that make a fact verified always come
-  // from outside the party that submitted it. A bare-key submitter has no
-  // operator to exclude, so only the agent itself is barred.
+  // 4. Section 5: no agent under the submitter's operator may validate that
+  // submitter's entry. The agent's half is here because it is about an agent
+  // and the six rules below are about an operator; the operator's half is one
+  // of those six.
   if (record.agent === context.submitter.agent) return refuse("submitter_agent");
-  if (
-    context.submitter.operator !== null &&
-    record.operator === context.submitter.operator
-  ) {
-    return refuse("submitter_operator");
-  }
 
-  // 6. Section 6, "Dispute": a challenge passes through the same validation
-  // process "with one extra exclusion: no operator that signed the original,
-  // submitter or validator, may validate the challenge against it." The list is
-  // the caller's, computed from the challenged entry (src/dispute.ts), and is
-  // empty for an ordinary entry — which is why every other caller is unchanged.
-  // It sits here, after the submitter rules and before the maintainer ones,
-  // because it is the same kind of rule: who is too close to judge.
-  if (context.excludedOperators !== undefined) {
-    for (const excluded of context.excludedOperators) {
-      if (record.operator === excluded) return refuse("original_signer");
-    }
-  }
-
-  // 7-8. Section 5: verification comes from outside the maintainer, and no
-  // model provider may register as an operator at all.
-  if (operator.maintainer) return refuse("maintainer_operator");
-  if (operator.provider) return refuse("provider_operator");
-
-  // 8a. Decision D-096: the authority the entry's subject names is the party
-  // the entry is about, so an operator under one of its official hosts is
-  // barred from judging it. The hosts are the caller's, computed from policy
-  // (`authorityHostsFor`), and empty for every domain and every subject that
-  // excludes nobody -- which is why ai-ecosystem is untouched. It sits beside
-  // the provider rule because it is the same kind of rule, one entry wide
-  // instead of one domain wide.
-  if (context.authority_hosts !== undefined) {
-    for (const host of context.authority_hosts) {
-      if (underHost(record.operator, host)) return refuse("subject_authority");
-    }
-  }
-
-  // 8b. Decision D-071: the independence attestation is per domain, so
-  // eligibility is too. An operator judges an entry only in a domain it has
-  // signed that domain's attestation for -- and an operator excluded from one
-  // domain stays eligible in another, which is exactly what a per-domain check
-  // and a global one differ about.
-  const entryDomain = context.domain ?? DEFAULT_DOMAIN;
-  const attestedIn = operator.domains ?? [DEFAULT_DOMAIN];
-  if (!attestedIn.includes(entryDomain)) {
-    return refuse("operator_not_in_domain");
-  }
+  // 5-8b. The six remaining exclusions -- who is too close to judge this
+  // particular entry -- through the one predicate derivation asks the same
+  // question of (src/eligibility.ts). This module used to keep its own copy of
+  // all seven, which is the drift the QA of 2026-09-12 had just finished
+  // pulling out of derivation: the door refused all seven and derivation
+  // applied three, so a record the door would never have taken was counted
+  // anyway. The facts are gathered here because only this module's caller has
+  // them; the rules, their order and their names are not this module's to keep
+  // a second copy of.
+  const excluded = eligibilityRefusal(record.operator, {
+    // Registration is settled above: an undefined lookup already answered
+    // `unregistered_operator` in the door's own order.
+    registered: true,
+    authorOperator: context.submitter.operator,
+    // Section 6, "Dispute". The list is the caller's, computed from the
+    // challenged entry (src/dispute.ts), and empty for an ordinary entry --
+    // which is why every other caller is unchanged.
+    originalSigners: () => context.excludedOperators ?? [],
+    maintainer: operator.maintainer,
+    provider: operator.provider,
+    // Decision D-096. The hosts are the caller's, computed from policy
+    // (`authorityHostsFor`), and empty for every domain and every subject that
+    // excludes nobody -- which is why ai-ecosystem is untouched.
+    authorityHosts: context.authority_hosts ?? [],
+    // Decision D-071: an operator judges an entry only in a domain it has
+    // signed that domain's attestation for. Absent reads as the default domain,
+    // exactly as a legacy v0.6 core and a pre-v0.7 registration do.
+    domain: context.domain ?? DEFAULT_DOMAIN,
+    attestedIn: operator.domains,
+  });
+  if (excluded !== null) return refuse(excluded);
 
   // 9-10. Section 6: an approval carries the validator's own snapshot hash, so
   // the capture at submission is never the only witness to what the page said;
@@ -257,18 +242,12 @@ export function checkValidation(
 }
 
 /**
- * Whether an operator's own domain is a listed host, or a subdomain of one.
- *
- * `eu.example.europa.eu` is under `europa.eu`; `europa.eu.evil.tld` is not, and
- * the dot is the whole point -- a bare suffix test would hand every lookalike
- * domain in the world the exclusion, and, worse, would miss none of them while
- * excluding strangers.
+ * Re-exported where it has always been imported from (src/derive.ts,
+ * src/assign.ts, src/reconfirm.ts). It moved to src/eligibility.ts with the
+ * predicate that is its only real caller, and a module that imported it from
+ * here and the predicate from there would have had two names for one rule.
  */
-export function underHost(operator: string, host: string): boolean {
-  const listed = host.toLowerCase();
-  const own = operator.toLowerCase();
-  return own === listed || own.endsWith(`.${listed}`);
-}
+export { underHost };
 
 function refuse(reason: ValidationRefusal): ValidationVerdict {
   return { ok: false, reason };

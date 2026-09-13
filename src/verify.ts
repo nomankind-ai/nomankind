@@ -19,6 +19,30 @@
  * Nothing here reimplements the kernel: the chain, the signatures, derivation,
  * the seal and the snapshot rule are all asked of the modules that own them, so
  * the verifier and the writer can never drift apart.
+ *
+ * The release window (decision D-100), and the one exception to that. A reader
+ * with no key exports the events still inside the window as hash lines — the
+ * payload null and `withheld: true` beside it (src/release.ts) — and a hash line
+ * is an event like any other here: the chain links it, the seal's Merkle root is
+ * over its hash, and an edited one fails one of those two. What it is not is
+ * something to derive from, so the checks that read payloads read the lines this
+ * reader was given whole, exactly as `verify-mirror` reads a clone that carries
+ * them. They are counted in the report as `withheld` rather than named as
+ * differences, because the window running is not a fault in anybody's copy —
+ * which is what makes the free view of the record checkable at all, as D-100
+ * promises it is. A bundle with nothing withheld in it is checked exactly as it
+ * always was.
+ *
+ * The entry file can be inside the window too, and that is the one thing the
+ * run stops for. `npm run export` hands a reader with no entitlement the
+ * released view -- the proof, with every content field null -- and run through
+ * the ordinary checks it came back with eight differences, each of them true
+ * and none of them the fault: the nulled strings break the schema, the
+ * signature is over a core the file no longer holds, the submission event is a
+ * hash line, and the capture is content as well. So the window is checked
+ * first, on the entry, and answers one named item -- `entry_withheld`, with the
+ * day the content opens -- and stops. The verdict is still not ok, because
+ * nothing was verified.
  */
 
 import { openAssignment } from "./assign.js";
@@ -35,6 +59,7 @@ import { disputeExclusions } from "./dispute.js";
 import { base64Decode } from "./encoding.js";
 import { isTranscriptCategory } from "./evidence.js";
 import {
+  eventHash,
   verifyChain,
   type ApproverRecord,
   type AttestationScorer,
@@ -43,6 +68,7 @@ import {
 import { canonicalize } from "./hash.js";
 import { decodeProof, verifyInclusion } from "./merkle.js";
 import { snapshotHash } from "./normalize.js";
+import { CONTENT_CORE_KEYS, isWithheld, releaseDateOf } from "./release.js";
 import {
   authorityHostsFor,
   DEFAULT_DOMAIN,
@@ -84,7 +110,14 @@ export interface Registry {
 export interface LogBundle {
   /** ISO 8601 date-time: the clock the entry was exported under. */
   as_of: string;
-  /** The whole log. Seq order is not required; derivation sorts. */
+  /**
+   * The whole log. Seq order is not required; derivation sorts.
+   *
+   * An event the release window has not opened for this reader is here as a
+   * hash line: its payload null and `withheld: true` beside it (D-100). The
+   * chain and the seals are over it like any other event; nothing is derived
+   * from it.
+   */
   events: Event[];
   registry: Registry;
   /** Every seal. Seq order is not required. */
@@ -96,6 +129,7 @@ export interface LogBundle {
 /** An entry's checks, in the order they run. */
 export type EntryCheck =
   | "bundle"
+  | "window"
   | "schema"
   | "chain"
   | "signature"
@@ -128,6 +162,7 @@ export type Check = EntryCheck | AttestationCheck;
 /** Every entry check, in run order. */
 export const CHECKS: readonly EntryCheck[] = Object.freeze([
   "bundle",
+  "window",
   "schema",
   "chain",
   "signature",
@@ -169,6 +204,17 @@ export interface VerifyReport {
   ok: boolean;
   entry_id: string | null;
   diffs: Diff[];
+  /**
+   * How many of the bundle's events the window handed over as hash lines
+   * (D-100): checked for their place in the chain and under the seal, and read
+   * for nothing else.
+   *
+   * Zero for a bundle out of a released log or a keyed export, which is why an
+   * `ok` verdict means the same thing it always did. A count and never a
+   * verdict: a withheld line is not a difference, and the day its seal releases
+   * the same bundle is checked whole.
+   */
+  withheld: number;
 }
 
 /** How much of a canonical form a diff may carry. */
@@ -226,8 +272,13 @@ class Report {
     this.diffs.push({ check, field, expected, actual, reason });
   }
 
-  finish(entryId: string | null): VerifyReport {
-    return { ok: this.diffs.length === 0, entry_id: entryId, diffs: this.diffs };
+  finish(entryId: string | null, withheld = 0): VerifyReport {
+    return {
+      ok: this.diffs.length === 0,
+      entry_id: entryId,
+      diffs: this.diffs,
+      withheld,
+    };
   }
 }
 
@@ -246,8 +297,122 @@ function isEventShape(value: unknown): boolean {
     (typeof value["entry_id"] === "string" || value["entry_id"] === null) &&
     (typeof value["prev_hash"] === "string" || value["prev_hash"] === null) &&
     typeof value["hash"] === "string" &&
-    isRecord(value["payload"])
+    (isRecord(value["payload"]) || isHashLine(value))
   );
+}
+
+/**
+ * Whether this is a hash line: the event the window has not opened for this
+ * reader (D-100).
+ *
+ * Both halves, and never `withheld` alone: the payload is null because there is
+ * no payload to give, so a line that claims to be withheld and carries one is
+ * not the shape src/release.ts writes and is refused as any other malformed
+ * event is.
+ */
+function isHashLine(value: unknown): boolean {
+  return isRecord(value) && value["payload"] === null && isWithheld(value);
+}
+
+/**
+ * The five content keys the schema declares are always strings.
+ *
+ * `evidence` and `observation` are content too (src/release.ts), but the schema
+ * lets both be null on an ordinary entry, so neither says anything on its own.
+ * These five do: a released entry always carries all five, and a view with all
+ * five null is not an entry somebody broke.
+ */
+const WITHHELD_TELLS: readonly string[] = Object.freeze(
+  CONTENT_CORE_KEYS.filter(
+    (key) => key !== "evidence" && key !== "observation",
+  ),
+);
+
+/**
+ * Whether this is the released view of an entry still inside the window
+ * (decision D-100) rather than an entry at all.
+ *
+ * `npm run export` writes exactly this file for a reader with no entitlement:
+ * `withholdEntry`'s proof, every content field null and every proof field
+ * untouched. Run through the ordinary checks it produced eight diffs — five
+ * `schema_violation` for the nulled strings, `bad_signature` because the
+ * signature is over a core this file no longer holds, `not_submitted` because
+ * the submission event is a hash line too, and `capture_missing` because the
+ * capture is content as well. Every one of them is true and not one of them is
+ * the fault: what happened is that the window has not opened, and the verifier
+ * that could not say so was the verifier a free reader actually runs.
+ *
+ * The test is the five keys the schema makes unconditional strings, all null at
+ * once. No honest entry is in that state and no hand edit reaches it by
+ * accident; a file with some of them nulled is an edited entry and is reported
+ * as one, diff by diff, exactly as before.
+ */
+function isWithheldEntryView(entry: Json): boolean {
+  return WITHHELD_TELLS.every((key) => entry[key] === null);
+}
+
+/**
+ * The day this entry's content opens, read off the seal the released view
+ * carries, or null when the export carries none.
+ *
+ * Computed and never stored (src/release.ts, `releaseDateOf`): the covering
+ * seal's `sealed_at` plus the published window. A withheld view with `seal`
+ * null is an entry nothing has sealed yet, which is a window that has not
+ * started rather than one that has not passed, and the report says null.
+ */
+function releaseDateOfView(entry: Json): string | null {
+  const seal = entry["seal"];
+  if (!isRecord(seal)) return null;
+  const sealedAt = seal["sealed_at"];
+  if (typeof sealedAt !== "string") return null;
+  try {
+    return releaseDateOf(sealedAt);
+  } catch {
+    return null;
+  }
+}
+
+/** The seqs the bundle carries as hash lines, in the order they appear. */
+function withheldSeqs(events: readonly Event[]): ReadonlySet<number> {
+  const seqs = new Set<number>();
+  for (const event of events) {
+    if (isHashLine(event)) seqs.add(event.seq);
+  }
+  return seqs;
+}
+
+/**
+ * The log this reader may read: the same bundle without its hash lines, and
+ * without the seals whose batches they are in.
+ *
+ * What every check that reads a payload is handed, exactly as `verify-mirror`
+ * hands this module a clone's public events: derivation is a fold over what
+ * happened, and a line whose payload nobody was given says nothing about what
+ * happened. The seals go with them because a seal's root is over its whole
+ * batch: a verifier asked to rebuild one out of leaves it does not hold would
+ * call an honest seal broken. Both lists are the bundle's own where nothing is
+ * withheld, so a released log is checked exactly as it always was.
+ */
+function readableLog(bundle: LogBundle, withheld: ReadonlySet<number>): LogBundle {
+  if (withheld.size === 0) return bundle;
+  return {
+    ...bundle,
+    events: bundle.events.filter((event) => !withheld.has(event.seq)),
+  };
+}
+
+/** The seals every one of whose events the reader was given whole. */
+function readableSeals(
+  seals: readonly Seal[],
+  withheld: ReadonlySet<number>,
+): Seal[] {
+  if (withheld.size === 0) return [...seals];
+  return seals.filter((seal) => {
+    for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
+      if (withheld.has(seq)) return false;
+    }
+    return true;
+  });
 }
 
 /** The same, for a seal: every field the seal checks and the entry seal read. */
@@ -411,17 +576,59 @@ function validationsOf(
   ) as Event<"validation">[];
 }
 
-/** c. The hash chain, exactly as src/events.ts verifies it. */
-async function checkChain(bundle: LogBundle, report: Report): Promise<void> {
-  let result;
-  try {
-    result = await verifyChain(bundle.events);
-  } catch {
-    report.add("chain", "/events", "unverifiable", null, bundle.events.length);
+/**
+ * c. The hash chain, exactly as src/events.ts verifies it — and, where the
+ * window handed some of it over as hash lines, the same three rules with the
+ * one exception those make.
+ *
+ * A bundle with nothing withheld is the kernel's own `verifyChain` and nothing
+ * else. A bundle that carries hash lines cannot be: seq still runs from 0
+ * without a gap and every prev_hash is still the hash before it, but a line
+ * whose payload nobody was given cannot have its own hash recomputed. That hash
+ * is still the leaf its seal's Merkle root is over, so an edited hash line fails
+ * `seals` instead — and the day that seal releases, the same bundle is checked
+ * whole. `verify-mirror` reads a clone's hash lines under exactly this rule.
+ */
+async function checkChain(
+  bundle: LogBundle,
+  withheld: ReadonlySet<number>,
+  report: Report,
+): Promise<void> {
+  if (withheld.size === 0) {
+    let result;
+    try {
+      result = await verifyChain(bundle.events);
+    } catch {
+      report.add("chain", "/events", "unverifiable", null, bundle.events.length);
+      return;
+    }
+    if (!result.ok) {
+      report.add("chain", `/events/${result.seq}`, result.reason);
+    }
     return;
   }
-  if (!result.ok) {
-    report.add("chain", `/events/${result.seq}`, result.reason);
+
+  try {
+    for (let index = 0; index < bundle.events.length; index += 1) {
+      const event = bundle.events[index]!;
+      if (event.seq !== index) {
+        report.add("chain", `/events/${index}`, "bad_seq");
+        return;
+      }
+      const expectedPrev = index === 0 ? null : bundle.events[index - 1]!.hash;
+      if (event.prev_hash !== expectedPrev) {
+        report.add("chain", `/events/${index}`, "bad_prev_hash");
+        return;
+      }
+      if (withheld.has(event.seq)) continue;
+      const { hash, ...fields } = event;
+      if ((await eventHash(fields)) !== hash) {
+        report.add("chain", `/events/${index}`, "bad_hash");
+        return;
+      }
+    }
+  } catch {
+    report.add("chain", "/events", "unverifiable", null, bundle.events.length);
   }
 }
 
@@ -916,6 +1123,7 @@ export async function verifyOffline(
           reason: "internal_error",
         },
       ],
+      withheld: 0,
     };
   }
 }
@@ -928,6 +1136,29 @@ async function runChecks(
 
   // a. The bundle.
   const log = readBundle(bundle, report);
+
+  // a2. The window, on the entry rather than on the log (decision D-100).
+  //
+  // Before the schema, because the released view fails the schema by
+  // construction and a reader handed five `schema_violation` lines learns
+  // nothing they can act on. One named item and stop: this file is not an entry
+  // to check but a promise that one exists, and the honest answer is the day it
+  // opens. The verdict is still not ok and the command still exits 1 — nothing
+  // here was verified — but it says what it could not verify and why.
+  if (isRecord(entry) && isWithheldEntryView(entry)) {
+    const heldId = entry["id"];
+    report.add(
+      "window",
+      "/claim",
+      "entry_withheld",
+      releaseDateOfView(entry),
+      null,
+    );
+    return report.finish(
+      typeof heldId === "string" ? heldId : null,
+      log === null ? 0 : withheldSeqs(log.events).size,
+    );
+  }
 
   // b. The schema.
   const schema = validateEntry(entry);
@@ -968,8 +1199,15 @@ async function runChecks(
     return report.finish(entryId);
   }
 
-  // c. The hash chain.
-  await checkChain(log, report);
+  // The window (D-100). `log` is every line the reader was handed, which is what
+  // the chain and the seals are over; `readable` is the log they may read, which
+  // is what everything else is derived from. The two are the same object where
+  // nothing is withheld.
+  const withheld = withheldSeqs(log.events);
+  const readable = readableLog(log, withheld);
+
+  // c. The hash chain, over every line.
+  await checkChain(log, withheld, report);
 
   // d. The author's signature over the core.
   if (!(await verifyEntrySignature(entry))) {
@@ -977,11 +1215,11 @@ async function runChecks(
   }
 
   // e. The core, against the core the log sealed.
-  const submission = submissionOf(log.events, entryId);
+  const submission = submissionOf(readable.events, entryId);
   if (submission === null) {
     report.add("core", "/id", "not_submitted", null, entryId);
-    await checkSnapshot(log, entry, report);
-    return report.finish(entryId);
+    await checkSnapshot(readable, entry, report);
+    return report.finish(entryId, withheld.size);
   }
   const logCore = (submission.payload as Json)["core"] as Json;
   checkCore(entry, logCore, report);
@@ -996,22 +1234,29 @@ async function runChecks(
   }
 
   // f. Every record signature on this entry.
-  await checkRecords(log, entryId, report);
+  await checkRecords(readable, entryId, report);
 
   // g. The exclusions, replayed at each decision's position.
-  checkExclusions(log, entryId, logCore, report);
+  checkExclusions(readable, entryId, logCore, report);
 
   // h. The seals, then every derived field.
+  //
+  // Every seal in the bundle is checked, hash lines and all: a withheld line's
+  // hash is the leaf its root is over, which is what makes an edited one fail.
+  // What is derived from is only the seals the reader holds whole, because an
+  // inclusion proof is rebuilt from the leaves and a leaf that is not here
+  // cannot be rebuilt.
   const seals = await checkSeals(log, report);
-  await checkDerived(log, entry, entryId, seals, report);
+  const readableSealList = readableSeals(seals, withheld);
+  await checkDerived(readable, entry, entryId, readableSealList, report);
 
   // i. The snapshot hash, under the entry's own norm version.
-  await checkSnapshot(log, entry, report);
+  await checkSnapshot(readable, entry, report);
 
   // j. The entry's seal and its inclusion proof.
-  await checkEntrySeal(log, entry, seals, submission, report);
+  await checkEntrySeal(readable, entry, readableSealList, submission, report);
 
-  return report.finish(entryId);
+  return report.finish(entryId, withheld.size);
 }
 
 // ---------------------------------------------------------------------------

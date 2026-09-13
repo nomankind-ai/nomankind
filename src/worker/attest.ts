@@ -105,7 +105,7 @@ import {
   methodNotAllowed,
   refuse,
 } from "./registry.js";
-import { registryEvents } from "./world.js";
+import { clocked, registryEvents } from "./world.js";
 
 /**
  * What these routes are given besides their bindings: the instant the request is
@@ -672,8 +672,12 @@ async function inputs(
   const stored = await getEntry(db, id);
   if (stored === null) return refuse(404, "not_found");
   return json(
+    // `stale` is an input, and it is the one the request's own clock gives
+    // rather than the one the column's last writer left: the same `clocked`
+    // the read door, the entry page and `GET /entries/{id}` apply, so a learner
+    // reading the inputs and a reader reading the entry see one answer.
     confidenceInputs({
-      entry: stored.entry,
+      entry: clocked(stored.entry, deps.now),
       sidecar: stored.sidecar,
       now: deps.now.toISOString(),
     }),
