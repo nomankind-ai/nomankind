@@ -2428,12 +2428,12 @@ const readme = readFileSync(
 );
 
 describe("the paper and the README carry observed pays more (D-087)", () => {
-  it("labels the money side in Section 9, after the promise it makes precise", () => {
+  it("states the money side in Section 9, after the promise it makes precise", () => {
     const promise = whitepaper.indexOf(
       "paid more than the operators who copy (Section 4).",
     );
     const addition = whitepaper.indexOf(
-      "[Spec change 2026-09-11, D-087] The split is published per evidence tier",
+      "The split is published per evidence tier",
     );
     expect(promise).toBeGreaterThan(-1);
     expect(addition).toBeGreaterThan(promise);
@@ -2448,13 +2448,13 @@ describe("the paper and the README carry observed pays more (D-087)", () => {
     expect(whitepaper).toContain("rather than moving the reader's price");
   });
 
-  it("labels the standing side in Section 4, beside the tier sentence", () => {
+  it("states the standing side in Section 4, beside the tier sentence", () => {
     const tiers = whitepaper.indexOf("is paid more for it (Section 9)");
     const standing = whitepaper.indexOf(
-      "[Spec change 2026-09-11, D-087] The standing side of the same rule is STANDING_VALIDATION_REPRODUCED",
+      "The standing side of the same rule is STANDING_VALIDATION_REPRODUCED",
     );
     const money = whitepaper.indexOf(
-      "[Spec change 2026-09-11, D-087] The split is published per evidence tier",
+      "The split is published per evidence tier",
     );
     expect(tiers).toBeGreaterThan(-1);
     expect(standing).toBeGreaterThan(tiers);
@@ -2466,11 +2466,9 @@ describe("the paper and the README carry observed pays more (D-087)", () => {
     );
   });
 
-  it("labels the changed-check reward in Section 6, beside the promise (D-095)", () => {
+  it("states the changed-check reward in Section 6, beside the promise (D-095)", () => {
     const promise = whitepaper.indexOf("plus a challenger-style reward.");
-    const labeled = whitepaper.indexOf(
-      "[Spec change 2026-09-11, D-095] The reward is paid in standing",
-    );
+    const labeled = whitepaper.indexOf("The reward is paid in standing");
     expect(promise).toBeGreaterThan(-1);
     expect(labeled).toBeGreaterThan(promise);
     expect(whitepaper).toContain("STANDING_REVALIDATION_CHANGED");
@@ -2583,13 +2581,13 @@ describe("renderDocs", () => {
   it("heads the page with the versions it is a reading of, from policy", () => {
     expect(page).toContain("<h1>Docs</h1>");
     expect(flat).toContain(
-      `whitepaper ${WHITEPAPER_VERSION} with labeled changes · schema ` +
+      `whitepaper ${WHITEPAPER_VERSION} · schema ` +
         `${SCHEMA_VERSION} · ${POLICY.NORM_VERSION}`,
     );
     // One constant, named in src/ui/pages/document.ts beside the document it is
     // the version of: the hub's head line, its whitepaper card, the document
     // page's note and the how-it-works head line all read it.
-    expect(WHITEPAPER_VERSION).toBe("v1.5");
+    expect(WHITEPAPER_VERSION).toBe("v1.6");
     expect(WHITEPAPER_DOCUMENT.note).toContain(WHITEPAPER_VERSION);
   });
 
@@ -2674,7 +2672,7 @@ describe("renderDocs", () => {
       [
         "/docs/whitepaper",
         "Whitepaper",
-        `The specification, with every change since ${WHITEPAPER_VERSION} labeled in place.`,
+        `The specification, consolidated at ${WHITEPAPER_VERSION}.`,
       ],
       ["/docs/summary", "Summary", "The whitepaper in one page."],
     ];

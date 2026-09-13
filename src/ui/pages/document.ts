@@ -46,7 +46,7 @@ import type { DocumentData, PageContext } from "../types.js";
  * version of the document /docs/whitepaper renders. It lives here because this
  * is the module that holds the document itself.
  */
-export const WHITEPAPER_VERSION = "v1.5";
+export const WHITEPAPER_VERSION = "v1.6";
 
 /** The directory a document lives in, which its relative links resolve against. */
 function directoryOf(path: string): string {
@@ -87,7 +87,7 @@ export const WHITEPAPER_DOCUMENT: DocumentData = Object.freeze({
   title: "Whitepaper",
   sourcePath: WHITEPAPER_SOURCE_PATH,
   markdown: WHITEPAPER_MARKDOWN,
-  note: `${WHITEPAPER_VERSION}, with every change since labeled in place`,
+  note: `${WHITEPAPER_VERSION}, consolidated: every change since v1.5 is in the prose`,
 });
 
 export const SUMMARY_DOCUMENT: DocumentData = Object.freeze({

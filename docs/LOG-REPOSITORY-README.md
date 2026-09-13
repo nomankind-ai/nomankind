@@ -53,9 +53,20 @@ rows, and entry sidecars without the derived `source` — and one that says
 `nomankind-mirror-v2` as the whole sealed log it was, before the window.
 
 Every JSON document is two-space indented with a trailing newline; every
-`.jsonl` file is one compact document per line. Two exports of the same sealed
-head are byte-identical, so a diff in this repository's history is a change in
-the log and never a change in formatting.
+`.jsonl` file is one compact document per line. The identity is per file, not
+per directory: for the same sealed content at the same clock, a seal's events
+file, an entry's file, a seal row and an anchor row come out byte for byte the
+same in every export, so a diff in one of those files is a change in the log and
+never a change in formatting. "At the same clock" is the whole of the caveat: an
+entry's file carries the derived entry, and `stale` is derived against the day
+it is read, so an entry whose freshness window runs out flips that one field on
+its expiry date with nothing sealed having changed. The directory itself moves every day, and for two reasons
+that say nothing about any record: `mirror.json` carries the `exported_at` of
+the run that wrote it, and — once the log has ever issued a read receipt — the
+sweep appends one `read_count` event for every finished UTC day after that,
+even when it counts nothing, so there is a new event, a new seal and a new head
+each day. Before the first receipt there is no day to count and the sweep
+publishes nothing.
 
 Nothing unsealed is ever here. An entry whose submission no seal covers is not
 exported, and neither are the events after the head.

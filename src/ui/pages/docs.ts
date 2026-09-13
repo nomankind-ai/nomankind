@@ -107,7 +107,7 @@ export const DOC_GROUPS: readonly Group[] = Object.freeze([
       Object.freeze({
         href: "/docs/whitepaper",
         title: "Whitepaper",
-        line: `The specification, with every change since ${WHITEPAPER_VERSION} labeled in place.`,
+        line: `The specification, consolidated at ${WHITEPAPER_VERSION}.`,
       }),
       Object.freeze({
         href: "/docs/summary",
@@ -148,8 +148,8 @@ export function renderDocs(ctx: PageContext): string {
       <div class="page-head">
         <h1>Docs</h1>
         <span class="note"
-          >whitepaper ${WHITEPAPER_VERSION} with labeled changes · schema
-          ${SCHEMA_VERSION} · ${NORM_VERSION}</span
+          >whitepaper ${WHITEPAPER_VERSION} · schema ${SCHEMA_VERSION} ·
+          ${NORM_VERSION}</span
         >
       </div>
       <p class="lede">

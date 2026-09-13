@@ -15,8 +15,12 @@
  * pushed for the same sealed head.
  *
  * Byte-identical is the whole discipline. Two exports of the same sealed head
- * must produce the same bytes, or a mirror commit would show a diff on a day
- * nothing happened and nobody could tell a real change from a re-serialization.
+ * at the same clock must produce the same bytes, or a mirror commit would show a
+ * diff on a day nothing happened and nobody could tell a real change from a
+ * re-serialization. The clock is part of it because an entry's file carries the
+ * derived entry, and `stale` (src/derive.ts) is judged against the day it is
+ * read, so a freshness window running out moves that one field by the calendar
+ * with nothing sealed having changed.
  * So: every JSON document is `JSON.stringify(value, null, 2)` and one trailing
  * newline, with keys in the order this file constructs them; every `.jsonl` file
  * is one compact document per line in seq order with a trailing newline; and

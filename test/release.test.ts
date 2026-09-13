@@ -300,12 +300,14 @@ describe("a withheld entry", () => {
 });
 
 /**
- * The paper's four amendments (decision D-100).
+ * The release window in the paper, as v1.6 consolidates it (decisions D-100,
+ * D-101, D-103).
  *
  * A page can be made to say anything a test asks for; the paper is the document
- * the pages are checked against. So each amendment is pinned where it belongs —
- * labeled, and beside the sentence it makes precise rather than appended
- * somewhere a reader of that sentence would never reach it.
+ * the pages are checked against. v1.5 carried the rule as four labeled
+ * amendments; v1.6 folds them into the prose, so what is pinned here is that
+ * each one still says what it said, in the section a reader of that sentence
+ * reaches, and that no marker is left anywhere in the paper.
  */
 const whitepaper = readFileSync(
   fileURLToPath(new URL("../paper/WHITEPAPER.md", import.meta.url)),
@@ -313,19 +315,26 @@ const whitepaper = readFileSync(
 );
 
 describe("the paper carries the release window (D-100)", () => {
-  const LABEL = "[Spec change 2026-09-11, D-100]";
+  it("is v1.6, consolidated, with no spec-change marker left", () => {
+    expect(whitepaper).toContain(
+      "*This is v1.6. It supersedes v1.5, v1.4, v1.3, v1.2, v1.1, v1.0,",
+    );
+    expect(whitepaper).not.toContain("[Spec change");
+  });
 
-  it("amends exactly four sentences, and labels every one of them", () => {
-    expect(whitepaper.split(LABEL)).toHaveLength(5);
+  it("states the window in the abstract, as one piece", () => {
+    const abstract = whitepaper.slice(0, whitepaper.indexOf("# Introduction"));
+    expect(abstract).toContain(
+      "its content is public and CC0 thirty days later",
+    );
+    expect(abstract).toContain("an API key or an operator's own signed request");
   });
 
   it("makes the training path free on release (Section 8)", () => {
-    const promise = whitepaper.indexOf(
-      "Training on the data itself is free by license.",
+    const rule = whitepaper.indexOf(
+      "Training on the data itself is free by license, on release.",
     );
-    const amendment = whitepaper.indexOf(`${LABEL} Free on release`);
-    expect(promise).toBeGreaterThan(-1);
-    expect(amendment).toBeGreaterThan(promise);
+    expect(rule).toBeGreaterThan(-1);
     expect(whitepaper).toContain("RELEASE_WINDOW_DAYS in the policy module");
     expect(whitepaper).toContain(
       "thirty days after the seal that covers its submission",
@@ -333,43 +342,43 @@ describe("the paper carries the release window (D-100)", () => {
   });
 
   it("makes the free tier free once released, forever (the money section)", () => {
-    const promise = whitepaper.indexOf(
-      "The log is free to read at low volume, forever.",
+    const rule = whitepaper.indexOf(
+      "The log is free to read at low volume, forever, once released.",
     );
-    const amendment = whitepaper.indexOf(`${LABEL} Once released, forever`);
-    expect(promise).toBeGreaterThan(-1);
-    expect(amendment).toBeGreaterThan(promise);
+    expect(rule).toBeGreaterThan(-1);
     expect(whitepaper).toContain(
       "the thirty-day window before release is part of the paid product",
     );
   });
 
-  it("says what the mirror publishes daily (Section 11)", () => {
+  it("says what the mirror publishes daily, and how the verifier reads it (Section 11)", () => {
     const mirror = whitepaper.indexOf(
       "The daily log mirror lives in its own public repository",
     );
-    const amendment = whitepaper.indexOf(`${LABEL} What it publishes daily`);
     expect(mirror).toBeGreaterThan(-1);
-    expect(amendment).toBeGreaterThan(mirror);
     expect(whitepaper).toContain(
       "exported as a hash line — the same event, its payload withheld",
+    );
+    // D-103, item 2: the offline verifier counts the lines it could not read.
+    const verifier = whitepaper.indexOf(
+      "printed as a withheld count beside the passes and the failures",
+    );
+    expect(verifier).toBeGreaterThan(mirror);
+    expect(whitepaper).toContain(
+      "A withheld line is neither a pass nor a failure",
     );
   });
 
   it("says what a fork leaves with (the conclusion)", () => {
     const exit = whitepaper.indexOf(
-      "the remedy is a fork that leaves with the entire record.",
-    );
-    const amendment = whitepaper.indexOf(
-      `${LABEL} With the entire record older than the release window`,
+      "the remedy is a fork that leaves with the entire record older than the " +
+        "release window, and with the proof of the rest",
     );
     expect(exit).toBeGreaterThan(-1);
-    expect(amendment).toBeGreaterThan(exit);
-    expect(whitepaper).toContain("and the proof of the rest");
-    // The conclusion is the last of the four: a paragraph that landed in the
-    // wrong section would still carry the words.
-    expect(amendment).toBeGreaterThan(
-      whitepaper.indexOf(`${LABEL} What it publishes daily`),
+    // The conclusion is the last of the four places the window is stated: a
+    // paragraph that landed in the wrong section would still carry the words.
+    expect(exit).toBeGreaterThan(
+      whitepaper.indexOf("The daily log mirror lives in its own public"),
     );
   });
 });
