@@ -120,8 +120,8 @@ function swept(over: Partial<StatusInput> = {}): StatusInput {
   return { ...empty(), steps: [step("sweep")], ...over };
 }
 
-describe("the fifteen stages", () => {
-  it("names them in the pipeline's order and answers all fifteen", () => {
+describe("the sixteen stages", () => {
+  it("names them in the pipeline's order and answers all sixteen", () => {
     expect(stageStates(empty(), NOW).map((one) => one.stage)).toEqual([
       "sweep timer",
       "pool snapshot",
@@ -130,6 +130,7 @@ describe("the fifteen stages", () => {
       "staleness",
       "read counts",
       "sealing",
+      "chain",
       "witnessing",
       "anchoring",
       "ledger",
@@ -143,7 +144,7 @@ describe("the fifteen stages", () => {
   });
 
   it("says each rule in the page's words, with the numbers from policy", () => {
-    // The fifteen sentences the mockup approved, pinned: the wording is the page
+    // The sixteen sentences the mockup approved, pinned: the wording is the page
     // and changing it is a design change. Two of them say a number, and both
     // come from src/policy.ts rather than from a digit typed here.
     const rules = [
@@ -154,6 +155,7 @@ describe("the fifteen stages", () => {
       "every row past its window marked stale",
       "yesterday's read_count sealed",
       `the newest seal younger than ${STATUS_ATTENTION_AFTER_INTERVALS} × SEAL_INTERVAL_MINUTES; no unsealed event older`,
+      `every event re-hashed and linked, a page a run within ${STATUS_ATTENTION_AFTER_INTERVALS} × SWEEP_INTERVAL_MINUTES`,
       "the newest seal countersigned by WITNESSES_REQUIRED pinned witnesses",
       "yesterday's anchor exists; posted to OpenTimestamps on production",
       "yesterday's reconciliation row present and equal",
@@ -172,7 +174,7 @@ describe("the fifteen stages", () => {
     );
     expect(stageStates(empty(), NOW).map((one) => one.rule)).toEqual(said);
     // The rule is what the state was decided by and not a reading of it, so a
-    // world where things have happened says exactly the same fifteen.
+    // world where things have happened says exactly the same sixteen.
     expect(stageStates(swept(), NOW).map((one) => one.rule)).toEqual(said);
   });
 
@@ -492,7 +494,100 @@ describe("7. sealing", () => {
   });
 });
 
-describe("8. witnessing", () => {
+describe("8. chain", () => {
+  /** The board row the chain step leaves after a clean walk. */
+  function walked(over: Record<string, unknown> = {}): SweepStep {
+    return step("chain", {
+      detail: {
+        from: 0,
+        through: 99,
+        events: 100,
+        checked_through: 99,
+        wrapped: false,
+        break_seq: null,
+        break_reason: null,
+        ...over,
+      },
+    });
+  }
+
+  it("is idle before the first run, because nothing has walked yet", () => {
+    expect(stateOf(empty(), "chain")).toBe("idle");
+    expect(rowOf(empty(), "chain").last).toBe("never");
+  });
+
+  it("is idle on a log with no event to walk", () => {
+    const input = swept({
+      steps: [
+        step("sweep"),
+        step("chain", {
+          detail: {},
+          last_skip_reason: "chain_no_event",
+          last_skip_at: NOW,
+        }),
+      ],
+    });
+    expect(stateOf(input, "chain")).toBe("idle");
+    expect(rowOf(input, "chain").last).toContain("chain_no_event");
+  });
+
+  it("is ok while the walk keeps advancing", () => {
+    const input = swept({ steps: [step("sweep"), walked()] });
+    expect(stateOf(input, "chain")).toBe("ok");
+    expect(rowOf(input, "chain").last).toContain("checked through 99");
+    expect(rowOf(input, "chain").last).toContain("100 events");
+  });
+
+  it("says so when the walk wrapped back to the start of the log", () => {
+    const input = swept({ steps: [step("sweep"), walked({ wrapped: true })] });
+    expect(rowOf(input, "chain").last).toContain("wrapped");
+  });
+
+  it("wants attention when the walk has not advanced for two intervals", () => {
+    // The published window and not a number typed here: a walk that has not
+    // got through in two sweep intervals is a walk that has stopped.
+    const stalled = swept({
+      steps: [
+        step("sweep"),
+        {
+          ...walked(),
+          last_ok_at: minutesAgo(
+            STATUS_ATTENTION_AFTER_INTERVALS * SWEEP_INTERVAL_MINUTES + 1,
+          ),
+        },
+      ],
+    });
+    expect(stateOf(stalled, "chain")).toBe("attention");
+  });
+
+  it("fails on a stored break, and names the event and what differed", () => {
+    const input = swept({
+      steps: [
+        step("sweep"),
+        walked({
+          from: 100,
+          through: 104,
+          events: 5,
+          checked_through: 99,
+          break_seq: 102,
+          break_reason: "bad_prev_hash",
+        }),
+      ],
+    });
+    expect(stateOf(input, "chain")).toBe("failing");
+    const row = rowOf(input, "chain");
+    expect(row.last).toContain("seq 102");
+    expect(row.last).toContain("bad_prev_hash");
+    expect(row.last).toContain("checked through 99");
+    // The evidence opens on the page of the log that holds the broken event,
+    // which is the whole use of a link on a status board.
+    expect(row.evidence).toEqual([
+      { label: "/events", href: "/events?after=101" },
+    ]);
+  });
+});
+
+describe("9. witnessing", () => {
   it("is idle with no seal", () => {
     expect(stateOf(swept(), "witnessing")).toBe("idle");
   });
@@ -535,7 +630,7 @@ describe("8. witnessing", () => {
   });
 });
 
-describe("9. anchoring", () => {
+describe("10. anchoring", () => {
   /** The newest proof that reached a block, two days before this instant. */
   const UPGRADE = {
     date: "2026-09-07",
@@ -646,7 +741,7 @@ describe("9. anchoring", () => {
   });
 });
 
-describe("10. ledger", () => {
+describe("11. ledger", () => {
   const count = { seq: 40, date: YESTERDAY, total: 12, at: minutesAgo(30) };
 
   it("is idle before any read count", () => {
@@ -680,7 +775,7 @@ describe("10. ledger", () => {
   });
 });
 
-describe("11. standing", () => {
+describe("12. standing", () => {
   const seal = { seq: 3, last_seq: 30, sealed_at: minutesAgo(1), witnesses: 1 };
 
   it("is idle with no operator", () => {
@@ -716,7 +811,7 @@ describe("11. standing", () => {
   });
 });
 
-describe("12. attestations", () => {
+describe("13. attestations", () => {
   it("is idle when none was ever asked for", () => {
     expect(stateOf(swept(), "attestations")).toBe("idle");
   });
@@ -733,7 +828,7 @@ describe("12. attestations", () => {
   });
 });
 
-describe("14. usage metering", () => {
+describe("15. usage metering", () => {
   it("is idle where there is no provider to meter through", () => {
     const input = swept({
       metering: { kind: "unavailable", reported_days: 0, owed: 0 },
@@ -792,7 +887,7 @@ describe("14. usage metering", () => {
   });
 });
 
-describe("15. change alerts", () => {
+describe("16. change alerts", () => {
   const SEALED = { seq: 3, last_seq: 30, sealed_at: NOW, witnesses: 2 };
 
   it("is idle while nobody has subscribed", () => {
@@ -856,8 +951,8 @@ describe("the four counters", () => {
       lastSweepAt: null,
       lastSweepAge: null,
       lastSweepTrigger: null,
-      stagesOk: 15,
-      stagesTotal: 15,
+      stagesOk: 16,
+      stagesTotal: 16,
       stagesFailing: 0,
       stagesAttention: 0,
       sealedHead: null,
@@ -872,7 +967,7 @@ describe("the four counters", () => {
   it("counts idle stages with the ok ones", () => {
     const input = swept();
     const counters = statusCounters(stageStates(input, NOW), input);
-    expect([counters.stagesOk, counters.stagesTotal]).toEqual([15, 15]);
+    expect([counters.stagesOk, counters.stagesTotal]).toEqual([16, 16]);
     expect(counters.lastSweepAge).toBe("0 min ago");
     expect(counters.lastSweepTrigger).toBe("alarm");
   });
@@ -895,7 +990,7 @@ describe("the four counters", () => {
     // interval and not past the failing one.
     expect(counters.stagesFailing).toBe(2);
     expect(counters.stagesAttention).toBe(1);
-    expect(counters.stagesOk).toBe(12);
+    expect(counters.stagesOk).toBe(13);
     expect([counters.sealedHead, counters.newestSealSeq]).toEqual([30, 3]);
     expect([counters.seals, counters.witnessedSeals]).toEqual([4, 3]);
     expect(counters.unsealedEvents).toBe(1);

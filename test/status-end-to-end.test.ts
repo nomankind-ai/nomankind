@@ -31,19 +31,22 @@ import {
   SWEEP_INTERVAL_MINUTES,
 } from "../src/policy.js";
 import { buildAnchor, type Anchor } from "../src/anchor.js";
+import { appendEvent } from "../src/events.js";
 import { txtRecordName } from "../src/registry.js";
-import type { Stage } from "../src/status.js";
+import { STAGE_COUNT, stageStates, type Stage } from "../src/status.js";
 import type { D1Like, D1LikeStatement } from "../src/storage/d1.js";
 import {
+  appendEvents,
   countOperators,
   countTrustedOperators,
+  eventBySeq,
   putAnchor,
   setAnchorExternal,
   sweepSteps,
 } from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest } from "../src/worker/index.js";
-import { handleStatus } from "../src/worker/status.js";
+import { handleStatus, statusInput } from "../src/worker/status.js";
 import { SWEEP_STEPS, runSweep } from "../src/worker/sweep.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
@@ -122,6 +125,26 @@ async function status(now: Date): Promise<Record<string, unknown>> {
   expect(response.status).toBe(200);
   expect(response.headers.get("cache-control")).toBe("no-store");
   return (await response.json()) as Record<string, unknown>;
+}
+
+/**
+ * A database that counts the statements a gather prepares.
+ *
+ * `prepare` is where every read in src/worker/status.ts begins and none of them
+ * is prepared without being run, so counting the calls counts the round trips —
+ * which is the thing the consolidation was about.
+ */
+function counting(db: D1Like): { db: D1Like; statements: () => number } {
+  let prepared = 0;
+  const wrapped: D1Like = {
+    prepare(sql: string): D1LikeStatement {
+      prepared += 1;
+      return db.prepare(sql);
+    },
+    batch: (statements) => db.batch(statements),
+    exec: (sql) => db.exec(sql),
+  };
+  return { db: wrapped, statements: () => prepared };
 }
 
 /** The state one named stage reads in an answer. */
@@ -216,8 +239,8 @@ describe("a log nothing has happened in", () => {
     expect(body["counters"]).toMatchObject({
       lastSweepAt: null,
       lastSweepAge: null,
-      stagesOk: 15,
-      stagesTotal: 15,
+      stagesOk: 16,
+      stagesTotal: 16,
       sealedHead: null,
     });
     // The thresholds travel with the answer: a state nobody can recompute is a
@@ -342,6 +365,7 @@ describe("a healthy world", () => {
       "pool snapshot",
       "beacon",
       "sealing",
+      "chain",
       "witnessing",
     ]) {
       expect([named, stateOf(body, named)]).toEqual([named, "ok"]);
@@ -353,11 +377,64 @@ describe("a healthy world", () => {
       lastSweepTrigger: "alarm",
       stagesFailing: 0,
       stagesAttention: 0,
-      stagesOk: 15,
+      stagesOk: 16,
       unsealedEvents: 0,
       witnessKind: "mock witnesses on local",
     });
   }, 240_000);
+
+  it("gathers the whole board in fourteen statements", async () => {
+    const { db: watched, statements } = counting(store.db);
+    const at = settled.toISOString();
+    const input = await statusInput(watched, { ...env, DB: watched }, at);
+
+    // The board is whole: every stage answered from what those statements
+    // brought back, so the number below is not bought with a missing light.
+    expect(stageStates(input, at)).toHaveLength(STAGE_COUNT);
+    expect(input.head_seq).not.toBeNull();
+    expect(input.assignments.drafts).toBe(0);
+    expect(input.alerts.cursor).toBeGreaterThanOrEqual(-1);
+
+    // Pinned to the exact number, and not to a ceiling, because the number is
+    // the point. The QA of 2026-09-12 found this gather making twenty-nine
+    // serialized statements on a page built to be hammered: eleven of them were
+    // numbers the sweep can count once a run and now does, and four were the
+    // same newest-of-a-type seek asked four times and now grouped into one. The
+    // fourteenth is the log's head, which stayed live so the sealing light
+    // reads it at the same instant as the unsealed count beside it. A read
+    // added back to this path has to be argued for, in the open, against this
+    // line.
+    expect(statements()).toBe(14);
+  }, 120_000);
+
+  it("sees an event appended since the last sweep, on both halves of the seal rule", async () => {
+    // The head and the unsealed count are one sentence in the sealing rule, so
+    // they have to be read at one instant. An event appended after the last
+    // counters run is the case that tells them apart: a head taken off the
+    // sweep's own row would still say "no event" here, while the count beside
+    // it said one was waiting.
+    const at = settled.toISOString();
+    const before = await statusInput(store.db, env, at);
+    expect(before.head_seq).not.toBeNull();
+
+    const head = await eventBySeq(store.db, before.head_seq!);
+    const chained = await appendEvent([head!], {
+      at,
+      type: "pool_snapshot",
+      entry_id: null,
+      payload: { operators: [] },
+    });
+    await appendEvents(store.db, [chained[chained.length - 1]!]);
+
+    const after = await statusInput(store.db, env, at);
+    expect(after.head_seq).toBe(before.head_seq! + 1);
+    expect(after.unsealed.count).toBe(before.unsealed.count + 1);
+    const sealing = stageStates(after, at).find(
+      (one) => one.stage === "sealing",
+    );
+    expect(sealing!.state).not.toBe("idle");
+    expect(sealing!.last).toContain(`${after.unsealed.count} unsealed`);
+  }, 120_000);
 
   it("says who last came through the registration door", async () => {
     const body = await status(settled);

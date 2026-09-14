@@ -43,10 +43,30 @@
  * own hash is over the artifact as submitted, placeholders included, so nothing
  * here changes what the author signed.
  *
- * What this command still does not carry: the frozen transcript of a behavior or
- * misbehavior entry, which snapshots its evidence rather than the cited page. A
- * fields file naming one is submitted honestly and the Worker's own refusal is
- * printed.
+ * `--transcript <file.json>` carries the frozen transcript artifact of a
+ * behavior or misbehavior entry, which snapshots its evidence rather than the
+ * cited page (the #64 gap, D-084). The artifact goes through the kernel's own
+ * `transcriptArtifactHash`, which refuses a shape that is not a transcript in
+ * the kernel's own words before anything is fetched; its six measured fields
+ * fill the fields file's `evidence` wherever that file leaves one null, and the
+ * hash it returns becomes the core's
+ * `snapshot_hash`, which for these categories is the hash of the artifact and
+ * not of a page. Nothing is fetched on this path at all: the door rebuilds the
+ * same artifact from the same `evidence` and archives it at the same hash, so
+ * there is no page to snapshot and no second copy to send. A fields file whose
+ * `evidence` already names a measured field is left alone, as a receipt_hash is,
+ * and one that names a transcript the file does not is refused here in one line
+ * rather than posted for the door to answer `snapshot_mismatch`.
+ *
+ * `--disclosure <file.json>` is the same body field the fields file may carry,
+ * read from a file instead: it goes out as the body's `disclosure` unchanged.
+ * Naming it both ways is a usage error, because one of the two would have to be
+ * dropped and neither is the obvious loser.
+ *
+ * A receipt and a transcript are never both: an observed entry rests on a
+ * measurement receipt and a transcript entry on its transcript, and a submission
+ * offering both is a mistake about which kind of entry is being made, refused
+ * before anything is fetched.
  *
  * The core is exported over injected io — an http client, a snapshot fetcher, a
  * clock and a key — so a test drives it in process against handleRequest with
@@ -58,8 +78,14 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
-import { checkReceiptArtifact, receiptArtifactHash } from "../artifact.js";
+import {
+  checkReceiptArtifact,
+  receiptArtifactHash,
+  transcriptArtifactHash,
+  TRANSCRIPT_ARTIFACT_KEYS,
+} from "../artifact.js";
 import type { Core } from "../core.js";
+import { canonicalize } from "../hash.js";
 import { signCore } from "../sign.js";
 import { buildSubmittedCore } from "../submit.js";
 import { runCommand } from "./main.js";
@@ -76,8 +102,23 @@ import {
   type ValidatorKey,
 } from "./validator.js";
 
-const USAGE =
-  "usage: submit <key.json> <base-url> <fields.json> [--receipt <file.json>]";
+/**
+ * Why a submission carries one artifact and not two, in the words both the
+ * usage line and the refusal use: one sentence, said in one place, so a reader
+ * who meets it on the command line and again on stderr meets the same rule.
+ */
+export const BOTH_ARTIFACTS =
+  "an observed entry carries a receipt and a transcript entry a transcript, never both";
+
+/** The usage line, and the one thing about the flags it cannot show. */
+export const USAGE = [
+  "usage: submit <key.json> <base-url> <fields.json> [--receipt <file.json>]",
+  "                [--transcript <file.json>] [--disclosure <file.json>]",
+  BOTH_ARTIFACTS,
+].join("\n");
+
+/** The flags that take the file after them. Each is dropped by its index. */
+const FILE_FLAGS = ["--receipt", "--transcript", "--disclosure"] as const;
 
 /** The one refusal this command makes for itself, before any request. */
 export const BAD_FIELDS = "bad_fields";
@@ -92,10 +133,12 @@ export const BAD_FIELDS = "bad_fields";
  * point of the rule -- so it travels beside the entry in the body, exactly as
  * `--receipt` does, and the door decides it.
  *
- * It is accepted from the fields file rather than from a flag because it is the
- * author's own material about their own evidence, and because a transcript
- * entry's evidence is already in that file; splitting the payload out to a
- * second path would put the placeholder and its original in two places.
+ * The fields file is still where it belongs when the author writes it by hand:
+ * it is their own material about their own evidence, and a transcript entry's
+ * evidence is already in that file. `--disclosure` is the same body field for a
+ * payload a runner wrote to its own file, which is how a seeded transcript
+ * arrives. One or the other, never both: two disclosures for one entry would
+ * make one of them silently lose.
  */
 export const BODY_FIELDS: readonly string[] = Object.freeze(["disclosure"]);
 
@@ -277,6 +320,13 @@ export async function buildAuthoredCore(input: {
   readonly key: ValidatorKey;
   readonly baseUrl: string;
   readonly fields: Record<string, unknown>;
+  /**
+   * The snapshot hash, when the caller already holds it. A transcript entry's
+   * snapshot is the frozen artifact and not the cited page, so the norm rule
+   * leaves nothing to fetch there; every other entry leaves this unset and the
+   * citation is captured here as it always was.
+   */
+  readonly snapshotHash?: string;
   readonly deps: {
     readonly http: HttpClient;
     readonly fetcher: SnapshotFetcher;
@@ -298,10 +348,17 @@ export async function buildAuthoredCore(input: {
   const citation = fields["citation"] as string;
 
   // Section 6: the source is snapshotted at the moment of submission. The
-  // Worker fetches it again for itself and refuses a hash that disagrees.
-  const captured = await fetchAndHash(deps.fetcher, citation);
-  if (!captured.ok) {
-    return { ok: false, reason: captured.reason, detail: null, usage: false };
+  // Worker fetches it again for itself and refuses a hash that disagrees. A
+  // caller carrying a transcript's hash has already snapshotted what its norm
+  // rule snapshots, and fetching the citation here would hash a page nobody
+  // compares it to.
+  let snapshotHash = input.snapshotHash;
+  if (snapshotHash === undefined) {
+    const captured = await fetchAndHash(deps.fetcher, citation);
+    if (!captured.ok) {
+      return { ok: false, reason: captured.reason, detail: null, usage: false };
+    }
+    snapshotHash = captured.snapshot.hash;
   }
 
   const core = await buildSubmittedCore(
@@ -316,7 +373,7 @@ export async function buildAuthoredCore(input: {
       evidence: fields["evidence"],
       observation: fields["observation"],
       citation,
-      snapshot_hash: captured.snapshot.hash,
+      snapshot_hash: snapshotHash,
       supersedes: (fields["supersedes"] as string | null | undefined) ?? null,
       author: input.key.agentId,
       author_operator: await operatorFor(
@@ -358,6 +415,70 @@ function stopped(error: string): SubmitRun {
 }
 
 /**
+ * A run this command will not send: the reason and its one line on stderr.
+ *
+ * Every one of these is decided before anything is fetched or asked of the log,
+ * so the exit code is 2 — a call that was never a submission — and not the 1
+ * that means the log refused one.
+ */
+function notSent(io: ValidatorIo, reason: string, detail: string): SubmitRun {
+  io.stderr(`${reason}: ${detail}`);
+  return {
+    ok: false,
+    code: 2,
+    status: null,
+    error: reason,
+    entryId: null,
+    entryStatus: null,
+  };
+}
+
+/**
+ * The `evidence` a transcript entry signs: the author's own, with each measured
+ * field the artifact carries filled in where the fields file leaves it null.
+ *
+ * `provider_statement` is never the artifact's — it is a citation, not a
+ * measurement, and `buildTranscriptArtifact` drops it for exactly that reason —
+ * so it is carried through as the author wrote it, and defaulted to null so the
+ * key the schema requires is always present.
+ */
+function evidenceWithTranscript(
+  named: unknown,
+  artifact: Record<string, unknown>,
+): Record<string, unknown> {
+  const author = isRecord(named) ? named : {};
+  return {
+    ...author,
+    ...artifact,
+    provider_statement: author["provider_statement"] ?? null,
+  };
+}
+
+/**
+ * The measured fields a fields file names differently from the artifact.
+ *
+ * The door rebuilds the transcript from the entry's own `evidence` and hashes
+ * that, so an author whose evidence says one thing and whose transcript file
+ * says another has signed a snapshot_hash of neither. Compared in the kernel's
+ * canonical form, because `parameters` is an object and two objects that differ
+ * only in key order are the same measurement.
+ */
+function transcriptDisagreements(
+  named: unknown,
+  artifact: Record<string, unknown>,
+): string[] {
+  const author = isRecord(named) ? named : {};
+  return TRANSCRIPT_ARTIFACT_KEYS.filter((key) => {
+    const value = author[key];
+    return (
+      value !== undefined &&
+      value !== null &&
+      canonicalize(value) !== canonicalize(artifact[key])
+    );
+  });
+}
+
+/**
  * Submit one entry: read the fields, capture the citation, build and sign the
  * core, and post it.
  */
@@ -367,40 +488,43 @@ export async function runSubmit(input: {
   readonly fields: Record<string, unknown>;
   /** The measurement receipt of an observed entry, when there is one. */
   readonly receipt?: unknown;
+  /** The frozen transcript artifact of a transcript entry, when there is one. */
+  readonly transcript?: unknown;
+  /** The originals behind a redacted transcript, read from their own file. */
+  readonly disclosure?: unknown;
   readonly deps: SubmitDeps;
 }): Promise<SubmitRun> {
   const { deps } = input;
+
+  let fields = input.fields;
+
+  // Which kind of entry this is, before anything else: an entry rests on a
+  // measurement receipt or on a transcript, and one offering both names no kind
+  // at all.
+  if (input.receipt !== undefined && input.transcript !== undefined) {
+    return notSent(deps.io, BAD_FIELDS, BOTH_ARTIFACTS);
+  }
+  if (input.disclosure !== undefined && fields["disclosure"] !== undefined) {
+    return notSent(
+      deps.io,
+      BAD_FIELDS,
+      "disclosure: named by the fields file and by --disclosure",
+    );
+  }
 
   // The receipt first, because its hash goes INTO the signed core: an artifact
   // the kernel refuses is a usage failure and never reaches the network, and a
   // hash computed after the core was built would be a hash of something the
   // author never signed.
-  let fields = input.fields;
   if (input.receipt !== undefined) {
     const checked = checkReceiptArtifact(input.receipt);
     if (!checked.ok) {
-      deps.io.stderr(`${checked.reason}: ${checked.detail}`);
-      return {
-        ok: false,
-        code: 2,
-        status: null,
-        error: checked.reason,
-        entryId: null,
-        entryStatus: null,
-      };
+      return notSent(deps.io, checked.reason, checked.detail);
     }
     const hashed = await receiptArtifactHash(input.receipt);
-    /* c8 ignore next 12 -- unreachable: the check above already passed. */
+    /* c8 ignore next 3 -- unreachable: the check above already passed. */
     if (!hashed.ok) {
-      deps.io.stderr(`${hashed.reason}: ${hashed.detail}`);
-      return {
-        ok: false,
-        code: 2,
-        status: null,
-        error: hashed.reason,
-        entryId: null,
-        entryStatus: null,
-      };
+      return notSent(deps.io, hashed.reason, hashed.detail);
     }
     const observation = fields["observation"];
     if (
@@ -415,10 +539,45 @@ export async function runSubmit(input: {
     }
   }
 
+  // The transcript next, and for the same reason: its hash is the entry's
+  // snapshot_hash, so it is checked and hashed by the kernel's own rule before
+  // anything is fetched, and the artifact's measured fields are the evidence the
+  // author signs.
+  let snapshotHash: string | undefined;
+  if (input.transcript !== undefined) {
+    // The hash is the check: `transcriptArtifactHash` refuses the shape itself,
+    // in the kernel's own reason and detail, so asking twice would only be a
+    // second place for the two answers to differ.
+    const hashed = await transcriptArtifactHash(input.transcript);
+    if (!hashed.ok) {
+      return notSent(deps.io, hashed.reason, hashed.detail);
+    }
+    const artifact = input.transcript as Record<string, unknown>;
+    const named = fields["evidence"];
+    if (named !== undefined && named !== null && !isRecord(named)) {
+      // The refusal `checkFields` makes, reached before the filling rather than
+      // after it: an evidence that is not an object cannot be completed from an
+      // artifact, and completing it anyway would answer the author's mistake by
+      // replacing it.
+      return notSent(deps.io, BAD_FIELDS, "evidence: not an object or null");
+    }
+    const disagreeing = transcriptDisagreements(named, artifact);
+    if (disagreeing.length > 0) {
+      return notSent(
+        deps.io,
+        BAD_FIELDS,
+        `evidence names a transcript this file is not: ${disagreeing.join(", ")}`,
+      );
+    }
+    fields = { ...fields, evidence: evidenceWithTranscript(named, artifact) };
+    snapshotHash = hashed.hash;
+  }
+
   const built = await buildAuthoredCore({
     key: input.key,
     baseUrl: input.baseUrl,
     fields,
+    ...(snapshotHash === undefined ? {} : { snapshotHash }),
     deps,
   });
   if (!built.ok) {
@@ -436,6 +595,10 @@ export async function runSubmit(input: {
   const { core } = built;
   const entryId = core["id"] as string;
 
+  // One body field, two spellings: the flag when it was given, the fields file
+  // otherwise. Naming both was refused above.
+  const disclosure = input.disclosure ?? fields["disclosure"];
+
   const signature = await signCore(core, input.key.privateKey);
   const request = await signedPost({
     baseUrl: input.baseUrl,
@@ -445,14 +608,13 @@ export async function runSubmit(input: {
       // The artifact itself, untouched: the hash the Worker takes is over
       // exactly these bytes, and it archives it at that hash.
       ...(input.receipt === undefined ? {} : { receipt: input.receipt }),
-      // The originals behind a redacted payload, as the fields file carried
-      // them and untouched for the same reason: the door hashes each value and
-      // refuses one that is not the placeholder's (D-096). Absent when the
-      // fields file names none, and never sent as null, because a body key
-      // present with nothing in it is a disclosure claim about nothing.
-      ...(isRecord(fields["disclosure"])
-        ? { disclosure: fields["disclosure"] }
-        : {}),
+      // The originals behind a redacted payload, as the fields file or the
+      // `--disclosure` file carried them and untouched for the same reason: the
+      // door hashes each value and refuses one that is not the placeholder's
+      // (D-096). Absent when neither names one, and never sent as null, because
+      // a body key present with nothing in it is a disclosure claim about
+      // nothing.
+      ...(isRecord(disclosure) ? { disclosure } : {}),
     },
     key: input.key,
     now: deps.now,
@@ -487,30 +649,42 @@ export async function runSubmit(input: {
   };
 }
 
-/** The three paths the command needs, and the optional receipt file. */
+/** The three paths the command needs, and the optional artifact files. */
 export interface SubmitArgs {
   readonly keyPath: string;
   readonly baseUrl: string;
   readonly fieldsPath: string;
   readonly receiptPath?: string;
+  readonly transcriptPath?: string;
+  readonly disclosurePath?: string;
 }
 
 /**
  * The command line, parsed. `null` is "print the usage line": a pure function so
  * the argument shapes can be checked without a process.
  *
- * `--receipt` takes the argument after it, and that argument is the only
- * non-flag word that is not positional. It is dropped by its index, and only
+ * Each file flag takes the argument after it, and those arguments are the only
+ * non-flag words that are not positional. They are dropped by index, and only
  * when the flag is actually there: without it `indexOf` returns -1, and a filter
- * that dropped index `-1 + 1` would eat the key path out of every plain call.
+ * that dropped index `-1 + 1` would eat the key path out of every plain call. A
+ * flag whose next word is another flag, or is missing, names no file.
+ *
+ * A receipt and a transcript together are refused here rather than sent: they
+ * are the evidence of two different kinds of entry, and the usage line says so.
  */
 export function parseSubmitArgs(argv: readonly string[]): SubmitArgs | null {
-  const receiptAt = argv.indexOf("--receipt");
-  const receiptPath = receiptAt === -1 ? undefined : argv[receiptAt + 1];
+  const paths: Partial<Record<(typeof FILE_FLAGS)[number], string>> = {};
+  const taken = new Set<number>();
+  for (const flag of FILE_FLAGS) {
+    const at = argv.indexOf(flag);
+    if (at === -1) continue;
+    const path = argv[at + 1];
+    if (path === undefined || path.startsWith("--")) return null;
+    paths[flag] = path;
+    taken.add(at + 1);
+  }
   const positional = argv.filter(
-    (argument, index) =>
-      (receiptAt === -1 || index !== receiptAt + 1) &&
-      !argument.startsWith("--"),
+    (argument, index) => !taken.has(index) && !argument.startsWith("--"),
   );
   const [keyPath, baseUrl, fieldsPath] = positional;
   if (
@@ -518,15 +692,20 @@ export function parseSubmitArgs(argv: readonly string[]): SubmitArgs | null {
     baseUrl === undefined ||
     fieldsPath === undefined ||
     positional.length > 3 ||
-    (receiptAt !== -1 && receiptPath === undefined)
+    (paths["--receipt"] !== undefined && paths["--transcript"] !== undefined)
   ) {
     return null;
   }
+  const receiptPath = paths["--receipt"];
+  const transcriptPath = paths["--transcript"];
+  const disclosurePath = paths["--disclosure"];
   return {
     keyPath,
     baseUrl,
     fieldsPath,
     ...(receiptPath === undefined ? {} : { receiptPath }),
+    ...(transcriptPath === undefined ? {} : { transcriptPath }),
+    ...(disclosurePath === undefined ? {} : { disclosurePath }),
   };
 }
 
@@ -540,32 +719,37 @@ if (
     console.error(USAGE);
     process.exit(2);
   }
-  const { keyPath, baseUrl, fieldsPath, receiptPath } = parsed;
+  const { keyPath, baseUrl, fieldsPath } = parsed;
 
   const io: ValidatorIo = {
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   };
-  // A fields file that cannot be read or parsed is a usage failure, not a
-  // refusal: nothing was ever asked of the log.
-  let fields: unknown;
-  try {
-    fields = JSON.parse(await readFile(resolve(fieldsPath), "utf8"));
-  } catch (error) {
-    io.stderr(`${fieldsPath}: ${reasonOf(error)}`);
-    process.exit(2);
-  }
-
-  // A receipt file that cannot be read or parsed is a usage failure too.
-  let receipt: unknown;
-  if (receiptPath !== undefined) {
+  // A file that cannot be read or parsed is a usage failure, not a refusal:
+  // nothing was ever asked of the log. The fields file and every artifact file
+  // are read the same way and for the same reason.
+  const readJson = async (path: string): Promise<unknown> => {
     try {
-      receipt = JSON.parse(await readFile(resolve(receiptPath), "utf8"));
+      return JSON.parse(await readFile(resolve(path), "utf8"));
     } catch (error) {
-      io.stderr(`${receiptPath}: ${reasonOf(error)}`);
+      io.stderr(`${path}: ${reasonOf(error)}`);
       process.exit(2);
     }
-  }
+  };
+
+  const fields = await readJson(fieldsPath);
+  const receipt =
+    parsed.receiptPath === undefined
+      ? undefined
+      : await readJson(parsed.receiptPath);
+  const transcript =
+    parsed.transcriptPath === undefined
+      ? undefined
+      : await readJson(parsed.transcriptPath);
+  const disclosure =
+    parsed.disclosurePath === undefined
+      ? undefined
+      : await readJson(parsed.disclosurePath);
 
   process.exit(
     await runCommand({ name: "submit", baseUrl, io }, async () => {
@@ -574,6 +758,8 @@ if (
         baseUrl,
         fields: fields as Record<string, unknown>,
         ...(receipt === undefined ? {} : { receipt }),
+        ...(transcript === undefined ? {} : { transcript }),
+        ...(disclosure === undefined ? {} : { disclosure }),
         deps: {
           http: new WebHttpClient(),
           fetcher: new WebFetcher(),

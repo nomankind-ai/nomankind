@@ -877,6 +877,7 @@ describe("migrations", () => {
       "0018_counters.sql",
       "0019_duplicate_key.sql",
       "0020_duplicate_key_effective_at.sql",
+      "0021_version_stale_seq.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -1030,6 +1031,7 @@ describe("migrations", () => {
       "0018_counters.sql",
       "0019_duplicate_key.sql",
       "0020_duplicate_key_effective_at.sql",
+      "0021_version_stale_seq.sql",
     ]);
   });
 });

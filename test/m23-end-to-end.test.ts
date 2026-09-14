@@ -613,6 +613,10 @@ describe("the step's place in the run", () => {
       // M25: the counters step, after the standing step so the trusted count is
       // the run's.
       "counters",
+      // the chain re-check, after the counters and before the backfill.
+      // It reads the events table and writes nothing to it, so it stands
+      // outside every wall above it.
+      "chain",
       // M25: the duplicate-key backfill (migration 0019), last in the list
       // because it is the last step to run — it reads no seal and, once the
       // backlog is caught up, makes one bounded read that finds nothing.

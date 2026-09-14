@@ -468,7 +468,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "SLOT_COUNT",
       value: String(policy.SLOT_COUNT),
       means:
-        "Read-share slots on an entry. A reconfirmation rotates the oldest holder out rather than adding one, so the share is always split among one submitter and this many slot holders.",
+        "Read-share slots on an entry. A reconfirmation rotates the oldest holder out rather than adding one, so the share is always split among one submitter and at most this many slot holders: two while the trusted pool is under ten operators, this many after.",
     },
     {
       name: "READ_PRICE_MICROS_PER_READ",

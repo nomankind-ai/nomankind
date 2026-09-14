@@ -126,6 +126,7 @@ import { duplicateKey, sameDuplicateKey } from "../duplicate.js";
 import { recordMeasured } from "../evidence.js";
 import {
   appendEvent,
+  eventHash,
   type Event,
   type EventPayloads,
   type EventType,
@@ -193,8 +194,10 @@ import {
   completeSealRewrites,
   countAttestations,
   countEntries,
+  countMeterReports,
   countOperators,
   countSeals,
+  countSealsSealedOn,
   countTrustedOperators,
   countWitnessedSeals,
   dueAssignments,
@@ -241,6 +244,7 @@ import {
   readCounterRangeOn,
   readCountsByKeyOn,
   meterReported,
+  owedMeterReports,
   putMeterReport,
   recordAssignment,
   recordAssignmentMissed,
@@ -251,6 +255,7 @@ import {
   recordRevalidationMissed,
   recordSeal,
   recordTrustChange,
+  recordVersionStale,
   releasedUnpaidRows,
   sealsAfter,
   sealsSealedOn,
@@ -259,8 +264,12 @@ import {
   putStandings,
   storedStandings,
   supersedersOf,
+  readChainCheckState,
   trustedOperatorCountsByDomain,
+  validationCountsByOperator,
+  writeChainCheckState,
   writeCounters,
+  writeOperatorValidationCounters,
   setSealRegistry,
   setSealWitnesses,
   staleDue,
@@ -277,6 +286,12 @@ import {
   type StoredEntryInput,
 } from "../storage/repository.js";
 import { keyById } from "../storage/keys.js";
+import {
+  alertCursor,
+  countAlertEndpoints,
+  countDueDeliveries,
+  countFailedDeliveries,
+} from "../storage/alerts.js";
 import { checkWitnesses, witnessedCount, type Witness } from "../witness.js";
 import { runAlertStep, type AlertStepReport } from "./alerts.js";
 import {
@@ -398,6 +413,7 @@ export const SWEEP_STEPS: readonly string[] = Object.freeze([
   "payout",
   "attestation",
   "counters",
+  "chain",
   "duplicates",
 ]);
 
@@ -471,6 +487,56 @@ export interface SweepRevalidationMiss {
  * (`pool_below_switch`, `snapshot_after_beacon`, `awaiting_volunteers`) rather
  * than errors. A caller reading this can say why the log did not move.
  */
+/**
+ * The status board's numbers, as one run counted them.
+ *
+ * The QA of 2026-09-12 found the status gather making twenty-nine serialized
+ * statements per view. Whitepaper Section 3: every number a page shows is a
+ * view of the log, and a view may be taken once per run rather than once per
+ * reader — the counters step already does exactly that for the public counts,
+ * and these are the rest. They ride on the step's own board row rather than in
+ * the counters table because two of them are not integers, and the board is
+ * read by the gather already.
+ */
+export interface SweptNumbers {
+  /** Entries still in draft: what the draw step is waiting to be given. */
+  readonly drafts: number;
+  /** The log's head, or -1 when nothing has ever been appended. */
+  readonly head_seq: number;
+  /** Assignments still past their window after this run's expiry step. */
+  readonly overdue_assignments: number;
+  /** Attestations still past their window after this run's attestation step. */
+  readonly due_attestations: number;
+  /** How many seals were sealed yesterday: whether an anchor was owed at all. */
+  readonly seals_yesterday: number;
+  /** The first UTC day any counted receipt was issued on, or null for none. */
+  readonly earliest_receipt_day: string | null;
+  /** Key-days reported to the payment provider, and key-days still owed. */
+  readonly meter_reported_days: number;
+  readonly meter_owed: number;
+  /** The alert step's four numbers: endpoints, how far it read, due, given up. */
+  readonly alert_endpoints: number;
+  readonly alert_cursor: number;
+  readonly alert_due: number;
+  readonly alert_failed: number;
+}
+
+/** What one run's chain re-check walked, and what it found. */
+export interface SweepChainReport {
+  /** The first seq of the page walked. */
+  readonly from: number;
+  /** The last seq the page held, or `from - 1` when the page was empty. */
+  readonly through: number;
+  /** How many events the page held. */
+  readonly events: number;
+  /** Where the walk has now proved the log to, which a break does not move. */
+  readonly checked_through: number;
+  /** Whether this run restarted from seq 0 after passing the head. */
+  readonly wrapped: boolean;
+  /** The first event that did not agree with the chain rule, or null. */
+  readonly break: { readonly seq: number; readonly reason: string } | null;
+}
+
 export interface SweepReport {
   /** The instant the run was made at, which is every event's `at`. */
   readonly at: string;
@@ -624,6 +690,26 @@ export interface SweepReport {
     readonly seals: number;
     readonly attestations: number;
   } | null;
+  /**
+   * The numbers the status board used to ask the database for on every view,
+   * counted once here instead.
+   *
+   * Every one of them is a question the sweep's own steps have just settled —
+   * how many drafts are waiting on a draw, which assignments are still overdue
+   * after the expiry step ran, how far the alert step read — so a reading taken
+   * at the end of the run is the sweep's own account of itself and not a
+   * second, later opinion. Null when the counters step refused, which leaves the
+   * board showing the last run that got through.
+   */
+  readonly swept: SweptNumbers | null;
+  /**
+   * What the chain re-check walked, or null when the step refused.
+   *
+   * A break is reported and never healed: the walk says which event stopped
+   * agreeing with its own hash, and repairing the log is not a thing a timer
+   * may do.
+   */
+  readonly chain: SweepChainReport | null;
   /** The payouts this run made, one per operator at most (decision D-053). */
   readonly payouts: readonly {
     readonly operator: string;
@@ -1713,8 +1799,10 @@ async function allOperators(db: D1Like): Promise<MirrorOperator[]> {
  * ten statements to arrive at the bytes already in hand. So the rows are read a
  * page at a time with one grouped read of where each entry's events stop, and
  * only a row that is behind — or one derived past the head, over events the
- * export must not see — is derived again. A thousand entries costs the pages and
- * the stragglers rather than ten thousand statements.
+ * export must not see, or one whose staleness the row cannot account for and
+ * 0021 has not yet recorded a position for — is derived again. A thousand
+ * entries costs the pages and the stragglers rather than ten thousand
+ * statements.
  */
 /**
  * A stored row read at an instant, or null when only the events can answer.
@@ -1728,12 +1816,25 @@ async function allOperators(db: D1Like): Promise<MirrorOperator[]> {
  * clock is applied here, by the rule src/worker/sync.ts applies at its own door
  * and out of the same function: `expiresAt` in the past at `asOf` is stale, and
  * a row that is stale with its window still open was made stale by something
- * else — D-096's version staleness, a fact about the log and not the clock —
- * which the row does not distinguish, so that row goes to the events.
+ * else — D-096's version staleness, a fact about the log and not the clock.
+ *
+ * Which of the two it was is the one thing the derivation beside it does not
+ * say, so until 0021 every ai-safety entry a later version had retired went back
+ * to the events on every export: correct, and ten statements each, every day,
+ * forever (the #78 QA, D-107). The column is that answer, kept: the sealed
+ * position at which an export folded the events and found the entry
+ * version-stale. A position and not a flag because an export reads at a head,
+ * and a head below the one that proved it must not publish a staleness it does
+ * not cover. It never has to be cleared and is never re-asked, because version
+ * staleness never clears — the sibling's verification does not unhappen, and
+ * `expires_at` is untouched by it, so a row carrying a position is stale at
+ * every later head whatever the calendar says. A row with no position is the
+ * only one left that the events have to answer for.
  */
 function clockedAt(
   row: StoredEntryRow,
   asOf: Date,
+  head: number,
 ): { entry: Entry; sidecar: Sidecar } | null {
   const fields = row.entry as unknown as Record<string, unknown>;
   const expiresAt = fields["expires_at"];
@@ -1742,7 +1843,12 @@ function clockedAt(
     asOf,
   );
   const wasStale = fields["stale"] === true;
-  if (wasStale && !expired) return null;
+  if (wasStale && !expired) {
+    const staledAt = row.versionStaleSeq;
+    if (staledAt === null || staledAt > head) return null;
+    // The row already says stale, and D-096 is why: it stands as it is.
+    return { entry: row.entry, sidecar: row.sidecar };
+  }
   return {
     entry:
       wasStale === expired
@@ -1779,14 +1885,30 @@ async function mirrorEntries(
         needed !== undefined &&
         row.derivedThroughSeq >= needed &&
         row.derivedThroughSeq <= head;
-      const fromRow = current ? clockedAt(row, asOf) : null;
-      const derived =
-        fromRow ??
-        rederive(
+      const fromRow = current ? clockedAt(row, asOf, head) : null;
+      let derived: { entry: Entry; sidecar: Sidecar } | null = fromRow;
+      if (derived === null) {
+        const full = rederive(
           worldAt(await entryWorld(db, row.id, cache), head),
           row.id,
           asOf,
         );
+        derived = full;
+        // The world was gathered anyway, so what it cost is kept: an entry the
+        // events call stale with its window still open is stale by D-096, and
+        // the position that proves it is this export's own head (0021). The next
+        // export reads the row and gathers nothing. Written after the
+        // derivation and never instead of it — this run publishes exactly what
+        // it derived — and it writes one column beside the doors' row rather
+        // than a row of its own.
+        if (
+          row.versionStaleSeq === null &&
+          full.derived.stale &&
+          !expiredByClock(full.derived.expires_at, asOf)
+        ) {
+          await recordVersionStale(db, row.id, head);
+        }
+      }
       records.push({
         entry: derived.entry,
         sidecar: derived.sidecar,
@@ -2649,7 +2771,10 @@ export async function countersStep(
   sealedHead: number,
   at: string,
   skip: Skip,
-): Promise<SweepReport["counters"]> {
+): Promise<{
+  counters: SweepReport["counters"];
+  swept: SweptNumbers | null;
+}> {
   try {
     const entriesByDomain = await entryCountsByDomain(db);
     const trustedByDomain = await trustedOperatorCountsByDomain(db);
@@ -2679,15 +2804,177 @@ export async function countersStep(
     };
     await writeCounters(db, counters);
 
-    return {
+    // One counter pair per operator, in their own batch. The operators
+    // directory and the genesis page grouped over every `validation` event in
+    // the log on every view (the QA of 2026-09-12); this is that grouping, made
+    // once per run, and the log is still what it is counted from.
+    await writeOperatorValidationCounters(
+      db,
+      await validationCountsByOperator(db, LIST_PAGE_LIMIT),
+      counters.position,
+      at,
+    );
+
+    return { counters: {
       position: counters.position,
       entries: counters.entries_total,
       operators: counters.operators_registered,
       seals: counters.seals,
       attestations: counters.attestations,
-    };
+    }, swept: await sweptNumbers(db, sealedHead, at) };
   } catch {
     skip("counters_failed");
+    return { counters: null, swept: null };
+  }
+}
+
+/**
+ * The status board's own numbers, counted at the end of the run.
+ *
+ * Everything here was a statement the status gather made per view. Each is a
+ * question this run has just finished answering — the expiry step closed the
+ * assignments it could, the attestation step closed the windows it could, the
+ * alert step read as far as it read — so counting them here is the run
+ * reporting what it left behind, and reading them back costs the board nothing
+ * beyond the row it already reads.
+ *
+ * `head_seq` is -1 on a log with no events, the same spelling every other
+ * position in this file uses for "nothing yet".
+ */
+async function sweptNumbers(
+  db: D1Like,
+  sealedHead: number,
+  at: string,
+): Promise<SweptNumbers> {
+  const yesterday = utcDay(
+    new Date(Date.parse(at) - MILLISECONDS_PER_DAY).toISOString(),
+  );
+  const head = await headSeq(db);
+  const meterCursor = (await ledgerCursor(db, METERING_CURSOR)) ?? -1;
+  return {
+    drafts: await countEntries(db, { status: "draft" }),
+    head_seq: head ?? -1,
+    // Bounded by one page, exactly as the gather bounded it: both stages ask
+    // only whether anything is overdue, and a page is more than enough to say.
+    overdue_assignments: (await dueAssignments(db, at, LIST_PAGE_LIMIT)).length,
+    due_attestations: (
+      await dueAttestations(db, { now: at, limit: LIST_PAGE_LIMIT })
+    ).length,
+    seals_yesterday: await countSealsSealedOn(db, yesterday),
+    earliest_receipt_day: await earliestReadReceiptDay(db),
+    meter_reported_days: await countMeterReports(db),
+    meter_owed:
+      sealedHead < 0
+        ? 0
+        : await owedMeterReports(db, meterCursor, sealedHead, LIST_PAGE_LIMIT),
+    alert_endpoints: await countAlertEndpoints(db),
+    alert_cursor: await alertCursor(db),
+    alert_due: await countDueDeliveries(db, at),
+    alert_failed: await countFailedDeliveries(db),
+  };
+}
+
+/**
+ * (j2b) Re-walk one page of the log and check that it is still itself.
+ *
+ * The gap the QA of 2026-09-12 named: a hand-edited `prev_hash` is noticed by
+ * nothing live. The offline verifier catches it and so does the mirror, but
+ * both are things somebody has to run, and a record whose whole claim is that a
+ * later change leaves proof (whitepaper Section 6, "Seal") should be the one
+ * noticing. So every run re-checks one page from a stored cursor and wraps back
+ * to seq 0 after the head, which walks the whole log continuously — a log of
+ * any size is re-proved in (events / LIST_PAGE_LIMIT) runs and no run pays for
+ * more than a page.
+ *
+ * The kernel's own rule and not a second copy of it: `eventHash`
+ * (src/events.ts) recomputes each event's digest over its own fields, and the
+ * link and contiguity checks are `verifyChain`'s, applied to a page that starts
+ * wherever the cursor left off — which is why `verifyChain` itself cannot be
+ * called here: it requires the list to begin at seq 0.
+ *
+ * A break is reported and never healed. The cursor does not move past it, so
+ * the next run walks the same page and the stage stays failing until the row is
+ * put back, at which point the walk passes it and moves on by itself. Nothing
+ * here writes to the events table: a timer that repaired the record would be
+ * the one thing this record must never have.
+ */
+export async function chainStep(
+  db: D1Like,
+  at: string,
+  skip: Skip,
+): Promise<SweepReport["chain"]> {
+  try {
+    const head = await headSeq(db);
+    if (head === null) {
+      skip("chain_no_event");
+      return null;
+    }
+    const stored = await readChainCheckState(db);
+    // Past the head, so back to the beginning: the log is re-walked for ever
+    // rather than once, because an event proved last week is exactly the one a
+    // hand edit would go for.
+    const wrapped = stored.checked_through >= head;
+    const from = wrapped ? 0 : stored.checked_through + 1;
+    const page = await eventsAfter(db, from - 1, LIST_PAGE_LIMIT);
+
+    // What the first event of the page must link to: null at seq 0, else the
+    // hash of the event before it, read on its own because the page does not
+    // hold it.
+    const before = from === 0 ? null : await eventBySeq(db, from - 1);
+    if (from > 0 && before === null) {
+      const state = { checked_through: stored.checked_through, break_seq: from };
+      await writeChainCheckState(db, state, at);
+      skip("chain_break");
+      return {
+        from,
+        through: from - 1,
+        events: 0,
+        checked_through: state.checked_through,
+        wrapped,
+        break: { seq: from, reason: "missing_prev" },
+      };
+    }
+
+    let expectedSeq = from;
+    let expectedPrev: string | null = before === null ? null : before.hash;
+    let broken: { seq: number; reason: string } | null = null;
+    for (const event of page) {
+      if (event.seq !== expectedSeq) {
+        broken = { seq: expectedSeq, reason: "bad_seq" };
+        break;
+      }
+      if (event.prev_hash !== expectedPrev) {
+        broken = { seq: event.seq, reason: "bad_prev_hash" };
+        break;
+      }
+      const { hash, ...fields } = event;
+      if ((await eventHash(fields)) !== hash) {
+        broken = { seq: event.seq, reason: "bad_hash" };
+        break;
+      }
+      expectedSeq = event.seq + 1;
+      expectedPrev = event.hash;
+    }
+
+    const through = page.length === 0 ? from - 1 : page[page.length - 1]!.seq;
+    const state = {
+      // A break leaves the cursor where it was, so the next run walks the same
+      // page again: the stage must go on reading failing until the row is back.
+      checked_through: broken === null ? through : stored.checked_through,
+      break_seq: broken === null ? null : broken.seq,
+    };
+    await writeChainCheckState(db, state, at);
+    if (broken !== null) skip("chain_break");
+    return {
+      from,
+      through,
+      events: page.length,
+      checked_through: state.checked_through,
+      wrapped,
+      break: broken,
+    };
+  } catch {
+    skip("chain_failed");
     return null;
   }
 }
@@ -3601,12 +3888,19 @@ export async function runSweep(
     // shown those rather than nothing. The position is then -1, which is what
     // "counted before anything was sealed" means everywhere else in this file.
     enter("counters");
-    const counters = await countersStep(
+    const counted = await countersStep(
       db,
       sealedHead === null ? -1 : sealedHead.last_seq,
       at,
       skip,
     );
+
+    // (j2b) One page of the log, re-walked against the kernel's own hash rule.
+    // After the counters and before the backfill: it reads the events table and
+    // writes nothing to it, so it stands outside every wall above, and a run
+    // that could not walk its page has still swept.
+    enter("chain");
+    const chain = await chainStep(db, at, skip);
 
     // (j3) The duplicate-key backfill, last and outside every wall: it reads no
     // seal, appends nothing, and on a log with nothing left to fill it is one
@@ -3636,7 +3930,9 @@ export async function runSweep(
       alerts,
       standing,
       payouts,
-      counters,
+      counters: counted.counters,
+      swept: counted.swept,
+      chain,
       duplicates,
       skipped,
       durations,
@@ -3729,6 +4025,8 @@ function nothingSwept(
     alerts: { created: 0, delivered: 0, failed: 0, retried: 0 },
     standing: null,
     counters: null,
+    swept: null,
+    chain: null,
     payouts: [],
     duplicates: null,
     skipped,
@@ -3878,8 +4176,24 @@ function stepRows(
             amount: report.payouts.reduce((total, one) => total + one.amount, 0),
           },
           attestation: { expired: report.attestations.expired.length },
-          counters:
-            report.counters === null ? { position: null } : { ...report.counters },
+          // The counters step's own row carries both the counts it wrote and
+          // the status board's numbers it took at the same instant, so the
+          // gather reads them off a row it already reads.
+          counters: {
+            ...(report.counters === null
+              ? { position: null }
+              : report.counters),
+            ...(report.swept ?? {}),
+          },
+          chain:
+            report.chain === null
+              ? { checked_through: null }
+              : {
+                  ...report.chain,
+                  break_seq: report.chain.break === null ? null : report.chain.break.seq,
+                  break_reason:
+                    report.chain.break === null ? null : report.chain.break.reason,
+                },
           duplicates:
             report.duplicates === null
               ? { filled: null }

@@ -3,7 +3,7 @@
  *
  * Whitepaper Section 11, Deployment and status: nomankind publishes what it is
  * running and whether it is working. `GET /status` is the second half of that as
- * JSON — fifteen stages, the five doors nobody probes, four counters, and the two
+ * JSON — sixteen stages, the five doors nobody probes, four counters, and the two
  * thresholds the states were decided by, so a reader can check the arithmetic
  * without this Worker.
  *
@@ -64,7 +64,7 @@ import {
   earliestReadReceiptDay,
   getAnchor,
   headSeq,
-  latestEventOfType,
+  latestEventsOfTypes,
   latestMirror,
   latestReceipt,
   latestSeal,
@@ -171,13 +171,130 @@ function detailNumber(
 }
 
 /**
+ * The numbers the sweep counts once a run so the board does not count them once
+ * a view.
+ *
+ * Named here rather than imported from src/worker/sweep.ts for the same reason
+ * `METERING_CURSOR` is: that module is the whole sweep, and this one only reads
+ * a row it wrote. The keys are the counters step's own, and `countedNow` below
+ * is the same twelve questions asked live, for a deployment whose counters step
+ * has not run yet.
+ */
+interface SweptNumbers {
+  readonly drafts: number;
+  readonly head_seq: number;
+  readonly overdue_assignments: number;
+  readonly due_attestations: number;
+  readonly seals_yesterday: number;
+  readonly earliest_receipt_day: string | null;
+  readonly meter_reported_days: number;
+  readonly meter_owed: number;
+  readonly alert_endpoints: number;
+  readonly alert_cursor: number;
+  readonly alert_due: number;
+  readonly alert_failed: number;
+}
+
+/** A string off a stored step's detail, or null when it carries none. */
+function detailText(
+  detail: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = detail[key];
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * What the counters step left on its board row, or null when it never ran.
+ *
+ * `head_seq` is the probe, because every one of these is written in the same
+ * object by the same step: a row carrying it carries all twelve, and a row
+ * without it is a board written before this existed or by a run that never
+ * reached the step.
+ */
+function sweptNumbers(
+  steps: readonly { readonly step: string; readonly detail: Record<string, unknown> }[],
+): SweptNumbers | null {
+  const row = steps.find((step) => step.step === "counters") ?? null;
+  if (row === null) return null;
+  const head = detailNumber(row.detail, "head_seq");
+  if (head === null) return null;
+  const at = (key: string): number => detailNumber(row.detail, key) ?? 0;
+  return {
+    drafts: at("drafts"),
+    head_seq: head,
+    overdue_assignments: at("overdue_assignments"),
+    due_attestations: at("due_attestations"),
+    seals_yesterday: at("seals_yesterday"),
+    earliest_receipt_day: detailText(row.detail, "earliest_receipt_day"),
+    meter_reported_days: at("meter_reported_days"),
+    meter_owed: at("meter_owed"),
+    alert_endpoints: at("alert_endpoints"),
+    // The alert cursor is -1 before the step has read anything, which is not
+    // the zero `at` would give: seq 0 is a real position.
+    alert_cursor: detailNumber(row.detail, "alert_cursor") ?? -1,
+    alert_due: at("alert_due"),
+    alert_failed: at("alert_failed"),
+  };
+}
+
+/**
+ * The same twelve numbers, asked of the store directly.
+ *
+ * The cold path, and only the cold path: a deployment between the deploy and
+ * its first sweep has no counters row, and a board showing zeros there would be
+ * stating a fact about the log rather than about itself — exactly the reason
+ * `logCounters` above counts rather than returning zeros.
+ */
+async function countedNow(
+  db: D1Like,
+  now: string,
+  seal: { readonly last_seq: number } | null,
+): Promise<SweptNumbers> {
+  const head = await headSeq(db);
+  const cursor = (await ledgerCursor(db, METERING_CURSOR)) ?? -1;
+  return {
+    drafts: await countEntries(db, { status: "draft" }),
+    head_seq: head ?? -1,
+    overdue_assignments: (await dueAssignments(db, now, LIST_PAGE_LIMIT)).length,
+    due_attestations: (
+      await dueAttestations(db, { now, limit: LIST_PAGE_LIMIT })
+    ).length,
+    seals_yesterday: await countSealsSealedOn(db, yesterdayOf(now)),
+    earliest_receipt_day: await earliestReadReceiptDay(db),
+    meter_reported_days: await countMeterReports(db),
+    meter_owed:
+      seal === null
+        ? 0
+        : await owedMeterReports(db, cursor, seal.last_seq, LIST_PAGE_LIMIT),
+    alert_endpoints: await countAlertEndpoints(db),
+    alert_cursor: await alertCursor(db),
+    alert_due: await countDueDeliveries(db, now),
+    alert_failed: await countFailedDeliveries(db),
+  };
+}
+
+/**
  * Gather everything the status rules read, once, from the store.
  *
- * The one place either door touches the database. Every question is a count, a
- * newest-row lookup, or one page of a deadline queue with LIST_PAGE_LIMIT on it:
- * the two queues are counted by the length of that page, which means a log with
- * more than a page of overdue assignments reports a page of them — the stage
- * only asks whether there are any, and a page is more than enough to say yes.
+ * The one place either door touches the database, and it makes fourteen
+ * statements. That number is pinned by a test (test/status-end-to-end.test.ts),
+ * because it is the whole point of this function: the QA of 2026-09-12 found it
+ * making twenty-nine, one after another, on a page built to be hammered. Eleven
+ * of those were numbers the sweep can count once a run, and four were the same
+ * newest-of-a-type seek asked four times.
+ *
+ * What is left is what has to be live. The sweep's own board rows, because they
+ * are how the page tells a stopped timer from a refusing step; the newest seal,
+ * the log's head and the events that seal does not cover, because the sealing
+ * light asks what is waiting now and all three are one sentence; and the
+ * handful of newest-row lookups the "exercised, not probed" rows are made of.
+ *
+ * Every question is still a count, a newest-row lookup, or one page of a
+ * deadline queue with LIST_PAGE_LIMIT on it: the two queues are counted by the
+ * length of that page, which means a log with more than a page of overdue
+ * assignments reports a page of them — the stage only asks whether there are
+ * any, and a page is more than enough to say yes.
  *
  * `now` is a string rather than a Date because everything downstream of it is,
  * and a second conversion is a second chance to disagree about the day.
@@ -195,11 +312,27 @@ export async function statusInput(
   // operators, the entries, and the attestations. Read once here, so the four
   // scans the QA of 2026-09-12 found are one indexed lookup by primary key.
   const counters = await logCounters(db);
+  // And the numbers that used to be eleven more statements of their own: the
+  // drafts, the two overdue queues, yesterday's seals, the first receipt day,
+  // the meter and the four alert counts, all of them taken by
+  // the counters step at the end of the last run and carried on its board row,
+  // which was already read above. Counted here only on a deployment whose
+  // counters step has never run.
+  const swept = sweptNumbers(steps) ?? (await countedNow(db, now, seal));
 
-  const snapshotEvent = await latestEventOfType(db, "pool_snapshot");
-  const readCountEvent = await latestEventOfType(db, "read_count");
-  const submittedEvent = await latestEventOfType(db, "entry_submitted");
-  const registeredEvent = await latestEventOfType(db, "operator_registered");
+  // The four newest-of-a-type reads, grouped into one statement: each is a
+  // seek on the (type, seq) index, and four seeks are four round trips.
+  const newest = await latestEventsOfTypes(db, [
+    "pool_snapshot",
+    "read_count",
+    "entry_submitted",
+    "operator_registered",
+  ]);
+  const snapshotEvent = newest["pool_snapshot"] ?? null;
+  const readCountEvent = newest["read_count"] ?? null;
+  const submittedEvent = newest["entry_submitted"] ?? null;
+  const registeredEvent = newest["operator_registered"] ?? null;
+
   const reconciliation = await reconciliationRows(db, 1);
   const payouts = await payoutRows(db, 1);
   const anchor = await getAnchor(db, yesterday);
@@ -237,6 +370,13 @@ export async function statusInput(
     // named by (decision D-013 as amended, D-053).
     payout_kind: env.ENVIRONMENT === PRODUCTION ? "unavailable" : "mock",
     steps,
+    // Live, and beside the unsealed count on purpose. The sealing rule reads
+    // the two together — "is there an event the newest seal does not cover, and
+    // how long has it waited" — so a head taken at the last sweep against a
+    // count taken now is two instants in one sentence, and the pair can say "no
+    // event" over a non-zero count for a whole sweep interval. One statement is
+    // what an honest light costs; the sweep still counts the head at the end of
+    // its run, which is what the counters step's row is checked against.
     head_seq: await headSeq(db),
     seal:
       seal === null
@@ -251,6 +391,10 @@ export async function statusInput(
       total: counters.seals,
       witnessed: counters.seals_witnessed,
     },
+    // The one count left live, and deliberately: the sealing light asks whether
+    // anything is waiting unsealed *now*, and an event appended a minute after
+    // the sweep is exactly the one it is there to see. It is a single aggregate
+    // over a primary-key range, so it costs the seek and not the count.
     unsealed: await unsealedEvents(db, seal === null ? null : seal.last_seq),
     pool: {
       snapshot:
@@ -268,8 +412,8 @@ export async function statusInput(
       registered: counters.operators_registered,
     },
     assignments: {
-      overdue: (await dueAssignments(db, now, LIST_PAGE_LIMIT)).length,
-      drafts: await countEntries(db, { status: "draft" }),
+      overdue: swept.overdue_assignments,
+      drafts: swept.drafts,
     },
     entries: counters.entries_total,
     read_counts: {
@@ -282,7 +426,7 @@ export async function statusInput(
               total: readCount.total,
               at: readCountEvent.at,
             },
-      earliest_receipt_day: await earliestReadReceiptDay(db),
+      earliest_receipt_day: swept.earliest_receipt_day,
     },
     anchor:
       anchor === null
@@ -296,7 +440,7 @@ export async function statusInput(
     // newest day whose proof reached a block. The stage names it in every state
     // it can be in, so it is gathered whether or not yesterday was anchored.
     upgraded_anchor: await newestUpgradedAnchor(db),
-    seals_yesterday: await countSealsSealedOn(db, yesterday),
+    seals_yesterday: swept.seals_yesterday,
     reconciliation:
       priced === null || priced.date === null
         ? null
@@ -307,7 +451,7 @@ export async function statusInput(
           },
     standing_position: standingPosition,
     attestations: {
-      due: (await dueAttestations(db, { now, limit: LIST_PAGE_LIMIT })).length,
+      due: swept.due_attestations,
       total: counters.attestations,
     },
     mirror: {
@@ -328,27 +472,18 @@ export async function statusInput(
     },
     // Usage metering (M24): the track this environment runs, asked of the same
     // `paymentsAdapterFor` the sweep asks, and the two numbers the stage reads —
-    // what has been reported, and what the published log says is still owed. The
-    // owed count is bounded by one page: the stage only asks whether it is zero.
+    // what has been reported, and what the published log says is still owed.
     metering: {
       kind: paymentsAdapterFor(env).kind,
-      reported_days: await countMeterReports(db),
-      owed:
-        seal === null
-          ? 0
-          : await owedMeterReports(
-              db,
-              (await ledgerCursor(db, METERING_CURSOR)) ?? -1,
-              seal.last_seq,
-              LIST_PAGE_LIMIT,
-            ),
+      reported_days: swept.meter_reported_days,
+      owed: swept.meter_owed,
     },
-    // Change alerts (M24), through the alert store's own four counts.
+    // Change alerts (M24), through the four counts the alert step left behind.
     alerts: {
-      endpoints: await countAlertEndpoints(db),
-      cursor: await alertCursor(db),
-      due: await countDueDeliveries(db, now),
-      failed: await countFailedDeliveries(db),
+      endpoints: swept.alert_endpoints,
+      cursor: swept.alert_cursor,
+      due: swept.alert_due,
+      failed: swept.alert_failed,
     },
     exercised: {
       submission:
@@ -377,7 +512,7 @@ export async function statusInput(
  *
  * The thresholds go out with the answer because a state nobody can recompute is
  * a state nobody can check: a reader holding this document and src/status.ts's
- * rules gets the same fifteen readings we did.
+ * rules gets the same sixteen readings we did.
  *
  * `as_of` is the last sweep run and never the request. The page is a reading of
  * a record, so it is dated by the record — an `as_of` of "now" would say the

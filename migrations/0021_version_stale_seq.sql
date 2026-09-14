@@ -1,0 +1,41 @@
+-- 0021_version_stale_seq: where the mirror found D-096's version staleness, so
+-- the export's stored-row path can answer it without the events (the #78 QA's
+-- D-107 gap, whitepaper Section 11, decision D-096).
+--
+-- Decision D-022 and the PoC retrospective's DEPLOY-1: migrations are numbered,
+-- forward-only, applied by the deploy workflow with wrangler before the Worker
+-- goes live, and never edited after merge. 0001 through 0020 are closed; this
+-- file adds and never reshapes.
+--
+-- No IF NOT EXISTS anywhere: idempotence belongs to the d1_migrations tracking
+-- table, not to the SQL. A migration that ran twice is a bug in the runner, and
+-- IF NOT EXISTS would hide it.
+--
+-- Nothing here is a source of truth. Section 3: the log is the record. What the
+-- column holds is a position the events already answer for -- drop it and the
+-- next export computes the same value back -- and it is never read as anything
+-- but "the events have already been asked, at this position, and said yes".
+--
+-- What it is for. `stale` is derivation's one clock-dependent field, so a door
+-- serving an entry from its stored row recomputes it against its own clock
+-- (src/worker/world.ts, `expiredByClock`). A row that is stale with its window
+-- still open was made stale by something other than the calendar -- D-096's
+-- version staleness, a later version of the same model having verified -- and
+-- the row does not say which of the two it was, so the mirror sent exactly
+-- those entries back to the full derivation: correct, and ten statements each.
+-- This column is the missing half. It holds the sealed position at which an
+-- export folded the events and found the entry version-stale, so the next
+-- export reads the row and never gathers the world again.
+--
+-- Null means one thing only: no export has found this entry version-stale.
+-- Nothing else writes it, and it never has to be cleared, because version
+-- staleness never clears -- the sibling's verification does not unhappen, and
+-- no reconfirmation can be taken against it (src/reconfirm.ts, `version_stale`).
+-- That is also why it is a position and not a flag: an export at a head below
+-- it must not publish a staleness that head does not cover yet.
+--
+-- Filled by the sweep rather than by SQL, exactly as 0019's key was: the answer
+-- is a fold over the log that SQLite cannot run, so the mirror step
+-- (src/worker/sweep.ts) writes it for each row it has just derived, and the
+-- first export after the deploy fills every row that needs one.
+ALTER TABLE entries ADD COLUMN version_stale_seq INTEGER;

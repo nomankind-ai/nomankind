@@ -305,6 +305,30 @@ afterAll(async () => {
   await store?.dispose();
 });
 
+/**
+ * The version-sibling walk (src/storage/repository.ts, `versionSiblingsOf`),
+ * counted by the one thing no other statement in this Worker carries: the
+ * ESCAPE its prefix match needs. It is reached only through an entry's whole
+ * world, so it is exactly the cost D-107 asked to stop paying, and zero of them
+ * means the export answered D-096 off the stored rows.
+ */
+function siblingWalks(
+  statements: readonly { sql: string; values: unknown[] }[],
+): number {
+  return statements.filter(
+    (statement) => statement.values.length === 0 && statement.sql.includes("ESCAPE"),
+  ).length;
+}
+
+/** What 0021 holds for one entry. */
+async function versionStaleSeq(id: string): Promise<number | null> {
+  const row = await store.db
+    .prepare(`SELECT version_stale_seq FROM entries WHERE id = ?`)
+    .bind(id)
+    .first<{ version_stale_seq: number | null }>();
+  return row?.version_stale_seq ?? null;
+}
+
 /** Forget every export this day, so the next step claims the day afresh. */
 async function forgetTheDay(): Promise<void> {
   await store.db.prepare(`DELETE FROM mirrors`).run();
@@ -400,11 +424,16 @@ describe("the export reads the rows it already has", () => {
       (statement) => statement.values.length === 0,
     );
     // Ten statements an entry would be two thousand. The export is the pages it
-    // reads: the entries, where their events stop, the seals, the anchors, the
-    // operators, the sealed log and the attestations, plus the one gathering the
-    // D-096-stale entry sends back to the events. Measured at forty and pinned
-    // just above it, so a regression that doubled the work fails here.
+    // reads and nothing else: the entries, where their events stop, the seals,
+    // the anchors, the operators, the sealed log and the attestations. The
+    // ceiling is the one 0021 inherited — it was measured at forty when the
+    // D-096-stale entry still went back to its world, and the export is under
+    // it by that gathering now — so a regression that doubled the work fails
+    // here.
     expect(prepared.length).toBeLessThanOrEqual(45);
+    // And no entry goes back to its world any more: the D-096-stale entry was
+    // the last one that did, and 0021 recorded where the export proved it.
+    expect(siblingWalks(measured.statements)).toBe(0);
   }, 600_000);
 
   it("pushes the bytes the full derivation would have pushed", async () => {
@@ -450,6 +479,94 @@ describe("the export reads the rows it already has", () => {
     expect(exported(SAFETY_V2)["stale"]).toBe(false);
     // A v0.6 core names no domain at all and is exported as it was signed.
     expect("domain" in exported(LEGACY)).toBe(false);
+  }, 600_000);
+
+  /**
+   * D-107, the gap the #78 QA left open: a row that is stale with its window
+   * still open is stale by D-096 — a later version of the same model verified —
+   * and the row does not say so, so the export sent every one of those entries
+   * back to its own world, every day, forever. 0021 keeps the position the
+   * export proved it at, and this is the pin: the bytes are the full
+   * derivation's, and the second export asks the events nothing.
+   */
+  it("stores where D-096 staled an entry and stops asking the events", async () => {
+    // The store as a deploy leaves it: rows the doors wrote, 0021 empty.
+    await seedRows(new Date(newest.sealed_at));
+    await seedRows(new Date(newest.sealed_at));
+    await store.db.prepare(`UPDATE entries SET version_stale_seq = NULL`).run();
+
+    // The first export pays for the answer — the version-sibling walk is the
+    // one read only the world-gathering path makes — and keeps it.
+    await forgetTheDay();
+    const first = counting(store.db);
+    const derived = new MockMirrorAdapter();
+    await step(first.db, derived, EXPORT_AT);
+    expect(siblingWalks(first.statements)).toBeGreaterThan(0);
+    expect(await versionStaleSeq(SAFETY_V1)).toBe(head);
+    // The newer version is fresh, and nothing is recorded against an entry the
+    // events do not call stale: the column is an answer, not a marker.
+    expect(await versionStaleSeq(SAFETY_V2)).toBeNull();
+
+    // The second reads it off the row. No world is gathered for any entry, and
+    // the files are the ones the full derivation pushed, byte for byte.
+    await forgetTheDay();
+    const second = counting(store.db);
+    const stored = new MockMirrorAdapter();
+    await step(second.db, stored, EXPORT_AT);
+    expect(siblingWalks(second.statements)).toBe(0);
+    expect([...stored.files.keys()].sort()).toEqual(
+      [...derived.files.keys()].sort(),
+    );
+    for (const [path, content] of derived.files) {
+      expect(stored.files.get(path)).toBe(content);
+    }
+
+    // And the entry the two paths agreed on is the D-096 one: stale with its
+    // window still open at the export's own clock, which is the only shape the
+    // stored row could not answer for before.
+    const file = JSON.parse(
+      stored.files.get(`${PREFIX}/entries/${SAFETY_V1}.json`)!,
+    ) as { entry: Record<string, unknown> };
+    expect(file.entry["stale"]).toBe(true);
+    const today = EXPORT_AT.toISOString().slice(0, 10);
+    expect(String(file.entry["expires_at"]) > today).toBe(true);
+  }, 600_000);
+
+  /**
+   * The other half of "a position and not a flag". A row can carry a position
+   * this export's head does not reach — an imported mirror, a fork replaying a
+   * newer copy into an older log — and staleness the head does not cover is a
+   * claim the sealed record does not make. So that row goes to the events like
+   * any other the stored answer cannot serve, and the bytes are the same bytes.
+   */
+  it("sends a row whose position is above the head back to the events", async () => {
+    const set = (seq: number): Promise<unknown> =>
+      store.db
+        .prepare(`UPDATE entries SET version_stale_seq = ? WHERE id = ?`)
+        .bind(seq, SAFETY_V1)
+        .run();
+
+    // One past the head is enough: the head is the whole test.
+    await set(head + 1);
+    await forgetTheDay();
+    const beyond = counting(store.db);
+    const above = new MockMirrorAdapter();
+    await step(beyond.db, above, EXPORT_AT);
+    expect(siblingWalks(beyond.statements)).toBe(1);
+
+    // The same position, now covered by the head: the row answers, and the two
+    // exports are the same files.
+    await set(head);
+    await forgetTheDay();
+    const covered = counting(store.db);
+    const within = new MockMirrorAdapter();
+    await step(covered.db, within, EXPORT_AT);
+    expect(siblingWalks(covered.statements)).toBe(0);
+
+    expect([...within.files.keys()].sort()).toEqual([...above.files.keys()].sort());
+    for (const [path, content] of above.files) {
+      expect(within.files.get(path)).toBe(content);
+    }
   }, 600_000);
 });
 
