@@ -109,6 +109,9 @@ const row: EntryRow = {
   status: "verified",
   subject: `kestrel/kestrel-1 ${HOSTILE}`,
   category: "behavior",
+  // The registered domain out of the signed core (D-125): the listing and the
+  // home table both print it, so the fixture carries one.
+  domain: "ai-safety",
   claim: `The model refuses this prompt ${HOSTILE}`,
   // Released: the ordinary row, whose content this reader may read. The
   // withheld shape is exercised on its own below (decision D-100).
@@ -812,6 +815,17 @@ describe("the home page", () => {
     );
   });
 
+  it("carries the listing's domain column on the newest-sealed table (D-125)", () => {
+    // The same column the entries listing shows, in the same place: after the
+    // subject, where the listing puts it after the category. The line above the
+    // table says which domain was counted; the column says which domain each
+    // row is, which on an unnarrowed page is a different question.
+    const header = document.indexOf("<th>domain</th>");
+    expect(header).toBeGreaterThan(document.indexOf("<th>subject</th>"));
+    expect(header).toBeLessThan(document.indexOf("<th>claim</th>"));
+    expect(document).toContain(`<td class="muted">${row.domain}</td>`);
+  });
+
   it("says it is counting all domains when it was narrowed to none", () => {
     expect(document).toContain("Counting all domains.");
     expect(document).toContain("?domain=&lt;slug&gt;");
@@ -922,6 +936,38 @@ describe("the entries listing", () => {
     );
   });
 
+  it("reads each row's registered domain in a column of its own (D-125)", () => {
+    // The chips stay the filter and the column is the reading: a reader on an
+    // unfiltered listing — which this one is, for domain — can only learn a
+    // row's domain from the row itself. It sits between category and claim,
+    // where the two classifying columns are scanned together.
+    const header = document.indexOf("<th>domain</th>");
+    expect(header).toBeGreaterThan(document.indexOf("<th>category</th>"));
+    expect(header).toBeLessThan(document.indexOf("<th>claim</th>"));
+    // Plain text and not a link: no filter value in this table is one.
+    expect(document).toContain(`<td class="muted">${row.domain}</td>`);
+  });
+
+  it("prints an em dash for an entry sealed before the domain key existed", () => {
+    // A page never invents a domain. `field` answers the empty string for a
+    // core that carries none, and the cell says so rather than guessing.
+    const legacy = renderEntries(ctx, {
+      filter: {
+        category: null,
+        status: null,
+        domain: null,
+        source: null,
+        tier: null,
+        fresh: null,
+      },
+      rows: [{ ...row, domain: "" }],
+      total: 1,
+      nextBefore: null,
+    });
+    expect(legacy).toContain('<td class="muted">—</td>');
+    expect(legacy).not.toContain('<td class="muted"></td>');
+  });
+
   it("gives domain a chip group of its own, from the schema's enum", () => {
     // The chips are the registered domains and never a list typed into a page:
     // the same enum the parser accepts is the one a reader can click.
@@ -950,6 +996,10 @@ describe("the entries listing", () => {
     expect(narrowed).toContain(
       `<input type="radio" name="domain" value="${DEFAULT_DOMAIN}" checked />`,
     );
+    // The column is there under a domain filter too (D-125): a filtered page
+    // that dropped it would make the reading depend on the chip.
+    expect(narrowed).toContain("<th>domain</th>");
+    expect(narrowed).toContain(`<td class="muted">${row.domain}</td>`);
     // The pager keeps the whole filter, domain among it: a next page that
     // dropped one filter would be a different query wearing the same word.
     expect(narrowed).toContain(

@@ -204,9 +204,18 @@ export function renderDryRun(ctx: PageContext): string {
         html`
           <p class="note">
             Pick a draft — an entry nobody has closed yet — from
-            <span class="mono">${origin}/entries?status=draft</span>, or write to
+            <a href="${origin}/entries?status=draft"
+              >${origin}/entries?status=draft</a
+            >, or write to
             <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a> and ask for a
-            seeded one to judge. Then run the validator against it.
+            seeded one to judge. That list is the naming: a draft the current
+            schema cannot derive is not offered on it, so whatever it holds is a
+            draft the validator can actually judge, and there is no way to pick
+            one that will be refused for being old. On demo today it holds
+            <span class="mono">nmk_40ddff3c</span>, an M24 alert probe citing
+            example.com — but take the list's word over this page's, because the
+            list is read from the log and this sentence is not. Then run the
+            validator against it.
           </p>
           <pre class="block mono">npm run validate -- ~/.nomankind/keys/demo.json ${origin} &lt;entry-id&gt; [--assigned] [--duplicate-of &lt;entry-id&gt;]</pre>
           <p class="note">
@@ -253,6 +262,52 @@ export function renderDryRun(ctx: PageContext): string {
             ${ASSIGNMENT_WINDOW_HOURS} hours to answer, and a miss costs standing
             and sends the next round after a replacement.
           </p>
+          <p class="note">
+            When a command stops instead of signing, it stops by name. These are
+            the words a first run usually meets, and none of them is a bug to
+            debug.
+          </p>
+          <dl class="dl">
+            <dt><span class="mono">entry_withheld</span></dt>
+            <dd>
+              A free read inside the release window: the entry's content is not
+              this reader's yet, and the command prints the date it opens rather
+              than guessing at it. Sign the reads with a registered operator's
+              key, as step 6 does, or wait for the date it printed.
+            </dd>
+            <dt><span class="mono">unregistered_operator</span></dt>
+            <dd>
+              The key is bound to no registered operator. Registration is step 3,
+              and it is what turns a key on your disk into an identity the log
+              answers to.
+            </dd>
+            <dt><span class="mono">legacy_entry</span></dt>
+            <dd>
+              The validate door refuses an entry the current schema cannot
+              derive. Old seeded material stays readable and stays in the log —
+              nothing is rewritten to keep a validator happy — but it cannot be
+              judged under today's rules, which is why the draft list does not
+              offer it. Validation is the only door that names it: reconfirm,
+              dispute and revalidate meet the same entry as a derivation that
+              failed and answer
+              <span class="mono">schema_invalid</span> instead.
+            </dd>
+            <dt><span class="mono">schema_invalid</span></dt>
+            <dd>
+              From the validate door, the validator's own submission failed the
+              schema and not the entry's. The door's
+              <span class="mono">errors</span> array is printed as it came back,
+              so the field that failed is named rather than guessed at — and on
+              the three doors above it is also how a pre-v0.7 entry is refused,
+              so read the array before assuming your own record was wrong.
+            </dd>
+            <dt><span class="mono">entry_malformed</span></dt>
+            <dd>
+              A body that claims to be an entry core and cannot be parsed as one.
+              The command stops before it fetches anything, because there is
+              nothing yet to fetch.
+            </dd>
+          </dl>
         `,
       )}
       ${panel(
@@ -308,11 +363,19 @@ export function renderDryRun(ctx: PageContext): string {
 npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
           <p class="note">
             <span class="mono">--sign</span> signs the export's reads with the
-            key you generated in step 1: an entry's content is released to
-            everybody ${RELEASE_WINDOW_DAYS} days after the seal that covers it
-            (decision D-100), and an entry you submitted minutes ago is inside
-            that window. Without the flag the export writes the released view —
-            every hash, every seal, the proof of the rest — and says so.
+            key you registered in step 3, which is the point of the flag: a
+            signature reaches inside the release window because the key is bound
+            to a registered operator and not because it exists. The same file
+            before step 3 is not an error — the export succeeds, and writes the
+            released view with the
+            <span class="mono">release_date</span> it was handed, exactly as a
+            run with no flag at all does. What registration buys is the content.
+            An entry's content
+            is released to everybody ${RELEASE_WINDOW_DAYS} days after the seal
+            that covers it (decision D-100), and an entry you submitted minutes
+            ago is inside that window. Without the flag the export writes the
+            released view — every hash, every seal, the proof of the rest — and
+            says so.
           </p>
           <p class="note">
             Exit 0 means the entry you were handed is the entry that was signed

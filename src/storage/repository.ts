@@ -5398,6 +5398,32 @@ export async function latestEventOfType(
 // ---------------------------------------------------------------------------
 
 /**
+ * The condition that hides an entry the current schema cannot derive.
+ *
+ * Decision D-124: a core sealed under schema v0.6 carries seventeen keys and no
+ * `domain` -- the eighteenth, which v0.7 added (src/core.ts, `coreVersion`) --
+ * and the entry schema requires it, so nothing derived from such a core can
+ * ever validate. A draft is an offer to validate, and an offer nobody can take
+ * up is a dead end the listing put there itself: the newcomer's dry run of
+ * 2026-09-13 followed one to a door that answered 422.
+ *
+ * So the draft listing, and the draft total beside it, skip those rows. Only
+ * the draft listing: a legacy entry that was verified before v0.7 is still a
+ * fact the log stands behind, and hiding it everywhere would be rewriting the
+ * record rather than declining to offer work nobody can do.
+ *
+ * The test is the presence of one key on the stored core, which is exactly what
+ * `coreVersion` reads, and it needs no migration: the `entries.domain` column
+ * cannot answer it, because 0012_domains backfills a legacy row to the default
+ * domain by design. `json_extract` over `entry_json` is the same kind of read
+ * the tier filter already makes.
+ */
+const DERIVABLE_CONDITION = "json_extract(entry_json, '$.domain') IS NOT NULL";
+
+/** The status whose listings offer work, and so must offer only work that can be done. */
+const DRAFT_STATUS = "draft";
+
+/**
  * How many entries there are, optionally narrowed by status or staleness.
  *
  * The counters step's read and the listing's "n of m" line, and the only reads
@@ -5427,6 +5453,9 @@ export async function countEntries(
   if (query.status !== undefined) {
     conditions.push("status = ?");
     bindings.push(query.status);
+    // The draft total is the draft listing's own count, so it counts what that
+    // listing shows and not one row more (D-124).
+    if (query.status === DRAFT_STATUS) conditions.push(DERIVABLE_CONDITION);
   }
   if (query.stale !== undefined) {
     conditions.push("stale = ?");
@@ -5487,6 +5516,9 @@ export async function listEntriesPage(
   if (query.status !== undefined) {
     conditions.push("status = ?");
     bindings.push(query.status);
+    // Decision D-124: the draft listing stops offering entries no decision can
+    // verify. See DERIVABLE_CONDITION above.
+    if (query.status === DRAFT_STATUS) conditions.push(DERIVABLE_CONDITION);
   }
   if (query.tier !== undefined) {
     conditions.push("json_extract(sidecar_json, '$.effective_tier') = ?");

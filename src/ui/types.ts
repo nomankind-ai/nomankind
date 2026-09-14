@@ -102,6 +102,16 @@ export interface EntryRow {
   status: string;
   subject: string;
   category: string;
+  /**
+   * The registered domain from the entry's signed core (decision D-125): one of
+   * the schema's own domain slugs, the same values the domain chips filter by.
+   * It is read and shown rather than only filtered on, because a row whose
+   * domain a reader has to work out from the chip they happened to click is a
+   * row that says less than the record does. The empty string is an entry
+   * sealed before the domain key existed, which the listing prints as an em
+   * dash rather than inventing a domain for.
+   */
+  domain: string;
   /** The claim, or the empty string on a withheld row: the route nulls it. */
   claim: string;
   /**

@@ -57,6 +57,17 @@ interface Fixture {
   readonly subject: string;
   readonly category: string;
   readonly status: string;
+  /**
+   * The signed core's eighteenth key, when this fixture carries one.
+   *
+   * Most of these are deliberately domainless -- a v0.6 core, which the log
+   * reads as the default domain (D-071), and which the domain test below
+   * depends on. The draft is not: decision D-124 keeps a core the current
+   * schema cannot derive out of the draft listing and the draft total, so a
+   * domainless draft would be counted nowhere and the counts below would be
+   * measuring that rule rather than the reads this file is about.
+   */
+  readonly domain?: string;
   /** The sidecar's effective_tier: the tier the entry actually verified at. */
   readonly effectiveTier: string | null;
   readonly stale: boolean;
@@ -87,6 +98,7 @@ const FIXTURES: readonly Fixture[] = [
     subject: "openai/gpt-5",
     category: "behavior",
     status: "draft",
+    domain: DEFAULT_DOMAIN,
     effectiveTier: null,
     stale: false,
     expiresAt: null,
@@ -116,6 +128,7 @@ function entryOf(fixture: Fixture): Entry {
     id: fixture.id,
     subject: fixture.subject,
     category: fixture.category,
+    ...(fixture.domain === undefined ? {} : { domain: fixture.domain }),
     claim: `${fixture.subject} ${fixture.category} changed`,
     before: "old",
     after: "new",

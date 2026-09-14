@@ -35,7 +35,7 @@
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
 import { openAssignment as openAssignmentOf } from "../assign.js";
-import { domainOf, type Core } from "../core.js";
+import { coreVersion, domainOf, type Core } from "../core.js";
 import {
   agentOperatorsAt,
   operatorDomainsAt,
@@ -506,6 +506,36 @@ async function validate(
   if (core === null) {
     // Unreachable: an entry row exists only where its submission event does.
     return refuse(404, "not_found");
+  }
+
+  // Decision D-124: an entry whose stored core the current schema cannot derive
+  // is refused in its own word, before anything is signed onto the log.
+  //
+  // A core sealed under v0.6 carries seventeen keys, and `domain` -- the
+  // eighteenth, which v0.7 added -- is not one of them (src/core.ts). The entry
+  // schema requires it, so the entry derived from such a core can never
+  // validate, whatever the decision says: the door used to run the whole
+  // validation, seal the event, derive the row, and only then refuse
+  // `schema_invalid`, which told the operator their own record was malformed
+  // when it was not. `coreVersion` is the whole test -- the presence of one key
+  // on the core the log already holds, no column, no re-validation per entry --
+  // and the refusal names what is actually wrong and that no record can fix it.
+  //
+  // It is asked after the checks that are about the submission itself (the
+  // signature, the instant it was signed at, the entry's own status) and before
+  // the ones that are about the log's context, because a stale draft nobody can
+  // ever validate is a fact about the entry rather than about this validator.
+  if (coreVersion(core) === "v0.6") {
+    return json(
+      {
+        error: "legacy_entry",
+        reason:
+          "the entry's core was sealed under schema v0.6 and carries no domain," +
+          " so it cannot be derived under the current schema",
+        core_version: "v0.6",
+      },
+      422,
+    );
   }
 
   // The context, gathered at the head of the log. Everything in it is read out

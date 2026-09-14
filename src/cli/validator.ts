@@ -274,13 +274,234 @@ export async function signedPost(input: {
   });
 }
 
+/** An object, as a body read off a door is one. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** The named error in a refusal body, or null when the body carries none. */
 export function errorOf(body: unknown): string | null {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    return null;
-  }
-  const error = (body as Record<string, unknown>)["error"];
+  if (!isRecord(body)) return null;
+  const error = body["error"];
   return typeof error === "string" ? error : null;
+}
+
+/** One item of the `errors` array a schema refusal carries: where, and what. */
+export interface DoorError {
+  /** The JSON pointer the door named, or "" when it named none. */
+  readonly path: string;
+  readonly message: string;
+}
+
+/**
+ * The `errors` array under a refusal, or null when the body carries none.
+ *
+ * A 422 from the validate, reconfirm, dispute and revalidate doors carries the
+ * schema's own list of what was wrong, and until the newcomer dry run of
+ * 2026-09-13 every command threw it away and printed the one word
+ * `schema_invalid` -- which tells an operator that something about their
+ * submission did not fit and nothing whatever about what. Read defensively: the
+ * items are a door's JSON and not this process's own objects.
+ */
+export function errorsOf(body: unknown): readonly DoorError[] | null {
+  if (!isRecord(body)) return null;
+  const errors = body["errors"];
+  if (!Array.isArray(errors)) return null;
+  return errors.map((item) => {
+    if (!isRecord(item)) return { path: "", message: String(item) };
+    const path = item["path"];
+    const message = item["message"];
+    return {
+      path: typeof path === "string" ? path : "",
+      message: typeof message === "string" ? message : JSON.stringify(item),
+    };
+  });
+}
+
+/**
+ * The lines a door's answer prints: the status and the word it refused in, then
+ * whatever detail it gave -- the schema's `errors` list, or the short `reason`
+ * a refusal like `legacy_entry` carries instead.
+ *
+ * One function, because the four write commands print the same last line and a
+ * detail printed by one of them and not the others is a detail nobody can rely
+ * on seeing.
+ */
+export function refusalLines(status: number, body: unknown): readonly string[] {
+  const error = errorOf(body);
+  const lines = [`response ${status}${error === null ? "" : ` ${error}`}`];
+  const errors = errorsOf(body);
+  if (errors !== null) {
+    for (const item of errors) {
+      lines.push(`  ${item.path === "" ? "" : `${item.path}: `}${item.message}`);
+    }
+    return lines;
+  }
+  const reason = isRecord(body) ? body["reason"] : undefined;
+  if (typeof reason === "string" && reason.length > 0) lines.push(`  ${reason}`);
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
+// Reading the entry (decision D-124)
+// ---------------------------------------------------------------------------
+
+/** The stop reason when the door served the withheld view instead of the entry. */
+export const ENTRY_WITHHELD = "entry_withheld";
+
+/**
+ * The stop reason when the signing key is bound to no registered operator.
+ *
+ * One word for one condition. It used to be two: a run whose key the registry
+ * does not know stopped as `unregistered_operator` inside the release window --
+ * where the withheld view is the first thing that gives the key away -- and as
+ * `unregistered_agent` once the entry had released and the run reached its own
+ * registry check a few lines later. Same key, same registry, same answer, and
+ * only one of the two words was ever written down.
+ */
+export const UNREGISTERED_OPERATOR = "unregistered_operator";
+
+/** What that stop says about the key, in the one place the sentence lives. */
+export function unregisteredOperatorDetail(agentId: string): string {
+  return `agent ${agentId} is bound to no registered operator`;
+}
+
+/**
+ * The withheld view of an entry, or null when this body is the entry itself.
+ *
+ * `GET /entries/{id}` answers a free reader inside the release window with the
+ * proof under its own key and never under `entry` (decision D-100,
+ * src/worker/submit.ts): `{proof, sidecar, entry_hash, release_date}`, the
+ * content fields nulled. It is a 200 and it is not an entry, so `extractCore`
+ * of it throws and every command used to call that `entry_malformed` -- which
+ * says the log served something broken when the log served exactly what the
+ * window says it serves.
+ *
+ * Recognised by the two keys only the withheld envelope has, so an entry can
+ * never be mistaken for one: an entry object carries neither `proof` nor
+ * `entry_hash`.
+ */
+export function withheldRelease(
+  body: unknown,
+): { readonly released_at: string | null } | null {
+  if (!isRecord(body)) return null;
+  if (!isRecord(body["proof"])) return null;
+  if (typeof body["entry_hash"] !== "string") return null;
+  const date = body["release_date"];
+  return { released_at: typeof date === "string" ? date : null };
+}
+
+/** The operator the registry puts behind one key, or null when it has none. */
+export async function operatorFor(
+  http: HttpClient,
+  baseUrl: string,
+  agentId: string,
+): Promise<string | null> {
+  const { status, body } = await getJson(
+    http,
+    baseUrl,
+    `/agents/${encodeURIComponent(agentId)}`,
+  );
+  if (status !== 200) return null;
+  const operator = isRecord(body) ? body["operator"] : undefined;
+  if (!isRecord(operator)) return null;
+  const id = operator["id"];
+  return typeof id === "string" ? id : null;
+}
+
+/** Why a run stopped before it asked a door anything: the word, and a detail. */
+export interface ReadStop {
+  readonly reason: string;
+  /** A short phrase for the printed line, or null when the word is all there is. */
+  readonly detail: string | null;
+}
+
+/** The entry a signed read got, or the reason the run stops. */
+export type EntryRead =
+  | { readonly ok: true; readonly body: unknown }
+  | { readonly ok: false; readonly stop: ReadStop };
+
+/**
+ * Read one entry with this run's own key, and tell the two 200s apart.
+ *
+ * Signed with the operator key the run already holds (decision D-100): an entry
+ * inside the release window is served to a signed request from an agent bound
+ * to a registered operator, and a validator is exactly that reader -- the people
+ * who have to judge an entry are the ones the window is not for.
+ *
+ * Which is why a withheld view coming back at all is the door saying this key
+ * bought nothing: `readerAccess` (src/worker/access.ts) resolves a signature it
+ * verified but whose agent is bound to nobody to the *free* reader, and
+ * `byId`'s window then hands back the proof. So the two cases arrive in one
+ * shape and are told apart by asking the registry itself, through the same
+ * `/agents/{id}` door every command already reads -- never by guessing from the
+ * body. A key with no operator behind it stops as `unregistered_operator`; a
+ * key with one stops as `entry_withheld`, carrying the date the door gave.
+ *
+ * `entry_malformed` is left for what it was always meant for: a body that
+ * claims to be an entry and cannot be read as one.
+ */
+export async function readEntry(input: {
+  readonly http: HttpClient;
+  readonly baseUrl: string;
+  readonly entryId: string;
+  readonly key: ValidatorKey;
+  readonly clock: Clock;
+}): Promise<EntryRead> {
+  const read = await getJson(
+    signingHttp(input.http, input.key, input.clock),
+    input.baseUrl,
+    `/entries/${encodeURIComponent(input.entryId)}`,
+  );
+  if (read.status !== 200) {
+    return {
+      ok: false,
+      stop: {
+        reason: errorOf(read.body) ?? `entry_unreadable_${read.status}`,
+        detail: null,
+      },
+    };
+  }
+
+  const withheld = withheldRelease(read.body);
+  if (withheld === null) return { ok: true, body: read.body };
+
+  const operator = await operatorFor(
+    input.http,
+    input.baseUrl,
+    input.key.agentId,
+  );
+  if (operator === null) {
+    return {
+      ok: false,
+      stop: {
+        reason: UNREGISTERED_OPERATOR,
+        detail: unregisteredOperatorDetail(input.key.agentId),
+      },
+    };
+  }
+  return {
+    ok: false,
+    stop: {
+      reason: ENTRY_WITHHELD,
+      detail: `released_at ${withheld.released_at ?? "unsealed"}`,
+    },
+  };
+}
+
+/**
+ * The one line a stopped run prints: the thing it was working on, the word that
+ * stopped it, and the detail behind the word when there is one.
+ *
+ * Pure and exported so the wording is tested without a process, exactly as
+ * `failureLine` in ./main.ts is.
+ */
+export function stopLine(
+  name: string,
+  run: { readonly error: string | null; readonly detail?: string | null },
+): string {
+  const detail = run.detail ?? null;
+  return `${name}: ${run.error ?? "unknown error"}${detail === null ? "" : ` ${detail}`}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -495,37 +716,30 @@ export interface ValidatorRun {
   readonly status: number | null;
   /** The refusal the route named, or the local failure that stopped the run. */
   readonly error: string | null;
+  /**
+   * The short phrase behind the word, or null when the word is all there is
+   * (decision D-124): the release date on `entry_withheld`, the agent on
+   * `unregistered_operator`.
+   */
+  readonly detail: string | null;
+  /** The `errors` array a 422 carried, or null when the answer had none. */
+  readonly errors: readonly DoorError[] | null;
   readonly decision: "approve" | "reject" | null;
   readonly reason: string | null;
   readonly record: ApproverRecord | null;
 }
 
-function stopped(error: string): ValidatorRun {
+function stopped(error: string, detail: string | null = null): ValidatorRun {
   return {
     ok: false,
     status: null,
     error,
+    detail,
+    errors: null,
     decision: null,
     reason: null,
     record: null,
   };
-}
-
-/** The operator the registry puts behind this key, or null when it has none. */
-async function operatorFor(
-  deps: ValidatorDeps,
-  baseUrl: string,
-): Promise<string | null> {
-  const { status, body } = await getJson(
-    deps.http,
-    baseUrl,
-    `/agents/${encodeURIComponent(deps.key.agentId)}`,
-  );
-  if (status !== 200) return null;
-  const operator = (body as Record<string, unknown> | null)?.["operator"];
-  if (typeof operator !== "object" || operator === null) return null;
-  const id = (operator as Record<string, unknown>)["id"];
-  return typeof id === "string" ? id : null;
 }
 
 /**
@@ -554,18 +768,16 @@ export async function runValidator(input: {
 }): Promise<ValidatorRun> {
   const { deps, io } = input;
 
-  // Signed with the operator key this run already holds (decision D-100): an
-  // entry inside the release window is served to a signed request from an agent
-  // bound to a registered operator, and a validator is exactly that reader —
-  // the people who have to judge an entry are the ones the window is not for.
-  const read = await getJson(
-    signingHttp(deps.http, deps.key, deps.clock ?? deps.now),
-    input.baseUrl,
-    `/entries/${encodeURIComponent(input.entryId)}`,
-  );
-  if (read.status !== 200) {
-    return stopped(errorOf(read.body) ?? `entry_unreadable_${read.status}`);
-  }
+  // Read with this run's own key, and the two 200s told apart (D-124): the
+  // entry, or the withheld view the window serves a reader it does not know.
+  const read = await readEntry({
+    http: deps.http,
+    baseUrl: input.baseUrl,
+    entryId: input.entryId,
+    key: deps.key,
+    clock: deps.clock ?? deps.now,
+  });
+  if (!read.ok) return stopped(read.stop.reason, read.stop.detail);
 
   let core: Core;
   try {
@@ -579,8 +791,20 @@ export async function runValidator(input: {
     return stopped("unsupported_norm_version");
   }
 
-  const operator = await operatorFor(deps, input.baseUrl);
-  if (operator === null) return stopped("unregistered_agent");
+  const operator = await operatorFor(
+    deps.http,
+    input.baseUrl,
+    deps.key.agentId,
+  );
+  // The same condition the withheld read above answers for, so the same word
+  // and the same sentence: the entry having released only changes which line
+  // notices that the registry puts nobody behind this key.
+  if (operator === null) {
+    return stopped(
+      UNREGISTERED_OPERATOR,
+      unregisteredOperatorDetail(deps.key.agentId),
+    );
+  }
 
   const citation = core["citation"];
   if (typeof citation !== "string") return stopped("unsupported_citation");
@@ -679,9 +903,10 @@ export async function runValidator(input: {
     `decision ${record.decision}${record.reason === null ? "" : ` ${record.reason}`}` +
       `${own === null ? "" : ` hash ${own.hash}`}`,
   );
-  io.stdout(
-    `response ${response.status}${error === null ? "" : ` ${error}`}`,
-  );
+  // The door's own detail under the word it refused in (D-124): a schema
+  // refusal that printed `schema_invalid` and nothing else told an operator
+  // only that something was wrong.
+  for (const line of refusalLines(response.status, body)) io.stdout(line);
 
   // The verdict stands: the third of three in a small pool finds the entry
   // already decided, and that is the rule working rather than a failure.
@@ -690,6 +915,8 @@ export async function runValidator(input: {
     ok: response.status === 201 || closed,
     status: response.status,
     error,
+    detail: null,
+    errors: errorsOf(body),
     decision: record.decision,
     reason: record.reason ?? null,
     record,
@@ -821,7 +1048,7 @@ if (
         },
       });
       if (!run.ok && run.status === null) {
-        io.stderr(`${entryId}: ${run.error ?? "unknown error"}`);
+        io.stderr(stopLine(entryId, run));
       }
       return run.ok ? 0 : 1;
     }),

@@ -615,6 +615,71 @@ describe("renderApi", () => {
     expect(words).not.toContain("the same standing whichever way");
   });
 
+  it("says the entries listing is a page and names the JSON reads (D-124e, D-124f)", () => {
+    const words = page.replace(/\s+/g, " ");
+    // What is actually true of the route: /entries is not in NEGOTIATED_PATHS,
+    // so it answers HTML whatever Accept says, and `limit` is not one of its
+    // parameters, so it is refused as unknown_parameter with the Bad query page.
+    expect(words).toContain(
+      "An HTML page and nothing else: this path has no JSON twin, so it answers" +
+        " HTML whatever the Accept header says",
+    );
+    expect(words).toContain(
+      "limit is refused as unknown_parameter, answered as the Bad query page" +
+        " with 400",
+    );
+    // And where a program goes instead.
+    const opens = page.indexOf("Reading entries as JSON");
+    expect(opens).toBeGreaterThan(-1);
+    const panel = page.slice(opens, page.indexOf("</section>", opens)).replace(/\s+/g, " ");
+    expect(panel).toContain("GET /entries/{id}</dt>");
+    expect(panel).toContain("without <span class=\"mono\">Accept: text/html</span>");
+    expect(panel).toContain("GET /entries/{id}/events</dt>");
+    expect(panel).toContain("GET /events</dt>");
+    expect(panel).toContain("npm run export</dt>");
+  });
+
+  it("names the stop reasons and the validate door's errors array (D-124f)", () => {
+    const opens = page.indexOf("What a validator's command stops on");
+    expect(opens, "the panel is not on the page").toBeGreaterThan(-1);
+    const panel = page.slice(opens, page.indexOf("</section>", opens)).replace(/\s+/g, " ");
+    expect(panel).toContain("carries an <span class=\"mono\">errors</span> array");
+    for (const reason of [
+      "entry_withheld",
+      "unregistered_operator",
+      "legacy_entry",
+      "schema_invalid",
+      "entry_malformed",
+    ]) {
+      expect(panel, `${reason} is not explained`).toContain(
+        `<dt class="mono">${reason}</dt>`,
+      );
+    }
+    // The validate row itself says the 422 carries the array, beside the word.
+    const row = page.slice(
+      page.indexOf("/entries/{id}/validate"),
+      page.indexOf("/entries/{id}/reconfirm"),
+    );
+    const words = row.replace(/\s+/g, " ");
+    expect(words).toContain(
+      "schema_invalid — whose 422 carries an errors array naming each field that failed",
+    );
+    // legacy_entry is checked after the signature and the status and before the
+    // schema, so it is named in that order and not appended to the end.
+    expect(words.indexOf("legacy_entry")).toBeGreaterThan(
+      words.indexOf("missing_observation"),
+    );
+    expect(words.indexOf("legacy_entry")).toBeLessThan(
+      words.indexOf("schema_invalid"),
+    );
+    // And the panel keeps schema_invalid true of the other three doors.
+    expect(panel).toContain(
+      "on <span class=\"mono\">reconfirm</span>, <span class=\"mono\">dispute</span>" +
+        " and <span class=\"mono\">revalidate</span> an entry sealed before schema" +
+        " v0.7 still answers <span class=\"mono\">schema_invalid</span>",
+    );
+  });
+
   it("documents binding a second agent under an operator, and its refusals in order", () => {
     // M12's gap: an operator with one key had no way to add a second. The door
     // and the command are the record of how, so the page has to name both — and
@@ -1860,6 +1925,80 @@ describe("renderDryRun", () => {
   it("takes its numbers from the policy module", () => {
     expect(page).toContain(`${ASSIGNMENT_WINDOW_HOURS} hours to answer`);
     expect(page).toContain(`${SEAL_INTERVAL_MINUTES} minutes`);
+  });
+
+  it("credits --sign to the key registered in step 3, not the one made in step 1 (D-124c)", () => {
+    // The flag reaches inside the release window because the key is bound to a
+    // registered operator: a key that only exists signs reads the door answers
+    // unregistered_operator. The old sentence said "step 1", which taught a
+    // newcomer that generating a key was enough.
+    const step = page.indexOf("Step 6. Verify it yourself");
+    expect(step).toBeGreaterThan(-1);
+    const panel = squeeze(page.slice(step));
+    expect(panel).toContain(
+      "signs the export's reads with the key you registered in step 3",
+    );
+    expect(panel).toContain(
+      "a signature reaches inside the release window because the key is bound" +
+        " to a registered operator and not because it exists",
+    );
+    expect(panel).not.toContain("the key you generated in step 1");
+    // The export CLI never classifies the key: an unregistered --sign is a
+    // success that wrote the released view, not a refusal, so the page may not
+    // promise a refusal word here.
+    expect(panel).toContain(
+      "The same file before step 3 is not an error — the export succeeds, and" +
+        " writes the released view with the" +
+        ' <span class="mono">release_date</span> it was handed',
+    );
+    expect(
+      squeeze(page.slice(page.indexOf("Step 6. Verify it yourself"))),
+    ).not.toContain("unregistered_operator");
+  });
+
+  it("links the draft list and says an underivable draft is not offered (D-124c)", () => {
+    const step = page.indexOf("Step 4. Judge one entry");
+    const panel = squeeze(page.slice(step, page.indexOf("Step 5.", step)));
+    // The list is the naming, so the sentence stays true when the drafts change.
+    expect(panel).toContain(
+      `<a href="${LOCAL_DEMO_ORIGIN}/entries?status=draft"`,
+    );
+    expect(panel).toContain(
+      "a draft the current schema cannot derive is not offered on it",
+    );
+    // Today's seeded draft is named as an example and said to be one.
+    expect(panel).toContain("nmk_40ddff3c");
+    expect(panel).toContain("take the list's word over this page's");
+  });
+
+  it("says what each stop reason means (D-124c)", () => {
+    const step = page.indexOf("Step 4. Judge one entry");
+    const panel = squeeze(page.slice(step, page.indexOf("Step 5.", step)));
+    for (const reason of [
+      "entry_withheld",
+      "unregistered_operator",
+      "legacy_entry",
+      "schema_invalid",
+      "entry_malformed",
+    ]) {
+      expect(panel, `${reason} is not explained`).toContain(
+        `<span class="mono">${reason}</span>`,
+      );
+    }
+    expect(panel).toContain("the command prints the date it opens");
+    expect(panel).toContain("Registration is step 3");
+    expect(panel).toContain("cannot be judged under today's rules");
+    expect(panel).toContain("errors</span> array is printed");
+    // legacy_entry is the validate door's word alone: reconfirm, dispute and
+    // revalidate still derive a pre-v0.7 entry into schema_invalid, so the page
+    // may not teach schema_invalid as only ever the sender's own fault.
+    expect(panel).toContain(
+      "Validation is the only door that names it: reconfirm, dispute and" +
+        " revalidate meet the same entry as a derivation that failed",
+    );
+    expect(panel).toContain(
+      "on the three doors above it is also how a pre-v0.7 entry is refused",
+    );
   });
 
   it("says what demo is not, and what the dry run that counts is", () => {
