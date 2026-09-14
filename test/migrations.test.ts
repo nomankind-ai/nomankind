@@ -167,6 +167,7 @@ describe("wrangler d1 migrations apply", () => {
         "0019_duplicate_key.sql",
         "0020_duplicate_key_effective_at.sql",
         "0021_version_stale_seq.sql",
+        "0022_cosign.sql",
       ]);
       expect(oursApplied.results.map((row) => row.name)).toEqual(
         applied.results.map((row) => row.name),

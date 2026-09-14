@@ -240,6 +240,59 @@ npm run export -- https://app.nomankind.ai <entry-id> ./out
 npm run verify -- ./out/entry.json ./out/log.json
 ```
 
+`log.json` is the whole log, because the checks it feeds are folds over the whole
+log. `--bounded` writes a second file bounded to that one entry's seals instead:
+
+```sh
+npm run export -- https://app.nomankind.ai <entry-id> ./out --bounded
+npm run verify -- ./out/entry.json ./out/log.json
+```
+
+It carries the entry's own events — the submission that holds the signed core,
+the decisions, the reconfirmations, the disputes — each with the Merkle path from
+it to the root the seal covering it committed to, those seals and the seal before
+each of them, and the registry and the captures exactly as before. On a log of a
+few hundred events it is around a twenty-fourth the size of the full bundle, and
+it does not grow as the log does: what is in it is this entry, not this instance.
+
+The reads are bounded too, which is the other half of it. One call to
+`GET /entries/{id}/events` answers the entry's own events with a proof each — the
+log is never paged to its head — and then the seals, each by seq. A bounded
+export makes the same handful of requests on a log of a thousand entries as on a
+log of ten.
+
+What it proves is the same tamper-evidence by a shorter route. The chain cannot
+be walked from a seq 0 that is not in the file, so instead every event's own hash
+is recomputed and checked against the path to its seal's root, and each seal's own
+hash and its link to the seal before it are checked too — which is what makes a
+seal unrewritable. An edited event fails its hash; an event moved under another
+seal fails its path; a seal whose range was widened fails its own hash; a bundle
+missing a seal is named as missing it. And because the decisions' own events are
+here, every validator's record signature is checked exactly as it is on a full
+bundle.
+
+What it cannot do is named rather than skipped quietly. The verifier prints
+
+```
+bounded not_run=chain,exclusions,derived,attestations
+```
+
+beside the verdict, and all four are folds over the whole log that could never be
+in a bounded bundle: the chain from seq 0, the exclusions replayed against who
+was registered and assigned at each decision's position, the derived view
+refolded out of every event, and the attestations, which are about a model rather
+than about any one entry. Everything else runs exactly as it does on a full
+bundle: the schema, the author's signature over the core, the core against the
+core the log sealed, the record signatures, the snapshot hashes against the
+captures, and the entry's own inclusion proof.
+
+So `ok` on a bounded bundle is a narrower sentence than `ok` on a full one: it
+says this entry's events were sealed where it says they were and every signature
+over them holds, and it does not say the log they came out of folds to this
+entry, or that the operators who signed it were entitled to. When that is the
+sentence you want, take the full bundle, which is still what the command writes
+when nothing is asked of it.
+
 ## Keeping going without nomankind
 
 If nomankind stops, nothing you hold stops working. The clone verifies offline,

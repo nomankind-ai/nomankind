@@ -156,6 +156,8 @@ describe("verify (the one script)", () => {
       entry_id: "nmk_0",
       diffs,
       withheld: 0,
+      bounded: false,
+      not_run: [],
     });
     const signature: Diff = {
       check: "signature",

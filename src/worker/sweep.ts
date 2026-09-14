@@ -191,7 +191,14 @@ import {
   backfillDuplicateKeys,
   bountiesForEntry,
   bountyPoolRows,
+  addCosignPairs,
   completeSealRewrites,
+  cosignaturesForEntry,
+  cosignaturesInRange,
+  readCosignCursor,
+  writeCosignCursor,
+  type CosignDelta,
+  type Cosignature,
   countAttestations,
   countEntries,
   countMeterReports,
@@ -2743,6 +2750,136 @@ export async function standingStep(
   };
 }
 
+/** A pair's running numbers while one run folds. */
+interface CosignAccumulator {
+  operator: string;
+  cosigner: string;
+  both: number;
+  agreed: number;
+  opposed: number;
+  newestEntryId: string;
+  newestSeq: number;
+}
+
+/** The key a pair accumulates under: the two ids, in order, once. */
+function pairKey(left: string, right: string): string {
+  return left < right ? `${left} ${right}` : `${right} ${left}`;
+}
+
+/**
+ * Who has co-signed with whom, folded from the sealed decisions (D-119).
+ *
+ * The question a reader asked of the demo: how do I tell three independent
+ * confirmations from three copies of one procedure. The log has always held the
+ * answer — `validation` and `reconfirmation` say who signed what — so this
+ * folds it into the pairs the pages read, and the pages read nothing else.
+ *
+ * An operator's stance on an entry is the first one it signed. First and not
+ * newest, because a co-signature is the act of signing beside somebody and a
+ * later reading of the same fact by the same operator is a second act, not a
+ * second co-signature — and because first is what makes this fold forward-only:
+ * a pair is formed once, by whichever of the two signed second, and nothing
+ * later takes it back.
+ *
+ * Incremental from the cursor the last run left. The tail is the decisions
+ * after it, and beside it goes one read per entry the tail touched, because the
+ * other half of a pair may have signed long before the cursor — the same bound
+ * the standing fold's tail uses, and for the same reason. A run at a cursor with
+ * nothing new reads one empty page. A cold start — no cursor, or a cursor above
+ * this run's sealed head — folds every sealed decision once, exactly as the
+ * standing step folds the whole log when it finds no cursor it can continue
+ * from; the tail then holds every entry whole and the per-entry reads are not
+ * made at all.
+ */
+async function cosignFold(
+  db: D1Like,
+  sealedHead: number,
+  at: string,
+): Promise<number> {
+  const stored = await readCosignCursor(db);
+  const from = stored === null || stored > sealedHead ? -1 : stored;
+
+  const tail: Cosignature[] = [];
+  for (let after = from; ; ) {
+    const page = await cosignaturesInRange(db, after, sealedHead, LIST_PAGE_LIMIT);
+    tail.push(...page);
+    if (page.length < LIST_PAGE_LIMIT) break;
+    after = page[page.length - 1]!.seq;
+  }
+  if (tail.length === 0) {
+    // Nothing new is still a run: the cursor moves so the next one knows this
+    // stretch of log has been folded and holds no decisions.
+    await writeCosignCursor(db, sealedHead, at);
+    return 0;
+  }
+
+  // The signatures this run judges pairs from, by entry. On a cold start the
+  // tail is every sealed decision there is, so it is already whole.
+  const byEntry = new Map<string, Cosignature[]>();
+  for (const signature of tail) {
+    const held = byEntry.get(signature.entryId);
+    if (held === undefined) byEntry.set(signature.entryId, [signature]);
+    else held.push(signature);
+  }
+  if (from !== -1) {
+    for (const entryId of [...byEntry.keys()]) {
+      byEntry.set(entryId, await cosignaturesForEntry(db, entryId, sealedHead));
+    }
+  }
+
+  const deltas = new Map<string, CosignAccumulator>();
+  for (const signatures of byEntry.values()) {
+    const first = new Map<string, Cosignature>();
+    for (const signature of signatures) {
+      if (!first.has(signature.operator)) first.set(signature.operator, signature);
+    }
+    const signers = [...first.values()].sort((left, right) =>
+      left.operator < right.operator ? -1 : left.operator > right.operator ? 1 : 0,
+    );
+    for (let i = 0; i < signers.length; i += 1) {
+      for (let j = i + 1; j < signers.length; j += 1) {
+        const one = signers[i]!;
+        const other = signers[j]!;
+        // The pair is formed when the second of the two signs. A pair formed at
+        // or before the cursor was counted by an earlier run, and counting it
+        // again is the one way an incremental fold can lie.
+        const formedAt = Math.max(one.seq, other.seq);
+        if (formedAt <= from) continue;
+        const agreed = one.stance === other.stance;
+        const key = pairKey(one.operator, other.operator);
+        const held = deltas.get(key);
+        if (held === undefined) {
+          deltas.set(key, {
+            operator: one.operator,
+            cosigner: other.operator,
+            both: 1,
+            agreed: agreed ? 1 : 0,
+            opposed: agreed ? 0 : 1,
+            newestEntryId: one.entryId,
+            newestSeq: formedAt,
+          });
+          continue;
+        }
+        held.both += 1;
+        if (agreed) held.agreed += 1;
+        else held.opposed += 1;
+        if (formedAt > held.newestSeq) {
+          held.newestSeq = formedAt;
+          held.newestEntryId = one.entryId;
+        }
+      }
+    }
+  }
+
+  const written: CosignDelta[] = [...deltas.values()];
+  if (written.length > 0) await addCosignPairs(db, written, sealedHead);
+  // After the rows and never before: a cursor ahead of the rows would skip a
+  // tail nobody had folded. The other way round is safe because the add is
+  // guarded by the position it carries (`addCosignPairs`).
+  await writeCosignCursor(db, sealedHead, at);
+  return written.length;
+}
+
 /**
  * (j2) Count everything the public pages show, once, and write the row.
  *
@@ -2761,6 +2898,10 @@ export async function standingStep(
  * The two per-domain counts are one grouped statement each rather than one per
  * registered slug, and a slug with nothing in it is written as the zero it is,
  * so the domains page never has to know which slugs the log has heard of.
+ *
+ * The co-signature fold (D-119) rides along at the end, because it is the same
+ * bargain in a different shape: a view of the sealed events, taken once a run,
+ * so that a page reads a row instead of folding the log.
  *
  * The whole step is a normal skip when it fails: the counters are a view of the
  * log and never the log, so a run that could not recount them has still swept,
@@ -2814,6 +2955,13 @@ export async function countersStep(
       counters.position,
       at,
     );
+
+    // And who signed beside whom (D-119), folded from the same sealed events at
+    // the same position. Here rather than in a step of its own because it is
+    // the same promise the counters are — a page reads a row and never the log
+    // — and a seventeenth light on the status board would be a new thing for a
+    // reader to learn about a view that is one more counter.
+    await cosignFold(db, sealedHead, at);
 
     return { counters: {
       position: counters.position,

@@ -15,6 +15,34 @@
  * a Worker that has sealed nothing yet answers an empty list, which the verifier
  * already reads as "nothing sealed yet".
  *
+ * `--bounded` writes the same two files with a smaller second one, read as
+ * narrowly as it is written (decision D-120). The whole log is what an entry's
+ * checks need only because the chain is walked from seq 0 and the derived view
+ * is refolded out of everything; what the entry's OWN proof needs is its own
+ * events, a Merkle path from each of them to the root the seal covering it
+ * committed to, those seals and the seal before each of them, and the registry
+ * and captures as ever.
+ *
+ * Both halves are bounded, and that is the point. The bundle does not grow with
+ * the log and neither does the walk that builds it: `GET /entries/{id}/events`
+ * answers the entry's own events with a proof each in one call, so a bounded
+ * export costs the same handful of requests on a log of a thousand entries as on
+ * a log of ten.
+ *
+ * What it leaves out is what a bounded bundle could never hold: every other
+ * entry's events, which are the inputs of the chain walk from seq 0, of the
+ * exclusions replayed against who was registered at each decision, and of the
+ * derived fold. The verifier names those as not run rather than passing over
+ * them.
+ *
+ * Full is still the default, and deliberately. The paper promises two files and
+ * one script, the checkpoint writes them, the published example is one of them,
+ * and an `ok` over a full bundle is a wider sentence than an `ok` over a bounded
+ * one. A default that quietly narrowed what `ok` means would be a default that
+ * changed the promise without anyone asking for it; a reader who wants the
+ * smaller file asks for it and is told, on stderr and in the verifier's report,
+ * what they got.
+ *
  * The core is exported over the injected http client, so the checkpoint builds a
  * bundle in process without a network. node:fs and node:path are allowed in this
  * CLI file only.
@@ -27,7 +55,7 @@ import { base64Encode } from "../encoding.js";
 import type { Event } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
 import type { Seal } from "../seal.js";
-import type { Capture, LogBundle, Registry } from "../verify.js";
+import type { BundleProof, Capture, LogBundle, Registry } from "../verify.js";
 import {
   errorOf,
   getJson,
@@ -43,7 +71,7 @@ import {
 import { runCommand, unreachableLine } from "./main.js";
 
 const USAGE =
-  "usage: export <base-url> <entry-id> <out-dir> [--key <api key>] [--sign <key.json>]";
+  "usage: export <base-url> <entry-id> <out-dir> [--bounded] [--key <api key>] [--sign <key.json>]";
 
 /** The two file names the verifier is handed. */
 export const ENTRY_FILE = "entry.json";
@@ -248,6 +276,122 @@ async function readCapture(
   };
 }
 
+/**
+ * One seal by its own seq, or null when the log has none there.
+ *
+ * Null rather than a failure for a 404: a bounded bundle asks for the seal
+ * before each covering seal, and the seal before seal 0 does not exist. Any
+ * other status is a read the bundle needed and did not get, and stops the
+ * export like every other one.
+ */
+async function readSeal(
+  http: HttpClient,
+  baseUrl: string,
+  seq: number,
+): Promise<Seal | null> {
+  const path = `/seals/${seq}`;
+  const { status, body } = await getJson(http, baseUrl, path);
+  if (status === 404) return null;
+  if (status !== 200) {
+    throw new ExportFailure(
+      `${path}: ${status}${errorOf(body) === null ? "" : ` ${errorOf(body)}`}`,
+    );
+  }
+  return body as Seal;
+}
+
+/**
+ * One entry's own events, in seq order, with a proof for each sealed one, out of
+ * the door that answers exactly that (decision D-120).
+ *
+ * One request, bounded by the entry rather than by the log: the whole point of
+ * `GET /entries/{id}/events` is that a reader gathering one entry's story no
+ * longer has to page `GET /events` to its head to be sure they have it all. The
+ * proofs are the Worker's own, recomputed nowhere here, for the same reason
+ * nothing else in this command is recomputed.
+ */
+async function readEntryEvents(
+  http: HttpClient,
+  baseUrl: string,
+  entryId: string,
+): Promise<{
+  events: Event[];
+  head: number | null;
+  proofs: Record<string, BundleProof>;
+}> {
+  const body = (await read(
+    http,
+    baseUrl,
+    `/entries/${encodeURIComponent(entryId)}/events`,
+  )) as {
+    events?: Event[];
+    head?: number | null;
+    proofs?: unknown[];
+  };
+
+  const events = Array.isArray(body.events) ? body.events : [];
+  const proofs: Record<string, BundleProof> = {};
+  for (const item of Array.isArray(body.proofs) ? body.proofs : []) {
+    if (!isRecord(item)) continue;
+    const seal = item["seal"];
+    const proof = item["inclusion_proof"];
+    if (typeof item["seq"] !== "number") continue;
+    if (!isRecord(seal) || typeof seal["seq"] !== "number") continue;
+    if (typeof proof !== "string") continue;
+    proofs[String(item["seq"])] = {
+      seal_seq: seal["seq"],
+      inclusion_proof: proof,
+    };
+  }
+  return { events, head: body.head ?? null, proofs };
+}
+
+/**
+ * The bundle bounded to one entry's seals (decision D-120), read as narrowly as
+ * it is written.
+ *
+ * The reads are what the entry is and not what the log is: the entry record,
+ * which the export has already read; its own events with their proofs, in one
+ * call; the seals those proofs are against and the seal before each of them,
+ * each by seq; and the registry and the captures, exactly as the full export
+ * reads them. Nothing here pages `GET /events`, so a bounded export costs the
+ * same handful of requests on a log of a thousand entries as on a log of ten.
+ */
+async function buildBoundedBundle(input: {
+  readonly baseUrl: string;
+  readonly entryId: string;
+  readonly http: HttpClient;
+  readonly now: Date;
+  readonly captures: Record<string, Capture>;
+}): Promise<LogBundle> {
+  const log = await readEntryEvents(input.http, input.baseUrl, input.entryId);
+
+  const wanted = new Set<number>();
+  for (const proof of Object.values(log.proofs)) {
+    wanted.add(proof.seal_seq);
+    // The seal before it, for the link. Seal 0 has none, and `readSeal` answers
+    // null for a seq the chain does not hold.
+    if (proof.seal_seq > 0) wanted.add(proof.seal_seq - 1);
+  }
+
+  const seals: Seal[] = [];
+  for (const seq of [...wanted].sort((left, right) => left - right)) {
+    const seal = await readSeal(input.http, input.baseUrl, seq);
+    if (seal !== null) seals.push(seal);
+  }
+
+  return {
+    as_of: input.now.toISOString(),
+    events: [...log.events].sort((left, right) => left.seq - right.seq),
+    registry: await readRegistry(input.http, input.baseUrl),
+    seals,
+    captures: input.captures,
+    bounded: true,
+    head: log.head,
+    proofs: log.proofs,
+  };
+}
+
 /** The two files, built but not written. */
 export interface ExportResult {
   readonly entry: unknown;
@@ -272,6 +416,12 @@ export async function buildExport(input: {
   readonly entryId: string;
   readonly http: HttpClient;
   readonly now: Date;
+  /**
+   * Write the bundle bounded to this entry's seals rather than the whole log
+   * (decision D-120). Absent is the whole log, which is what every caller that
+   * predates the flag asks for and gets.
+   */
+  readonly bounded?: boolean;
 }): Promise<ExportResult> {
   const answer = await read(
     input.http,
@@ -293,15 +443,18 @@ export async function buildExport(input: {
     if (capture !== null) captures[hash] = capture;
   }
 
-  const bundle: LogBundle = {
-    as_of: input.now.toISOString(),
-    events: await readEvents(input.http, input.baseUrl),
-    registry: await readRegistry(input.http, input.baseUrl),
-    // An empty list is not a missing field: the verifier reads it as a log
-    // nothing has sealed yet.
-    seals: await readSeals(input.http, input.baseUrl),
-    captures,
-  };
+  const bundle: LogBundle =
+    input.bounded === true
+      ? await buildBoundedBundle({ ...input, captures })
+      : {
+          as_of: input.now.toISOString(),
+          events: await readEvents(input.http, input.baseUrl),
+          registry: await readRegistry(input.http, input.baseUrl),
+          // An empty list is not a missing field: the verifier reads it as a
+          // log nothing has sealed yet.
+          seals: await readSeals(input.http, input.baseUrl),
+          captures,
+        };
   return withheld === null
     ? { entry, bundle }
     : { entry, bundle, release_date: withheld.release_date };
@@ -354,6 +507,8 @@ export interface ExportPlan {
   readonly key: string | null;
   /** An operator's agent key file, whose signature every read carries. */
   readonly signPath: string | null;
+  /** `--bounded`: the bundle bounded to this entry's seals (decision D-120). */
+  readonly bounded: boolean;
 }
 
 /**
@@ -374,14 +529,25 @@ export function exportPlan(args: readonly string[]): ExportPlan | null {
   if (outDir === undefined || outDir.startsWith("--")) return null;
 
   const values = new Map<string, string>();
-  for (let index = 0; index < rest.length; index += 2) {
+  // `--bounded` takes no value, so the walk steps by what each flag actually
+  // is rather than by pairs; a repeated flag is still refused, and so is a
+  // value that looks like another flag.
+  let bounded = false;
+  for (let index = 0; index < rest.length; ) {
     const flag = rest[index];
-    const value = rest[index + 1];
-    if (flag === undefined || value === undefined) return null;
+    if (flag === undefined) return null;
+    if (flag === "--bounded") {
+      if (bounded) return null;
+      bounded = true;
+      index += 1;
+      continue;
+    }
     if (flag !== "--key" && flag !== "--sign") return null;
-    if (value.startsWith("--")) return null;
+    const value = rest[index + 1];
+    if (value === undefined || value.startsWith("--")) return null;
     if (values.has(flag)) return null;
     values.set(flag, value);
+    index += 2;
   }
   if (values.has("--key") && values.has("--sign")) return null;
 
@@ -391,6 +557,7 @@ export function exportPlan(args: readonly string[]): ExportPlan | null {
     outDir,
     key: values.get("--key") ?? null,
     signPath: values.get("--sign") ?? null,
+    bounded,
   };
 }
 
@@ -410,10 +577,11 @@ export async function exportEntry(
   io: ValidatorIo,
   http: HttpClient = new WebHttpClient(),
   now: Date = new Date(),
+  bounded = false,
 ): Promise<number> {
   let result: ExportResult;
   try {
-    result = await buildExport({ baseUrl, entryId, http, now });
+    result = await buildExport({ baseUrl, entryId, http, now, bounded });
   } catch (error) {
     io.stderr(
       unreachableLine(baseUrl, error) ??
@@ -425,6 +593,15 @@ export async function exportEntry(
   if ("release_date" in result) {
     io.stderr(
       `${entryId}: withheld until ${result.release_date ?? "it is sealed"}; exported the released view`,
+    );
+  }
+
+  // What a bounded bundle is, said where a reader will see it and not only in
+  // the verifier's report: the file proves this entry's events were sealed, and
+  // the three checks that are a fold over the whole log are not in it.
+  if (result.bundle.bounded === true) {
+    io.stderr(
+      `${entryId}: bounded bundle at head ${result.bundle.head ?? "none"}; the chain, the exclusions and the derived view are not checkable from it`,
     );
   }
 
@@ -475,6 +652,7 @@ if (
         io,
         await exportClient(new WebHttpClient(), plan, () => new Date()),
         now,
+        plan.bounded,
       ),
     ),
   );

@@ -18,6 +18,13 @@
  * `entry_withheld` and the day the content opens — rather than as the eight
  * true-but-useless differences the ordinary checks found in it.
  *
+ * A bounded bundle (decision D-120) is a third answer that is neither a pass
+ * nor a fault on its own: the file carries this entry's events, a proof each
+ * against the seal that covers them, and the seals' own links, and not the rest
+ * of the log. It checks out or it does not exactly as a full bundle does, and
+ * one line says which checks had no inputs in it, so an `ok` is read as the
+ * sentence it is rather than as the wider one.
+ *
  * One thing is added to the diffs and nothing is taken away: a hand-edited
  * content field fails the signature, the core and the derived view, and the
  * three lines are one fault. They are all printed, the count still counts them
@@ -132,6 +139,16 @@ export async function verify(
   // here and its two lines are what they have always been.
   if (report.withheld > 0) {
     io.stdout(`withheld ${report.withheld}`);
+  }
+
+  // What a bounded bundle bought and what it cost (decision D-120). Beside the
+  // withheld count and before the verdict, because both change what the verdict
+  // means: `ok` over a bounded bundle says this entry's events were sealed and
+  // its signatures hold, and does not say the log they came out of folds to
+  // this entry. Printed only for a bounded bundle, so the full path's two lines
+  // are what they have always been.
+  if (report.bounded) {
+    io.stdout(`bounded not_run=${report.not_run.join(",")}`);
   }
 
   // The other half of the window (decision D-100): the entry file itself is the

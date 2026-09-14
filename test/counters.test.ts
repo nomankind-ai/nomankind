@@ -492,8 +492,10 @@ describe("the counters step", () => {
       .prepare(`SELECT COUNT(*) AS n FROM counters`)
       .first<Record<string, unknown>>();
     // Nine named counters plus a pair per registered domain, and no second run
-    // of the same step doubles them.
-    expect(rows!["n"]).toBe(9 + DOMAIN_SLUGS.length * 2);
+    // of the same step doubles them. Plus one: the co-signature fold's cursor
+    // (D-119), which is a row the step keeps between runs rather than one of
+    // the counters it rewrites, which is why its name is prefixed.
+    expect(rows!["n"]).toBe(9 + DOMAIN_SLUGS.length * 2 + 1);
   });
 
   it("answers a status gather from the row instead of scanning for it", async () => {
@@ -685,6 +687,7 @@ describe("the 0018 backfill on a database written before it", () => {
         "0019_duplicate_key.sql",
         "0020_duplicate_key_effective_at.sql",
         "0021_version_stale_seq.sql",
+        "0022_cosign.sql",
       ]);
 
       // The column says exactly what the JSON beside it has always said.

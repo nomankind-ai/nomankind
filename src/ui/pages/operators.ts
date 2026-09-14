@@ -16,6 +16,12 @@
  * count beside it is a reading too: the entries an operator signed, as submitter
  * or as approver, that an upheld dispute overturned, counted once per entry.
  *
+ * The last column is the co-signing one (D-119): how many distinct operators
+ * this one has signed an entry beside. It is here because the directory is
+ * where a reader asks whether the operators are actually distinct parties, and
+ * one number per row is as much as a directory can honestly carry — the
+ * breakdown lives on each operator's own page.
+ *
  * Pure: the rows were gathered by the route.
  */
 
@@ -55,6 +61,9 @@ function row(operator: OperatorRow): Safe {
     <td class="${operator.overturned === 0 ? "dim" : "danger"}">
       ${operator.overturned}
     </td>
+    <td class="${operator.cosigners === 0 ? "dim" : ""}">
+      ${operator.cosigners}
+    </td>
   </tr>`;
 }
 
@@ -92,6 +101,7 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
                     <th>validations</th>
                     <th>standing</th>
                     <th>overturned</th>
+                    <th>co-signers</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -107,7 +117,10 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
         formula has not been run for that operator yet rather than that it has
         earned nothing. The overturned count beside it is a reading of the log
         too: entries this operator signed, as submitter or as approver, that an
-        upheld dispute overturned.
+        upheld dispute overturned. The co-signers column is how many distinct
+        operators this one has signed an entry beside; each operator's own page
+        breaks that down, pair by pair, into what the two agreed and disagreed
+        on.
       </p>
     `,
   });

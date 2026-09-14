@@ -61,6 +61,7 @@ import type {
   EntryData,
   EntryRow,
   OperatorData,
+  CosignerRow,
   OperatorRow,
   PageContext,
 } from "../src/ui/types.js";
@@ -536,7 +537,34 @@ const operatorRow: OperatorRow = {
   validations: 7,
   overturned: 2,
   standing: { standing: 14, seq: 61 },
+  cosigners: 2,
 };
+
+/**
+ * Who this operator has signed beside (D-119).
+ *
+ * Two pairs, one of each shape: one that has never disagreed, and one that has.
+ * The page must show both as what they are — counts, not verdicts — so the
+ * fixture carries both rather than a single happy row.
+ */
+const operatorCosigners: CosignerRow[] = [
+  {
+    cosigner: "k2.example",
+    both: 5,
+    agreed: 5,
+    opposed: 0,
+    throughSeq: 61,
+    newestEntryId: ENTRY_ID,
+  },
+  {
+    cosigner: "k3.example",
+    both: 3,
+    agreed: 2,
+    opposed: 1,
+    throughSeq: 61,
+    newestEntryId: ENTRY_ID,
+  },
+];
 
 /**
  * The operator's money (M21).
@@ -681,6 +709,7 @@ function everyPage(): Record<string, string> {
       rows: [operatorRow, { ...operatorRow, id: "maintainer.example", maintainer: true, trusted: false, trustedSeq: null }],
     }),
     operator: renderOperator(ctx, {
+      cosigners: operatorCosigners,
       row: operatorRow,
       agents: ["1F916:k1", "1F916:k1b"],
       domains: OPERATOR_DOMAINS,
@@ -1716,6 +1745,7 @@ describe("the operator pages", () => {
 
   /** An operator nothing has happened to yet: every panel's empty state at once. */
   const quiet = renderOperator(ctx, {
+    cosigners: [],
     row: {
       ...operatorRow,
       validations: 0,
@@ -1794,6 +1824,7 @@ describe("the operator pages", () => {
 
   it("shows one operator's record, agents, attestation and validations", () => {
     const one = renderOperator(ctx, {
+      cosigners: [],
       row: operatorRow,
       agents: ["1F916:k1"],
       domains: OPERATOR_DOMAINS,
@@ -1829,6 +1860,7 @@ describe("the operator pages", () => {
 
   it("lists the domains an operator is attested in, each with its version", () => {
     const one = renderOperator(ctx, {
+      cosigners: [],
       row: operatorRow,
       agents: ["1F916:k1"],
       domains: [
@@ -1871,6 +1903,7 @@ describe("the operator pages", () => {
    */
   it("shows the stored standing, its position, and how to recompute it", () => {
     const one = renderOperator(ctx, {
+      cosigners: [],
       row: operatorRow,
       agents: ["1F916:k1"],
       domains: OPERATOR_DOMAINS,
@@ -1905,6 +1938,7 @@ describe("the operator pages", () => {
 
   it("shows the ledger balance in micro-USD with a dollar rendering beside it", () => {
     const one = renderOperator(ctx, {
+      cosigners: [],
       row: operatorRow,
       agents: [],
       domains: OPERATOR_DOMAINS,
@@ -1949,6 +1983,7 @@ describe("the operator pages", () => {
 
   it("shows one ledger row per stored row, and marks a row a payout covered", () => {
     const one = renderOperator(ctx, {
+      cosigners: [],
       row: operatorRow,
       agents: [],
       domains: OPERATOR_DOMAINS,
@@ -1999,6 +2034,7 @@ describe("the operator page's attestations", () => {
     ledger: operatorLedger,
     payouts: operatorPayouts,
     balance: operatorBalance,
+    cosigners: [],
   } satisfies Omit<OperatorData, "attestations">;
 
   const document = renderOperator(ctx, { ...base, attestations });
