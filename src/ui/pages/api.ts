@@ -20,9 +20,7 @@ import {
   ALERT_KINDS,
   ALERT_RETRY_MINUTES,
   ALERT_TIMEOUT_MS,
-  CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-  CONTRIBUTOR_SHARE_PERCENT,
-  DISPUTE_FILING_FEE_CENTS,
+  DISPUTE_STAKE_STANDING,
   DRAW_DRAFT_MAX_AGE_DAYS,
   FREE_READS_PER_DAY_GLOBAL,
   FREE_TIER,
@@ -31,16 +29,12 @@ import {
   PAGE_CACHE_SECONDS,
   PAGE_CACHE_STALE_SECONDS,
   RATE_TIERS,
-  READ_PRICE_MICROS_PER_READ,
-  READ_SHARE_SPLIT,
-  RELEASE_WINDOW_DAYS,
   REQUEST_MAX_BODY_BYTES,
   SCHEMA_VERSION,
-  STRIPE,
   WRITES_PER_AGENT_PER_DAY,
   WRITES_PER_CLIENT_PER_DAY,
 } from "../../policy.js";
-import { STAGE_COUNT } from "../../status.js";
+import { EXERCISED_COUNT, STAGE_COUNT } from "../../status.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
 import type { PageContext } from "../types.js";
@@ -106,7 +100,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/entries/{id}",
     parameters: "—",
     answers:
-      "The derived entry. Status is recomputed from the log and is draft until validation closes it. The plain fetch, with no receipt. Before the release window is up, a reader with no key and no signature is answered { proof, release_date } instead of { entry }: every proof field as it stands, the content fields null, and the instant the rest of it opens.",
+      "The derived entry, whole, to anybody who asks: the content is public and CC0 from the seal that covers the submission, so there is nothing here a key reaches and a keyless reader does not. Status is recomputed from the log and is draft until validation closes it. The plain fetch, with no receipt.",
     refusals: "400 bad_id, 404 not_found.",
   },
   {
@@ -116,7 +110,7 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "The raw archived bytes behind a snapshot_hash or a receipt_hash, whichever role froze them — snapshot, receipt, statement, or report:<seq> — with their stored media type and the archive address in x-nomankind-archive-hash. Served inert: attachment, nosniff, and a sandboxing CSP, because the bytes are a stranger's.",
     refusals:
-      "400 bad_hash, 404 not_found; 403 unreleased, carrying release_date, for a capture every one of whose entries is still inside the release window — a key or an operator signature is served throughout; 403 undisclosed, carrying disclose_after, for a capture held only under the role disclosure while its domain's disclosure window is still open — a signed request from an agent bound to a registered operator is served throughout, because a validator has to reproduce the measurement.",
+      "400 bad_hash, 404 not_found; 403 undisclosed, carrying disclose_after, for a capture held only under the role disclosure while its domain's disclosure window is still open — a signed request from an agent bound to a registered operator is served throughout, because a validator has to reproduce the measurement.",
   },
   {
     method: "GET",
@@ -125,14 +119,14 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "The norm rule's record of the fetch: final_url, status, headers, fetched_at, fetcher. The same four roles — snapshot, receipt, statement, report:<seq> — answer here.",
     refusals:
-      "400 bad_hash, 404 not_found; 403 unreleased and 403 undisclosed, as above.",
+      "400 bad_hash, 404 not_found; 403 undisclosed, as above.",
   },
   {
     method: "GET",
     path: "/events",
     parameters: `after=<seq>, limit=<1..${LIST_PAGE_LIMIT}>, and nothing else`,
     answers:
-      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. An event about an entry whose release date has not arrived goes to a free reader as a hash line — seq, at, type, entry_id, prev_hash, hash, payload null and withheld true — so the chain still links and the seal's root is still over the same leaves. The registry is never withheld: operator_registered, operator_trusted, operator_untrusted, agent_bound, operator_joined_domain and pool_snapshot go out in full the moment a seal covers them, because GET /operators publishes the same facts from the first minute. One page is one read: it is charged one unit against the caller's own bucket after the page is built, and carries the same three x-nomankind headers every other door does.",
+      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. Every event goes out in full the moment a seal covers it, to anybody who asks: the record is released at the seal, so no payload is withheld from anyone and the chain a reader gets is the chain the root is over. One page is one read: it is charged one unit against the caller's own bucket after the page is built, and carries the same three x-nomankind headers every other door does.",
     refusals:
       "400 bad_query for a parameter this door does not take, a parameter given twice, an after that is not a position, or a limit outside the page size; 401 and 402 as the key gate gives them; 429 rate_limited past the cap.",
   },
@@ -141,7 +135,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/entries/{id}/events",
     parameters: "—",
     answers:
-      "One entry's own events, in seq order, with the log's head and one proof per sealed event: entry_id, head, events, proofs. Each proof is exactly what GET /events/{seq}/proof answers — seq, hash, seal (seq, root, hash, sealed_at), inclusion_proof, witnesses — and an event nothing has sealed yet is simply absent from proofs. The release window is the paged door's: a free reader inside it is handed the events as hash lines, a key or an operator signature is served them whole, and the proofs go out either way because proof is public from the first minute. Bounded by the entry and not by the log, which is what lets a reader gather one entry's whole story without paging GET /events to its head. One call is one read: one unit against the caller's own bucket after the answer is built, and the same three x-nomankind headers every other door carries. JSON only, and never held at the edge — what it answers depends on who is asking.",
+      "One entry's own events, in seq order, with the log's head and one proof per sealed event: entry_id, head, events, proofs. Each proof is exactly what GET /events/{seq}/proof answers — seq, hash, seal (seq, root, hash, sealed_at), inclusion_proof, witnesses — and an event nothing has sealed yet is simply absent from proofs. The events go out whole to anybody who asks, as the paged door serves them, and so do the proofs: content and proof are both public from the seal. Bounded by the entry and not by the log, which is what lets a reader gather one entry's whole story without paging GET /events to its head. One call is one read: one unit against the caller's own bucket after the answer is built, and the same three x-nomankind headers every other door carries. JSON only, and never held at the edge — what it answers depends on who is asking.",
     refusals:
       "400 bad_id for an id that is not the schema's shape; 404 not_found for an id the log has no events for; 401 and 402 as the key gate gives them; 429 rate_limited past the cap; 405 with Allow: GET, HEAD otherwise.",
   },
@@ -192,7 +186,7 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "The frozen reader's single signed fact: entry, sidecar, seal, receipt. Only a verified entry is served with a receipt, stale or not.",
     refusals:
-      "400 unknown_parameter and repeated_parameter — a demand this door cannot apply is refused rather than dropped, exactly as on the query twin — then 400 bad_id; 402 unreleased with release_date, to a reader with neither a key nor an operator signature, while the entry's content is inside the release window; 404 not_found; 409 entry_not_verified with status and superseded_by, which issues no receipt and moves no counter; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter and repeated_parameter — a demand this door cannot apply is refused rather than dropped, exactly as on the query twin — then 400 bad_id; 404 not_found; 409 entry_not_verified with status and superseded_by, which issues no receipt and moves no counter; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
@@ -202,7 +196,7 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed; min_source is the lowest source class the reader will take, official above recognized above other, compared against the class the sidecar derived from the entry's own citation; and the age is whole UTC days against last_confirmed.",
     refusals:
-      "400 unknown_parameter, repeated_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_max_age; 402 unreleased with release_date, as above; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, repeated_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
@@ -210,7 +204,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters:
       `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, min_source=official|recognized, domain=<slug>`,
     answers:
-      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the four can touch an unlearn. A reader with no key and no signature is served to the released head rather than the sealed one: head names that boundary and sealed_head still reports the true head, so the gap is visible rather than silent, and a range with nothing released in it is an empty page with head null.",
+      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the four can touch an unlearn. Every reader is served to the same head, keyed or not: an entry is released by the seal that covers it, so head and sealed_head name the same position and no page is narrower for the reader who asked without a key.",
     refusals:
       "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, bad_min_source, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
@@ -253,7 +247,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/status",
     parameters: "—",
     answers:
-      `Every stage of the pipeline as the last sweep left it: as_of, environment, counters (last sweep, stages, sealed head, witnessed), stages — ${STAGE_COUNT} of them, each with stage, state (ok, attention, failing, idle), last, rule and evidence — exercised (the five stages that run only when someone asks), and thresholds (STATUS_ATTENTION_AFTER_INTERVALS, STATUS_FAILING_AFTER_MINUTES). Nothing is probed to answer it: every reading is a published rule applied to the log and to the report the sweep stored at the end of its last run, so the answer cannot be warmed by asking for it. A browser gets the same object as the status page, and the JSON is cached at the edge with it for sixty seconds, so a reading may be up to a minute behind the log. A stage whose sweep step threw reads failing with the error named in its line, whatever its own facts say, until that step runs clean.`,
+      `Every stage of the pipeline as the last sweep left it: as_of, environment, counters (last sweep, stages, sealed head, witnessed), stages — ${STAGE_COUNT} of them, each with stage, state (ok, attention, failing, idle), last, rule and evidence — exercised (the ${EXERCISED_COUNT} stages that run only when someone asks), and thresholds (STATUS_ATTENTION_AFTER_INTERVALS, STATUS_FAILING_AFTER_MINUTES). Nothing is probed to answer it: every reading is a published rule applied to the log and to the report the sweep stored at the end of its last run, so the answer cannot be warmed by asking for it. A browser gets the same object as the status page, and the JSON is cached at the edge with it for sixty seconds, so a reading may be up to a minute behind the log. A stage whose sweep step threw reads failing with the error named in its line, whatever its own facts say, until that step runs clean.`,
     refusals:
       "None of its own: a stage that is failing is an answer and not a refusal. 503 storage_unreachable; 405 with Allow: GET.",
   },
@@ -271,7 +265,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/how-it-works",
     parameters: "—",
     answers:
-      "The pipeline explained in ten panels, each carrying this environment's own newest record for that stage — the newest entry and its capture, the trusted pool, the newest decision, seal and anchor, yesterday's read count, standing and the ledger, the newest attestation, the daily export, and the paid tiers — and the policy names that stage runs under. HTML only: it is a page about the log and not a view of it, so it has no JSON twin.",
+      "The pipeline explained in ten panels, each carrying this environment's own newest record for that stage — the newest entry and its capture, the trusted pool, the newest decision, seal and anchor, yesterday's read count, standing, the newest attestation, the daily export, and the caps a reader is served under — and the policy names that stage runs under. HTML only: it is a page about the log and not a view of it, so it has no JSON twin.",
     refusals: "—",
   },
   {
@@ -295,7 +289,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/operators/{id}/ledger",
     parameters: "—",
     answers:
-      `One operator's money: operator, balance (accrued, held, released, clawed_back, paid, carried_forward, all in micro-USD), and rows — the newest ${LIST_PAGE_LIMIT} ledger rows, newest first, each with id, kind, entry_id, operator, role, date, reads, unit, amount, available_at, seq, at, ref. A read_share row's ref carries price_micros_per_read, share_percent, stale, the entry's evidence tier as tier, and on a slot holder's row measured — whether that holder's own signed record carried a passing measurement, which is what decides between the two validator rates. A dispute_reward row's ref carries the stake record it was written as, the ids of the clawbacks its amount was read off as clawbacks, and their sum as clawed_back.`,
+      `One operator's ledger rows: operator, balance and rows — the newest ${LIST_PAGE_LIMIT} of them, newest first, each with id, kind, entry_id, operator, role, date, unit, amount, seq, at and ref. Nothing here is money and nothing is owed: no read is priced, so what the rows carry is the standing a stake put up and gave back, and the amounts are in the unit the row itself names.`,
     refusals: "400 bad_query for any parameter at all; 404 not_found.",
   },
   {
@@ -303,7 +297,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/ledger",
     parameters: "—",
     answers:
-      "The money side of the log as a whole: reconciliations (each day's published read count against what the ledger accrued for it), payouts (what has left, under the provider's own reference), and policy — READ_PRICE_MICROS_PER_READ, PAYOUT_MINIMUM_MICROS, PAYOUT_CYCLE, HOLDBACK_DAYS, read from the same module the policy page reads.",
+      "The ledger as a whole: the reconciliations, one per published day, which hold that day's sealed read count against the rows written for it. The counts are evidence that the record is used and buy nobody anything — there is no price, no share and no payout to reconcile against.",
     refusals: "400 bad_query for any parameter at all; 405 with Allow: GET.",
   },
 ];
@@ -386,7 +380,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     parameters:
       "record (exactly the schema's approvers item) and signature (nomankind-record-v1, kind validation); signed by the record's own agent",
     answers:
-      `201 with the derived entry. A draft is drawn a validator by the sweep only while it is within DRAW_DRAFT_MAX_AGE_DAYS of its own submitted_at — ${DRAW_DRAFT_MAX_AGE_DAYS} days: past that it leaves the draw queue, and it is still a draft, still readable, and still open to a volunteer — a validation makes it draw-eligible again only if it is inside the window, because the cutoff is on submitted_at and nothing moves that. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation. A validator that judges the entry a duplicate of one it does not supersede rejects in the published form, the reason duplicate_claim:<entry id>, which is taken as any other reason is: nothing new is signed, and the entry page and the confidence inputs read the id back out of it. There are three answers a validator can give and the door takes all three. approve: the validator fetched the cited source itself, it says what the entry says, and the record carries that validator's own snapshot_hash — plus its own measurement (runs and holds) when the entry is observed and the category is not a transcript one, which is the missing_observation refusal above; the door checks that it is there and well formed, and whether it passed is read later by derivation and standing. reject: the same work found otherwise, and the record needs a reason (missing_reason) and may carry the measurement it found — a reproduction's runs and holds, or an observation — but is not required to, because a rejection can rest on the citation alone. test_accepted false: the proposed test does not decide the claim, which is a judgment about the test rather than about the entry, recorded on a rejection and an approval alike so testVerdict can count the majority. A negative result is a first-class, paid answer: the standing a completed validation earns (STANDING_VALIDATION_ASSIGNED or STANDING_VALIDATION_VOLUNTEERED) is earned whichever way the decision went, and STANDING_VALIDATION_REPRODUCED is paid beside it for a record carrying a passing measurement, which is work and not a direction.`,
+      `201 with the derived entry. A draft is drawn a validator by the sweep only while it is within DRAW_DRAFT_MAX_AGE_DAYS of its own submitted_at — ${DRAW_DRAFT_MAX_AGE_DAYS} days: past that it leaves the draw queue, and it is still a draft, still readable, and still open to a volunteer — a validation makes it draw-eligible again only if it is inside the window, because the cutoff is on submitted_at and nothing moves that. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation. A validator that judges the entry a duplicate of one it does not supersede rejects in the published form, the reason duplicate_claim:<entry id>, which is taken as any other reason is: nothing new is signed, and the entry page and the confidence inputs read the id back out of it. There are three answers a validator can give and the door takes all three. approve: the validator fetched the cited source itself, it says what the entry says, and the record carries that validator's own snapshot_hash — plus its own measurement (runs and holds) when the entry is observed and the category is not a transcript one, which is the missing_observation refusal above; the door checks that it is there and well formed, and whether it passed is read later by derivation and standing. reject: the same work found otherwise, and the record needs a reason (missing_reason) and may carry the measurement it found — a reproduction's runs and holds, or an observation — but is not required to, because a rejection can rest on the citation alone. test_accepted false: the proposed test does not decide the claim, which is a judgment about the test rather than about the entry, recorded on a rejection and an approval alike so testVerdict can count the majority. A negative result is a first-class answer and earns what a positive one earns: the standing a completed validation is paid (STANDING_VALIDATION_ASSIGNED or STANDING_VALIDATION_VOLUNTEERED) is earned whichever way the decision went, and STANDING_VALIDATION_REPRODUCED is paid beside it for a record carrying a passing measurement, which is work and not a direction.`,
     refusals:
       "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, deadline_passed (the operator was drawn for this entry and the draw's seventy-two hours have run out — read off the assignment the draw made, so the answer is the same whether or not a sweep has closed it yet), unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, subject_authority (the operator's own domain is, or is under, an official host of the entry's subject's authority row, in a domain whose registry says a subject excludes its own authority), operator_not_in_domain (the operator is not attested in the entry's own domain), missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, legacy_entry (the entry is one the current schema cannot derive — checked after the signature and the status and before the schema, so an old entry is refused by name rather than as a schema failure), schema_invalid — whose 422 carries an errors array naming each field that failed, and which on this door is the validator's own record failing the schema rather than the entry's.",
   },
@@ -396,7 +390,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     parameters:
       "record (exactly the schema's reconfirmations item) and signature (nomankind-record-v1, kind reconfirmation); signed by the record's own agent",
     answers:
-      "201 with the derived entry: last_confirmed advanced to the record's date, the window reopened, a read-share slot seated or rotated, and the accrued bounty written to the ledger in the same batch as the event that earned it.",
+      "201 with the derived entry: last_confirmed advanced to the record's date and the freshness window reopened. The reconfirmer earns standing for the check and nothing else is owed, because no read of the entry was priced.",
     refusals:
       "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature, entry_not_verified, version_stale (the entry is stale because another version of the same model verified, and no reconfirmation can bring back the version it observed), unregistered_agent, operator_mismatch, submitter_agent, submitter_operator, untrusted_operator, subject_authority, operator_not_in_domain, missing_snapshot_hash, unexpected_reproduction, unexpected_observation, missing_reproduction, bad_reproduction, failed_reproduction, missing_observation, bad_observation, failed_observation; 409 entry_not_stale; 422 schema_invalid.",
   },
@@ -408,7 +402,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with { correction, target }: the correction entry as submitted, and the disputed entry as derivation left it. The correction enters the log as its own draft entry and is validated like any other, so nothing about the target moves until the challenge is upheld.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 422 self_dispute (the entry's own author may not challenge it, asked of the envelope's key and of the correction's author alike and before either is settled, so the rule holds whichever identity the filing came under); 403 author_mismatch; then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch; 409 dispute_open; 422 unknown_authority and source_not_official read against the entry being challenged (a correction's own category is never official-required, so the gate here is the target's domain and category: overturning a pricing, limit, deprecation, release or outage claim takes a citation of the target subject's own official source), bad_report_link, bad_revalidation_link, insufficient_standing (a registered operator's available standing, less what its open stakes already hold, is below the published dispute stake), schema_invalid.",
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 422 self_dispute (the entry's own author may not challenge it, asked of the envelope's key and of the correction's author alike and before either is settled, so the rule holds whichever identity the filing came under); 403 author_mismatch; 422 insufficient_standing (the filer's available standing, less what its open stakes already hold, is below the published dispute stake — and a bare key has no operator and so no standing, which is how a burner key is stopped from disputing for free); then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch; 409 dispute_open; 422 unknown_authority and source_not_official read against the entry being challenged (a correction's own category is never official-required, so the gate here is the target's domain and category: overturning a pricing, limit, deprecation, release or outage claim takes a citation of the target subject's own official source), bad_report_link, bad_revalidation_link, schema_invalid. The standing gate is in front of the submission pipeline because that pipeline fetches the cited page: a filing that cannot cover its stake costs the log no fetch at all.",
   },
   {
     method: "POST",
@@ -517,15 +511,18 @@ const ATTESTATION_PATH: readonly Endpoint[] = [
 ];
 
 /**
- * The paid loop's own doors (Section 9), in the order a caller meets them: what
- * the tiers are, buy one, claim the key it paid for, then the three reads a
- * holder makes about their own key.
+ * The key doors (Section 9, and decision D-127), in the order a caller meets
+ * them: what the tiers are, ask for a key at the free door, then the three
+ * reads a holder makes about their own key.
+ *
+ * A key buys nothing and costs nothing. It is a free identity: something for an
+ * alert endpoint, a receipt counter and a usage listing to be named under, and
+ * a cap of its own instead of the address it came from. The doors that sold one
+ * are gone and answer 410.
  *
  * Every one of them is JSON with `cache-control: no-store`, and the three
  * `/keys/me` doors take the key as a bearer token. They are account doors and
- * not reading doors, so they charge no quota and a key whose bill has not
- * cleared can still reach them — a door that refused `key_past_due` here would
- * lock a customer out of the page that fixes it.
+ * not reading doors, so they charge no quota.
  */
 const KEY_PATH: readonly Endpoint[] = [
   {
@@ -533,26 +530,17 @@ const KEY_PATH: readonly Endpoint[] = [
     path: "/keys/tiers",
     parameters: "—",
     answers:
-      "What is on sale: tiers (each with name, reads_per_day and key), price_micros_per_read, contributor_share_percent — an object keyed by evidence tier, stated and observed, because the split is published per tier and the observed one is larger — and contributor_share_floor_percent, the floor both of them sit at or above. Free and unauthenticated, which is the whole point of it.",
+      "{ tiers }: each with name, reads_per_day and key. A tier is a daily cap and nothing else — nothing is on sale, so there is no price here and no share of one. Free and unauthenticated, which is the whole point of it.",
     refusals: "405 with Allow: GET.",
   },
   {
     method: "POST",
-    path: "/keys/checkout",
-    parameters: "tier, email?",
+    path: "/keys/free",
+    parameters: "— (no body; an empty JSON object is accepted)",
     answers:
-      "200 with { session, url }: the provider's hosted checkout to send a buyer to. The success URL comes back to /keys/claim with the session id.",
+      "201 with { key, id, tier, status, limit, created_at }. The key is shown exactly once and is stored here only as a hash, so there is no door that can show it again; a holder that loses one asks for another tomorrow. No provider, no payment and no account: the door hands out an identity, and the record behind it was already free to read.",
     refusals:
-      "400 bad_body; 422 free_tier_needs_no_key, unknown_tier; 503 payments_unavailable when this deployment takes no money at all; 502 provider_error, bad_response, network with the provider's status and error code — never its message, and never a request header.",
-  },
-  {
-    method: "GET",
-    path: "/keys/claim",
-    parameters: "session=<checkout session id>",
-    answers:
-      "201 with { key, id, tier, status, customer, created_at }. The key is shown exactly once and is stored here only as a hash, so there is no door that can show it again. A browser — which is where the provider's success redirect lands a person — gets the same fields as a page, with that warning on it.",
-    refusals:
-      "400 missing_session; 404 unknown_session; 402 not_paid; 422 unknown_tier; 409 already_claimed, which is the unique index and not a check that hoped nobody raced: one checkout session mints one key however many times its success URL is opened.",
+      "400 bad_body for a body that is not an empty object; 429 key_today past one key per client address per UTC day, answered from the standing row for a caller that asks twice and from the unique index for two callers that ask at once, which is what keeps a free door from being a key mint; 503 no_keyed_tier where this deployment publishes no keyed tier at all; 405 with Allow: POST.",
   },
   {
     method: "GET",
@@ -567,7 +555,7 @@ const KEY_PATH: readonly Endpoint[] = [
     path: "/keys/me/usage",
     parameters: "days=<n>",
     answers:
-      "{ key, days: [{ date, reads, published }] }, over a window of thirty days by default and ninety at most. reads is this Worker's own counter, which is what the cap was enforced against; published is what the sealed read_count event for that day says the key read, which is what the ledger priced — { reads, seq }, or null while no event has been published for that day. A day where the two disagree is a day to ask about.",
+      "{ key, days: [{ date, reads, published }] }, over a window of thirty days by default and ninety at most. reads is this Worker's own counter, which is what the cap was enforced against; published is what the sealed read_count event for that day says the key read, which is the evidence of use the log publishes — { reads, seq }, or null while no event has been published for that day. A day where the two disagree is a day to ask about.",
     refusals: "401 as above; 400 bad_days.",
   },
   {
@@ -578,16 +566,25 @@ const KEY_PATH: readonly Endpoint[] = [
       "{ key, receipts: [{ kind, key_counter, counter, created_at, receipt }] } in the key's own counter order, keyset paged. The receipt goes out verbatim: the bytes that were signed, not a summary of them.",
     refusals: "401 as above; 400 bad_after, bad_limit.",
   },
-  {
-    method: "POST",
-    path: "/keys/me/portal",
-    parameters: "—",
-    answers:
-      "200 with { url }: the provider's own billing page for the customer behind this key. nomankind holds no card, no address and no invoice; it hands out the link.",
-    refusals:
-      "401 as above; 503 payments_unavailable; 502 provider_error, bad_response, network.",
-  },
 ];
+
+/**
+ * The doors the paid loop left behind (decision D-127).
+ *
+ * Named rather than deleted from the page: a caller that integrated against one
+ * of them is owed the reason it stopped answering, and 410 is that reason said
+ * in the protocol's own word — gone, and not coming back under another path.
+ */
+const RETIRED_DOORS: readonly { readonly path: string; readonly was: string }[] =
+  [
+    { path: "POST /keys/checkout", was: "the provider's hosted checkout" },
+    { path: "GET /keys/claim", was: "the key a checkout session paid for" },
+    { path: "POST /keys/me/portal", was: "the provider's billing page" },
+    {
+      path: "POST /stripe/webhook",
+      was: "the payment provider's own webhook",
+    },
+  ];
 
 /**
  * The change-alert doors (Section 9's "structured feeds and webhooks, change
@@ -632,7 +629,7 @@ const ALERT_PATH: readonly Endpoint[] = [
 const NOT_YET_BUILT: readonly { readonly what: string; readonly when: string }[] =
   [
     {
-      what: "Production submission, genesis, and the payout provider",
+      what: "Production submission and genesis",
       when: "M25",
     },
   ];
@@ -656,9 +653,10 @@ export function renderApi(ctx: PageContext): string {
     body: html`
       <div class="page-head"><h1>API</h1></div>
       <p class="lede">
-        Reads need no key at low volume, forever: the free tier is served to
-        anybody, and a key buys a higher rate, receipts that name it, and change
-        alerts. Writes are signed requests from a 1F916 agent key:
+        Reads need no key, ever: the record is public and CC0 from the seal
+        that covers it, and a key is a free identity — asked for at
+        <span class="mono">POST /keys/free</span>, costing nothing — that gives
+        a caller a cap of its own, receipts that name it, and change alerts. Writes are signed requests from a 1F916 agent key:
         there are no passwords and no sessions anywhere in this system. Every
         response is JSON with <span class="mono">cache-control: no-store</span>,
         and every read that serves a verified entry returns a signed receipt.
@@ -732,8 +730,8 @@ export function renderApi(ctx: PageContext): string {
           <span class="mono">environment_misconfigured</span> with the value it
           was given, <span class="mono">GET /health</span> included, and the
           sweep does nothing but record that reason on every step: the name
-          chooses the payout, payment and witness adapters, so a typo must not
-          be able to select the mocks quietly.
+          chooses the adapters this deployment runs with, the witness among
+          them, so a typo must not be able to select the mocks quietly.
         </p>
       </section>
 
@@ -911,10 +909,11 @@ POST
         <dl class="dl">
           <dt class="mono">entry_withheld</dt>
           <dd>
-            A free-tier read inside the release window: the entry's content is
-            not this reader's yet, and the release date is printed with the
-            refusal. A paid key or a signature from an agent bound to a
-            registered operator reaches inside the window.
+            The entry's content was not served to this reader. Nothing on this
+            log answers it: the release window is zero days, so every entry is
+            released the moment it is sealed. It is what a fork that publishes a
+            window of its own would stop on, and the release date is printed
+            with the refusal.
           </dd>
           <dt class="mono">unregistered_operator</dt>
           <dd>
@@ -1018,24 +1017,24 @@ POST
           revalidation at nomankind's expense.
         </p>
         <p class="note">
-          Filing takes a stake, so burner keys cannot dispute for free: a
-          registered operator stakes standing and a bare key a refundable filing
-          fee, both published on the policy page. A stake, a refund and a
-          forfeit are ledger records in the unit they were put up in, and the
-          amounts on them are the placeholders the policy page publishes.
+          Filing takes a stake, and the stake is contribution: an operator puts
+          up ${DISPUTE_STAKE_STANDING} standing to file a dispute, and less
+          again to ask for a revalidation, both published on
+          <a href="/policy">the policy page</a>. The stake is held while the
+          challenge is open, comes back when it is upheld and is forfeited when
+          it fails, so a challenge costs the operator that files it and never
+          costs it money.
         </p>
         <p class="note">
-          The reward an upheld challenge is paid is priced from the entry it
-          overturned: the row is written at the outcome with no amount, and the
-          ledger step prices it at exactly what the clawbacks came to — the
-          shares the entry's signers had accrued inside the holdback and lost —
-          in micro-USD, released when the last of those shares would have been.
-          An entry that had nothing still held prices the reward at zero. A
-          bare-key challenger's row names the key and no operator: the reward
-          accrues to the key and holds, and turning it into dollars means
-          verifying as an operator, whenever they choose. A revalidation request
-          has no reward of its own; a check that turns up a citation is upgraded
-          into a dispute, and the reward on that is the one above.
+          What an upheld challenge is paid is standing too, and one published
+          number rather than a share of anything: the challenger earns
+          STANDING_DISPUTE_UPHELD beside its stake coming back, and every
+          operator that signed the entry it overturned burns
+          STANDING_OVERTURNED_SIGNER, once each. Nothing is clawed back, because
+          nothing was ever paid out: no read of the overturned entry was
+          charged for. A revalidation request has a reward of its own when the
+          check finds the fact changed, and a check that turns up a citation is
+          upgraded into a dispute.
         </p>
       </section>
 
@@ -1069,13 +1068,13 @@ npm run attest -- answer &lt;model-key.json&gt; ${origin} &lt;attestation-id&gt;
 npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt; [--sign &lt;key.json&gt;]</pre>
         <p class="note">
           <span class="mono">--sign &lt;key.json&gt;</span> signs every read the
-          run makes with an operator's agent key (decision D-100). The answer
-          and the score both read each probed entry's own claim, and a claim
-          whose covering seal is still inside the release window is not served
-          to a free reader at all, so an unsigned run stops on one named line —
-          <span class="mono">withheld inside the release window; pass --sign
-          &lt;key.json&gt;</span> — rather than scoring a model against content
-          it never saw.
+          run makes with an operator's agent key. The answer and the score both
+          read each probed entry's own claim, and every claim in this log is
+          served to anybody who asks for it, so the flag buys the run its
+          operator's own daily cap rather than the content: it is what keeps a
+          scorer walking many probes out of the free tier of the address it came
+          from. Against a fork that publishes a release window of its own it is
+          also what reaches content that fork withholds.
         </p>
         <p class="note">
           The submit command gained the other half of an observed entry:
@@ -1135,40 +1134,30 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
       </section>
 
       <section class="panel" id="keys">
-        <h2 class="panel-title">Paid access: tiers and keys</h2>
+        <h2 class="panel-title">Free access: caps and keys</h2>
         <p class="note">
-          The release window (decision D-100) is what a key buys first. An
-          entry's content — its claim, what it changed from and to, when it took
-          effect, its citation, its evidence, its observation, and the words each
-          validator wrote — is served to a key or to a signed request from an
-          agent bound to a registered operator from the first minute, and to
-          everybody else ${RELEASE_WINDOW_DAYS} days after the seal that covers
-          its submission, when it becomes public and CC0 and enters the daily
-          mirror. The proof is never withheld from anyone: every event's seq,
-          instant, type, entry id and hash, every seal, anchor and operator
-          record, and each entry's id, domain, subject, category, status,
-          effective tier, entry hash, seal, signers and hashes are public and
-          free today, as they always were. Inside the window a free read of an
-          entry is 402 <span class="mono">unreleased</span> with its
-          <span class="mono">release_date</span>, a free sync stops at the
-          released head, and a free
-          <span class="mono">GET /entries/{id}</span> answers
-          <span class="mono">{ proof, release_date }</span>. The window is one
-          number in <a href="/policy">policy</a> and one rule everywhere: an
-          event's release date is its covering seal's
-          <span class="mono">sealed_at</span> plus that many days, an entry's is
-          its submission event's, and an unsealed event is not released at all —
-          except that the six registry events are never withheld at all, and are
-          served in full the moment a seal covers them.
+          The record is free (decision D-127). Every entry's content — its
+          claim, what it changed from and to, when it took effect, its citation,
+          its evidence, its observation, and the words each validator wrote — is
+          public and CC0 from the seal that covers its submission, served to
+          anybody who asks, with no key, no signature and no charge; the proof
+          was always public from the first minute and still is. There is nothing
+          a key reaches that a keyless reader does not, on any door:
+          <span class="mono">/read</span>,
+          <span class="mono">/sync</span>,
+          <span class="mono">/events</span> and
+          <span class="mono">GET /entries/{id}</span> answer the same record to
+          everybody, and the release window is one number in
+          <a href="/policy">policy</a>, at zero, with its code dormant behind it
+          for a fork that publishes a window of its own.
         </p>
         <p class="note">
-          Section 9: "The log is free to read at low volume, forever. Revenue
-          comes from high-rate API access, structured feeds and webhooks, change
-          alerts." A tier is a daily cap and nothing else. The free tier carries
-          no key and is counted per client; the paid tiers carry a key and are
-          counted per key. Every paid read is priced at
-          ${READ_PRICE_MICROS_PER_READ} micro-USD whichever tier bought it, so a
-          tier buys throughput and never a discount.
+          Section 9: "The log is free to read at low volume, forever." A tier is
+          a daily cap and nothing else. The free tier carries no key and is
+          counted per client; a keyed tier carries a key and is counted per key,
+          and the key is a free identity rather than a purchase — something for
+          an alert endpoint, a receipt counter and a usage listing to be named
+          under, and a cap of its own instead of the address it came from.
         </p>
         <div class="table-wrap">
           <table class="table">
@@ -1195,9 +1184,10 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
         <p class="note">
           The free tier is <span class="mono">${FREE_TIER}</span>: a request with
           no <span class="mono">Authorization</span> header at all is served on
-          it, counted against the address it came from. A paid read sends the key
-          as a bearer token, on <span class="mono">/read</span>,
-          <span class="mono">/sync</span> and the account doors below.
+          it, counted against the address it came from. A keyed read sends the
+          key as a bearer token, on <span class="mono">/read</span>,
+          <span class="mono">/sync</span> and the account doors below, and is
+          counted against that key instead.
         </p>
         <p class="note">
           Two more caps beside the per-client one, both on
@@ -1226,10 +1216,13 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           one word, in the order the gate checks: a header that is not a
           well-formed key is 401 <span class="mono">bad_key</span> before the
           database is touched, a key nobody holds is 401
-          <span class="mono">unknown_key</span>, a canceled subscription is 402
-          <span class="mono">key_canceled</span> and one whose bill did not clear
-          is 402 <span class="mono">key_past_due</span>. A reader who mistyped
-          their key is told which rule refused them rather than "unauthorized".
+          <span class="mono">unknown_key</span>, a key whose row reads canceled
+          is 402 <span class="mono">key_canceled</span> and one that reads
+          past_due is 402 <span class="mono">key_past_due</span> — two states
+          left over from the paid loop that a key minted at the free door is
+          never in, since there is no bill behind it to fall past due and no
+          subscription to cancel. A reader who mistyped their key is told which
+          rule refused them rather than "unauthorized".
         </p>
         <p class="note">
           Past the cap the answer is 429 with
@@ -1241,40 +1234,59 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
   "used": ${exampleCap}, "resets_at": "2026-09-12T00:00:00.000Z" }</pre>
         ${endpoints(
           "The key doors",
-          html`Buying one is the provider's hosted checkout and the claim that
-          follows it. The key is shown exactly once, at the claim: it is stored
-          here as a SHA-256 of the secret, so a copy of the key table cannot be
-          used to read as anybody, and a reader who loses a key cancels and buys
-          another.`,
+          html`Asking for one is <span class="mono">POST /keys/free</span>: no
+          body, no provider and nothing to pay, one key per client address per
+          UTC day. The secret is shown exactly once, in that answer: it is
+          stored here as a SHA-256 of itself, so a copy of the key table cannot
+          be used to read as anybody, and a holder who loses one asks for
+          another tomorrow.`,
           KEY_PATH,
         )}
         <p class="note">
-          The claim answers JSON to an agent and a page to a browser, because the
-          provider's success redirect lands a person on it and a person owed a
-          credential should not be shown a JSON blob they may close. The JSON is
-          the contract; the page is the same fields, through the same layout
-          every other page uses, with the one warning that matters — the key is
-          on that page and nowhere else, ever again.
+          Four doors of the paid loop are retired and answer 410
+          <span class="mono">{"error":"retired"}</span> (decision D-127). They
+          keep their addresses and their method checks, and each touches no
+          storage and reads no secret on the way to that answer, because a
+          caller that integrated against one is owed the reason it stopped
+          rather than a 404 that reads like a typo.
         </p>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>door</th>
+                <th>what it was</th>
+                <th>answer</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${RETIRED_DOORS.map(
+                (door) => html`<tr>
+                  <td class="mono">${door.path}</td>
+                  <td>${door.was}</td>
+                  <td class="mono">410 retired</td>
+                </tr>`,
+              )}
+            </tbody>
+          </table>
+        </div>
         <p class="note">
-          The contributor pool's share of this revenue is published per evidence
-          tier: ${CONTRIBUTOR_SHARE_PERCENT.stated} percent of a read of a stated
-          entry and ${CONTRIBUTOR_SHARE_PERCENT.observed} percent of a read of an
-          observed one, each at or above the published floor of
-          ${CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent. All three are on
-          <a href="/policy">the policy page</a>, and the share is a floor that
-          only rises.
+          What a contributor earns is standing and nothing else: the amounts are
+          on <a href="/policy">the policy page</a>, an entry's own acts are on
+          its page, and an operator's total is the fold on its page. There is no
+          share of anything to publish here, because no read of this record is
+          charged for.
         </p>
       </section>
 
       <section class="panel">
-        <h2 class="panel-title">Receipts for paid reads</h2>
+        <h2 class="panel-title">Receipts and the key's own counter</h2>
         <p class="note">
-          Every read receipt and every sync receipt now carries
+          Every read receipt and every sync receipt carries
           <span class="mono">key</span> and
           <span class="mono">key_counter</span>: the key's public id, never its
           secret, and that key's own running number. Both are
-          <span class="mono">null</span> on a free read, and a receipt issued
+          <span class="mono">null</span> on a read made with no key at all, and a receipt issued
           before M24 carries neither property at all and verifies exactly as it
           always did — the signing bytes cover the two fields only when the
           object has them.
@@ -1293,12 +1305,11 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           by side, which is the check Section 9 asks readers to make. Its
           <span class="mono">reads</span> is the quota counter the cap was
           enforced against; its <span class="mono">published</span> is the sealed
-          <span class="mono">read_count</span> event for that day, whose
-          <span class="mono">paid.keys[&lt;key id&gt;]</span> is what the ledger
-          priced and what the provider's meter was told. A reader holding their
-          own receipts can add them up and compare all three, and a day where
-          they disagree is a day to ask about. The event's
-          <span class="mono">paid</span> block also carries
+          <span class="mono">read_count</span> event for that day, which is what
+          the log publishes as evidence that the record is used and buys nobody
+          anything. A reader holding their own receipts can add them up and
+          compare the two, and a day where they disagree is a day to ask about.
+          The event also carries
           <span class="mono">reads</span> per entry and a
           <span class="mono">total</span>, and the per-key counts sum to that
           total.
@@ -1316,8 +1327,8 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           <span class="mono">counter_last - counter_first + 1 - receipts</span>
           is how many counters were drawn and never handed over, which is what a
           request that died between drawing its number and storing its receipt
-          leaves behind. It is evidence about the receipts and not about money,
-          so the ledger and the mirror pass it through untouched.
+          leaves behind. It is evidence about the receipts, so the
+          ledger and the mirror pass it through untouched.
         </p>
       </section>
 
@@ -1417,95 +1428,15 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
       </section>
 
       <section class="panel">
-        <h2 class="panel-title">The provider's webhook</h2>
-        <p class="note">
-          <span class="mono">POST ${STRIPE.webhook_path}</span> is the one door
-          the payment provider knocks on, and it is not for callers. It trusts
-          nothing it is sent until the signature over the raw body verifies
-          against this deployment's own signing secret and the message's own
-          timestamp is inside ${STRIPE.webhook_tolerance_seconds} seconds of now;
-          a forged or stale one is 400
-          <span class="mono">bad_signature</span>. A deployment that takes no
-          money, which is production's state until M25, answers 503
-          <span class="mono">payments_unavailable</span> and goes on serving the
-          free tier.
-        </p>
-        <p class="note">
-          It may change exactly one column: a key's status. A message it has
-          already acted on answers 200
-          <span class="mono">{ received: true, outcome: "duplicate" }</span>,
-          because a provider retries and a retried cancellation must not cancel a
-          key that was paid for again in between. Everything it understood is
-          recorded — applied, ignored, or about a subscription nobody here holds
-          a key for — and everything is 200 after that, because a provider told
-          anything else retries a message that was already handled.
-        </p>
-      </section>
-
-      <section class="panel">
-        <h2 class="panel-title">What the ledger pays, per evidence tier</h2>
-        <p class="note">
-          Section 9: "observed entries take a larger read share than stated ones,
-          by published policy, so the operators who measure are paid more than
-          the operators who copy". The split is published per tier and read off
-          <a href="/policy">the policy page</a>: on a stated entry
-          ${READ_SHARE_SPLIT.stated.submitter} percent of the read goes to the
-          submitter's operator and ${READ_SHARE_SPLIT.stated.validator} percent
-          to each read-share slot holder; on an observed entry
-          ${READ_SHARE_SPLIT.observed.submitter} percent and
-          ${READ_SHARE_SPLIT.observed.validator} percent. The tier that prices a read is
-          the one fixed when the entry verified, so a reconfirmation never
-          reprices the entry into another tier.
-        </p>
-        <p class="note">
-          The observed validator rate is earned rather than inherited. A slot
-          holder takes it only when its own signed record — the approval or the
-          reconfirmation that seated it — carries a passing measurement under the
-          n-of-k rule; a validator that accepted the test without running it is
-          paid at the stated rate on the same entry, and a slot whose seating
-          event cannot be read is priced at the stated rate rather than an
-          invented observed one. Every row says which it was: the ref on a
-          read_share row carries <span class="mono">tier</span> and, on a slot
-          holder's row, <span class="mono">measured</span>, beside the
-          <span class="mono">share_percent</span> actually applied.
-        </p>
-        <p class="note">
-          The difference between the two splits comes out of nomankind's share
-          and never out of the reader's: a paid read is
-          ${READ_PRICE_MICROS_PER_READ} micro-USD whatever tier the entry is, so
-          no reader pays more for an observed fact than for a stated one.
-        </p>
-      </section>
-
-      <section class="panel">
         <h2 class="panel-title">Units</h2>
         <p class="note">
-          Three units appear on the ledger, and every amount says which one it is
-          in on the row itself, so nothing has to be inferred from its size.
+          One unit appears on the ledger, and every amount says so on the row
+          itself. Standing units, which are not money and never convert to it:
+          earned and burned by the published formula, and staked by an operator
+          to file a dispute or ask for a revalidation. There is no micro-USD
+          amount anywhere in this record and no row denominated in a currency —
+          no read is priced, so there is nothing for one to count.
         </p>
-        <dl class="dl">
-          <dt class="mono">micros</dt>
-          <dd>
-            Micro-USD, a millionth of a dollar: 1,000,000 to the dollar. Every
-            read share, bounty, clawback, dispute reward and payout is an
-            integer count of them,
-            because one read's submitter share is a fraction of a cent and a
-            ledger that rounded to cents would pay the long tail nothing. The
-            price per read is on the policy page and nowhere else.
-          </dd>
-          <dt class="mono">standing</dt>
-          <dd>
-            Standing units, which are not money and never convert to it. Earned
-            and burned by the published formula, and staked by a registered
-            operator to file a dispute or ask for a revalidation.
-          </dd>
-          <dt class="mono">cents</dt>
-          <dd>
-            Whole US cents, on one row only: the refundable filing fee a bare key
-            puts up instead of standing, ${DISPUTE_FILING_FEE_CENTS} cents, so a
-            burner key cannot dispute for free.
-          </dd>
-        </dl>
       </section>
 
       <section class="panel">
@@ -1561,22 +1492,20 @@ npm run checkpoint -- [--wait-seal] ${origin} &lt;maintainer-key.json&gt; &lt;fi
           <span class="mono">GET /seals</span> until the head seal covers the
           entry, so the export carries an inclusion proof rather than a seal not
           yet made, and <span class="mono">--sign &lt;key.json&gt;</span> signs
-          every read it makes — the entry it just made is minutes old and so
-          inside the release window, and a free export of it is the released
-          view, on which the verifier answers
-          <span class="mono">entry_withheld</span>. Without the flag the walk
-          says so in one line —
-          <span class="mono">withheld inside the release window; pass --sign
-          &lt;key.json&gt;</span> — rather than printing a diff that means the
-          same thing.
+          every read it makes. The entry it just made is minutes old and is
+          exported whole all the same: the window is zero days, so a seal is all
+          it takes. Against a fork that publishes a window of its own an
+          unsigned export writes the released view, the verifier answers
+          <span class="mono">entry_withheld</span>, and the walk says so in one
+          line rather than printing a diff that means the same thing.
         </p>
         <p class="note">
           <span class="mono">--sign</span> signs the export's reads with an
           operator's agent key and <span class="mono">--key</span> presents an
-          API key: either reaches content that is still inside the release
-          window, and with neither the export writes the released view and says
-          so. <span class="mono">npm run read</span> and
-          <span class="mono">npm run sync</span> take the same two flags.
+          API key: either names who is reading, which is what decides the cap
+          the reads are counted against, and with neither the export is the same
+          record read on the free tier. <span class="mono">npm run read</span>
+          and <span class="mono">npm run sync</span> take the same two flags.
         </p>
         <p class="note">
           The verifier prints the schema version it checked against
@@ -1606,13 +1535,12 @@ npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT} [--domain &lt;slug
         </p>
         <pre class="block mono">npm run standing -- ${origin} &lt;operator&gt; [--sign &lt;key.json&gt;]</pre>
         <p class="note">
-          The fold is over the sealed events, and an event inside the release
-          window goes to a free reader as a hash line with its payload nulled,
-          which is nothing to fold. So this command takes
-          <span class="mono">--sign &lt;key.json&gt;</span> too, and run without
-          it against a log the window still holds it stops on the same line —
-          <span class="mono">withheld inside the release window; pass --sign
-          &lt;key.json&gt;</span> — rather than folding a null.
+          The fold is over the sealed events, and every sealed event goes out
+          whole here, so an unsigned run folds the same events a signed one
+          does. The command takes
+          <span class="mono">--sign &lt;key.json&gt;</span> all the same — for
+          the cap it is counted against, and for a fork whose own window would
+          hand a free reader a hash line with nothing in it to fold.
         </p>
         <p class="note">
           The whole log has a command of its own too: the daily CC0 mirror

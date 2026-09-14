@@ -86,7 +86,6 @@
 import type { BeaconReader } from "../adapters/beacon.js";
 import type { MirrorAdapter } from "../adapters/mirror.js";
 import type { PayoutAdapter } from "../adapters/payout.js";
-import type { PaymentsAdapter } from "../adapters/stripe.js";
 import type { EnvironmentWitnessAdapter } from "../adapters/witness.js";
 import {
   buildAnchor,
@@ -133,19 +132,7 @@ import {
   type ReadCountDuplicate,
   type ReadCountRow,
 } from "../events.js";
-import {
-  bountyAccrualRow,
-  clawbackRows,
-  disputeRewardRow,
-  payoutPlan,
-  payoutRow,
-  pricedReads,
-  readShareRows,
-  reconciliationRow,
-  type EntryShareState,
-  type LedgerRow,
-  type ReadShareSlotState,
-} from "../ledger.js";
+import type { LedgerRow } from "../ledger.js";
 import {
   DEFAULT_DOMAIN,
   DOMAIN_SLUGS,
@@ -201,7 +188,6 @@ import {
   type Cosignature,
   countAttestations,
   countEntries,
-  countMeterReports,
   countOperators,
   countSeals,
   countSealsSealedOn,
@@ -251,8 +237,6 @@ import {
   readCounterRangeOn,
   readCountsByKeyOn,
   meterReported,
-  owedMeterReports,
-  putMeterReport,
   recordAssignment,
   recordAssignmentMissed,
   recordAttestationExpired,
@@ -345,10 +329,10 @@ export interface SweepDeps {
   readonly ineligibleAgents?: ReadonlySet<string>;
   readonly anchor?: AnchorAdapter;
   /**
-   * Where a cycle's money leaves through (M21, decision D-053). Optional like
-   * the sealing deps and for the same reason: a caller that asks for the sweep
-   * without it gets every other step and a payout step that counts
-   * `payout_unconfigured` rather than one that pretends to have paid.
+   * Accepted and ignored (D-127). The payout step is retired — the record is
+   * free, so a cycle has nothing to pay — and no run reads this. It stays in
+   * the shape so a caller that still names an adapter is passing something
+   * dead rather than failing to compile.
    */
   readonly payout?: PayoutAdapter;
   /**
@@ -370,13 +354,6 @@ export interface SweepDeps {
    * anywhere reads it.
    */
   readonly trigger?: SweepTrigger;
-  /**
-   * Where the day's paid reads are reported (M24, decision D-078). Optional
-   * like the payout and mirror adapters and for the same reason: a caller that
-   * asks for the sweep without one gets a metering step that counts
-   * `metering_unavailable` rather than one that pretends to have billed.
-   */
-  readonly payments?: PaymentsAdapter;
   /**
    * What the alert step delivers through. The platform's own fetch when a
    * caller says nothing; a test injects its own so no alert leaves the process.
@@ -414,10 +391,8 @@ export const SWEEP_STEPS: readonly string[] = Object.freeze([
   "anchor",
   "mirror",
   "ledger",
-  "metering",
   "alerts",
   "standing",
-  "payout",
   "attestation",
   "counters",
   "chain",
@@ -519,8 +494,6 @@ export interface SweptNumbers {
   /** The first UTC day any counted receipt was issued on, or null for none. */
   readonly earliest_receipt_day: string | null;
   /** Key-days reported to the payment provider, and key-days still owed. */
-  readonly meter_reported_days: number;
-  readonly meter_owed: number;
   /** The alert step's four numbers: endpoints, how far it read, due, given up. */
   readonly alert_endpoints: number;
   readonly alert_cursor: number;
@@ -663,15 +636,6 @@ export interface SweepReport {
     readonly day: string | null;
     readonly ok: boolean;
   } | null;
-  /**
-   * What this run told the payment provider: how many key-days it reported and
-   * how many reads those carried (M24).
-   *
-   * Zeros rather than null when nothing was owed, because a run that reported
-   * nothing did examine the question — and on a deployment with no provider at
-   * all the answer is in `skipped` under `metering_unavailable`.
-   */
-  readonly metered: { readonly keys: number; readonly reads: number };
   /** What the alert step created, delivered, retried and gave up on (M24). */
   readonly alerts: AlertStepReport;
   /**
@@ -717,12 +681,6 @@ export interface SweepReport {
    * may do.
    */
   readonly chain: SweepChainReport | null;
-  /** The payouts this run made, one per operator at most (decision D-053). */
-  readonly payouts: readonly {
-    readonly operator: string;
-    readonly amount: number;
-    readonly transfer: string;
-  }[];
   /**
    * How many rows written before migration 0019 this run gave a duplicate key,
    * or null when the step refused.
@@ -2116,475 +2074,43 @@ export async function mirrorStep(
 export const LEDGER_CURSOR = "ledger";
 
 /**
- * How far into the day at LEDGER_CURSOR + 1 the ledger step has priced, as an
- * index into that day's priced reads. Zero, and the row absent, when no day is
- * part-way through.
+ * (i) The ledger step: walk what the log has sealed, and price none of it.
  *
- * Its own row rather than a field of the ledger cursor, because ledger_state
- * holds positions and this is one: the position inside a day, which the step
- * needs for exactly as long as a day takes more than one run to price. A row
- * somebody drops costs a day repriced, and repricing writes the same rows over
- * the same ids.
- */
-export const LEDGER_DAY_CURSOR = "ledger_day";
-
-/** Narrow one event to its own type, the way the kernel does it. */
-function isEvent<T extends EventType>(event: Event, type: T): event is Event<T> {
-  return event.type === type;
-}
-
-/** The UTC calendar day an instant falls on. */
-function dayOf(at: string): string {
-  return at.slice(0, 10);
-}
-
-/**
- * The cycle a payout belongs to.
+ * Decision D-127, "the record is free, no money anywhere". There is no read
+ * price, no contributor share, no holdback money, no bounty, no dispute reward
+ * and no payout, so there is nothing for this step to compute: it writes no
+ * `read_share`, `clawback`, `bounty`, `dispute_reward`, `payout` or
+ * `reconciliation` row, and it reports ok with a zero count. The rows the ledger
+ * already holds are not touched — they are the log's own history of the months
+ * the record was sold, and the ledger doors go on serving them.
  *
- * `PAYOUT_CYCLE` is monthly (decision D-053), so a cycle is a UTC calendar
- * month and its name is the month a date starts with. No policy number is
- * written here: the length of the cycle is the policy, and this is only how a
- * date is read as one.
- */
-function cycleOf(at: string): string {
-  return at.slice(0, 7);
-}
-
-/**
- * Whether the holder of one read-share slot measured anything (D-087).
+ * It stays a stage rather than disappearing, and it keeps its cursor, because
+ * the cursor is a restart invariant and not a pricing detail: `npm run
+ * import-mirror` sets LEDGER_CURSOR to the imported sealed head so a fork's
+ * first sweep carries on from there (src/cli/import-mirror.ts), and a step that
+ * stopped writing the cursor would leave that value standing at a position
+ * nothing ever moves. So the walk is now exactly one statement — the cursor
+ * forward to the sealed head — and the board goes on showing a ledger stage
+ * whose position a reader can check.
  *
- * The slot carries the seq of the event that seated it, so the answer is one
- * event read back by position and one pure question asked of the record it
- * carries — a validation's ApproverRecord or a reconfirmation's. Anything else
- * at that position, and an event that is no longer there at all, is false: the
- * stated rate, never an invented observed one.
- */
-async function slotMeasured(db: D1Like, seq: number): Promise<boolean> {
-  const event = await eventBySeq(db, seq);
-  if (event === null) return false;
-  if (isEvent(event, "validation") || isEvent(event, "reconfirmation")) {
-    return recordMeasured(event.payload.record);
-  }
-  return false;
-}
-
-/**
- * What pricing needs to know about an entry, read off its stored row.
- *
- * Every field is derivation's, exactly as `EntryShareState` asks: the author
- * operator off the signed core, the read-share slots off the sidecar, verified
- * off `verified_at`, and stale off the window against the day being priced
- * rather than against today — the day is what is being paid for, and an entry
- * that has gone stale since must not turn a fresh day's reads into half a day's.
- */
-async function shareStateOf(
-  db: D1Like,
-  stored: StoredEntry,
-  date: string,
-): Promise<EntryShareState> {
-  const entry = stored.entry as unknown as Record<string, unknown>;
-  const author = entry["author_operator"];
-  const expires = entry["expires_at"];
-  const slots = stored.sidecar.read_share_slots;
-  let seated: ReadShareSlotState[] | null = null;
-  if (slots !== null) {
-    seated = [];
-    for (const slot of slots) {
-      seated.push({
-        operator: slot.operator,
-        seq: slot.seq,
-        measured: await slotMeasured(db, slot.seq),
-      });
-    }
-  }
-  return {
-    author_operator: typeof author === "string" ? author : null,
-    read_share_slots: seated,
-    stale: typeof expires === "string" && expires < date,
-    verified: typeof entry["verified_at"] === "string",
-    effective_tier: stored.sidecar.effective_tier,
-  };
-}
-
-/** How far one run got through one published day. */
-interface DayPricing {
-  /** The rows it wrote: the chunk's shares, and the reconciliation if it ended the day. */
-  readonly rows: LedgerRow[];
-  /** How many of the day's entries this run priced. */
-  readonly priced: number;
-  /** The entry the next run resumes at; the day's length once it is done. */
-  readonly through: number;
-  /** Whether every entry of the day has now been priced. */
-  readonly done: boolean;
-  /** The day's reconciliation, meaningful only on the run that finished it. */
-  readonly ok: boolean;
-}
-
-/**
- * Price part of one published day of reads: a share row per holder, the
- * withheld halves of every stale entry, and — on the run that reaches the end
- * of the day — the day's reconciliation beside them.
- *
- * Section 9: "Each day's published count is the number the seal commits to and
- * payouts are computed from." So the count this reads is the sealed event's own
- * and never the receipts underneath it, and the reconciliation says whether the
- * two still agree.
- *
- * Part of a day, because pricing one entry costs a read of the entry and a read
- * per read-share slot it seated: a day on which a thousand entries were read is
- * thousands of statements, and a run that tried them all would be killed
- * part-way through rather than finish. So a run takes `limit` entries from
- * `from`, and the next run resumes where it stopped. What that costs is that a
- * day is priced across runs and not inside one transaction; what pays for it is
- * that every row is idempotent by its id, so a run that died after writing half
- * a chunk writes the same rows again and changes nothing.
- *
- * The reconciliation waits for the end of the day because it is about the whole
- * day: a reconciliation written over one chunk would name every entry the other
- * chunks priced as unpriced. It is built from what the earlier chunks actually
- * landed (`pricedEntriesOfDay`) plus this one's own rows, and every share row of
- * an entry carries that entry's published count, so which entries accrued is all
- * it needs from them.
- */
-async function priceDay(
-  db: D1Like,
-  event: Event<"read_count">,
-  from: number,
-  limit: number,
-): Promise<DayPricing> {
-  const { date } = event.payload;
-  const reads: readonly ReadCountRow[] = pricedReads(event);
-  const through = Math.min(from + limit, reads.length);
-
-  const states = new Map<string, EntryShareState>();
-  for (const read of reads.slice(from, through)) {
-    const stored = await getEntry(db, read.entry_id);
-    if (stored === null) continue;
-    states.set(read.entry_id, await shareStateOf(db, stored, date));
-  }
-
-  // Only this chunk's entries have a state, so only this chunk's entries get
-  // rows: an entry the run has not reached yet is not "unpriced", it is next.
-  const rows = readShareRows(event, (entryId) => states.get(entryId) ?? null);
-  const priced = through - from;
-  if (through < reads.length) {
-    return { rows, priced, through, done: false, ok: true };
-  }
-
-  const accruedEntries = await pricedEntriesOfDay(db, event.seq);
-  for (const row of rows) {
-    if (row.kind !== "read_share" || row.entry_id === null) continue;
-    accruedEntries.add(row.entry_id);
-  }
-  const accrued = new Map<string, number>();
-  for (const read of reads) {
-    if (accruedEntries.has(read.entry_id)) accrued.set(read.entry_id, read.count);
-  }
-  const reconciliation = reconciliationRow(event, accrued);
-  return {
-    rows: [...rows, reconciliation],
-    priced,
-    through,
-    done: true,
-    ok: reconciliation.ref["ok"] === true,
-  };
-}
-
-/**
- * Which of `bountiesForEntry`'s two shapes this row is: the door's unpriced
- * accrual, which still carries the stale window, or the priced ledger row,
- * which does not.
- */
-function isUnpricedAccrual(row: StoredBountyRow): row is BountyAccrual {
-  return typeof row.stale_from === "string";
-}
-
-/**
- * Price one reconfirmation's bounty: the halves the entry withheld while it was
- * stale, summed over exactly the window the accrual names.
- *
- * Null when there is nothing to do — a reconfirmation inside the window accrued
- * no bounty and the door wrote no row — and null when the row has already been
- * priced, which is what keeps the step idempotent under a cursor set back.
- */
-async function priceBounty(
-  db: D1Like,
-  event: Event<"reconfirmation">,
-  entryId: string,
-): Promise<LedgerRow | null> {
-  const accruals = await bountiesForEntry(db, entryId, LIST_PAGE_LIMIT);
-  const stored = accruals.find((candidate) => candidate.seq === event.seq);
-  if (stored === undefined) return null;
-  // A priced row carries the ledger record rather than the accrual, so the
-  // window is no longer at the top of the payload: it has been priced already.
-  if (!isUnpricedAccrual(stored)) return null;
-  const accrual = stored;
-
-  const pool = await bountyPoolRows(
-    db,
-    entryId,
-    accrual.stale_from,
-    dayOf(accrual.stale_until),
-  );
-  return bountyAccrualRow(event, accrual, pool);
-}
-
-/**
- * (i) Price everything the log has sealed since the last run.
- *
- * Whitepaper Section 9, Money: thirty percent of paid-read revenue goes to the
- * contributor pool, "accrued fees are held for thirty days before payout so an
- * upheld dispute can claw them back before they leave", and Section 7's stale
- * half builds up on the entry "as a reconfirmation bounty, paid to whoever makes
- * it fresh again". Three kinds of sealed event say those three things happened —
- * `read_count`, `dispute_upheld`, `reconfirmation` — and this reads them in log
- * order and writes what src/ledger.ts says they are worth.
- *
- * An upheld dispute is worth two things at once, and the second is the price of
- * the first: Section 6 "pays the challenger" and "claws back what the approvers
- * earned on it", so the clawbacks are written and the `dispute_reward` row the
- * dispute door left unpriced at that position is priced at what they come to.
- *
- * Only sealed events, ever: a price computed off an event the log has not
- * committed to could be recomputed differently later, and Section 9's promise
- * that an operator can reconcile a payout against the log would be worth
- * nothing. The cursor is what makes it a fold rather than a rescan, and losing
- * it costs only work: every row is idempotent by its id.
+ * LEDGER_DAY_CURSOR is gone with the pricing it indexed: it was the position
+ * inside a published day, and a day that is never priced has no inside.
  */
 export async function ledgerStep(
   db: D1Like,
   sealedHead: number,
 ): Promise<SweepReport["ledger"]> {
-  const cursor = (await ledgerCursor(db, LEDGER_CURSOR)) ?? -1;
-  const started = (await ledgerCursor(db, LEDGER_DAY_CURSOR)) ?? 0;
-  let offset = started;
-  let budget = LEDGER_ENTRIES_PER_RUN;
-  let readShares = 0;
-  let clawbacks = 0;
-  let bounties = 0;
-  let reconciliations = 0;
-  let entries = 0;
-  let day: string | null = null;
-  let ok = true;
-  // The last position this run finished with. A day it only got part-way
-  // through is not finished, so the cursor stays behind that event and the next
-  // run reads it again.
-  let through = cursor;
-  let stopped = false;
-
-  walk: for (let from = cursor + 1; from <= sealedHead; ) {
-    const to = Math.min(from + LIST_PAGE_LIMIT - 1, sealedHead);
-    const page = await eventsInRange(db, from, to);
-    for (const event of page) {
-      if (isEvent(event, "read_count")) {
-        const priced = await priceDay(db, event, offset, budget);
-        await putLedgerRows(db, priced.rows);
-        readShares += priced.rows.filter((row) => row.kind === "read_share").length;
-        entries += priced.priced;
-        budget -= priced.priced;
-        if (!priced.done) {
-          // Stop on the day rather than past it: the cursor is left below this
-          // event and the entry cursor says which entry of it comes next.
-          offset = priced.through;
-          day = event.payload.date;
-          stopped = true;
-          break walk;
-        }
-        offset = 0;
-        reconciliations += 1;
-        if (!priced.ok) ok = false;
-        through = event.seq;
-        if (budget <= 0) {
-          stopped = true;
-          break walk;
-        }
-        continue;
-      }
-
-      through = event.seq;
-
-      if (isEvent(event, "dispute_upheld")) {
-        const entryId = event.entry_id;
-        // Unreachable: `appendEvent` refuses an entry-scoped event without one.
-        if (entryId === null) continue;
-        const held = await heldReadShareRows(db, entryId, event.at);
-        const rows = clawbackRows(event, held);
-        if (rows.length > 0) {
-          await putLedgerRows(db, rows);
-          clawbacks += rows.length;
-        }
-        // Section 6: the same sentence that claws back "what the approvers
-        // earned on it" pays the challenger, so the clawbacks are the price of
-        // the reward the dispute door wrote unpriced at this position. An entry
-        // that had nothing held is priced at zero rather than left null: the
-        // step has passed the row, and what it found was nothing.
-        const owed = await unpricedStakeRow(db, `dispute_reward:${event.seq}`);
-        if (owed === null) continue;
-        const priced = disputeRewardRow(owed, rows);
-        await priceLedgerRow(db, priced.id, priced);
-        continue;
-      }
-
-      if (isEvent(event, "reconfirmation")) {
-        const entryId = event.entry_id;
-        if (entryId === null) continue;
-        const row = await priceBounty(db, event, entryId);
-        if (row === null) continue;
-        // The unpriced accrual out and the priced row in, in one batch: the
-        // delete is the only record that the bounty was ever owed, so it must
-        // not be able to land without the price.
-        await priceLedgerRow(db, row.id, row);
-        bounties += 1;
-      }
-    }
-    from = to + 1;
-  }
-
-  // A run that walked the whole range is through to the head, whether or not
-  // the last position it read carried anything to price.
-  if (!stopped) through = sealedHead;
-  if (offset !== started) await setLedgerCursor(db, LEDGER_DAY_CURSOR, offset);
-  await setLedgerCursor(db, LEDGER_CURSOR, through);
+  await setLedgerCursor(db, LEDGER_CURSOR, sealedHead);
   return {
-    through,
-    read_shares: readShares,
-    clawbacks,
-    bounties,
-    reconciliations,
-    entries,
-    day,
-    ok,
+    through: sealedHead,
+    read_shares: 0,
+    clawbacks: 0,
+    bounties: 0,
+    reconciliations: 0,
+    entries: 0,
+    day: null,
+    ok: true,
   };
-}
-
-// ---------------------------------------------------------------------------
-// (i2) The provider's meter: what the day's paid reads cost
-// ---------------------------------------------------------------------------
-
-/**
- * The metering step's cursor, named in `ledger_state` by the step itself.
- *
- * Its own cursor and not the ledger's, because the two answer to different
- * things: the ledger prices what the log published and can be replayed at will,
- * and this tells a payment provider to bill somebody, which cannot. A cursor
- * shared between them would mean a ledger replay re-billing every reader.
- */
-export const METERING_CURSOR = "metering";
-
-/** How many seconds there are in a day, less one: the day's last second. */
-const LAST_SECOND_OF_DAY = 86_399;
-
-/**
- * (i2) Report every published day of paid reads to the payment provider.
- *
- * Whitepaper Section 9, Money: "Read counts are published to the sealed log
- * daily, so nomankind cannot quietly change the numbers later." The bill
- * follows the published number and never a private one: this reads the sealed
- * `read_count` events, takes `paid.keys` exactly as the log committed to it, and
- * sends one meter event per key per day. A reader can therefore check their
- * invoice against a number that was public before it was billed.
- *
- * Exactly once per key-day, guarded twice: the `meter_reports` row, which is
- * written only after the provider said yes, and the identifier
- * `<environment>:<date>:<key id>`, which is the provider's own idempotency key —
- * so a run that wrote the row and died before it committed still cannot bill
- * twice. The timestamp is the day's last second, because the usage belongs to
- * the day it was read on and not to the morning it was reported.
- *
- * Refusals are counted, never repaired. An adapter that is not there at all
- * stops the step (`metering_unavailable`): reporting half a day would leave the
- * rest to a run that could not tell which half. Anything else refuses one
- * key-day (`metering_failed`), leaves its row unwritten, and the next run tries
- * it again, because the cursor only moves past events every key-day of which
- * has a row.
- */
-async function meteringStep(
-  db: D1Like,
-  environment: string,
-  payments: PaymentsAdapter | undefined,
-  sealedHead: number,
-  now: Date,
-  skip: Skip,
-): Promise<SweepReport["metered"]> {
-  const metered = { keys: 0, reads: 0 };
-  if (payments === undefined) {
-    skip("metering_unavailable");
-    return metered;
-  }
-
-  const cursor = (await ledgerCursor(db, METERING_CURSOR)) ?? -1;
-  if (cursor >= sealedHead) return metered;
-
-  // Bounded like every other step: the rest is the next run's.
-  const to = Math.min(cursor + LIST_PAGE_LIMIT, sealedHead);
-  const page = await eventsInRange(db, cursor + 1, to);
-
-  let through = cursor;
-  let stalled = false;
-  for (const event of page) {
-    if (stalled) break;
-    let complete = true;
-
-    if (isEvent(event, "read_count")) {
-      const paid = event.payload.paid;
-      const keys = paid === undefined ? {} : paid.keys;
-      for (const keyId of Object.keys(keys).sort()) {
-        const reads = keys[keyId] as number;
-        if (reads <= 0) continue;
-        if (await meterReported(db, keyId, event.payload.date)) continue;
-
-        const key = await keyById(db, keyId);
-        if (key === null) {
-          // A published key nobody holds: there is no customer to bill, so the
-          // key-day stays owed rather than being quietly dropped.
-          skip("metering_failed");
-          complete = false;
-          continue;
-        }
-
-        const identifier = `${environment}:${event.payload.date}:${keyId}`;
-        const reported = await payments.reportUsage({
-          customer: key.customer,
-          value: reads,
-          identifier,
-          timestamp: Math.floor(
-            Date.parse(`${event.payload.date}T00:00:00Z`) / 1000,
-          ) + LAST_SECOND_OF_DAY,
-        });
-        if (!reported.ok) {
-          if (reported.refusal === "payments_unavailable") {
-            skip("metering_unavailable");
-            complete = false;
-            stalled = true;
-            break;
-          }
-          skip("metering_failed");
-          complete = false;
-          continue;
-        }
-
-        await putMeterReport(db, {
-          key_id: keyId,
-          date: event.payload.date,
-          event_seq: event.seq,
-          reads,
-          identifier,
-          reported_at: now.toISOString(),
-        });
-        metered.keys += 1;
-        metered.reads += reads;
-      }
-    }
-
-    if (!complete) {
-      stalled = true;
-      continue;
-    }
-    through = event.seq;
-  }
-
-  if (through > cursor) await setLedgerCursor(db, METERING_CURSOR, through);
-  return metered;
 }
 
 /**
@@ -2998,7 +2524,6 @@ async function sweptNumbers(
     new Date(Date.parse(at) - MILLISECONDS_PER_DAY).toISOString(),
   );
   const head = await headSeq(db);
-  const meterCursor = (await ledgerCursor(db, METERING_CURSOR)) ?? -1;
   return {
     drafts: await countEntries(db, { status: "draft" }),
     head_seq: head ?? -1,
@@ -3010,11 +2535,6 @@ async function sweptNumbers(
     ).length,
     seals_yesterday: await countSealsSealedOn(db, yesterday),
     earliest_receipt_day: await earliestReadReceiptDay(db),
-    meter_reported_days: await countMeterReports(db),
-    meter_owed:
-      sealedHead < 0
-        ? 0
-        : await owedMeterReports(db, meterCursor, sealedHead, LIST_PAGE_LIMIT),
     alert_endpoints: await countAlertEndpoints(db),
     alert_cursor: await alertCursor(db),
     alert_due: await countDueDeliveries(db, at),
@@ -3174,133 +2694,6 @@ export async function duplicateBackfillStep(
     skip("duplicate_backfill_failed");
     return null;
   }
-}
-
-/**
- * One operator's cycle: what is released, whether it clears the floor, and the
- * transfer that took it out.
- *
- * Decision D-053: at most one payout batch per operator per cycle, above a
- * published minimum. Below it nothing is claimed and nothing is marked, so the
- * rows carry forward whole to the next cycle (src/ledger.ts, `payoutPlan`).
- *
- * Both halves select by operator — `releasedUnpaidRows` on the `operator_id`
- * column, `payoutPlan` on the row's own operator — so a row with no operator is
- * never selected and never paid. That is the whole mechanism behind Section 6's
- * bare-key reward: it accrues to the key and holds, and turning it into dollars
- * means verifying as an operator, which gives the row an operator to pay.
- *
- * Whether this operator's cycle has been paid already is the step's question
- * and not this one's: it comes back with the list of who is owed anything, in
- * the same statement, so a run that has nothing to do costs exactly one read.
- */
-async function payOperator(
-  db: D1Like,
-  adapter: PayoutAdapter,
-  operator: OperatorRecord,
-  sealedHead: number,
-  at: string,
-  skip: Skip,
-): Promise<SweepReport["payouts"][number] | null> {
-  const plan = payoutPlan(operator.id, await releasedUnpaidRows(db, operator.id, at), at);
-  if (plan.rows.length === 0) {
-    // Nothing due, or due but under the floor: either way nothing leaves and
-    // nothing is claimed, and what there is carries to the next cycle.
-    skip("payout_below_minimum");
-    return null;
-  }
-
-  // The reference is the payment provider's name for this operator, stored when
-  // it completed onboarding (Section 11). Nothing can be sent without one.
-  const reference = operator.details["payout_reference"];
-  if (typeof reference !== "string" || reference === "") {
-    skip("payout_unavailable");
-    return null;
-  }
-
-  const transfer = await adapter.transfer(reference, plan.amount);
-  if (!transfer.ok) {
-    // "unavailable" is nobody having asked and is retried next cycle;
-    // "failed" is the provider having refused and waits for a person.
-    skip(transfer.reason === "unavailable" ? "payout_unavailable" : "payout_failed");
-    return null;
-  }
-
-  await recordPayout(
-    db,
-    payoutRow(plan, sealedHead, at, transfer.transfer),
-    plan.rows,
-  );
-  return { operator: operator.id, amount: plan.amount, transfer: transfer.transfer };
-}
-
-/**
- * (k) Pay the cycle.
- *
- * Whitepaper Section 9: "Accrued fees are held for thirty days before payout",
- * and decision D-053 batches what is left per operator per calendar month above
- * a published minimum. Work due at most once a month, on a step that runs every
- * few minutes — so the run asks one question before it asks anybody anything.
- *
- * Who holds something released and unpaid, and which of them this cycle has
- * already paid? One statement on the `ledger_operator_unpaid` index, and only
- * the operators it names are asked anything further. Walking the whole
- * directory to ask two questions of each was a monthly job's cost paid on every
- * run of the sweep, and an operator with nothing due is answered by its absence
- * from that list rather than by two reads of its own.
- *
- * Per operator, because that is what D-053 says: "at most one payout batch per
- * operator per cycle". A single gate over the whole log — has anybody been paid
- * this month — made the first operator paid each month close the month for
- * everyone else, so an operator crossing the minimum on the twentieth waited
- * for a cycle it was owed. Now an operator already paid inside the cycle is
- * counted `payout_this_cycle` and passed over, and the operators beside it are
- * paid in the same run.
- *
- * The transfer is the one thing in this whole file that leaves the system, so it
- * is the one thing whose failure is counted three ways: below the floor,
- * unavailable, refused. On none of them is a row marked paid.
- */
-export async function payoutStep(
-  db: D1Like,
-  adapter: PayoutAdapter | undefined,
-  sealedHead: number,
-  at: string,
-  skip: Skip,
-): Promise<SweepReport["payouts"]> {
-  if (adapter === undefined) {
-    skip("payout_unconfigured");
-    return [];
-  }
-
-  const due = await operatorsDue(db, at, cycleOf(at));
-  if (due.length === 0) {
-    // Nothing is past the holdback anywhere: the same answer an operator below
-    // the floor gets, because in both cases nothing leaves and nothing is
-    // claimed, and what there is carries to the next cycle.
-    skip("payout_below_minimum");
-    return [];
-  }
-
-  const payouts: SweepReport["payouts"][number][] = [];
-  for (const owed of due) {
-    if (owed.paidInCycle) {
-      // D-053 pays an operator once a cycle: this one has had its batch, and
-      // what it has accrued since carries to the next month.
-      skip("payout_this_cycle");
-      continue;
-    }
-    const operator = await getOperator(db, owed.operator);
-    if (operator === null) {
-      // A ledger row naming an operator the directory does not have. Nothing
-      // can be sent, for the same reason a missing payout reference cannot.
-      skip("payout_unavailable");
-      continue;
-    }
-    const made = await payOperator(db, adapter, operator, sealedHead, at, skip);
-    if (made !== null) payouts.push(made);
-  }
-  return payouts;
 }
 
 /**
@@ -3964,14 +3357,12 @@ export async function runSweep(
     );
     mirrorDetail = mirrored.detail;
 
-    // (i), (j) and (k). The money and the standing, read off what the log has
+    // (i) and (j). The ledger and the standing, read off what the log has
     // sealed — this run's own seal included, which is why they come after the
-    // seal step and not before it. A log with no seal at all has nothing any of
-    // them may read, and all three say so in the same word.
+    // seal step and not before it. A log with no seal at all has nothing either
+    // of them may read, and both say so in the same word.
     let ledger: SweepReport["ledger"] = null;
     let standing: SweepReport["standing"] = null;
-    let payouts: SweepReport["payouts"] = [];
-    let metered: SweepReport["metered"] = { keys: 0, reads: 0 };
     let alerts: AlertStepReport = {
       created: 0,
       delivered: 0,
@@ -3983,29 +3374,14 @@ export async function runSweep(
     if (sealedHead === null) {
       skip("unsealed");
       skip("unsealed");
-      skip("unsealed");
-      // The same three refusals the report counts, told apart by step. The two
-      // M24 steps read the same sealed events, so they are behind the same wall
-      // and the board says so — without a fourth and fifth count, because the
-      // report's `unsealed` has meant "the three money steps" since M21.
+      // The same refusals the report counts, told apart by step. The metering
+      // and payout steps used to stand behind this same wall and are retired
+      // (D-127), so the count is two rather than the three it was since M21.
       noteSkip("standing", "unsealed");
-      noteSkip("payout", "unsealed");
-      noteSkip("metering", "unsealed");
       noteSkip("alerts", "unsealed");
     } else {
       ledger = await ledgerStep(db, sealedHead.last_seq);
-      // (i2) The provider's meter, after the ledger and off the same sealed
-      // events: what the log published is what a reader is billed for.
-      enter("metering");
-      metered = await meteringStep(
-        db,
-        env.ENVIRONMENT,
-        deps.payments,
-        sealedHead.last_seq,
-        deps.now,
-        skip,
-      );
-      // (i3) The change alerts, after the meter and before the standing fold:
+      // (i2) The change alerts, after the ledger and before the standing fold:
       // an endpoint hears about a sealed change in the run that sealed it.
       enter("alerts");
       alerts = await runAlertStep(
@@ -4025,8 +3401,6 @@ export async function runSweep(
       );
       enter("standing");
       standing = await standingStep(db, sealedHead.last_seq, at, skip, cache);
-      enter("payout");
-      payouts = await payoutStep(db, deps.payout, sealedHead.last_seq, at, skip);
     }
 
     // (j2) The counters the public pages read, after the standing step so the
@@ -4074,10 +3448,8 @@ export async function runSweep(
       upgraded,
       mirror: mirrored.report,
       ledger,
-      metered,
       alerts,
       standing,
-      payouts,
       counters: counted.counters,
       swept: counted.swept,
       chain,
@@ -4169,13 +3541,11 @@ function nothingSwept(
     upgraded: null,
     mirror: null,
     ledger: null,
-    metered: { keys: 0, reads: 0 },
     alerts: { created: 0, delivered: 0, failed: 0, retried: 0 },
     standing: null,
     counters: null,
     swept: null,
     chain: null,
-    payouts: [],
     duplicates: null,
     skipped,
     durations,
@@ -4313,16 +3683,11 @@ function stepRows(
               ? { date: null, detail: board.mirrorDetail }
               : { ...report.mirror },
           ledger: report.ledger === null ? { through: null } : { ...report.ledger },
-          metering: { ...report.metered },
           alerts: { ...report.alerts },
           standing:
             report.standing === null
               ? { position: null }
               : { ...report.standing, trusted: [...report.standing.trusted] },
-          payout: {
-            payouts: report.payouts.length,
-            amount: report.payouts.reduce((total, one) => total + one.amount, 0),
-          },
           attestation: { expired: report.attestations.expired.length },
           // The counters step's own row carries both the counts it wrote and
           // the status board's numbers it took at the same instant, so the

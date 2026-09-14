@@ -42,8 +42,6 @@ import {
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
   RATE_TIERS,
-  READ_SHARE_SPLIT,
-  READ_PRICE_MICROS_PER_READ,
 } from "../src/policy.js";
 import {
   signReadReceipt,
@@ -575,35 +573,31 @@ describe("the day's published count", () => {
 });
 
 // ---------------------------------------------------------------------------
-// (c) The money, over the paid half only
+// (c) The money: there is none
 // ---------------------------------------------------------------------------
 
 describe("the ledger over a day with free reads in it", () => {
-  it("prices the paid block and nothing beside it", async () => {
-    const rows = (
-      await entryLedgerRows(store.db, first["id"] as string, LIST_PAGE_LIMIT)
-    ).filter((row: LedgerRow) => row.kind === "read_share");
-    expect(rows.length).toBeGreaterThan(0);
-
-    // Three paid reads of entry one, not the four the day published: the free
-    // read earned nobody anything, because nobody was billed for it.
-    expect(rows.every((row) => row.reads === 3)).toBe(true);
-    const submitter = rows.find((row) => row.role === "submitter");
-    // A bare-key submission has no operator to pay, so the slots are the rows.
-    expect(submitter).toBeUndefined();
-    expect(rows.map((row) => row.amount)).toEqual(
-      rows.map(() =>
-        Math.floor((3 * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.stated.validator) / 100),
-      ),
+  it("prices neither the paid block nor anything beside it", async () => {
+    // Decision D-127, "the record is free, no money anywhere": the day's counts
+    // are still published, per key, as evidence of use — and not one read of
+    // them, paid half or free half, is worth anything to anybody.
+    const rows = await entryLedgerRows(
+      store.db,
+      first["id"] as string,
+      LIST_PAGE_LIMIT,
+    );
+    expect(rows.filter((row: LedgerRow) => row.kind === "read_share")).toEqual(
+      [],
+    );
+    expect(rows.filter((row: LedgerRow) => row.kind === "bounty_pool")).toEqual(
+      [],
     );
   }, 600_000);
 
-  it("prices the day exactly as the mirror recomputes it", async () => {
+  it("agrees with the mirror's own recompute: both build nothing", async () => {
     // The ledger table is a cache of the fold the mirror runs over the sealed
-    // events, so the two readings of one day have to be one answer — and for a
-    // day with a `paid` block that means both of them price `paid.reads`. A
-    // mirror that priced the whole day's traffic would hand a verifier a
-    // different number than the row the sweep wrote, on the same events.
+    // events, so the two readings of one day have to be one answer. Under
+    // D-127 that answer is the empty one, on both sides.
     const sealed = (await latestSeal(store.db))!;
     const events = await eventsAfter(store.db, -1, LIST_PAGE_LIMIT * 4);
     const id = first["id"] as string;
@@ -613,20 +607,15 @@ describe("the ledger over a day with free reads in it", () => {
     const stored = (
       await entryLedgerRows(store.db, id, LIST_PAGE_LIMIT)
     ).filter((row: LedgerRow) => row.kind === "read_share");
-    expect(recomputed.length).toBeGreaterThan(0);
+    expect(recomputed).toEqual([]);
     expect(recomputed).toEqual(stored);
-    // Three paid reads of entry one, and not the four the day published.
-    expect(recomputed.every((row) => row.reads === 3)).toBe(true);
   }, 600_000);
 
-  it("reconciles the day against the priced rows and says ok", async () => {
+  it("reconciles nothing, because it accrued nothing", async () => {
     const answer = await get("/ledger", { now: day(1) });
     expect(answer.status).toBe(200);
-    const reconciliations = answer.body["reconciliations"] as LedgerRow[];
-    const zero = reconciliations.find((row) => row.date === date(0))!;
-    expect(zero.ref["ok"]).toBe(true);
-    expect(zero.ref["published_total"]).toBe(5);
-    expect(zero.ref["accrued_total"]).toBe(5);
+    expect(answer.body["reconciliations"]).toEqual([]);
+    expect(answer.body["payouts"]).toEqual([]);
   }, 600_000);
 });
 

@@ -44,7 +44,6 @@ import {
 import {
   DEFAULT_DOMAIN,
   ASSIGNMENT_WINDOW_HOURS,
-  DISPUTE_FILING_FEE_CENTS,
   DISPUTE_STAKE_STANDING,
   LIST_PAGE_LIMIT,
   REVALIDATION_REQUEST_STAKE_STANDING,
@@ -161,14 +160,27 @@ let k4: Party;
 let k5: Party;
 let parties: Party[] = [];
 
-/** Bare keys: the author of every entry, and the two challengers. */
+/** A bare key: the author of every entry. */
 let author: TestAgent;
+/**
+ * The two challengers, each bound to a registered operator.
+ *
+ * Bound, and not bare, since decision D-127: a dispute is staked in standing
+ * and nothing else, so a bare key has nothing to put up and the door refuses it
+ * `insufficient_standing` (pinned below). Registered but never named, so the
+ * trusted pool is exactly the five parties it always was and no draw or
+ * threshold in this file moves.
+ */
+let challengerParty: Party;
+let secondChallengerParty: Party;
 let challenger: TestAgent;
 let secondChallenger: TestAgent;
 /** Three more bare keys, for the flood Section 12 answers at the threshold. */
 let readers: TestAgent[] = [];
 
 let sealingKey = "";
+/** The fetcher the world runs on, kept so a test can count what it was asked. */
+let fetcher: FixtureFetcher;
 
 /** The entry that is challenged and overturned. */
 let overturnedEntry: Core;
@@ -437,7 +449,7 @@ function artifact(observer: string, note: string): Record<string, unknown> {
 const FIXTURE_STANDING = DISPUTE_STAKE_STANDING * 4;
 
 async function fundStanding(): Promise<void> {
-  for (const party of parties) {
+  for (const party of [...parties, challengerParty, secondChallengerParty]) {
     await setOperatorStanding(
       world.store.db,
       party.operator,
@@ -507,8 +519,10 @@ beforeAll(async () => {
   const store = await openTestDatabase();
   const maintainer = await makeAgent();
   author = await makeAgent();
-  challenger = await makeAgent();
-  secondChallenger = await makeAgent();
+  challengerParty = await makeParty("challenger.example");
+  secondChallengerParty = await makeParty("second-challenger.example");
+  challenger = challengerParty.agent;
+  secondChallenger = secondChallengerParty.agent;
   readers = [await makeAgent(), await makeAgent(), await makeAgent()];
 
   k1 = await makeParty("k1.example");
@@ -522,8 +536,15 @@ beforeAll(async () => {
     agent: maintainer,
   };
 
+  fetcher = new FixtureFetcher(PAGES);
+
   const records: Record<string, string[]> = {};
-  for (const party of [...parties, maintainerParty]) {
+  for (const party of [
+    ...parties,
+    maintainerParty,
+    challengerParty,
+    secondChallengerParty,
+  ]) {
     records[txtRecordName(party.operator)] = [party.agent.agentId];
   }
 
@@ -540,7 +561,7 @@ beforeAll(async () => {
       now: NOW,
       dns: new FixtureResolver(records),
       payout: new MockPayoutAdapter(),
-      fetcher: new FixtureFetcher(PAGES),
+      fetcher,
     },
     maintainer,
   };
@@ -550,6 +571,10 @@ beforeAll(async () => {
     await name(party);
   }
   await register(maintainerParty);
+  // Registered and not named: a challenger needs an operator to stake standing
+  // through, and needs no place in the trusted pool to file.
+  await register(challengerParty);
+  await register(secondChallengerParty);
   await fundStanding();
 
   overturnedEntry = await verified(
@@ -589,6 +614,7 @@ describe("a challenge by a bare key", () => {
       challenger,
       overturnedEntry,
       "Kestrel-1 seat pricing is $44 per seat per month, not $40",
+      challengerParty.operator,
     );
     upheldCorrectionId = core["id"] as string;
 
@@ -604,7 +630,7 @@ describe("a challenge by a bare key", () => {
       expect.objectContaining({
         id: upheldCorrectionId,
         challenger: challenger.agentId,
-        operator: null,
+        operator: challengerParty.operator,
         outcome: "open",
         citation: CORRECTED_URL,
         snapshot_hash: CORRECTED_HASH,
@@ -651,24 +677,26 @@ describe("a challenge by a bare key", () => {
       "dispute_refund",
       "dispute_reward",
     ]);
-    // A bare key stakes a refundable filing fee, not standing.
+    // One stake, in standing, whoever filed: D-127 retired the bare key's
+    // refundable filing fee with the rest of the money, so there is no second
+    // unit a row can be in — and no filer without an operator to stake it.
     expect(rows[0]).toEqual(
       expect.objectContaining({
         agent: challenger.agentId,
-        operator: null,
-        unit: "cents",
-        amount: DISPUTE_FILING_FEE_CENTS,
+        operator: challengerParty.operator,
+        unit: "standing",
+        amount: DISPUTE_STAKE_STANDING,
         correction_entry_id: upheldCorrectionId,
       }),
     );
-    expect(rows[1]!.amount).toBe(DISPUTE_FILING_FEE_CENTS);
+    expect(rows[1]!.amount).toBe(DISPUTE_STAKE_STANDING);
     // The reward is owed at this position and priced by the sweep's ledger
     // step, from the clawbacks of this same event: nothing has swept yet, so
     // the row is the fact without the number.
     expect([rows[2]!.unit, rows[2]!.amount]).toEqual([null, null]);
-    // A bare-key challenger's reward accrues to the key, which the row names.
+    // The reward names the operator that staked and the key that signed.
     expect([rows[2]!.operator, rows[2]!.agent]).toEqual([
-      null,
+      challengerParty.operator,
       challenger.agentId,
     ]);
   }, 120_000);
@@ -678,6 +706,7 @@ describe("a challenge by a bare key", () => {
       secondChallenger,
       standingEntry,
       "Kestrel-2 seat pricing is $44 per seat per month, not $40",
+      secondChallengerParty.operator,
     );
     const first = await file(secondChallenger, standingEntry, other);
     expect(first.status).toBe(201);
@@ -687,6 +716,7 @@ describe("a challenge by a bare key", () => {
       challenger,
       standingEntry,
       "Kestrel-2 seat pricing is $44, filed twice",
+      challengerParty.operator,
     );
     const refused = await file(challenger, standingEntry, again);
     expect([refused.status, refused.body["error"]]).toEqual([
@@ -735,7 +765,8 @@ describe("a challenge its own validators reject", () => {
       "dispute_stake",
       "dispute_forfeit",
     ]);
-    expect(rows[1]!.amount).toBe(DISPUTE_FILING_FEE_CENTS);
+    expect(rows[1]!.unit).toBe("standing");
+    expect(rows[1]!.amount).toBe(DISPUTE_STAKE_STANDING);
   }, 240_000);
 });
 
@@ -1172,6 +1203,7 @@ describe("failure reports", () => {
       challenger,
       upgradedEntry,
       "Kestrel-5 pricing, upgraded by a stranger",
+      challengerParty.operator,
     );
     const refused = await file(challenger, upgradedEntry, stranger, {
       from_report_seq: reportSeq,
@@ -1208,16 +1240,21 @@ describe("the overturned entry", () => {
     expect(entryOf["overturned_by"]).toBe(upheldCorrectionId);
   }, 240_000);
 
-  it("prices the challenger's reward at zero, because nothing was held", async () => {
-    // Section 6 pays the challenger what the entry's approvers lost, and this
-    // entry was never read, so it lost nothing. The sweeps above have carried
-    // the ledger step past the outcome, and a row it has passed is priced —
-    // explicitly zero, never a null left to read as an amount still to come.
+  it("leaves the challenger's reward unpriced, because there is nothing to price it in", async () => {
+    // Section 6 pays the challenger what the entry's approvers lost, and under
+    // D-127 an entry earns nothing however often it is read — so there is no
+    // sum of clawbacks to price the reward from and no currency to price it
+    // in. src/stake.ts writes the row as it always did, the fact that a reward
+    // is owed at the position it became owed, and the sweep's ledger step
+    // leaves it there: unit and amount null together.
     const rows = await stakes(overturnedEntry["id"] as string);
     const reward = rows.find((row) => row.kind === "dispute_reward")!;
-    expect([reward.unit, reward.amount]).toEqual(["micros", 0]);
-    // Still the key's, and still at the position it became owed.
-    expect([reward.operator, reward.agent]).toEqual([null, challenger.agentId]);
+    expect([reward.unit, reward.amount]).toEqual([null, null]);
+    // Still the challenger's, and still at the position it became owed.
+    expect([reward.operator, reward.agent]).toEqual([
+      challengerParty.operator,
+      challenger.agentId,
+    ]);
     expect(
       (await entryLedgerRows(
         world.store.db,
@@ -1227,26 +1264,30 @@ describe("the overturned entry", () => {
     ).toEqual([]);
   }, 240_000);
 
-  it("accrues that reward to the key, and pays it to no operator", async () => {
-    // Section 6: a bare-key challenger's reward "accrues to the key and holds",
-    // and turning it into dollars means verifying as an operator. The row
-    // carries no operator, and every read the payout cycle makes selects by
-    // one — so the reward is on the ledger, and no operator can be paid it.
+  it("pays that reward to nobody, because there is no payout at all", async () => {
+    // Under D-127 the reward is a row with no number in it and there is no
+    // cycle to pay it: no operator, the challenger's own included, can ever be
+    // paid a thing the ledger never priced.
     const rows = await entryLedgerRows(
       world.store.db,
       overturnedEntry["id"] as string,
       LIST_PAGE_LIMIT,
     );
     const reward = rows.find((row) => row.kind === "dispute_reward")!;
-    expect(reward.operator).toBeNull();
+    expect(reward.operator).toBe(challengerParty.operator);
 
+    // The row is the challenger's on the ledger page, and payable to nobody:
+    // an unpriced reward carries no amount, so no cycle can ever claim it — and
+    // there is no cycle left to try (D-127).
     const late = hour(24 * 60).toISOString();
-    for (const party of parties) {
+    for (const party of [...parties, challengerParty]) {
       expect(
         (await releasedUnpaidRows(world.store.db, party.operator, late)).map(
           (row) => row.id,
         ),
       ).not.toContain(reward.id);
+    }
+    for (const party of parties) {
       expect(
         (
           await ledgerRowsForOperator(
@@ -1282,11 +1323,17 @@ describe("the overturned entry", () => {
  * Whitepaper Section 9: standing "gates everything discretionary, from entry to
  * and stay in the trusted pool to revalidation-request caps and dispute stakes."
  * So a registered operator that cannot cover the published stake is refused at
- * the door, with nothing written; a bare key is not gated, because Section 6 has
- * it stake a refundable fee instead.
+ * the door, with nothing written.
+ *
+ * A bare key is refused by the same gate. D-127 retired the refundable fee
+ * Section 6 had it stake, so the stake is standing and only standing, and a key
+ * with no operator has none: it covers nothing and meets the same
+ * `insufficient_standing`. That is Section 6's "burner keys cannot dispute for
+ * free" holding rather than a new rule — what earns the standing to file is
+ * registering as an operator under a name.
  */
-describe("a filing an operator cannot cover", () => {
-  it("is refused at the dispute door, and a bare key's is not", async () => {
+describe("a filing the filer cannot cover", () => {
+  it("is refused at the dispute door, whether or not the filer has an operator", async () => {
     const target = checkedEntry;
     const id = target["id"] as string;
     const before = (await eventsForEntry(world.store.db, id)).length;
@@ -1312,14 +1359,23 @@ describe("a filing an operator cannot cover", () => {
     // Nothing was written: not the correction, not the challenge, not a stake.
     expect((await eventsForEntry(world.store.db, id)).length).toBe(before);
 
-    // The same filing from a bare key is not gated: its stake is a fee.
+    // The same filing from a bare key: no operator, no standing, no cover. The
+    // gate stands in front of the submission pipeline, so the refusal costs the
+    // log no fetch of the cited page and writes nothing.
+    const bareBefore = (await eventsForEntry(world.store.db, id)).length;
+    const fetchesBefore = fetcher.requests.length;
     const bare = await correction(
-      secondChallenger,
+      readers[0]!,
       target,
       "Kestrel-3 seat pricing is $44 per seat per month, not $40, says a reader",
     );
-    const filed = await file(secondChallenger, target, bare);
-    expect([filed.status, filed.body["error"] ?? null]).toEqual([201, null]);
+    const filed = await file(readers[0]!, target, bare);
+    expect([filed.status, filed.body["error"]]).toEqual([
+      422,
+      "insufficient_standing",
+    ]);
+    expect((await eventsForEntry(world.store.db, id)).length).toBe(bareBefore);
+    expect(fetcher.requests.length).toBe(fetchesBefore);
 
     await fundStanding();
   }, 240_000);
@@ -1344,8 +1400,9 @@ describe("a filing an operator cannot cover", () => {
       ),
     ).toBe(false);
 
-    // A bare key never reaches the gate: it has no standing to gate.
-    const bare = await post(challenger, `/entries/${id}/revalidate`, {});
+    // A bare key never reaches the gate: it has no standing to gate, and the
+    // revalidate door says so in its own word rather than in the gate's.
+    const bare = await post(readers[1]!, `/entries/${id}/revalidate`, {});
     expect([bare.status, bare.body["error"]]).toEqual([422, "bare_key"]);
 
     // And with the stake covered, the same request opens the check.
@@ -1408,6 +1465,7 @@ describe("a challenge by the entry's own author", () => {
       challenger,
       ownEntry,
       "Kestrel-6 seat pricing is $44 per seat per month, filed by proxy",
+      challengerParty.operator,
     );
 
     const filed = await file(author, ownEntry, core);
@@ -1421,6 +1479,7 @@ describe("a challenge by the entry's own author", () => {
       secondChallenger,
       ownEntry,
       "Kestrel-6 seat pricing is $44 per seat per month, not $40, says a reader",
+      secondChallengerParty.operator,
     );
 
     const filed = await file(secondChallenger, ownEntry, core);

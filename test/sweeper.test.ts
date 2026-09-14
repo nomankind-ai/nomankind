@@ -17,10 +17,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import {
-  MockPayoutAdapter,
-  UnavailablePayoutAdapter,
-} from "../src/adapters/payout.js";
 import { SWEEP_INTERVAL_MINUTES } from "../src/policy.js";
 import type { D1Like, D1LikeStatement } from "../src/storage/d1.js";
 import { eventBySeq, headSeq, sweepSteps } from "../src/storage/repository.js";
@@ -338,23 +334,20 @@ describe("arming the timer from a request", () => {
 });
 
 /**
- * The payout adapter the timer's own deps carry (M21, decision D-053).
+ * The payout adapter the timer's own deps carry: none (decision D-127).
  *
- * `sweepDepsFor` is the one place a run's adapters are built, and the alarm is a
- * sweep like any other: a cycle that pays through `/run` and skips
- * `payout_unconfigured` through the alarm would be two different sweeps of the
- * same log, and which one an operator was paid by would depend on which door
- * happened to be used.
+ * `sweepDepsFor` is the one place a run's adapters are built, and there is no
+ * payout step left to build one for — the record is free, so a sweep moves no
+ * money. An environment that still built one would be carrying a way out to a
+ * provider that nothing can reach.
  */
 describe("the payout adapter the timer runs with", () => {
-  it("is the one this environment runs, and never a fixture", async () => {
+  it("is not built at all, on any environment", async () => {
     const store = await database();
 
-    // The same rule the beacon and the witness follow: demo and local mock it,
-    // production holds the stub that refuses.
-    expect((await sweepDepsFor(envFor(store), () => NOW)).payout).toBeInstanceOf(
-      MockPayoutAdapter,
-    );
+    expect(
+      (await sweepDepsFor(envFor(store), () => NOW)).payout,
+    ).toBeUndefined();
     expect(
       (
         await sweepDepsFor(
@@ -362,13 +355,13 @@ describe("the payout adapter the timer runs with", () => {
           () => NOW,
         )
       ).payout,
-    ).toBeInstanceOf(UnavailablePayoutAdapter);
+    ).toBeUndefined();
   });
 
   it("reaches the alarm's own run, which configures the payout step", async () => {
     const store = await database();
-    // The deps a caller hands the object carry no payout adapter, exactly as
-    // the deployed object's do not: the environment's own is what fills it in.
+    // The deps a caller hands the object carry no payout adapter, and neither
+    // do the deployed object's: nothing builds one any more (D-127).
     const deps = await sweeperDeps(await makeWitness("sweeper-witness.example"));
     expect(deps).not.toHaveProperty("payout");
     const sweeper = new Sweeper(fakeState(), envFor(store), deps);
@@ -377,10 +370,12 @@ describe("the payout adapter the timer runs with", () => {
 
     expect(response.status).toBe(200);
     const report = (await response.json()) as SweepReport;
-    // The run sealed, so the payout step was reached, and it was configured.
+    // The run sealed. There is no payout step to reach any more (D-127): the
+    // record is free, so a sweep pays nobody and the report carries no payouts
+    // at all rather than an empty list of them.
     expect(report.sealed).not.toBeNull();
     expect(report.skipped["payout_unconfigured"]).toBeUndefined();
-    expect(report.payouts).toEqual([]);
+    expect(report).not.toHaveProperty("payouts");
   });
 });
 

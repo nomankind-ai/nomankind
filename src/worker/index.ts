@@ -83,10 +83,6 @@ import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
 import { DohResolver, type DnsResolver } from "../adapters/dns.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
 import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
-import {
-  paymentsAdapterFor,
-  type PaymentsAdapter,
-} from "../adapters/stripe.js";
 import { PAGE_CACHE_SECONDS, PAGE_CACHE_STALE_SECONDS } from "../policy.js";
 import { HEADER_AGENT } from "../request.js";
 import { APP_CSS_HREF, htmlResponse } from "../ui/html.js";
@@ -182,15 +178,6 @@ export interface RequestDeps {
    * here (decision D-013 as amended).
    */
   readonly beacon?: BeaconReader;
-  /**
-   * Where the paid loop's money goes (M24, decision D-078). The deployed Worker
-   * passes none and gets whichever track this environment's secrets say it
-   * runs — the real provider where a key is set, the refusal on production
-   * where none is, and the mock everywhere else — exactly as the payout and
-   * mirror adapters are built. A test passes a mock and never reaches the
-   * network.
-   */
-  readonly payments?: PaymentsAdapter;
   /**
    * The edge cache the anonymous pages are served from (D-059 as amended). The
    * deployed Worker passes `caches.default`; a test passes its own, and a
@@ -322,7 +309,12 @@ const NEGOTIATED_PATHS: ReadonlySet<string> = new Set([
   "/independence",
   "/status",
   "/mirror/latest",
+  // Both answer JSON only now — the claim is retired (D-127) and the free door
+  // never rendered a page — but they stay named here for the reason the header
+  // exists at all: a shared cache that had ever keyed one of these paths without
+  // `vary: Accept` would go on handing an agent whatever a browser asked for.
   "/keys/claim",
+  "/keys/free",
 ]);
 
 function negotiates(path: string): boolean {
@@ -626,18 +618,16 @@ async function dispatch(
   const synced = await handleSync(request, env, { now });
   if (synced !== null) return synced;
 
-  // M24's paid access, Section 9's "Money": the tiers, the checkout, the claim
-  // that hands a key over once, and what one key read. The payment provider
-  // enters as an injected adapter, so a test never reaches one.
-  const payments = deps?.payments ?? paymentsAdapterFor(env);
-
-  const keys = await handleKeys(request, env, { now, payments });
+  // The key doors (D-127): the tiers, the free door that hands a key over once,
+  // what one key is and what it read — and the checkout, the claim and the
+  // portal, which answer 410. No payment provider is constructed: nothing here
+  // is bought, so there is nothing for one to do.
+  const keys = await handleKeys(request, env, { now });
   if (keys !== null) return keys;
 
-  // The one door the provider knocks on. It trusts nothing it is sent until the
-  // signature over the raw body verifies against this deployment's own webhook
-  // secret, and it may change exactly one column: a key's status.
-  const webhook = await handleStripeWebhook(request, env, { now, payments });
+  // The address the provider's event destination used to post to, retired with
+  // the rest of the paid loop. It reads no body, no secret and no storage.
+  const webhook = handleStripeWebhook(request, env);
   if (webhook !== null) return webhook;
 
   // M24's change alerts, Section 9's "structured feeds and webhooks, change

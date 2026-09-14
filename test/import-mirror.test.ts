@@ -35,7 +35,25 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+/**
+ * A window this file publishes for itself: thirty days, which is what the
+ * policy module published before D-127 zeroed it.
+ *
+ * D-127 made the record free — RELEASE_WINDOW_DAYS is 0 and everything is
+ * released the instant it is sealed — and left the window's code exactly as it
+ * was, dormant behind that zero. The withheld paths this file covers are part
+ * of that code, so the regression cover stays by publishing a window here
+ * instead: every rule below the mock is the kernel's own, read from the same
+ * one place, and only the number is this file's.
+ */
+vi.mock("../src/policy.js", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    "../src/policy.js",
+  );
+  return { ...actual, RELEASE_WINDOW_DAYS: 30 };
+});
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { MockMirrorAdapter } from "../src/adapters/mirror.js";

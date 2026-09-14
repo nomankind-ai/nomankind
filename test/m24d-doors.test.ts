@@ -43,7 +43,38 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+/**
+ * The window this file publishes for itself, and the real one beside it.
+ *
+ * D-127 made the record free: RELEASE_WINDOW_DAYS is 0, so every sealed event
+ * and every sealed entry is public and CC0 from the instant of its seal and no
+ * door here ever withholds anything. The window's code is dormant behind that
+ * zero rather than gone — it is arithmetic over the seal date, stored on no row
+ * — so this file, which is where that code is made falsifiable at every door,
+ * publishes thirty days of its own and keeps exercising it.
+ *
+ * A mutable holder rather than a constant, because one test below reads the
+ * doors at the number the log actually runs on: it sets `state.windowDays` to
+ * the published value and puts this file's own back afterwards.
+ */
+const state = vi.hoisted(() => ({ windowDays: 30 }));
+
+vi.mock("../src/policy.js", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    "../src/policy.js",
+  );
+  return {
+    ...actual,
+    get RELEASE_WINDOW_DAYS() {
+      return state.windowDays;
+    },
+  };
+});
+
+/** The window the policy module really publishes: zero (D-127). */
+const PUBLISHED_WINDOW_DAYS = 0;
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { MockPayoutAdapter } from "../src/adapters/payout.js";
@@ -433,6 +464,49 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 // The rule itself
 // ---------------------------------------------------------------------------
+
+describe("the published window, which is no window at all (D-127)", () => {
+  it("answers a keyless read of a just-sealed entry with the content", async () => {
+    // The rule this log runs on, at every door this file covers: the record is
+    // free, so a reader with no key, no signature and no wait is served the
+    // whole entry the moment the seal covering it closes. Everything below
+    // runs at a window this file publishes for itself, so this is the one test
+    // that reads the doors at the real one.
+    expect(PUBLISHED_WINDOW_DAYS).toBe(0);
+    const published = (await vi.importActual<Record<string, unknown>>(
+      "../src/policy.js",
+    ))["RELEASE_WINDOW_DAYS"];
+    expect(published).toBe(PUBLISHED_WINDOW_DAYS);
+
+    state.windowDays = PUBLISHED_WINDOW_DAYS;
+    try {
+      const id = sealedEntry["id"] as string;
+      // At the seal's own instant, which is also the release date now.
+      expect(releaseDateOf(sealedAt)).toBe(sealedAt);
+      const answer = await free(`/read/${id}`, new Date(sealedAt));
+      expect(answer.status).toBe(200);
+      const entry = answer.body["entry"] as Record<string, unknown>;
+      expect(entry["id"]).toBe(id);
+      expect(entry["claim"]).toBe(sealedEntry["claim"]);
+      expect(entry["citation"]).not.toBeNull();
+      expect(answer.body["error"]).toBeUndefined();
+
+      // And the log's own page hands the same reader the payloads whole,
+      // rather than the hash lines it hands one inside a window. Everything
+      // this seal covers, which at this instant is everything released: the
+      // later seal's events are still in the future and an unsealed event is
+      // not released at any window.
+      const events = await free("/events?limit=100", new Date(sealedAt));
+      const covered = (events.body["events"] as Record<string, unknown>[]).filter(
+        (event) => (event["seq"] as number) <= releasedHeadSeq,
+      );
+      expect(covered.length).toBeGreaterThan(0);
+      expect(covered.some((event) => isWithheld(event))).toBe(false);
+    } finally {
+      state.windowDays = 30;
+    }
+  }, 120_000);
+});
 
 describe("the window, as the doors compute it", () => {
   it("opens a sealed entry the window after its seal, and never before", () => {

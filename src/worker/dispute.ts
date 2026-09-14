@@ -7,8 +7,13 @@
  * citation. It passes through the same validation process with one extra
  * exclusion: no operator that signed the original, submitter or validator, may
  * validate the challenge against it. Filing takes a stake, so burner keys cannot
- * dispute for free. A verified operator stakes standing, a bare key stakes a
- * refundable filing fee, and the amounts are published policy."
+ * dispute for free."
+ *
+ * The stake is standing, and only standing (decision D-127: the record is free,
+ * and disputes and revalidation requests stay staked in standing). A bare key
+ * has no operator and so no standing to stake, which is what stops it filing:
+ * the standing gate below refuses it `insufficient_standing`, before any fetch,
+ * any archive write and any event.
  *
  * Two entries are in play and this door is scoped to the CHALLENGED one: the
  * path names the target, the body carries the correction, and the events that
@@ -20,12 +25,15 @@
  *
  * Order matters and is deliberate: the id, the shape, the envelope signature,
  * the target, the one rule no identity may walk around -- an author does not
- * challenge its own entry -- the identity, the whole submission pipeline on the
- * correction, the filing rules (src/dispute.ts), the source policy read against the entry
- * being challenged (src/sources.ts), the two links a filing may claim to be an
- * upgrade of, and last the standing its stake needs (Section 9: standing "gates
- * ... dispute stakes"). Nothing is written until every one of them has passed,
- * and the archive is written only after that: a refused filing leaves the log
+ * challenge its own entry -- the identity, the standing its stake needs
+ * (Section 9: standing "gates ... dispute stakes"), then the whole submission
+ * pipeline on the correction, the filing rules (src/dispute.ts), the source
+ * policy read against the entry being challenged (src/sources.ts), and last the
+ * two links a filing may claim to be an upgrade of. The standing gate is in
+ * front of the pipeline because the pipeline fetches the cited page and writes
+ * it to the archive, and a filer that cannot cover its stake must not cost the
+ * log a live fetch. Nothing is written until every one of them has passed, and
+ * the archive is written only after that: a refused filing leaves the log
  * exactly where it was.
  *
  * Nothing derived is set here. `overturned_by`, the `disputes[]` row and the
@@ -33,7 +41,7 @@
  * events; the stake rows are src/stake.ts's, read out of the sealed event.
  *
  * No policy number lives here: the bare integers are HTTP status codes, and
- * every amount is src/policy.ts's — the stake reaches the ledger through
+ * the one amount is src/policy.ts's — the stake reaches the ledger through
  * src/stake.ts, and the standing gate reads the same constant to say what a
  * filer must be able to cover. The id pattern is read out of the entry schema
  * rather than copied into TypeScript.
@@ -290,6 +298,53 @@ async function file(
     return refuse(403, "author_mismatch");
   }
 
+  // Section 9: standing "gates everything discretionary, from entry to and stay
+  // in the trusted pool to revalidation-request caps and dispute stakes". So a
+  // filer has to be able to cover what it is about to stake, and available means
+  // its standing less what its still-open stakes already hold. The gate reads
+  // the standing the sweep stored, which is the published formula folded to the
+  // last sealed head and so at most one interval behind the log.
+  //
+  // Asked here, before the submission pipeline below, because that pipeline
+  // fetches the cited page and writes it to the archive: a filing that cannot
+  // cover its stake must not cost the log a live fetch first. The operator it
+  // reads is the one the correction's own core claims, which is the same field
+  // the pipeline binds to the signing key a moment later — so a claim nobody is
+  // attested for still fails, in the pipeline's own words, and this gate is the
+  // cheap half of the question rather than the authority on it.
+  //
+  // A bare key is gated by the same rule and not exempt from it (D-127). Section
+  // 6's "filing takes a stake, so burner keys cannot dispute for free" used to
+  // be answered two ways — an operator staked standing and a bare key staked a
+  // refundable filing fee — and the fee was money, which there is none of any
+  // more. What is left is the one currency: standing. A bare key has no operator
+  // and therefore no standing at all, so it covers nothing and is refused
+  // `insufficient_standing`, which is the same word an operator too thin to file
+  // is refused in.
+  const claimedOperator = body.entry["author_operator"];
+  const challengerOperator =
+    typeof claimedOperator === "string" ? claimedOperator : null;
+  const challengerStanding =
+    challengerOperator === null
+      ? null
+      : await operatorStanding(env.DB, challengerOperator);
+  const locked =
+    challengerOperator === null
+      ? 0
+      : lockedStanding(
+          await openStakeRowsForOperator(
+            env.DB,
+            challengerOperator,
+            LIST_PAGE_LIMIT,
+          ),
+        );
+  const cover = checkStakeCover({
+    standing: challengerStanding?.standing ?? 0,
+    locked,
+    stake: DISPUTE_STAKE_STANDING,
+  });
+  if (!cover.ok) return refuse(422, cover.reason);
+
   // "It passes through the same validation process." The same pipeline, then,
   // and not a second one that could drift from it.
   //
@@ -313,9 +368,6 @@ async function file(
 
   const targetWorld = await entryWorld(env.DB, id);
   const targetEvents = targetWorld.entryEvents;
-
-  const challengerOperator =
-    (prepared.core["author_operator"] as string | null) ?? null;
 
   const filing = checkDisputeFiling(
     prepared.core,
@@ -403,25 +455,6 @@ async function file(
     return refuse(422, "bad_revalidation_link");
   }
 
-  // Section 9: standing "gates everything discretionary, from entry to and stay
-  // in the trusted pool to revalidation-request caps and dispute stakes". So a
-  // registered operator has to be able to cover what it is about to stake, and
-  // available means its standing less what its still-open stakes already hold.
-  // The gate reads the standing the sweep stored, which is the published formula
-  // folded to the last sealed head and so at most one interval behind the log.
-  // A bare key is never gated: Section 6 has it stake a filing fee instead, and
-  // that fee is money rather than standing.
-  if (challengerOperator !== null) {
-    const stored = await operatorStanding(env.DB, challengerOperator);
-    const cover = checkStakeCover({
-      standing: stored?.standing ?? 0,
-      locked: lockedStanding(
-        await openStakeRowsForOperator(env.DB, challengerOperator, LIST_PAGE_LIMIT),
-      ),
-      stake: DISPUTE_STAKE_STANDING,
-    });
-    if (!cover.ok) return refuse(422, cover.reason);
-  }
 
   // The draw the upgrade closes, if the request had one standing. Read before
   // the write, because the batch's callbacks are synchronous.

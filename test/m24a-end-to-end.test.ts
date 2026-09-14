@@ -38,6 +38,7 @@ import {
   captureForHash,
   getEntry,
   headSeq,
+  setOperatorStanding,
 } from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
@@ -94,11 +95,13 @@ let fetcher: FixtureFetcher;
 let maintainer: TestAgent;
 let alice: TestAgent;
 /**
- * A bare key that authors nothing: the challenger in the dispute cases below.
+ * The challenger in the dispute cases below, bound to an operator of its own.
  * An entry's own author may not challenge it (`self_dispute`, the QA of
- * 2026-09-12), and alice authors every entry here.
+ * 2026-09-12), and alice authors every entry here — and since D-127 a dispute is
+ * staked in standing, so a filer needs an operator with standing to stake.
  */
 let bob: TestAgent;
+const BOB_OPERATOR = "bob.example";
 let parties: Party[];
 
 beforeAll(async () => {
@@ -117,6 +120,7 @@ beforeAll(async () => {
   for (const party of parties) {
     records[txtRecordName(party.operator)] = [party.agent.agentId];
   }
+  records[txtRecordName(BOB_OPERATOR)] = [bob.agentId];
 
   env = {
     DB: store.db,
@@ -155,6 +159,22 @@ beforeAll(async () => {
     );
     expect([named.status, party.operator]).toEqual([200, party.operator]);
   }
+
+  // The challenger registers but is never named: it needs standing to stake a
+  // filing (D-127) and no place in the trusted pool to file one.
+  const joinedBob = await send(
+    await signedPost(bob, {
+      path: "/operators",
+      body: {
+        operator: BOB_OPERATOR,
+        attestation: await attestFor(bob, BOB_OPERATOR, AT),
+        payout: { reference: VERIFIED_REFERENCE },
+      },
+      timestamp: AT,
+    }),
+  );
+  expect(joinedBob.status).toBe(201);
+  await setOperatorStanding(store.db, BOB_OPERATOR, 1_000, 0);
 }, 240_000);
 
 afterAll(async () => {
@@ -436,6 +456,7 @@ describe("the dispute door, which asks the same question in its own order", () =
     after: string,
   ): Omit<SubmissionProposal, "author"> {
     return {
+      author_operator: BOB_OPERATOR,
       subject,
       category: "correction",
       domain: DEFAULT_DOMAIN,
@@ -448,7 +469,7 @@ describe("the dispute door, which asks the same question in its own order", () =
     };
   }
 
-  /** File one signed correction against one target, as the bare key bob. */
+  /** File one signed correction against one target, as bob. */
   async function file(targetId: string, core: Core): Promise<Response> {
     const signature = await signCore(core, bob.privateKey);
     return send(

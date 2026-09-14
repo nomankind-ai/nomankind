@@ -23,11 +23,7 @@ import {
   REVALIDATION_REQUEST_STAKE_STANDING,
   LIST_PAGE_LIMIT,
   buildReadCountPayload,
-  clawbackRows,
   disputeRewardRow,
-  payoutPlan,
-  payoutRow,
-  readShareRows,
   reconciliationRow,
   buildAnchor,
   buildSeal,
@@ -4049,7 +4045,21 @@ describe("the ledger", () => {
    */
   let log: Event[] = [];
 
-  /** A day's read counts, sealed as a real event, priced by src/ledger.ts. */
+  /** The holdback, spelt here so the fixtures do not depend on a price. */
+  const HOLDBACK_MS = 30 * 86_400_000;
+
+  /**
+   * A day's read counts, sealed as a real event, with the rows such a day used
+   * to be worth.
+   *
+   * Built here rather than by src/ledger.ts, because nothing is priced any more
+   * (decision D-127) and these tests are about the table rather than about what
+   * a read was worth: the ledger still holds months of rows in exactly this
+   * shape, and reading them back is what is under test. The amounts are
+   * arbitrary and derived from `count` so the relations the tests check — a
+   * clawback is the negative of its share, a stale day withholds half — still
+   * hold without a price anywhere.
+   */
   async function pricedDay(
     count: number,
     stale: boolean,
@@ -4067,13 +4077,52 @@ describe("the ledger", () => {
         1,
       ),
     });
-    return readShareRows(log[log.length - 1] as Event<"read_count">, () => ({
-      author_operator: LEDGER_OPERATOR,
-      read_share_slots: [{ operator: SLOT_OPERATOR, seq: 1, measured: false }],
-      stale,
-      verified: true,
-      effective_tier: "stated",
-    }));
+    const event = log[log.length - 1]!;
+    const availableAt = new Date(
+      Date.parse(`${date}T00:00:00.000Z`) + HOLDBACK_MS,
+    ).toISOString();
+    const rows: LedgerRow[] = [];
+    let withheld = 0;
+    const holders = [
+      [LEDGER_OPERATOR, "submitter", count] as const,
+      [SLOT_OPERATOR, "validator", Math.floor(count / 3)] as const,
+    ];
+    for (const [operator, role, full] of holders) {
+      const paid = stale ? Math.floor(full / 2) : full;
+      if (stale) withheld += full - paid;
+      rows.push({
+        id: `read_share:${event.seq}:${LEDGER_ENTRY}:${role}:${operator}`,
+        kind: "read_share",
+        entry_id: LEDGER_ENTRY,
+        operator,
+        role,
+        date,
+        reads: count,
+        unit: "micros",
+        amount: paid,
+        available_at: availableAt,
+        seq: event.seq,
+        at: event.at,
+        ref: { stale },
+      });
+    }
+    if (!stale) return rows;
+    rows.push({
+      id: `bounty_pool:${event.seq}:${LEDGER_ENTRY}`,
+      kind: "bounty_pool",
+      entry_id: LEDGER_ENTRY,
+      operator: null,
+      role: null,
+      date,
+      reads: count,
+      unit: "micros",
+      amount: withheld,
+      available_at: null,
+      seq: event.seq,
+      at: event.at,
+      ref: { stale: true },
+    });
+    return rows;
   }
 
   beforeAll(async () => {
@@ -4126,8 +4175,19 @@ describe("the ledger", () => {
       entry_id: LEDGER_ENTRY,
       payload: { correction_entry_id: "nmk_01M21CORRECTIONSTORE" },
     });
+    const event = upheld[0]!;
     const held = await heldReadShareRows(store.db, LEDGER_ENTRY, INSIDE);
-    const clawbacks = clawbackRows(upheld[0] as Event<"dispute_upheld">, held);
+    // The rows an upheld dispute used to write, in the shape the table holds:
+    // the exact negative of each held share, waiting out the same holdback.
+    const clawbacks: LedgerRow[] = held.map((row) => ({
+      ...row,
+      id: `clawback:${event.seq}:${row.id}`,
+      kind: "clawback",
+      amount: -row.amount,
+      seq: event.seq,
+      at: event.at,
+      ref: { claws_back: row.id },
+    }));
     expect(clawbacks).toHaveLength(held.length);
     await putLedgerRows(store.db, clawbacks);
 
@@ -4150,11 +4210,28 @@ describe("the ledger", () => {
 
   it("pays a cycle: the payout row, and the rows it claims", async () => {
     const released = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE);
-    const plan = payoutPlan(LEDGER_OPERATOR, released, OUTSIDE);
-    expect(plan.rows.length).toBeGreaterThan(0);
+    const claimed = released.map((row) => row.id);
+    expect(claimed.length).toBeGreaterThan(0);
+    const amount = released.reduce((sum, row) => sum + row.amount, 0);
 
-    const paid = payoutRow(plan, 1, OUTSIDE, "mock-verified-ledger");
-    await recordPayout(store.db, paid, plan.rows);
+    // The payout row as the table holds one. No door writes these any more
+    // (D-127); the reader that serves the ones already written is the subject.
+    const paid: LedgerRow = {
+      id: `payout:${LEDGER_OPERATOR}:${OUTSIDE.slice(0, 10)}`,
+      kind: "payout",
+      entry_id: null,
+      operator: LEDGER_OPERATOR,
+      role: null,
+      date: OUTSIDE.slice(0, 10),
+      reads: null,
+      unit: "micros",
+      amount,
+      available_at: null,
+      seq: 1,
+      at: OUTSIDE,
+      ref: { reference: "mock-verified-ledger", rows: claimed },
+    };
+    await recordPayout(store.db, paid, claimed);
 
     expect(await payoutRows(store.db, LIST_PAGE_LIMIT, LEDGER_OPERATOR)).toEqual([
       paid,

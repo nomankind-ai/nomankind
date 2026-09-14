@@ -483,7 +483,6 @@ function anchoringRow(anchor: AnchorFact): Stage {
   const input: StatusInput = {
     environment: "production",
     witness_kind: "mock",
-    payout_kind: "mock",
     steps: [
       {
         step: "sweep",
@@ -512,14 +511,12 @@ function anchoringRow(anchor: AnchorFact): Stage {
     standing_position: null,
     attestations: { due: 0, total: 0 },
     mirror: { kind: "unavailable", newest: null },
-    metering: { kind: "unavailable", reported_days: 0, owed: 0 },
     alerts: { endpoints: 0, cursor: -1, due: 0, failed: 0 },
     exercised: {
       submission: null,
       registration: null,
       read_receipt: null,
       sync_receipt: null,
-      payout: null,
     },
   };
   const found = stageStates(input, STATUS_NOW).find((one) => one.stage === "anchoring");

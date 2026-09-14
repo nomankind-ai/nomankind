@@ -33,15 +33,7 @@ import {
   quotaScopeForKey,
   tierLimit,
 } from "../src/keys.js";
-import {
-  CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-  CONTRIBUTOR_SHARE_PERCENT,
-  FREE_TIER,
-  RATE_TIERS,
-  READ_SHARE_SPLIT,
-  SLOT_COUNT,
-  isPaidTier,
-} from "../src/policy.js";
+import { FREE_TIER, RATE_TIERS, isPaidTier } from "../src/policy.js";
 import type { D1Like } from "../src/storage/d1.js";
 import {
   KeyClaimConflictError,
@@ -204,22 +196,14 @@ describe("tierLimit", () => {
 });
 
 describe("the published tiers", () => {
-  it("keeps the contributor share at or above its floor, in either tier", () => {
-    // Section 9: "The contributor share is a floor that only rises." Published
-    // per evidence tier since D-087, and the floor holds for both.
-    for (const tier of ["stated", "observed"] as const) {
-      expect(CONTRIBUTOR_SHARE_PERCENT[tier]).toBeGreaterThanOrEqual(
-        CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-      );
-    }
-  });
-
-  it("makes each tier's share exactly the split it is made of", () => {
-    for (const tier of ["stated", "observed"] as const) {
-      const split = READ_SHARE_SPLIT[tier];
-      expect([tier, split.submitter + SLOT_COUNT * split.validator]).toEqual([
-        tier,
-        CONTRIBUTOR_SHARE_PERCENT[tier],
+  it("publishes a cap and a name, and no price or share at all", () => {
+    // Decision D-127, "the record is free, no money anywhere": a tier is a cap
+    // and a name. There is no contributor share to hold above a floor and no
+    // split to check it against, so a tier row must carry nothing else.
+    for (const slug of Object.keys(RATE_TIERS)) {
+      expect([slug, Object.keys(RATE_TIERS[slug]!).sort()]).toEqual([
+        slug,
+        ["key", "name", "reads_per_day"],
       ]);
     }
   });

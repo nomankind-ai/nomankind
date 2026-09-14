@@ -246,10 +246,11 @@ export function renderDryRun(ctx: PageContext): string {
             alone. <span class="mono">test_accepted</span> false: the test the
             entry proposes does not decide the claim, which is a judgment about
             the test rather than about the entry, and it is recorded on a
-            rejection and an approval alike. A negative result is a first-class,
-            paid answer: the standing for a completed validation is earned
-            whichever way it went, and the extra credit for measuring is paid for
-            a passing measurement, which is work and not a direction.
+            rejection and an approval alike. A negative result is a first-class
+            answer and earns what a positive one earns: the standing for a
+            completed validation is earned whichever way it went, and the extra
+            credit for measuring is earned for a passing measurement, which is
+            work and not a direction.
           </p>
           <p class="note">
             Your decision is recorded in the log and counts toward nothing while
@@ -270,10 +271,12 @@ export function renderDryRun(ctx: PageContext): string {
           <dl class="dl">
             <dt><span class="mono">entry_withheld</span></dt>
             <dd>
-              A free read inside the release window: the entry's content is not
-              this reader's yet, and the command prints the date it opens rather
-              than guessing at it. Sign the reads with a registered operator's
-              key, as step 6 does, or wait for the date it printed.
+              The content of an entry was not served to this reader. You will
+              not meet it here: this log releases every entry the moment it is
+              sealed, so a reader with no key at all reads an entry submitted a
+              minute ago. It is what a fork that publishes a release window of
+              its own stops on, and the command prints the date that fork
+              handed it rather than guessing at one.
             </dd>
             <dt><span class="mono">unregistered_operator</span></dt>
             <dd>
@@ -363,19 +366,14 @@ export function renderDryRun(ctx: PageContext): string {
 npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
           <p class="note">
             <span class="mono">--sign</span> signs the export's reads with the
-            key you registered in step 3, which is the point of the flag: a
-            signature reaches inside the release window because the key is bound
-            to a registered operator and not because it exists. The same file
-            before step 3 is not an error — the export succeeds, and writes the
-            released view with the
-            <span class="mono">release_date</span> it was handed, exactly as a
-            run with no flag at all does. What registration buys is the content.
-            An entry's content
-            is released to everybody ${RELEASE_WINDOW_DAYS} days after the seal
-            that covers it (decision D-100), and an entry you submitted minutes
-            ago is inside that window. Without the flag the export writes the
-            released view — every hash, every seal, the proof of the rest — and
-            says so.
+            key you registered in step 3. It is not what reaches the content:
+            an entry is released ${RELEASE_WINDOW_DAYS} days after the seal that
+            covers it (decision D-100, at zero since D-127), so the entry you
+            submitted minutes ago is exported whole with no flag at all, by
+            anybody. What the flag buys is the bucket the reads are counted in —
+            a signed read is metered under your operator rather than under the
+            address you came from — and, against a fork that publishes a window
+            of its own, the content that fork withholds.
           </p>
           <p class="note">
             Exit 0 means the entry you were handed is the entry that was signed
@@ -417,9 +415,12 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
               runs. Judge them as carefully as you would judge a real one — that
               is the practice — but nothing here is a claim anybody relies on.
             </dd>
-            <dt>Nothing here is money, and nothing here is the record</dt>
+            <dt>Nothing here is the record</dt>
             <dd>
-              No amount on demo is paid and no row on demo is the production log.
+              No row on demo is the production log. Money is not the difference:
+              there is none on either, here or in production — the record is
+              free to read from the seal, and the only thing anyone earns for
+              this work is standing.
             </dd>
           </dl>
         `,
@@ -432,7 +433,7 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
             environment: it is in the log, it is sealed, and anyone can read it.
             What it is not is the evidence the genesis pool is named on. That
             evidence is a dry run on production — the same three steps and the
-            same one validation, against the real payout provider and the real
+            same one validation, against the real registry and the real
             witnesses — published in the genesis call issue when it opens at
             production go-live. That issue will note demo practice as context
             beside it, because a candidate who rehearsed in public has shown

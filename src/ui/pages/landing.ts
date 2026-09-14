@@ -202,9 +202,9 @@ const VALUES: readonly { readonly head: string; readonly body: string }[] = [
       "What a source said, or what a reproduced test showed. No rankings, no scores.",
   },
   {
-    head: "Paid for being right.",
+    head: "Credited for being right.",
     body:
-      "Contributors earn only when the facts they backed are read and survive. Errors are clawed back and attributed, forever.",
+      "Contributors earn standing for the facts they back, and only while those facts survive. Errors are burned and attributed, forever.",
   },
   {
     head: "Checkable offline.",
@@ -214,7 +214,7 @@ const VALUES: readonly { readonly head: string; readonly body: string }[] = [
   {
     head: "Forkable.",
     body:
-      "Open code, public-domain data on release, the whole log exportable. If nomankind breaks its rules, anyone leaves with the record.",
+      "Open code, public-domain data from the seal, the whole log exportable. If nomankind breaks its rules, anyone leaves with the record.",
   },
 ];
 
@@ -457,7 +457,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
       </section>
 
       <footer class="landing-footer row mono">
-        <span>CODE APACHE-2.0 · DATA CC0 ON RELEASE · TRAINING ON THE DATA IS FREE ON RELEASE</span>
+        <span>CODE APACHE-2.0 · DATA CC0 FROM THE SEAL · TRAINING ON THE DATA IS FREE</span>
         <span
           >NOMANKIND.AI ·
           <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL.toUpperCase()}</a></span

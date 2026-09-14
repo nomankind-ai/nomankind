@@ -1,6 +1,16 @@
 /**
- * The money side of the log: read shares, the stale bounty pool, clawbacks,
- * payouts and the daily reconciliation.
+ * The money side of the log, retired: read shares, the stale bounty pool,
+ * clawbacks, payouts and the daily reconciliation.
+ *
+ * Decision D-127, "the record is free, no money anywhere": nothing is priced,
+ * so the functions that used to price things build nothing. They are still
+ * here, and still exported, because the rows they used to build are still in
+ * the ledger — months of sealed history that `ledgerBalance` and the ledger
+ * doors go on serving, and that the mirror's fold still walks. What changed is
+ * what a NEW event is worth, and the answer everywhere below is nothing.
+ *
+ * What follows is the rule as it stood while the record was sold. It is kept
+ * as written so a reader of an old row can see what produced it.
  *
  * Whitepaper Section 9, Money: "Thirty percent of paid-read revenue goes to the
  * contributor pool at launch, fifteen to the submitter and five to each
@@ -34,12 +44,7 @@ import type { EvidenceTier } from "./evidence.js";
 import type { Event, ReadCountRow } from "./events.js";
 import type { BountyAccrual } from "./bounty.js";
 import type { StakeKind, StakeRecord } from "./stake.js";
-import {
-  HOLDBACK_DAYS,
-  PAYOUT_MINIMUM_MICROS,
-  READ_PRICE_MICROS_PER_READ,
-  READ_SHARE_SPLIT,
-} from "./policy.js";
+import { HOLDBACK_DAYS } from "./policy.js";
 
 /**
  * Every kind of ledger row. The stake kinds are src/stake.ts's, unchanged: a
@@ -142,11 +147,6 @@ function datePlusDays(date: string, days: number): string {
   return new Date(shifted).toISOString().slice(0, 10);
 }
 
-/** The instant a row accrued on `date` may leave: the holdback, in full. */
-function releaseFromDate(date: string): string {
-  return `${datePlusDays(date, HOLDBACK_DAYS)}T00:00:00.000Z`;
-}
-
 /** The instant a row accrued at `at` may leave. */
 function releaseFromInstant(at: string): string {
   return new Date(Date.parse(at) + HOLDBACK_DAYS * MILLISECONDS_PER_DAY).toISOString();
@@ -157,72 +157,11 @@ function utcDateOf(timestamp: string): string {
   return new Date(Date.parse(timestamp)).toISOString().slice(0, 10);
 }
 
-/**
- * One share of one day's reads of one entry, in micros.
- *
- * The multiplication runs before the division so the arithmetic is exact at the
- * paper's own example: ten thousand reads at 500 micros, fifteen percent, is
- * 750,000 micros — seventy-five cents. The floor is the only rounding in the
- * system and it always rounds toward nomankind's share, never toward its own.
+/*
+ * `shareMicros`, `ShareHolder` and `holdersOf` stood here: the price of a read
+ * times a share percent, and who was owed one. All three are gone with the
+ * price and the split they read out of policy (D-127).
  */
-function shareMicros(count: number, percent: number): number {
-  return Math.floor((count * READ_PRICE_MICROS_PER_READ * percent) / 100);
-}
-
-/**
- * Who is owed a share of an entry's reads, at what percent, and — for a slot
- * holder — whether its own record measured anything.
- */
-interface ShareHolder {
-  readonly operator: string;
-  readonly role: ShareRole;
-  readonly percent: number;
-  /** Null on the submitter's row: the question is only asked of a slot. */
-  readonly measured: boolean | null;
-}
-
-/**
- * The rates one entry pays, per tier and per holder (decision D-087).
- *
- * Section 9: "observed entries take a larger read share than stated ones, by
- * published policy, so the operators who measure are paid more than the
- * operators who copy." So the submitter's rate is the entry's tier's, and a
- * slot holder takes the observed validator rate only when BOTH are true: the
- * entry verified as observed, and this holder's own signed record carried a
- * passing measurement. A validator who accepted the test without running it is
- * paid the stated rate beside a holder who ran it, and on a stated entry every
- * holder takes the stated rate whatever its record carried — the tier is the
- * one verification fixed (D-035) and no later measurement moves it.
- *
- * An entry whose tier is null is not verified and is skipped before this is
- * reached; the stated split is the safe reading if it ever is, because a rate
- * nobody earned must never be the larger one.
- */
-function holdersOf(state: EntryShareState): ShareHolder[] {
-  const tier: EvidenceTier = state.effective_tier ?? "stated";
-  const split = READ_SHARE_SPLIT[tier];
-  const holders: ShareHolder[] = [];
-  if (state.author_operator !== null) {
-    holders.push({
-      operator: state.author_operator,
-      role: "submitter",
-      percent: split.submitter,
-      measured: null,
-    });
-  }
-  for (const slot of state.read_share_slots ?? []) {
-    const paidForMeasuring = tier === "observed" && slot.measured;
-    holders.push({
-      operator: slot.operator,
-      role: "validator",
-      percent: paidForMeasuring
-        ? READ_SHARE_SPLIT.observed.validator
-        : READ_SHARE_SPLIT.stated.validator,
-      measured: slot.measured,
-    });
-  }
-  return holders;
-}
 
 /**
  * Price one published day of reads.
@@ -263,82 +202,12 @@ export function readShareRows(
   event: Event<"read_count">,
   stateOf: (entryId: string) => EntryShareState | null,
 ): LedgerRow[] {
-  const { date } = event.payload;
-  const availableAt = releaseFromDate(date);
-  const rows: LedgerRow[] = [];
-
-  for (const read of pricedReads(event)) {
-    if (read.count <= 0) continue;
-    const state = stateOf(read.entry_id);
-    if (state === null || !state.verified) continue;
-
-    const holders = holdersOf(state);
-    if (holders.length === 0) continue;
-
-    let withheld = 0;
-    const withheldFrom: string[] = [];
-    for (const holder of holders) {
-      const full = shareMicros(read.count, holder.percent);
-      // Section 7: "Stale entries earn half rate, and the withheld half builds
-      // up on the entry as a reconfirmation bounty." The half that is paid is
-      // rounded down, so the odd micro is withheld rather than invented.
-      const paid = state.stale ? Math.floor(full / 2) : full;
-      if (state.stale) withheld += full - paid;
-      const id = `read_share:${event.seq}:${read.entry_id}:${holder.role}:${holder.operator}`;
-      if (state.stale) withheldFrom.push(id);
-      rows.push({
-        id,
-        kind: "read_share",
-        entry_id: read.entry_id,
-        operator: holder.operator,
-        role: holder.role,
-        date,
-        reads: read.count,
-        unit: "micros",
-        amount: paid,
-        available_at: availableAt,
-        seq: event.seq,
-        at: event.at,
-        // The rate, and what made it that rate: the entry's tier, and on a
-        // slot holder's row whether that holder's own record measured. A
-        // reader who disagrees with the amount can see which rule produced it
-        // without rederiving the entry.
-        ref: {
-          price_micros_per_read: READ_PRICE_MICROS_PER_READ,
-          share_percent: holder.percent,
-          stale: state.stale,
-          tier: state.effective_tier ?? "stated",
-          ...(holder.measured === null ? {} : { measured: holder.measured }),
-        },
-      });
-    }
-
-    if (!state.stale) continue;
-    rows.push({
-      id: `bounty_pool:${event.seq}:${read.entry_id}`,
-      kind: "bounty_pool",
-      entry_id: read.entry_id,
-      // The pool belongs to the entry and not to a person: whoever makes it
-      // fresh again collects it, and until then nobody holds it.
-      operator: null,
-      role: null,
-      date,
-      reads: read.count,
-      unit: "micros",
-      amount: withheld,
-      // Not waiting on the holdback: it is not owed to anyone yet.
-      available_at: null,
-      seq: event.seq,
-      at: event.at,
-      ref: {
-        price_micros_per_read: READ_PRICE_MICROS_PER_READ,
-        stale: true,
-        withheld_from: withheldFrom,
-      },
-    });
-  }
-
-  return rows;
+  // Nothing (D-127). A read is free, so no holder is owed a share of it and no
+  // stale entry withholds half of nothing into a pool. The arguments stay so
+  // every caller's shape stays; neither is read.
+  void event;
+  void stateOf;
+  return [];
 }
 
 /**
@@ -360,33 +229,12 @@ export function clawbackRows(
   event: Event<"dispute_upheld">,
   held: readonly LedgerRow[],
 ): LedgerRow[] {
-  const rows: LedgerRow[] = [];
-  for (const row of held) {
-    if (row.kind !== "read_share") continue;
-    if (row.available_at === null || row.available_at <= event.at) continue;
-    rows.push({
-      id: `clawback:${event.seq}:${row.id}`,
-      kind: "clawback",
-      entry_id: row.entry_id,
-      operator: row.operator,
-      role: row.role,
-      date: row.date,
-      reads: row.reads,
-      unit: "micros",
-      amount: -row.amount,
-      // The negated row's own release instant, not null: a clawback is the
-      // exact negative of a share that is still inside the holdback, so it
-      // waits out the same holdback and the two come to nothing together. A
-      // clawback released early would read as money owed back out of rows that
-      // are not payable yet, and one that never released would leave the share
-      // it cancels payable on its own.
-      available_at: row.available_at,
-      seq: event.seq,
-      at: event.at,
-      ref: { claws_back: row.id },
-    });
-  }
-  return rows;
+  // Nothing (D-127). An upheld dispute still overturns the entry and still
+  // burns standing — src/standing.ts's half of Section 6 is untouched — but
+  // there is no accrued fee to claw back, because no fee accrued.
+  void event;
+  void held;
+  return [];
 }
 
 /**
@@ -508,148 +356,6 @@ export function bountyAccrualRow(
   };
 }
 
-/** What one operator is owed this cycle, and what carries to the next. */
-export interface PayoutPlan {
-  readonly operator: string;
-  /** What is being paid now: zero when the total sat below the minimum. */
-  readonly amount: number;
-  /** The ids the payout covers, empty when nothing is being paid. */
-  readonly rows: string[];
-  /** What carries forward: zero when paid, else the whole released total. */
-  readonly carried_forward: number;
-}
-
-/**
- * The kinds that carry an amount to or from an operator and wait out the
- * holdback.
- *
- * `dispute_reward` is one of them. Section 6's upheld challenge "returns the
- * stake, pays the challenger", and what it pays is money in micros, held until
- * the last clawed-back share would have left (`disputeRewardRow`): a reward
- * that never entered a balance would be a payment nobody could ever be paid.
- * The other stake kinds are not here — standing and a bare key's filing fee are
- * their own units, and no query ever sums two units together.
- */
-function isBalanceKind(kind: LedgerKind): boolean {
-  return (
-    kind === "read_share" ||
-    kind === "bounty_accrual" ||
-    kind === "clawback" ||
-    kind === "dispute_reward"
-  );
-}
-
-/**
- * Whether a row counts toward a balance at all: a balance kind, and priced.
- *
- * A `dispute_reward` is written at the outcome as a fact with no number — unit
- * and amount null together (src/stake.ts) — and priced here when the sweep's
- * ledger step reaches that position. Unpriced it counts for nothing, exactly as
- * a bounty accrual does before its pricing: such a row reads back through the
- * columns as zero in `standing` (src/storage/repository.ts, `toLedgerRow`) and
- * the mirror recomputes it the same way, so `micros` is what says the step has
- * passed it and the amount is a real number. Every other balance kind is
- * written priced and always counts.
- */
-function countsTowardBalance(row: LedgerRow): boolean {
-  if (!isBalanceKind(row.kind)) return false;
-  return row.kind !== "dispute_reward" || row.unit === "micros";
-}
-
-/**
- * Whether a row is released — payable now — at `now`.
- *
- * A clawback is counted by its `available_at` like every other row, because it
- * carries the release instant of the share it negates: the two are released in
- * the same instant, so a share can never be paid out from under a clawback that
- * is still held, and a clawback can never be taken out of a cycle before the
- * share it cancels was payable. A priced reward carries the latest of those
- * instants, so it leaves with the last share it was priced off and never before.
- */
-function isReleased(row: LedgerRow, now: string): boolean {
-  if (!countsTowardBalance(row)) return false;
-  return row.available_at !== null && row.available_at <= now;
-}
-
-/**
- * What to pay one operator this cycle (decision D-053).
- *
- * The cycle is monthly and the floor is published (`PAYOUT_MINIMUM_MICROS`): an
- * operator whose released accruals sit below it is not paid, and the whole
- * amount carries forward to the next cycle rather than being written off. That
- * is why nothing is paid and no row is claimed when the total falls short —
- * a plan that named its rows without paying them would let the next cycle think
- * they had already left.
- *
- * `released` is what the caller read back as unpaid for this operator; the rule
- * is applied again here rather than trusted from the query, and a clawback is
- * counted by its own `available_at` — which is the release instant of the share
- * it negates — so an operator can never be paid a share whose clawback is still
- * held, and never be charged a clawback before that share was payable. A priced
- * `dispute_reward` is paid like any other released row, at its own release.
- */
-export function payoutPlan(
-  operator: string,
-  released: readonly LedgerRow[],
-  now: string,
-): PayoutPlan {
-  let amount = 0;
-  const rows: string[] = [];
-  for (const row of released) {
-    // Selected by operator, which is what leaves a bare key's reward where it
-    // is: that row carries no operator at all, so a null can never equal the
-    // operator being paid and the row is simply never selected here. Section 6:
-    // the reward accrues to the key and holds, and "turning it into dollars
-    // means verifying as an operator". `releasedUnpaidRows` selects on
-    // `operator_id = ?` for the same reason, so such a row never even reaches
-    // this loop.
-    if (row.operator !== operator) continue;
-    if (!isReleased(row, now)) continue;
-    amount += row.amount;
-    rows.push(row.id);
-  }
-
-  if (amount < PAYOUT_MINIMUM_MICROS) {
-    return { operator, amount: 0, rows: [], carried_forward: amount };
-  }
-  return { operator, amount, rows, carried_forward: 0 };
-}
-
-/**
- * The row that records money leaving.
- *
- * The one row in this module that is NOT a function of the log: it names a
- * transfer that happened at a payment provider, under a reference the provider
- * gave back, and no amount of replaying events can reproduce it. Everything
- * around it can be recomputed and checked against it, which is the point of
- * Section 9's "any operator can reconcile their payout against the log".
- *
- * One payout per operator per day at most, which is what the id says: the cycle
- * is monthly, so a second payout on the same day is the same payout retried.
- */
-export function payoutRow(
-  plan: PayoutPlan,
-  seq: number,
-  at: string,
-  reference: string,
-): LedgerRow {
-  return {
-    id: `payout:${plan.operator}:${utcDateOf(at)}`,
-    kind: "payout",
-    entry_id: null,
-    operator: plan.operator,
-    role: null,
-    date: utcDateOf(at),
-    reads: null,
-    unit: "micros",
-    amount: plan.amount,
-    available_at: null,
-    seq,
-    at,
-    ref: { reference, rows: plan.rows },
-  };
-}
-
 /**
  * The daily reconciliation: does what the ledger accrued agree with what the log
  * published?
@@ -722,6 +428,43 @@ export function reconciliationRow(
       unpriced,
     },
   };
+}
+
+/**
+ * The kinds that carry an amount to or from an operator and wait out the
+ * holdback.
+ *
+ * `dispute_reward` is one of them. Section 6's upheld challenge "returns the
+ * stake, pays the challenger", and what it paid was money in micros, held until
+ * the last clawed-back share would have left. The other stake kinds are not
+ * here — standing is its own unit, and no query ever sums two units together.
+ *
+ * Nothing new is ever written in any of these kinds now (D-127). They are read
+ * because the rows are still in the table.
+ */
+function isBalanceKind(kind: LedgerKind): boolean {
+  return (
+    kind === "read_share" ||
+    kind === "bounty_accrual" ||
+    kind === "clawback" ||
+    kind === "dispute_reward"
+  );
+}
+
+/**
+ * Whether a row counts toward a balance at all: a balance kind, and priced.
+ *
+ * A `dispute_reward` is written at the outcome as a fact with no number — unit
+ * and amount null together (src/stake.ts) — and was priced when the sweep's
+ * ledger step reached that position. Unpriced it counts for nothing: such a row
+ * reads back through the columns as zero in `standing`
+ * (src/storage/repository.ts, `toLedgerRow`) and the mirror recomputes it the
+ * same way, so `micros` is what says a step has passed it and the amount is a
+ * real number. Every other balance kind was written priced and always counts.
+ */
+function countsTowardBalance(row: LedgerRow): boolean {
+  if (!isBalanceKind(row.kind)) return false;
+  return row.kind !== "dispute_reward" || row.unit === "micros";
 }
 
 /** What a set of rows adds up to, in micros. */

@@ -15,11 +15,12 @@
  * has nothing stored, and there the log is folded here, because a position
  * nobody has computed is not an answer to serve.
  *
- * The other two are Money's: "any operator can reconcile their payout against
- * the log". An operator's ledger is its own rows and what they add up to, and
- * the ledger page is the daily reconciliations, the payouts, and the four policy
- * numbers a reader needs to check any of it — the price of a read, the payout
- * floor, the cycle, and the holdback.
+ * The other two are the ledger's. The record is free and prices nothing
+ * (decision D-127), so what they serve is history: an operator's ledger is its
+ * own stored rows and what they add up to, and the ledger page is the daily
+ * reconciliations and the payouts that were made while the record was sold.
+ * One policy number is published beside them, the holdback every accrual
+ * waited out, because it is the one a reader still needs to read an old row.
  *
  * Reads only, and nothing is written: every number here is one the sweep folded
  * out of what the log has sealed, at a position that is served beside it, so
@@ -32,19 +33,13 @@
  * src/worker/pages.ts's business, and an agent parsing these must keep parsing
  * them whatever a browser asks for.
  *
- * No policy number lives here: the four the ledger page publishes are read from
+ * No policy number lives here: the one the ledger page publishes is read from
  * src/policy.ts, the page size is LIST_PAGE_LIMIT, and the bare integers are
  * HTTP status codes.
  */
 
 import { ledgerBalance } from "../ledger.js";
-import {
-  HOLDBACK_DAYS,
-  LIST_PAGE_LIMIT,
-  PAYOUT_CYCLE,
-  PAYOUT_MINIMUM_MICROS,
-  READ_PRICE_MICROS_PER_READ,
-} from "../policy.js";
+import { HOLDBACK_DAYS, LIST_PAGE_LIMIT } from "../policy.js";
 import { STANDING_FORMULA, standingAt, zeroStanding } from "../standing.js";
 import type { D1Like } from "../storage/d1.js";
 import {
@@ -217,24 +212,20 @@ async function operatorLedger(
 }
 
 /**
- * GET /ledger: the daily reconciliations, the payouts, and the numbers both are
- * computed with.
+ * GET /ledger: the daily reconciliations and the payouts, as history.
  *
- * The policy block is what makes the rest checkable without this Worker: the
- * price of a read, the floor a payout must clear, the cycle it clears it in, and
- * the holdback every accrual waits out.
+ * Nothing is priced any more (D-127), so no row is ever added to either
+ * listing: what is served is what the log accrued and paid while the record was
+ * sold. The policy block is down to the one number that still reads an old
+ * row — the holdback every accrual waited out. The price of a read, the payout
+ * floor and the payout cycle are not published, because there are none.
  */
 async function ledger(db: D1Like): Promise<Response> {
   return json(
     {
       reconciliations: await reconciliationRows(db, LIST_PAGE_LIMIT),
       payouts: await payoutRows(db, LIST_PAGE_LIMIT),
-      policy: {
-        READ_PRICE_MICROS_PER_READ,
-        PAYOUT_MINIMUM_MICROS,
-        PAYOUT_CYCLE,
-        HOLDBACK_DAYS,
-      },
+      policy: { HOLDBACK_DAYS },
     },
     200,
   );

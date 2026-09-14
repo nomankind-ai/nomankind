@@ -42,22 +42,24 @@
  * reports are read off the entry's own arrays and the revalidations off the
  * stored sidecar, so nothing on this page is folded a second time here.
  *
- * Section 9, Money: what the entry's reads paid, and to whom, is shown as the
- * ledger rows themselves — shares, the stale pool, the accrual that collected
- * it, the clawbacks an upheld dispute wrote — because "any operator can
- * reconcile their payout against the log" and a summary would be a number to
- * take on trust.
+ * Section 9, and decision D-127: contribution is the currency, so what this
+ * entry cost its contributors and what it earned them is one panel in standing
+ * and nothing else. No read of this record is priced, so there is no money row
+ * to show: the Contribution panel names who submitted, who decided, who
+ * reconfirmed and who challenged, each with the published standing its own act
+ * earns or burns. The acts are read off the sealed record this page already
+ * holds — the core's author, the approvers, the reconfirmations and the
+ * disputes — and the amounts are read off src/policy.ts, so the panel is the
+ * published rule applied to what was signed and never a second fold: the
+ * operator's own standing is the fold, and it is on the operator page.
  *
- * Decision D-100, the release window: an entry's content — the claim, what it
- * changed from and to, when it took effect, the citation, the evidence, the
- * observation, and the words each validator wrote — is served to a free reader
- * only once the seal covering its submission is older than
- * RELEASE_WINDOW_DAYS. Until then the route hands this page the proof and
- * nothing else (`data.withheld` is set and `data.entry` is `withholdEntry`'s
- * result), and the page prints one line saying when it opens and where to buy a
- * key. Everything a reader needs to prove the entry exists, in that order, at
- * that instant — every hash, the seal, the inclusion proof, the events and the
- * two offline commands — is shown either way, because proof is never withheld.
+ * Decision D-100, the release window, now at zero days (D-127): every entry is
+ * released the moment it is sealed, and its content is public and CC0 from that
+ * instant. The withheld view stays in the code, dormant, for a fork that
+ * publishes a window of its own — when the route sets `data.withheld` the seven
+ * content keys are gone from the core and each decision's reason reads as
+ * withheld — and every hash, the seal, the inclusion proof, the events and the
+ * two offline commands are shown either way, because proof is never withheld.
  *
  * Neutral tone throughout: the page prints what the record says and never
  * characterises it. Pure: no clock, no storage, no derivation.
@@ -65,7 +67,17 @@
 
 import { CORE_KEYS, type CoreKey } from "../../core.js";
 import { duplicateOf, parseDuplicateReason } from "../../duplicate-reason.js";
-import { DEFAULT_DOMAIN, RELEASE_WINDOW_DAYS } from "../../policy.js";
+import {
+  DEFAULT_DOMAIN,
+  DISPUTE_STAKE_STANDING,
+  REPRODUCTION_HOLDS,
+  STANDING_DISPUTE_UPHELD,
+  STANDING_OVERTURNED_SIGNER,
+  STANDING_SUBMISSION_VERIFIED,
+  STANDING_VALIDATION_ASSIGNED,
+  STANDING_VALIDATION_REPRODUCED,
+  STANDING_VALIDATION_VOLUNTEERED,
+} from "../../policy.js";
 import { CONTENT_CORE_KEYS } from "../../release.js";
 import {
   badge,
@@ -218,24 +230,23 @@ function disclosureNote(disclosure: EntryData["disclosure"]): Safe {
 }
 
 /**
- * The one line that stands where the content was, before the window is up
- * (decision D-100).
+ * The one line that stands where the content was, on the dormant withheld view
+ * (decision D-100, at zero days since D-127).
  *
- * "Released on <date>. Read it now with a key." — the date is the covering
- * seal's `sealed_at` through RELEASE_WINDOW_DAYS, computed by the route from
- * src/policy.ts, and the key link goes to the API page's own keys section, which
- * is where a reader who does not want to wait actually buys one. An entry
- * nothing has sealed yet has no date to print, so the line names the rule
- * instead — and the number in it is policy's, never a numeral typed here.
+ * Nothing on this log reaches it: RELEASE_WINDOW_DAYS is zero, so every entry
+ * is released the moment it is sealed and the route never builds a withheld
+ * view. A fork that publishes a window of its own sets that one number and this
+ * line comes back — so it says what this reader was served and nothing about
+ * when it opens, because the when is that fork's number and not a sentence this
+ * page can promise.
  */
 function releaseLine(withheld: WithheldView): Safe {
-  const buy = html`<a href="/api#keys">a key</a>`;
-  if (withheld.releaseDate === null) {
-    return html`Released ${RELEASE_WINDOW_DAYS} days after the seal that covers
-    it. Read it now with ${buy}.`;
-  }
-  return html`Released on ${fmtDate(withheld.releaseDate)}. Read it now with
-  ${buy}.`;
+  const from =
+    withheld.releaseDate === null
+      ? raw("")
+      : html` It is served from ${fmtDate(withheld.releaseDate)}.`;
+  return html`The content of this entry is not served to this reader.${from}
+  Every proof below is public.`;
 }
 
 /**
@@ -501,9 +512,14 @@ function confidence(ctx: PageContext, data: EntryData): Safe {
   </section>`;
 }
 
-/** The state beside the entry that the schema cannot hold. */
+/**
+ * The state beside the entry that the schema cannot hold.
+ *
+ * No read-share slot among them since D-127: no read is priced, so a seat on an
+ * entry's revenue is a seat on nothing, and a row for it would be publishing a
+ * claim this record no longer makes.
+ */
 function sidecar(data: EntryData): Safe {
-  const slots = data.sidecar.read_share_slots;
   return html`<section class="panel">
     <div class="panel-head">
       <h2>Sidecar</h2>
@@ -522,15 +538,6 @@ function sidecar(data: EntryData): Safe {
           ${data.sidecar.trusted_count_at_decision === null
             ? EM_DASH
             : data.sidecar.trusted_count_at_decision}
-        </dd>
-        <dt>read_share_slots</dt>
-        <dd>
-          ${slots === null || slots.length === 0
-            ? raw(EM_DASH)
-            : slots.map(
-                (slot) =>
-                  html`<div>${slot.operator} · seq ${slot.seq}</div>`,
-              )}
         </dd>
       </dl>
     </div>
@@ -940,183 +947,223 @@ function revalidations(data: EntryData): Safe {
 }
 
 /**
- * The stakes this entry's disputes and revalidations put up.
+ * One act this entry's sealed record shows, and what the published standing
+ * rule pays or burns for it (Section 9; decision D-127).
  *
- * Every row is a ledger record derived from a sealed event, and an amount is
- * shown only where the record carries one. A reward carries none until the
- * sweep's ledger step reaches the position it became owed at and prices it from
- * the clawbacks of the same dispute; until then it reads as unpriced, which is
- * what the log says about it.
+ * `standing` is a list because one act can move standing more than once: an
+ * assigned validation that carried a passing measurement earns twice, and every
+ * signer of an overturned entry burns beside whatever its own act earned.
  */
-function stakes(data: EntryData): Safe {
-  if (data.ledger.length === 0) {
+interface ContributionRow {
+  readonly who: Safe;
+  readonly role: string;
+  readonly act: string;
+  readonly standing: readonly string[];
+}
+
+/** What an act earned, in the policy constant's own name. */
+function earned(amount: number, rule: string): string {
+  return `+${amount} standing · ${rule}`;
+}
+
+/** What an act burned, in the policy constant's own name. */
+function burned(amount: number, rule: string): string {
+  return `-${amount} standing · ${rule}`;
+}
+
+/**
+ * Whether a signed record carries a measurement that passed the n-of-k rule.
+ *
+ * The published rule and not a reading of its own: `holds` at or above
+ * REPRODUCTION_HOLDS is what "a passing measurement" means everywhere else in
+ * this system, so the row says measured on exactly the records standing pays
+ * STANDING_VALIDATION_REPRODUCED for.
+ */
+function passed(source: unknown): boolean {
+  if (source === null || typeof source !== "object") return false;
+  const holds = (source as Record_)["holds"];
+  return typeof holds === "number" && holds >= REPRODUCTION_HOLDS;
+}
+
+/**
+ * Every act on this entry, in the order the record made them: the submission,
+ * each decision, each reconfirmation, each challenge.
+ *
+ * Read off the sealed record this page already holds and priced from
+ * src/policy.ts. Nothing is summed and nothing is stored: an operator's own
+ * standing is the fold over the whole log, and it is on the operator page.
+ */
+function contributionRows(data: EntryData): ContributionRow[] {
+  const rows: ContributionRow[] = [];
+  const overturned = text(data.entry, "status") === "overturned";
+  const signerBurn = overturned
+    ? [burned(STANDING_OVERTURNED_SIGNER, "STANDING_OVERTURNED_SIGNER")]
+    : [];
+
+  const author = text(data.entry, "author");
+  if (author !== null) {
+    const verified = text(data.entry, "verified_at") !== null;
+    rows.push({
+      who: html`<span class="break">${author}</span>`,
+      role: "submitter",
+      act: verified ? "submitted · verified" : "submitted · not yet verified",
+      standing: [
+        ...(verified
+          ? [earned(STANDING_SUBMISSION_VERIFIED, "STANDING_SUBMISSION_VERIFIED")]
+          : []),
+        ...signerBurn,
+      ],
+    });
+  }
+
+  for (const approver of data.approvers) {
+    const measured =
+      passed(approver.reproduction) || passed(approver.observation);
+    rows.push({
+      who: operatorCell(approver.operator, approver.operatorTrusted),
+      role: "validator",
+      act: `${approver.decision} · ${
+        approver.assigned_random ? "assigned" : "volunteered"
+      }${measured ? " · measured" : ""}`,
+      standing: [
+        approver.assigned_random
+          ? earned(STANDING_VALIDATION_ASSIGNED, "STANDING_VALIDATION_ASSIGNED")
+          : earned(
+              STANDING_VALIDATION_VOLUNTEERED,
+              "STANDING_VALIDATION_VOLUNTEERED",
+            ),
+        ...(measured
+          ? [
+              earned(
+                STANDING_VALIDATION_REPRODUCED,
+                "STANDING_VALIDATION_REPRODUCED",
+              ),
+            ]
+          : []),
+        ...signerBurn,
+      ],
+    });
+  }
+
+  for (const row of data.reconfirmations) {
+    const measured =
+      passed(row.record["reproduction"]) || passed(row.record["observation"]);
+    rows.push({
+      who: operatorCell(
+        text(row.record, "operator") ?? EM_DASH,
+        row.operatorTrusted,
+      ),
+      role: "reconfirmer",
+      act: measured ? "reconfirmed · measured" : "reconfirmed",
+      standing: [
+        earned(
+          STANDING_VALIDATION_VOLUNTEERED,
+          "STANDING_VALIDATION_VOLUNTEERED",
+        ),
+        ...(measured
+          ? [
+              earned(
+                STANDING_VALIDATION_REPRODUCED,
+                "STANDING_VALIDATION_REPRODUCED",
+              ),
+            ]
+          : []),
+        ...signerBurn,
+      ],
+    });
+  }
+
+  for (const dispute of items(data.entry, "disputes")) {
+    const outcome = text(dispute, "outcome") ?? "open";
+    const standing =
+      outcome === "upheld"
+        ? [
+            earned(STANDING_DISPUTE_UPHELD, "STANDING_DISPUTE_UPHELD"),
+            `${DISPUTE_STAKE_STANDING} standing returned · DISPUTE_STAKE_STANDING`,
+          ]
+        : outcome === "open"
+          ? [
+              `${DISPUTE_STAKE_STANDING} standing staked and held · DISPUTE_STAKE_STANDING`,
+            ]
+          : [burned(DISPUTE_STAKE_STANDING, "DISPUTE_STAKE_STANDING forfeited")];
+    rows.push({
+      who: filerOperator(dispute["operator"]),
+      role: "challenger",
+      act: `dispute · ${outcome}`,
+      standing,
+    });
+  }
+
+  return rows;
+}
+
+/**
+ * Who contributed to this entry, and what their acts earned or burned
+ * (decision D-127, the record is free).
+ *
+ * One panel where the read shares and the stakes used to be two. Nothing on
+ * this entry is priced and nothing is owed: the content is public and CC0 from
+ * the seal that covers it, no read of it is charged, and the only thing an act
+ * moves is standing. So the panel is the acts and the published amounts, with
+ * no money anywhere and no total — the amounts are src/policy.ts's, applied to
+ * what the log already shows, and the authority on any operator's own number is
+ * the fold on its page.
+ */
+function contribution(data: EntryData): Safe {
+  const rows = contributionRows(data);
+  if (rows.length === 0) {
     return html`<section class="panel">
-      <div class="panel-head"><h2>Stakes</h2></div>
-      <div class="panel-empty">No stake has been recorded.</div>
+      <div class="panel-head"><h2>Contribution</h2></div>
+      <div class="panel-empty">Nothing has been signed for this entry yet.</div>
     </section>`;
   }
   return html`<section class="panel">
     <div class="panel-head">
-      <h2>Stakes</h2>
-      <span class="panel-label">ledger rows, derived from the log</span>
+      <h2>Contribution</h2>
+      <span class="panel-label">standing, the only currency here</span>
     </div>
     <div class="table-wrap">
       <table class="dense">
         <thead>
           <tr>
-            <th>kind</th>
             <th>who</th>
-            <th>amount</th>
-            <th>seq</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${data.ledger.map(
-            (stake) => html`<tr class="row">
-              <td>${stake.kind}</td>
-              <td class="break">
-                ${stake.operator === null
-                  ? html`${stake.agent ?? EM_DASH}`
-                  : html`<a href="/operators/${stake.operator}"
-                      >${stake.operator}</a
-                    >`}
-              </td>
-              <td>
-                ${stake.amount === null
-                  ? html`<span class="dim">unpriced</span>`
-                  : html`${stake.amount} ${stake.unit ?? EM_DASH}`}
-              </td>
-              <td class="dim">${stake.seq}</td>
-            </tr>`,
-          )}
-        </tbody>
-      </table>
-    </div>
-    <p class="note">
-      A stake, a refund and a forfeit are in the unit they were put up in, and
-      the amounts are the placeholders the policy page publishes. A reward is in
-      micro-USD and is what the upheld dispute clawed back from the entry's
-      signers — nothing more, and zero where nothing was still held; a row with
-      no amount at all is one the ledger step has not reached yet, a fact the
-      log records without a number attached.
-    </p>
-  </section>`;
-}
-
-/**
- * What this entry's reads paid, and to whom.
- *
- * Whitepaper Section 9, Money: "Thirty percent of paid-read revenue goes to the
- * contributor pool at launch, fifteen to the submitter and five to each
- * validator, paid to their operators", held for thirty days "so an upheld
- * dispute can claw them back before they leave"; Section 7: a stale entry's
- * withheld half "builds up on the entry as a reconfirmation bounty". Four kinds
- * of row say those things happened, and all four are shown here in log order:
- * the shares, the pool the stale rule withheld, the accrual that collected it,
- * and the clawbacks an upheld dispute wrote.
- *
- * Every column is a field of the row as src/ledger.ts built it. Nothing is
- * summed and nothing is derived: a total on this page would be a second answer
- * to a question the ledger endpoint already answers from the same rows.
- */
-/**
- * What rate one read-share row was priced at, in the row's own words.
- *
- * Section 9, as of decision D-087: the split is published per evidence tier, so
- * a row that says only its amount no longer says why that amount. The rate is
- * read back out of `ref` — the percent the ledger applied, the entry's tier as
- * verification fixed it, and on a slot holder's row whether that holder's own
- * signed record carried a passing measurement — and never recomputed here: a
- * page that reapplied the rule would be a second answer to it, and a split that
- * moved by decision would silently restate a row it never priced.
- *
- * On an observed entry the submitter takes the observed rate and a slot holder
- * takes it only when it measured, which is the whole of Section 4's "paid more
- * for it" on one line. A row written before D-087 carries no tier at all, so it
- * renders its percent alone rather than being labeled with a tier nobody
- * priced it under.
- */
-function shareRate(ref: Record<string, unknown>): string | null {
-  const percent = ref["share_percent"];
-  if (typeof percent !== "number") return null;
-  const tier = ref["tier"];
-  if (typeof tier !== "string") return `${percent} percent`;
-  const measured = ref["measured"];
-  const holder = typeof measured === "boolean";
-  const observed = tier === "observed" && (!holder || measured === true);
-  const rate = observed ? "observed rate" : "stated rate";
-  const suffix = holder && measured === true ? " · measured" : "";
-  return `${percent} percent · ${rate}${suffix}`;
-}
-
-function readShares(data: EntryData): Safe {
-  if (data.readShares.length === 0) {
-    return html`<section class="panel">
-      <div class="panel-head"><h2>Read shares</h2></div>
-      <div class="panel-empty">
-        No read of this entry has been priced. Reads are published to the log
-        daily and priced from there, so an entry earns nothing until a day that
-        counted it has been sealed.
-      </div>
-    </section>`;
-  }
-  return html`<section class="panel">
-    <div class="panel-head">
-      <h2>Read shares</h2>
-      <span class="panel-label">ledger rows, derived from the log</span>
-    </div>
-    <div class="table-wrap">
-      <table class="dense">
-        <thead>
-          <tr>
-            <th>kind</th>
-            <th>operator</th>
             <th>role</th>
-            <th>date</th>
-            <th>reads</th>
-            <th>rate</th>
-            <th>amount</th>
-            <th>available at</th>
+            <th>act</th>
+            <th>standing</th>
           </tr>
         </thead>
         <tbody>
-          ${data.readShares.map(
+          ${rows.map(
             (row) => html`<tr class="row">
-              <td>${row.kind}</td>
-              <td class="break">
-                ${row.operator === null
-                  ? html`<span class="dim">${EM_DASH}</span>`
-                  : html`<a href="/operators/${row.operator}"
-                      >${row.operator}</a
-                    >`}
+              <td class="break">${row.who}</td>
+              <td>${row.role}</td>
+              <td>${row.act}</td>
+              <td>
+                ${row.standing.length === 0
+                  ? raw(EM_DASH)
+                  : row.standing.map(
+                      (each) => html`<div class="dim">${each}</div>`,
+                    )}
               </td>
-              <td>${row.role ?? EM_DASH}</td>
-              <td class="dim">${fmtDate(row.date)}</td>
-              <td class="dim">${row.reads === null ? EM_DASH : `${row.reads}`}</td>
-              <td class="dim">${shareRate(row.ref) ?? EM_DASH}</td>
-              <td>${row.amount} ${row.unit}</td>
-              <td class="dim">${fmtInstant(row.available_at)}</td>
             </tr>`,
           )}
         </tbody>
       </table>
     </div>
     <p class="note">
-      A pool row is owed to the entry rather than to a person: whoever reconfirms
-      it next collects it, which is the bounty accrual beside it. A row's
-      available_at is when it may leave, thirty days after the day it accrued;
-      a clawback carries the same instant as the share it negates.
+      Every amount is the published rule beside it, read from the policy page
+      and applied to the acts this entry's own sealed record carries. Reading
+      this entry costs nothing and pays nobody: its content is public and CC0
+      from the seal that covers it, so contribution is what the record counts
+      and standing is the whole of it. A submitter's amount is earned the first
+      time the entry derives verified, a decision earns whichever way it went,
+      a measured record earns beside it, and an upheld challenge that overturns
+      the entry burns every operator that signed it.
     </p>
     <p class="note">
-      The rate column is what the ledger applied, read off the row and not
-      recomputed: the percent, and the evidence tier the entry verified at, since
-      the split is published per tier and an observed entry pays more than a
-      stated one. A slot holder's row says measured when that holder's own signed
-      record carried a passing measurement, which is what earns it the observed
-      validator rate — a validator that accepted the test without running it is
-      paid at the stated rate, and the difference stays with nomankind rather
-      than moving the reader's price. A row priced before the per-tier split was
-      published names its percent and no tier.
+      Nothing here is a balance. Standing is folded over the whole sealed log
+      and recomputable by anyone, and each operator's own number, with the
+      position it was folded to, is on that operator's page.
     </p>
   </section>`;
 }
@@ -1286,7 +1333,7 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
     description:
       withheld === null
         ? (text(data.entry, "claim") ?? undefined)
-        : `The proof of this entry is public; its content is released ${RELEASE_WINDOW_DAYS} days after the seal that covers it.`,
+        : "The proof of this entry is public; its content is not served to this reader.",
     body: html`
       <div class="crumbs mono">
         <a href="/entries">Entries</a><span>/</span><span>${id}</span>
@@ -1313,8 +1360,7 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
       ${confidence(ctx, data)}
       <div class="cols">${sidecar(data)} ${seal(data)}</div>
       ${approvers(data)} ${reconfirmations(data)} ${disputes(data)}
-      ${failureReports(data)} ${revalidations(data)} ${stakes(data)}
-      ${readShares(data)}
+      ${failureReports(data)} ${revalidations(data)} ${contribution(data)}
       ${data.superseders.length === 0
         ? raw("")
         : html`<section class="panel">

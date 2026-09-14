@@ -17,7 +17,6 @@ import { describe, expect, it } from "vitest";
 
 import type { Event, EventPayloads, EventType } from "../src/events.js";
 import {
-  DISPUTE_FILING_FEE_CENTS,
   DISPUTE_STAKE_STANDING,
   REVALIDATION_REQUEST_STAKE_STANDING,
 } from "../src/policy.js";
@@ -106,11 +105,22 @@ describe("disputeStake", () => {
     });
   });
 
-  it("stakes a refundable filing fee for a bare key", () => {
+  it("has no filing fee left to stake for a bare key (D-127)", async () => {
+    // "No money anywhere": the fee is gone from published policy, so there is
+    // nothing a bare key could put up. A filing with no operator never reaches
+    // here — the dispute door refuses it with `insufficient_standing`, which is
+    // the refusal it already had for a challenger who cannot cover the stake —
+    // and the row this would derive is standing like every other, never cents.
+    const policyModule = (await import("../src/policy.js")) as Record<
+      string,
+      unknown
+    >;
+    expect("DISPUTE_FILING_FEE_CENTS" in policyModule).toBe(false);
+
     const stake = disputeStake(filed(null));
     expect(stake.operator).toBeNull();
-    expect(stake.unit).toBe("cents");
-    expect(stake.amount).toBe(DISPUTE_FILING_FEE_CENTS);
+    expect(stake.unit).toBe("standing");
+    expect(stake.amount).toBe(DISPUTE_STAKE_STANDING);
   });
 
   it("refuses a filing with no entry to be filed against", () => {
@@ -157,14 +167,14 @@ describe("disputeOutcomeStakes", () => {
     expect(rows[0]!.amount).toBe(DISPUTE_STAKE_STANDING);
   });
 
-  it("forfeits a bare key's fee in the unit it was staked in", () => {
+  it("forfeits in the unit it was staked in, which is standing (D-127)", () => {
     const failedOutcome = event(11, "dispute_failed", TARGET, {
       correction_entry_id: CORRECTION,
       reason: null,
     });
     const rows = disputeOutcomeStakes(filed(null), failedOutcome);
-    expect(rows[0]!.unit).toBe("cents");
-    expect(rows[0]!.amount).toBe(DISPUTE_FILING_FEE_CENTS);
+    expect(rows[0]!.unit).toBe("standing");
+    expect(rows[0]!.amount).toBe(DISPUTE_STAKE_STANDING);
     expect(rows[0]!.operator).toBeNull();
   });
 });

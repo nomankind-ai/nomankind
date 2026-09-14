@@ -239,8 +239,8 @@ describe("a log nothing has happened in", () => {
     expect(body["counters"]).toMatchObject({
       lastSweepAt: null,
       lastSweepAge: null,
-      stagesOk: 16,
-      stagesTotal: 16,
+      stagesOk: 15,
+      stagesTotal: 15,
       sealedHead: null,
     });
     // The thresholds travel with the answer: a state nobody can recompute is a
@@ -251,10 +251,11 @@ describe("a log nothing has happened in", () => {
     });
   }, 60_000);
 
-  it("says never for all five exercised doors", async () => {
+  it("says never for all four exercised doors", async () => {
     const body = await status(NOW);
     const rows = body["exercised"] as { stage: string; last: string }[];
-    expect(rows).toHaveLength(5);
+    // Four, not five: the payouts row went with the payout step (D-127).
+    expect(rows).toHaveLength(4);
     for (const row of rows) expect(row.last).toContain("never");
   }, 60_000);
 });
@@ -303,9 +304,12 @@ describe("a sweep's own account of itself", () => {
       ]);
       expect([step, byStep.get(step)!.last_ok_at]).toEqual([step, null]);
     }
-    // And the same again for the three money steps, which the report counts as
-    // one word three times.
-    for (const step of ["ledger", "standing", "payout"]) {
+    // And the same again for the two steps behind the seal, which the report
+    // counts as one word twice. The metering and payout steps stood here too
+    // and are retired (D-127), so no row is written for either.
+    expect(byStep.has("metering")).toBe(false);
+    expect(byStep.has("payout")).toBe(false);
+    for (const step of ["ledger", "standing"]) {
       expect([step, byStep.get(step)!.last_skip_reason]).toEqual([
         step,
         "unsealed",
@@ -377,7 +381,7 @@ describe("a healthy world", () => {
       lastSweepTrigger: "alarm",
       stagesFailing: 0,
       stagesAttention: 0,
-      stagesOk: 16,
+      stagesOk: 15,
       unsealedEvents: 0,
       witnessKind: "mock witnesses on local",
     });

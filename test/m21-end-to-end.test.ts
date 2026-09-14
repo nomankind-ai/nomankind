@@ -48,16 +48,12 @@ import {
   generateKeypair,
 } from "../src/identity.js";
 import { mintKey } from "../src/keys.js";
-import { payoutPlan, type LedgerRow } from "../src/ledger.js";
-import { mirrorLedgerRows } from "../src/mirror.js";
+import type { LedgerRow } from "../src/ledger.js";
 import {
   DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
   HOLDBACK_DAYS,
   LIST_PAGE_LIMIT,
-  PAYOUT_MINIMUM_MICROS,
-  READ_PRICE_MICROS_PER_READ,
-  READ_SHARE_SPLIT,
   STANDING_OVERTURNED_SIGNER,
   STANDING_TRUSTED_ENTRY,
   STANDING_VALIDATION_VOLUNTEERED,
@@ -523,11 +519,6 @@ async function standingOfOperator(
   return answer.body;
 }
 
-/** What one read of one entry pays one share, in micros. */
-function share(count: number, percent: number): number {
-  return Math.floor((count * READ_PRICE_MICROS_PER_READ * percent) / 100);
-}
-
 // ---------------------------------------------------------------------------
 // The world, built once
 // ---------------------------------------------------------------------------
@@ -626,10 +617,11 @@ describe("the three steps before anything is sealed", () => {
 
     expect(report.ledger).toBeNull();
     expect(report.standing).toBeNull();
-    expect(report.payouts).toEqual([]);
-    // One refusal each: nothing may be priced, folded or paid off events the
-    // log has not committed to.
-    expect(report.skipped["unsealed"]).toBe(3);
+    expect(report).not.toHaveProperty("payouts");
+    // One refusal each: nothing may be read or folded off events the log has
+    // not committed to. Two of them now, not three: the payout step is retired
+    // (D-127) and there is no third thing behind the wall.
+    expect(report.skipped["unsealed"]).toBe(2);
     // Day 0's read count still went in: it needs the clock and nothing else.
     expect(report.published.map((entry) => entry.date)).toEqual([dayDate(0)]);
   }, 600_000);
@@ -681,54 +673,48 @@ describe("after a sweep, standing", () => {
     });
   }, 600_000);
 
-  it("prices the day that was sealed with it", async () => {
-    const rows = await rowsOfKind(releasedEntry["id"] as string, "read_share");
-    // One submitter and the two operators that verified it: three shares of two
-    // reads, at the published price and the published split.
-    expect(rows.map((row) => [row.operator, row.amount])).toEqual([
-      [k1.operator, share(2, READ_SHARE_SPLIT.stated.submitter)],
-      [k2.operator, share(2, READ_SHARE_SPLIT.stated.validator)],
-      [k3.operator, share(2, READ_SHARE_SPLIT.stated.validator)],
-    ]);
-    expect(rows[0]!.available_at).toBe(`${dayDate(HOLDBACK_DAYS)}T00:00:00.000Z`);
+  it("prices nothing about the day that was sealed with it", async () => {
+    // Decision D-127: the record is free. The day was published and sealed —
+    // the counts are evidence of use — and not one row followed from it.
+    expect(await rowsOfKind(releasedEntry["id"] as string, "read_share")).toEqual(
+      [],
+    );
 
     const ledger = await read("/ledger");
     expect(ledger.status).toBe(200);
-    const reconciliations = ledger.body["reconciliations"] as LedgerRow[];
-    const day0 = reconciliations.find((row) => row.date === dayDate(0));
-    expect(day0?.ref["ok"]).toBe(true);
-    expect(day0?.ref["published_total"]).toBe(2);
-    expect(day0?.ref["accrued_total"]).toBe(2);
-    expect(ledger.body["policy"]).toEqual({
-      READ_PRICE_MICROS_PER_READ,
-      PAYOUT_MINIMUM_MICROS,
-      PAYOUT_CYCLE: "monthly",
-      HOLDBACK_DAYS,
-    });
+    expect(ledger.body["reconciliations"]).toEqual([]);
+    expect(ledger.body["payouts"]).toEqual([]);
+    // One number, and it is the one that still reads an old row: no price of a
+    // read, no payout floor, no cycle.
+    expect(ledger.body["policy"]).toEqual({ HOLDBACK_DAYS });
   }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
-// (e) The payout cycle, below the floor
+// (e) The payout cycle, retired
 // ---------------------------------------------------------------------------
 
-describe("an operator whose released rows sit below the minimum", () => {
-  it("is not paid, and the rows carry forward", async () => {
+describe("an operator whose entries were read", () => {
+  it("is owed nothing, and nothing is ever paid", async () => {
     const at = day(HOLDBACK_DAYS + 2);
     const report = await sweep(at);
 
-    expect(report.payouts).toEqual([]);
-    expect(report.skipped["payout_below_minimum"]).toBeGreaterThan(0);
+    // No payout step ran, so there is no refusal to count either: the cycle is
+    // not below a floor, it is gone.
+    expect(report).not.toHaveProperty("payouts");
+    expect(report.skipped["payout_below_minimum"]).toBeUndefined();
+    expect(report.skipped["payout_unconfigured"]).toBeUndefined();
 
     const ledger = await ledgerOf(k1.operator, at);
-    expect(ledger.balance["held"]).toBe(0);
-    expect(ledger.balance["released"]).toBe(
-      share(2, READ_SHARE_SPLIT.stated.submitter),
-    );
-    expect(ledger.balance["paid"]).toBe(0);
-    expect(ledger.balance["carried_forward"]).toBe(
-      share(2, READ_SHARE_SPLIT.stated.submitter),
-    );
+    expect(ledger.rows).toEqual([]);
+    expect(ledger.balance).toEqual({
+      accrued: 0,
+      held: 0,
+      released: 0,
+      clawed_back: 0,
+      paid: 0,
+      carried_forward: 0,
+    });
     expect(await payoutRows(world.store.db, LIST_PAGE_LIMIT)).toEqual([]);
   }, 600_000);
 });
@@ -748,12 +734,10 @@ describe("a dispute upheld after the holdback", () => {
       await rowsOfKind(releasedEntry["id"] as string, "clawback"),
     ).toEqual([]);
 
-    // The rows are untouched: released is released.
+    // There was nothing to claw back, because nothing ever accrued.
     const ledger = await ledgerOf(k2.operator, at);
     expect(ledger.balance["clawed_back"]).toBe(0);
-    expect(ledger.balance["released"]).toBe(
-      share(2, READ_SHARE_SPLIT.stated.validator),
-    );
+    expect(ledger.balance["released"]).toBe(0);
 
     // The signers burn, and the challenger earns.
     const signer = await standingOfOperator(k2.operator, at);
@@ -765,66 +749,6 @@ describe("a dispute upheld after the holdback", () => {
     ).toBe(1);
     // The stake is unlocked the moment the challenge holds.
     expect(challenger["locked"]).toBe(0);
-  }, 600_000);
-});
-
-// ---------------------------------------------------------------------------
-// (e) The payout cycle, at the floor
-// ---------------------------------------------------------------------------
-
-describe("an operator whose released rows reach the minimum", () => {
-  it("is paid once through the provider, and not twice in one cycle", async () => {
-    const at = day(HOLDBACK_DAYS + 5, 2);
-
-    // Onboarding stored the reference at registration; this world writes the
-    // one the mock provider calls verified onto the row the payout step reads.
-    const record = await getOperator(world.store.db, k6.operator);
-    await putOperator(world.store.db, {
-      ...record!,
-      details: { ...record!.details, payout_reference: VERIFIED_REFERENCE },
-    });
-    // A released accrual at exactly the published floor. Sixty-six thousand
-    // real reads would say the same thing more slowly.
-    await putLedgerRows(world.store.db, [
-      {
-        id: "read_share:fixture:payout",
-        kind: "read_share",
-        entry_id: null,
-        operator: k6.operator,
-        role: "validator",
-        date: dayDate(0),
-        reads: 1,
-        unit: "micros",
-        amount: PAYOUT_MINIMUM_MICROS,
-        available_at: `${dayDate(HOLDBACK_DAYS)}T00:00:00.000Z`,
-        seq: 0,
-        at: AT,
-        ref: {},
-      },
-    ]);
-
-    const report = await sweep(at);
-    expect(report.payouts).toHaveLength(1);
-    expect(report.payouts[0]!.operator).toBe(k6.operator);
-    expect(report.payouts[0]!.amount).toBe(PAYOUT_MINIMUM_MICROS);
-    expect(report.payouts[0]!.transfer).toMatch(/^mock-transfer-\d+$/);
-
-    const ledger = await ledgerOf(k6.operator, at);
-    expect(ledger.balance["paid"]).toBe(PAYOUT_MINIMUM_MICROS);
-    expect(ledger.balance["carried_forward"]).toBe(0);
-    const paid = await payoutRows(world.store.db, LIST_PAGE_LIMIT, k6.operator);
-    expect(paid).toHaveLength(1);
-    expect(paid[0]!.ref["rows"]).toEqual(["read_share:fixture:payout"]);
-
-    // The cycle is monthly and per operator (D-053), so a second run in the same
-    // month pays nothing: the accrual this one paid is claimed, so the operator
-    // holds nothing released at all and is not even asked about.
-    const again = await sweep(new Date(at.getTime() + HOUR_MS));
-    expect(again.payouts).toEqual([]);
-    expect(again.skipped["payout_below_minimum"]).toBeGreaterThan(0);
-    expect(
-      await payoutRows(world.store.db, LIST_PAGE_LIMIT, k6.operator),
-    ).toHaveLength(1);
   }, 600_000);
 });
 
@@ -851,111 +775,71 @@ describe("a stale entry", () => {
     const report = await sweep(day(RECONFIRM_DAY));
     expect(report.ledger!.ok).toBe(true);
 
-    const shares = (await rowsOfKind(id, "read_share")).filter(
-      (row) => row.date === dayDate(STALE_READ_DAY),
-    );
-    const full = [
-      share(2, READ_SHARE_SPLIT.stated.submitter),
-      share(2, READ_SHARE_SPLIT.stated.validator),
-      share(2, READ_SHARE_SPLIT.stated.validator),
-    ];
-    expect(shares.map((row) => [row.operator, row.amount])).toEqual([
-      [k1.operator, Math.floor(full[0]! / 2)],
-      [k2.operator, Math.floor(full[1]! / 2)],
-      [k3.operator, Math.floor(full[2]! / 2)],
-    ]);
-
-    const pool = await rowsOfKind(id, "bounty_pool");
-    expect(pool).toHaveLength(1);
-    expect(pool[0]!.operator).toBeNull();
-    expect(pool[0]!.amount).toBe(
-      full.reduce((sum, amount) => sum + amount - Math.floor(amount / 2), 0),
-    );
+    // Half of nothing is nothing (D-127): a stale entry earns no half rate,
+    // because it earns no rate, and no pool builds up on it.
+    expect(
+      (await rowsOfKind(id, "read_share")).filter(
+        (row) => row.date === dayDate(STALE_READ_DAY),
+      ),
+    ).toEqual([]);
+    expect(await rowsOfKind(id, "bounty_pool")).toEqual([]);
   }, 600_000);
 
-  it("pays the pool to whoever makes it fresh again, once", async () => {
+  it("still reopens the window, and pays the reconfirmer nothing", async () => {
     const at = day(RECONFIRM_DAY, 1);
     const id = staleEntry["id"] as string;
-    const pooled = (await rowsOfKind(id, "bounty_pool"))[0]!.amount;
 
     await reconfirm(id, k4, at);
-    // The other stale entry is reconfirmed too: it accrued no pool, so its
-    // bounty is priced at nothing rather than left unpriced.
     await reconfirm(heldEntry["id"] as string, k6, at);
 
     const report = await sweep(day(FRESH_READ_DAY));
-    expect(report.ledger!.bounties).toBe(2);
+    // Section 7's bounty was money, and there is none (D-127): the step prices
+    // no accrual, so it counts none.
+    expect(report.ledger!.bounties).toBe(0);
 
-    const accruals = await rowsOfKind(id, "bounty_accrual");
-    // One row, not two: the door's unpriced row and the priced one are the same
-    // row, under the same id.
-    expect(accruals).toHaveLength(1);
-    expect([accruals[0]!.operator, accruals[0]!.amount]).toEqual([
-      k4.operator,
-      pooled,
-    ]);
-    expect(accruals[0]!.role).toBe("reconfirmer");
-    expect(accruals[0]!.available_at).toBe(
-      new Date(at.getTime() + HOLDBACK_DAYS * DAY_MS).toISOString(),
-    );
-    expect(await rowsOfKind(heldEntry["id"] as string, "bounty_accrual")).toEqual([
-      expect.objectContaining({ operator: k6.operator, amount: 0 }),
-    ]);
+    // The entry is fresh again and the reconfirmer is seated in a slot, which
+    // is the half of Section 7 that was never about money.
+    const entry = await read(`/entries/${id}`, at);
+    expect(entry.body["stale"]).toBe(false);
   }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
-// (b) One day, four shares, and a second run that adds nothing
+// (b) One day of reads, worth nothing, and a second run that adds nothing
 // ---------------------------------------------------------------------------
 
-describe("a day of reads over an entry with a submitter and three slots", () => {
-  it("splits four ways, reconciles, and prices exactly once", async () => {
+describe("a day of reads over an entry a submitter and three validators made", () => {
+  it("splits nothing four ways, and adds nothing on a second run", async () => {
     const at = day(FRESH_READ_DAY, 1);
     const id = staleEntry["id"] as string;
 
-    // The reconfirmation seated a third slot holder, so the split is the
-    // paper's own: fifteen to the submitter and five to each of three.
+    // There are no read-share slots to seat any more: the split they existed
+    // for is gone with the money (D-127).
     const entry = await read(`/read/${id}`, at);
     expect(entry.status).toBe(200);
     const slots = (entry.body["sidecar"] as Record<string, unknown>)[
       "read_share_slots"
-    ] as { operator: string }[];
-    expect(slots.map((slot) => slot.operator)).toEqual([
-      k2.operator,
-      k3.operator,
-      k4.operator,
-    ]);
-    // Two more reads of it, and two of the entry whose money is clawed back.
+    ] as { operator: string }[] | null;
+    expect(slots ?? []).toEqual([]);
+    // Two more reads of it, and two of the entry that is overturned below.
     await readEntry(id, 2, at);
     await readEntry(heldEntry["id"] as string, 2, at);
 
     const report = await sweep(day(FRESH_READ_DAY + 1));
     expect(report.ledger!.ok).toBe(true);
+    expect(report.ledger!.read_shares).toBe(0);
+    expect(report.ledger!.reconciliations).toBe(0);
 
-    const shares = (await rowsOfKind(id, "read_share")).filter(
-      (row) => row.date === dayDate(FRESH_READ_DAY),
-    );
-    expect(shares.map((row) => [row.operator, row.role, row.amount])).toEqual([
-      [k1.operator, "submitter", share(3, READ_SHARE_SPLIT.stated.submitter)],
-      [k2.operator, "validator", share(3, READ_SHARE_SPLIT.stated.validator)],
-      [k3.operator, "validator", share(3, READ_SHARE_SPLIT.stated.validator)],
-      [k4.operator, "validator", share(3, READ_SHARE_SPLIT.stated.validator)],
-    ]);
-    // Fresh again, so nothing is withheld on that day.
-    expect(
-      (await rowsOfKind(id, "bounty_pool")).filter(
-        (row) => row.date === dayDate(FRESH_READ_DAY),
-      ),
-    ).toEqual([]);
+    // Four holders, and four shares of nothing: the slots are what the paper's
+    // split was about, and the split is gone (D-127).
+    expect(await rowsOfKind(id, "read_share")).toEqual([]);
+    expect(await rowsOfKind(id, "bounty_pool")).toEqual([]);
 
     const ledger = await read("/ledger");
-    const reconciliation = (ledger.body["reconciliations"] as LedgerRow[]).find(
-      (row) => row.date === dayDate(FRESH_READ_DAY),
-    );
-    expect(reconciliation?.ref["ok"]).toBe(true);
-    expect(reconciliation?.ref["published_total"]).toBe(5);
+    expect(ledger.body["reconciliations"]).toEqual([]);
 
-    // A second run over the same sealed log writes nothing at all.
+    // A second run over the same sealed log writes nothing at all, which is
+    // what every run does now.
     const before = await rowsFor(id);
     const again = await sweep(day(FRESH_READ_DAY + 1, 1));
     expect([
@@ -973,136 +857,31 @@ describe("a day of reads over an entry with a submitter and three slots", () => 
 // ---------------------------------------------------------------------------
 
 describe("a dispute upheld inside the holdback", () => {
-  it("claws back every held share and burns the signers", async () => {
+  it("claws back nothing, and burns the signers exactly as before", async () => {
     const at = day(FRESH_READ_DAY + 2);
     const id = heldEntry["id"] as string;
-    const held = await rowsOfKind(id, "read_share");
-    expect(held).toHaveLength(4);
+    // Nothing was ever held, because nothing was ever priced.
+    expect(await rowsOfKind(id, "read_share")).toEqual([]);
 
     await overturn(heldEntry, n1, [k2, k3], at);
     const report = await sweep(new Date(at.getTime() + HOUR_MS));
-    expect(report.ledger!.clawbacks).toBe(4);
+    expect(report.ledger!.clawbacks).toBe(0);
+    expect(await rowsOfKind(id, "clawback")).toEqual([]);
 
-    const clawbacks = await rowsOfKind(id, "clawback");
-    expect(clawbacks).toHaveLength(4);
-    expect(clawbacks.map((row) => row.amount)).toEqual(
-      held.map((row) => -row.amount),
-    );
-
-    // Every clawback waits with the share it negates, so the two release
-    // together and neither can leave alone.
-    expect(clawbacks.map((row) => row.available_at)).toEqual(
-      held.map((row) => row.available_at),
-    );
-
-    // Section 6's same sentence pays the challenger: the reward the dispute
-    // door wrote unpriced is priced here at exactly what came back, and leaves
-    // when the last of those shares would have.
-    const rewards = await rowsOfKind(id, "dispute_reward");
-    expect(rewards).toHaveLength(1);
-    const reward = rewards[0]!;
-    expect([reward.unit, reward.amount]).toEqual([
-      "micros",
-      -clawbacks.reduce((sum, row) => sum + row.amount, 0),
-    ]);
-    expect(reward.available_at).toBe(
-      clawbacks.map((row) => row.available_at).sort().at(-1),
-    );
-    expect(reward.ref["clawbacks"]).toEqual(clawbacks.map((row) => row.id));
-    // The row it was written as is still under `ref`, naming the challenger.
-    expect(reward.ref["agent"]).toBe(n1.agent.agentId);
-
-    // An operator that held a share on this entry and nowhere else: everything
-    // it accrued came back.
+    // Section 6's money half is gone and its standing half is untouched: the
+    // signers burn, and the reconfirmer that signed it burns exactly once.
     const ledger = await ledgerOf(k5.operator, at);
-    expect(ledger.balance["accrued"] + ledger.balance["clawed_back"]).toBe(0);
-    expect(ledger.balance["accrued"]).toBeGreaterThan(0);
-    // Inside the holdback both rows are held, so they net to nothing: nothing
-    // is owed, nothing is payable, and nothing carries to the next cycle.
-    expect(ledger.balance["held"]).toBe(0);
-    expect(ledger.balance["released"]).toBe(0);
-    expect(ledger.balance["carried_forward"]).toBe(0);
-    expect(ledger.balance["paid"]).toBe(0);
+    expect(ledger.balance["accrued"]).toBe(0);
+    expect(ledger.balance["clawed_back"]).toBe(0);
 
-    // The reconfirmer signed it too, and burns for it exactly once.
     const reconfirmer = await standingOfOperator(k6.operator, at);
     expect(
       (reconfirmer["counts"] as Record<string, number>)["overturned"],
     ).toBe(1);
-  }, 600_000);
-
-  it("holds the challenger's reward, then releases it to their operator", async () => {
-    // Section 6 pays the challenger, and Section 9 holds what it pays for as
-    // long as the shares it was priced off: the reward waits with them and
-    // comes out with them, on the challenger's operator's own balance.
-    const id = heldEntry["id"] as string;
-    const reward = (await rowsOfKind(id, "dispute_reward"))[0]!;
-    expect([reward.operator, reward.unit]).toEqual([n1.operator, "micros"]);
-    expect(reward.amount).toBeGreaterThan(0);
-
-    // An hour inside the holdback: held, and no cycle can reach it.
-    const inside = new Date(new Date(reward.available_at!).getTime() - HOUR_MS);
-    const held = (await ledgerOf(n1.operator, inside)).balance;
-    expect([held["accrued"], held["held"], held["released"]]).toEqual([
-      reward.amount,
-      reward.amount,
-      0,
-    ]);
+    const signer = await standingOfOperator(k2.operator, at);
     expect(
-      (
-        await releasedUnpaidRows(world.store.db, n1.operator, inside.toISOString())
-      ).map((row) => row.id),
-    ).not.toContain(reward.id);
-
-    // At its release it is what the payout cycle reads: released, unpaid, and
-    // either paid this cycle or carried whole to the next.
-    const out = new Date(reward.available_at!);
-    const released = await releasedUnpaidRows(
-      world.store.db,
-      n1.operator,
-      out.toISOString(),
-    );
-    expect(released.map((row) => row.id)).toContain(reward.id);
-    const plan = payoutPlan(n1.operator, released, out.toISOString());
-    expect(plan.amount + plan.carried_forward).toBe(reward.amount);
-
-    const balance = (await ledgerOf(n1.operator, out)).balance;
-    expect([balance["released"], balance["paid"], balance["carried_forward"]]).toEqual(
-      [reward.amount, 0, reward.amount],
-    );
-  }, 600_000);
-
-  it("stores the reward the mirror recomputes, field for field", async () => {
-    // The property verify-mirror's ledger check rests on: a clone recomputes
-    // the reward from the sealed events rather than believing the number, so a
-    // stored row and a recomputed one cannot disagree about what an upheld
-    // challenge is owed.
-    const id = heldEntry["id"] as string;
-    const stored = (await rowsOfKind(id, "dispute_reward"))[0]!;
-
-    const sealed = (await latestSeal(world.store.db))!;
-    const events = await eventsAfter(world.store.db, -1, LIST_PAGE_LIMIT * 20);
-    const recomputed = mirrorLedgerRows(events, sealed.sealed_at).filter(
-      (row) => row.kind === "dispute_reward" && row.entry_id === id,
-    );
-    expect(recomputed).toHaveLength(1);
-    expect(recomputed[0]).toEqual(stored);
-    // Named field by field as well, so a failure says which one moved.
-    expect([
-      recomputed[0]!.id,
-      recomputed[0]!.amount,
-      recomputed[0]!.unit,
-      recomputed[0]!.available_at,
-      recomputed[0]!.operator,
-      recomputed[0]!.ref,
-    ]).toEqual([
-      stored.id,
-      stored.amount,
-      stored.unit,
-      stored.available_at,
-      stored.operator,
-      stored.ref,
-    ]);
+      (signer["counts"] as Record<string, number>)["overturned"],
+    ).toBeGreaterThanOrEqual(1);
   }, 600_000);
 
   it("moves the trusted pool, and the next run's snapshot says so", async () => {

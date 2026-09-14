@@ -14,8 +14,6 @@ import {
   ASSIGNMENT_WINDOW_HOURS,
   BEACON,
   CAPTURE_MAX_BYTES,
-  CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-  CONTRIBUTOR_SHARE_PERCENT,
   FAILURE_REPORT_THRESHOLD,
   FETCH_MAX_REDIRECTS,
   FETCH_TIMEOUT_MS,
@@ -30,21 +28,16 @@ import {
   NORM_VERSION,
   PAGE_CACHE_SECONDS,
   PAGE_CACHE_STALE_SECONDS,
-  PAYOUT_CYCLE,
-  PAYOUT_MINIMUM_MICROS,
   POLICY,
-  READ_PRICE_MICROS_PER_READ,
   RELEASE_WINDOW_DAYS,
   REGISTRY,
   REQUEST_CLOCK_SKEW_SECONDS,
-  READ_SHARE_SPLIT,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   SEAL_INTERVAL_MINUTES,
   SEAL_MAX_EVENTS,
   SWEEP_BATCH_STATEMENTS,
   SCHEMA_VERSION,
-  SLOT_COUNT,
   stalenessWindowDays,
   STANDING_ASSIGNMENT_MISSED,
   STANDING_DECAY_PAUSED,
@@ -95,9 +88,6 @@ const EXPECTED_POLICY_KEYS = [
   "REPRODUCTION_HOLDS",
   "DOMAINS",
   "HOLDBACK_DAYS",
-  "READ_SHARE_SPLIT",
-  "SLOT_COUNT",
-  "CONTRIBUTOR_SHARE_PERCENT",
   "SEAL_INTERVAL_MINUTES",
   "SWEEP_INTERVAL_MINUTES",
   "STATUS_ATTENTION_AFTER_INTERVALS",
@@ -112,7 +102,6 @@ const EXPECTED_POLICY_KEYS = [
   "ANCHOR_CALENDARS",
   "FAILURE_REPORT_THRESHOLD",
   "DISPUTE_STAKE_STANDING",
-  "DISPUTE_FILING_FEE_CENTS",
   "REVALIDATION_REQUEST_STAKE_STANDING",
   "REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW",
   "STANDING_VALIDATION_VOLUNTEERED",
@@ -127,14 +116,11 @@ const EXPECTED_POLICY_KEYS = [
   "STANDING_TRUSTED_ENTRY",
   "STANDING_TRUSTED_STAY",
   "STANDING_DECAY_PAUSED",
-  "READ_PRICE_MICROS_PER_READ",
   "RELEASE_WINDOW_DAYS",
   "RATE_TIERS",
   "FREE_TIER",
   "FREE_READS_PER_DAY_GLOBAL",
   "OPERATOR_READS_PER_DAY",
-  "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
-  "STRIPE",
   "ALERT_ENDPOINTS_PER_KEY",
   "ALERT_TIMEOUT_MS",
   "ALERT_RETRY_MINUTES",
@@ -142,8 +128,6 @@ const EXPECTED_POLICY_KEYS = [
   "ALERT_DELIVERIES_PER_RUN",
   "ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE",
   "ALERT_KINDS",
-  "PAYOUT_MINIMUM_MICROS",
-  "PAYOUT_CYCLE",
   "MIRROR",
   "NORM_VERSION",
   "SCHEMA_VERSION",
@@ -183,47 +167,35 @@ describe("policy numbers", () => {
     expect(SEAL_INTERVAL_MINUTES).toBe(5);
   });
 
-  it("holds the money numbers from the whitepaper, per tier (D-087)", () => {
-    expect(HOLDBACK_DAYS).toBe(30);
-    expect(SLOT_COUNT).toBe(3);
-
-    // The paper's launch split, on a stated entry.
-    expect(READ_SHARE_SPLIT.stated.submitter).toBe(15);
-    expect(READ_SHARE_SPLIT.stated.validator).toBe(5);
-    expect(CONTRIBUTOR_SHARE_PERCENT.stated).toBe(30);
-
-    // Section 4: "A submitter who can measure a fact may submit it as observed,
-    // and is paid more for it"; Section 9: "observed entries take a larger read
-    // share than stated ones". Larger in both roles, never equal.
-    expect(READ_SHARE_SPLIT.observed.submitter).toBeGreaterThan(
-      READ_SHARE_SPLIT.stated.submitter,
-    );
-    expect(READ_SHARE_SPLIT.observed.validator).toBeGreaterThan(
-      READ_SHARE_SPLIT.stated.validator,
-    );
-
-    // Every tier's share is exactly the split it is made of, and every tier's
-    // share is at or above the floor that only rises.
-    for (const tier of ["stated", "observed"] as const) {
-      const split = READ_SHARE_SPLIT[tier];
-      expect([tier, split.submitter + SLOT_COUNT * split.validator]).toEqual([
-        tier,
-        CONTRIBUTOR_SHARE_PERCENT[tier],
-      ]);
-      expect(CONTRIBUTOR_SHARE_PERCENT[tier]).toBeGreaterThanOrEqual(
-        CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-      );
+  it("carries no money key at all (D-127)", async () => {
+    // "No money anywhere": no paid reads, no read-share slots, no payouts, no
+    // dispute filing fee. The nine keys that priced them left POLICY and left
+    // the module, and this is the check that keeps them gone — a share, a
+    // price, a slot count or a payment provider reappearing here would be the
+    // money side coming back under a new name.
+    const gone = [
+      "READ_SHARE_SPLIT",
+      "SLOT_COUNT",
+      "CONTRIBUTOR_SHARE_PERCENT",
+      "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
+      "READ_PRICE_MICROS_PER_READ",
+      "PAYOUT_MINIMUM_MICROS",
+      "PAYOUT_CYCLE",
+      "STRIPE",
+      "DISPUTE_FILING_FEE_CENTS",
+    ];
+    const policyModule = (await import("../src/policy.js")) as Record<
+      string,
+      unknown
+    >;
+    for (const name of gone) {
+      expect([name, name in POLICY]).toEqual([name, false]);
+      expect([name, name in policyModule]).toEqual([name, false]);
     }
 
-    // The tiers the split is keyed by are the schema's own evidence tiers, not
-    // a second pair of names: policy declares them locally because evidence
-    // imports policy, and this is what keeps the two readings one.
-    expect(Object.keys(READ_SHARE_SPLIT).sort()).toEqual(
-      [...schema.properties.evidence_tier.enum].sort(),
-    );
-    expect(Object.keys(CONTRIBUTOR_SHARE_PERCENT).sort()).toEqual(
-      Object.keys(READ_SHARE_SPLIT).sort(),
-    );
+    // The caps stay caps: HOLDBACK_DAYS is how long an upheld dispute may claw
+    // back, and it is a duration and not an amount.
+    expect(HOLDBACK_DAYS).toBe(30);
   });
 
   it("pays standing for a measurement beside the credit for the decision (D-087)", () => {
@@ -550,28 +522,6 @@ describe("policy numbers", () => {
     }
   });
 
-  it("prices a read in micro-USD, at the paper's own example (M21)", () => {
-    // "At $0.50 per thousand paid reads": fifty cents per thousand is five
-    // hundred micro-USD per read, and the paper's worked example follows.
-    expect(READ_PRICE_MICROS_PER_READ).toBe(500);
-    expect(READ_PRICE_MICROS_PER_READ * 1000).toBe(500_000);
-    const reads = 10_000;
-    expect(
-      (reads * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.stated.submitter) / 100,
-    ).toBe(750_000);
-    expect(
-      (reads * READ_PRICE_MICROS_PER_READ * READ_SHARE_SPLIT.stated.validator) / 100,
-    ).toBe(250_000);
-  });
-
-  it("carries the payout floor and cycle (D-053)", () => {
-    expect(PAYOUT_MINIMUM_MICROS).toBe(5_000_000);
-    // Five dollars, in the micro-USD the ledger counts in.
-    expect(PAYOUT_MINIMUM_MICROS).toBe(5 * 1_000_000);
-    expect(Number.isInteger(PAYOUT_MINIMUM_MICROS)).toBe(true);
-    expect(PAYOUT_CYCLE).toBe("monthly");
-  });
-
   it("no longer carries a seed fee (D-052)", async () => {
     // "There is no seed fee: the maintainer pays nothing from its own funds,
     // and validating before revenue earns standing and read-share slots on the
@@ -586,14 +536,14 @@ describe("policy numbers", () => {
     }
   });
 
-  it("publishes the release window the data is free on (D-100, D-101)", () => {
-    // Section 8 as D-100 amends it: training on the data is free on release,
-    // and this is the wait. Thirty days, set by the maintainer in D-101 and not
-    // a placeholder — the number the paid product is sold against, moving only
-    // by a later decision.
-    expect(RELEASE_WINDOW_DAYS).toBe(30);
+  it("publishes a release window of zero: the record is free (D-127)", () => {
+    // Section 8 as D-100 amends it and D-127 supersedes it: training on the
+    // data is free on release, and release is the seal. Zero days, and zero is
+    // a published number rather than a missing one — the constant stays so a
+    // fork may set a window of its own, and the code behind it stays with it.
+    expect(RELEASE_WINDOW_DAYS).toBe(0);
     expect(Number.isInteger(RELEASE_WINDOW_DAYS)).toBe(true);
-    expect(RELEASE_WINDOW_DAYS).toBeGreaterThan(0);
+    expect(RELEASE_WINDOW_DAYS).not.toBeLessThan(0);
     expect(POLICY.RELEASE_WINDOW_DAYS).toBe(RELEASE_WINDOW_DAYS);
     // One window, and no environment's own: a rule that a deployment could
     // shorten would be a rule the paper does not describe.
@@ -607,7 +557,6 @@ describe("policy numbers", () => {
       expect(value).not.toBeNull();
       if (
         key === "NORM_VERSION" ||
-        key === "PAYOUT_CYCLE" ||
         key === "SCHEMA_VERSION" ||
         // M24: the slug of the tier served without a key. A name, like the
         // three above, and the fourth and last one.
@@ -637,9 +586,6 @@ describe("policy numbers", () => {
     expect(POLICY.REPRODUCTION_HOLDS).toBe(REPRODUCTION_HOLDS);
     expect(POLICY.DOMAINS).toBe(DOMAINS);
     expect(POLICY.HOLDBACK_DAYS).toBe(HOLDBACK_DAYS);
-    expect(POLICY.READ_SHARE_SPLIT).toBe(READ_SHARE_SPLIT);
-    expect(POLICY.SLOT_COUNT).toBe(SLOT_COUNT);
-    expect(POLICY.CONTRIBUTOR_SHARE_PERCENT).toBe(CONTRIBUTOR_SHARE_PERCENT);
     expect(POLICY.STANDING_ATTESTATION_SCORED).toBe(
       STANDING_ATTESTATION_SCORED,
     );
@@ -678,8 +624,5 @@ describe("policy numbers", () => {
     expect(POLICY.STANDING_ASSIGNMENT_MISSED).toBe(STANDING_ASSIGNMENT_MISSED);
     expect(POLICY.STANDING_TRUSTED_ENTRY).toBe(STANDING_TRUSTED_ENTRY);
     expect(POLICY.STANDING_TRUSTED_STAY).toBe(STANDING_TRUSTED_STAY);
-    expect(POLICY.READ_PRICE_MICROS_PER_READ).toBe(READ_PRICE_MICROS_PER_READ);
-    expect(POLICY.PAYOUT_MINIMUM_MICROS).toBe(PAYOUT_MINIMUM_MICROS);
-    expect(POLICY.PAYOUT_CYCLE).toBe(PAYOUT_CYCLE);
   });
 });

@@ -1,29 +1,25 @@
 /**
- * M24: the day's paid reads, reported to the payment provider exactly once.
+ * M25d: the day's read counts, still published, and billed to nobody.
  *
- * Whitepaper Section 9, Money: "Read counts are published to the sealed log
- * daily, so nomankind cannot quietly change the numbers later, and any operator
- * can reconcile their payout against the log." The bill has to follow that
- * published number, and this is the step that sends it: one meter event per key
- * per day, drawn from the sealed `read_count` event's own `paid.keys`, with the
- * day and the key inside the identifier so the provider itself refuses a
- * duplicate.
+ * Decision D-127, "the record is free, no money anywhere": the metering step and
+ * the payout step are retired. What was the bill's side of Section 9 is gone —
+ * no key-day is reported to any provider and no `meter_reports` row is ever
+ * written again — and what stays is the sentence underneath it: "Read counts are
+ * published to the sealed log daily, so nomankind cannot quietly change the
+ * numbers later." The daily `read_count` event goes on being published, with its
+ * per-key counts, as evidence of use that nobody prices.
  *
  * The world here is deliberately small — receipts, a seal, and two keys — so
- * that what is under test is the step and not a milestone's worth of scaffolding
- * around it. Everything it touches is real: miniflare's D1 with the migrations
- * applied, real signed receipts, the real publish, seal and ledger steps, and
- * the sweep the alarm runs. The provider is the mock, because the one thing a
- * test of a paid loop must never do is reach a payment provider.
+ * that what is under test is the sweep and not a milestone's worth of
+ * scaffolding around it. Everything it touches is real: miniflare's D1 with the
+ * migrations applied, real signed receipts, and the real publish, seal and
+ * ledger steps of the sweep the alarm runs. No payment provider is constructed
+ * anywhere, because there is no door and no step left to construct one for.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import {
-  MockPaymentsAdapter,
-  UnavailablePaymentsAdapter,
-} from "../src/adapters/stripe.js";
 import { base64urlEncode } from "../src/encoding.js";
 import {
   agentIdFromPublicKey,
@@ -40,12 +36,19 @@ import {
   eventsAfter,
   ledgerCursor,
   nextReadCounter,
+  payoutRows,
   putReadReceipt,
+  reconciliationRows,
   sweepSteps,
 } from "../src/storage/repository.js";
 import type { EventPayloads, Event } from "../src/events.js";
 import type { Env } from "../src/worker/env.js";
-import { METERING_CURSOR, runSweep, type SweepReport } from "../src/worker/sweep.js";
+import {
+  LEDGER_CURSOR,
+  SWEEP_STEPS,
+  runSweep,
+  type SweepReport,
+} from "../src/worker/sweep.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
 import {
   FakeAnchorAdapter,
@@ -70,7 +73,6 @@ const ENTRY_HASH = `sha256:${"a".repeat(64)}`;
 
 let store: TestDatabase;
 let env: Env;
-let payments: MockPaymentsAdapter;
 let issuerKey: CryptoKey;
 let issuerId = "";
 
@@ -105,10 +107,7 @@ async function receipt(at: Date, keyId: string | null): Promise<void> {
 }
 
 /** Run the sweep the alarm runs, with the fakes standing in for the world. */
-async function sweep(
-  at: Date,
-  provider: MockPaymentsAdapter | UnavailablePaymentsAdapter = payments,
-): Promise<SweepReport> {
+async function sweep(at: Date): Promise<SweepReport> {
   const beacon = new FixtureBeacon("m24-metering");
   await beacon.advance(at.toISOString());
   return runSweep(env, {
@@ -118,7 +117,6 @@ async function sweep(
     pinned: pinnedSet([]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payments: provider,
   });
 }
 
@@ -149,8 +147,6 @@ beforeAll(async () => {
       await exportPrivateKeyPkcs8(pair.privateKey),
     ),
   };
-  payments = new MockPaymentsAdapter();
-
   for (const holder of [one, two]) {
     const minted = mintKey();
     holder.id = minted.id;
@@ -179,10 +175,10 @@ afterAll(async () => {
 }, 600_000);
 
 // ---------------------------------------------------------------------------
-// (a) One meter event per key per day
+// (a) The count is published; nobody is billed for it
 // ---------------------------------------------------------------------------
 
-describe("the metering step over a published day", () => {
+describe("a published day, under D-127", () => {
   let report: SweepReport;
   let published: Event<"read_count">;
 
@@ -191,52 +187,29 @@ describe("the metering step over a published day", () => {
     published = await publishedOn(date(0));
   }, 600_000);
 
-  it("publishes the day's paid half before it bills anyone", () => {
+  it("still publishes the day's counts, per key, as evidence of use", () => {
     const payload = published.payload as EventPayloads["read_count"];
     expect(payload.total).toBe(4);
     expect(payload.paid!.keys).toEqual({ [one.id]: 2, [two.id]: 1 });
     expect(payload.paid!.total).toBe(3);
   });
 
-  it("sends one event per key, with the day inside the identifier", () => {
-    // The identifier is the provider's own idempotency key, and it names the
-    // environment, the day and the key: three things that cannot collide.
-    expect(
-      [...payments.reported].sort((left, right) =>
-        left.identifier < right.identifier ? -1 : 1,
-      ),
-    ).toEqual(
-      [
-        {
-          customer: one.customer,
-          value: 2,
-          identifier: `${ENVIRONMENT}:${date(0)}:${one.id}`,
-          timestamp: Math.floor(Date.parse(`${date(0)}T23:59:59Z`) / 1000),
-        },
-        {
-          customer: two.customer,
-          value: 1,
-          identifier: `${ENVIRONMENT}:${date(0)}:${two.id}`,
-          timestamp: Math.floor(Date.parse(`${date(0)}T23:59:59Z`) / 1000),
-        },
-      ].sort((left, right) => (left.identifier < right.identifier ? -1 : 1)),
-    );
-  });
-
-  it("reports what it did, and moves its own cursor", async () => {
-    expect(report.metered).toEqual({ keys: 2, reads: 3 });
-    expect(await countMeterReports(store.db)).toBe(2);
-    expect(await ledgerCursor(store.db, METERING_CURSOR)).toBeGreaterThanOrEqual(
-      published.seq,
-    );
+  it("bills nobody: no meter report, ever", async () => {
+    expect(await countMeterReports(store.db)).toBe(0);
   }, 600_000);
 
-  it("writes a row for its own step and for the alert step beside it", async () => {
+  it("has no metering step and no payout step to run", () => {
+    expect(SWEEP_STEPS).not.toContain("metering");
+    expect(SWEEP_STEPS).not.toContain("payout");
+    expect(report).not.toHaveProperty("metered");
+    expect(report).not.toHaveProperty("payouts");
+  });
+
+  it("writes no row for either retired step, and one for the alerts", async () => {
     const rows = await sweepSteps(store.db);
     const byStep = new Map(rows.map((row) => [row.step, row]));
-    expect(byStep.has("metering")).toBe(true);
-    expect(byStep.has("alerts")).toBe(true);
-    expect(byStep.get("metering")!.detail).toEqual({ keys: 2, reads: 3 });
+    expect(byStep.has("metering")).toBe(false);
+    expect(byStep.has("payout")).toBe(false);
     expect(byStep.get("alerts")!.detail).toEqual({
       created: 0,
       delivered: 0,
@@ -245,43 +218,38 @@ describe("the metering step over a published day", () => {
     });
   }, 600_000);
 
-  it("never bills the same key-day twice, however often the sweep runs", async () => {
-    const again = await sweep(day(1));
-    expect(again.metered).toEqual({ keys: 0, reads: 0 });
-    expect(payments.reported).toHaveLength(2);
-    expect(await countMeterReports(store.db)).toBe(2);
-    // The second run's own row says it did nothing, which is the truth about a
-    // day already billed rather than a step that failed to bill it.
-    const rows = await sweepSteps(store.db);
-    const metering = rows.find((row) => row.step === "metering")!;
-    expect(metering.detail).toEqual({ keys: 0, reads: 0 });
-  }, 600_000);
-});
-
-// ---------------------------------------------------------------------------
-// (b) A deployment that cannot bill at all
-// ---------------------------------------------------------------------------
-
-describe("the metering step where there is no provider", () => {
-  it("says so once and reports nothing, leaving the day still owed", async () => {
-    // A second day of reads on the first key, published by the run below.
-    await receipt(day(1), one.id);
-
-    const report = await sweep(day(2), new UnavailablePaymentsAdapter());
-    expect(report.metered).toEqual({ keys: 0, reads: 0 });
-    expect(report.skipped["metering_unavailable"]).toBe(1);
-    // Nothing was sent and nothing was written down as sent.
-    expect(payments.reported).toHaveLength(2);
-    expect(await countMeterReports(store.db)).toBe(2);
-
-    // And the next run with the provider back picks the day up.
-    const after = await sweep(day(2));
-    expect(after.metered).toEqual({ keys: 1, reads: 1 });
-    expect(payments.reported[2]).toEqual({
-      customer: one.customer,
-      value: 1,
-      identifier: `${ENVIRONMENT}:${date(1)}:${one.id}`,
-      timestamp: Math.floor(Date.parse(`${date(1)}T23:59:59Z`) / 1000),
+  it("prices nothing: the ledger step reports ok with a zero count", async () => {
+    expect(report.ledger).toEqual({
+      through: report.sealed!.last_seq,
+      read_shares: 0,
+      clawbacks: 0,
+      bounties: 0,
+      reconciliations: 0,
+      entries: 0,
+      day: null,
+      ok: true,
     });
+    // No row of any kind followed from a day of reads.
+    expect(await reconciliationRows(store.db, LIST_PAGE_LIMIT)).toEqual([]);
+    expect(await payoutRows(store.db, LIST_PAGE_LIMIT)).toEqual([]);
+  }, 600_000);
+
+  it("keeps the cursor a fork restarts from", async () => {
+    // `npm run import-mirror` sets this, and the step has to go on moving it or
+    // a fork would resume at a position nothing ever advances.
+    expect(await ledgerCursor(store.db, LEDGER_CURSOR)).toBe(
+      report.sealed!.last_seq,
+    );
+  }, 600_000);
+
+  it("keeps publishing on the days after, unpriced", async () => {
+    await receipt(day(1), one.id);
+    const again = await sweep(day(2));
+    const second = await publishedOn(date(1));
+    const payload = second.payload as EventPayloads["read_count"];
+    expect(payload.paid!.keys).toEqual({ [one.id]: 1 });
+    expect(await countMeterReports(store.db)).toBe(0);
+    expect(again.ledger!.read_shares).toBe(0);
+    expect(await reconciliationRows(store.db, LIST_PAGE_LIMIT)).toEqual([]);
   }, 600_000);
 });

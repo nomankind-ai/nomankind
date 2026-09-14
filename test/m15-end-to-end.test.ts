@@ -606,12 +606,22 @@ describe("the small-pool checkpoint", () => {
     expect(entry["reconfirmations"]).toEqual([]);
   });
 
-  it("seats the two promoting approvals in the read-share slots", async () => {
+  it("seats nobody in the read-share slots, which are empty from the promotion (D-127)", async () => {
+    // The read share is retired with the rest of the money, so the two
+    // approvals that promoted this entry seat nobody. The field keeps its
+    // shape — a list from the promoting decision, null before it — so every
+    // export and the verifier read the document they always read.
     const row = await getEntry(world.store.db, checkpoint["id"] as string);
 
-    expect(
-      row?.sidecar.read_share_slots?.map((slot) => slot.operator),
-    ).toEqual([a1.operator, a2.operator]);
+    expect(row?.sidecar.read_share_slots).toEqual([]);
+    for (const operator of [a1.operator, a2.operator]) {
+      expect([
+        operator,
+        row?.sidecar.read_share_slots?.some(
+          (slot) => slot.operator === operator,
+        ),
+      ]).toEqual([operator, false]);
+    }
   });
 
   it("refuses a reconfirmation on the last fresh day", async () => {
@@ -798,12 +808,16 @@ describe("reconfirming a stale entry", () => {
     expect(row?.sidecar.effective_tier).toBe("stated");
   });
 
-  it("seats the reconfirmer in a read-share slot", async () => {
+  it("seats the reconfirmer nowhere: the refresh is the whole of its effect", async () => {
+    // The reconfirmation above did everything Freshness and decay asks of it —
+    // the entry is verified, fresh, and its window reopened — and it seats
+    // nobody, because there is no read share to rotate into (D-127).
     const row = await getEntry(world.store.db, checkpoint["id"] as string);
 
-    expect(
-      row?.sidecar.read_share_slots?.map((slot) => slot.operator),
-    ).toEqual([a1.operator, a2.operator, a3.operator]);
+    // The refresh itself is the test above, on the door's own answer; what is
+    // pinned here is that the same reconfirmation seated nobody.
+    expect(row?.sidecar.read_share_slots).toEqual([]);
+    expect(row?.sidecar.effective_tier).toBe("stated");
   });
 
   it("writes one bounty accrual for the window it was stale for", async () => {
@@ -827,9 +841,10 @@ describe("reconfirming a stale entry", () => {
     expect(event?.type).toBe("reconfirmation");
   });
 
-  it("rotates nothing when the reconfirmer already holds a slot", async () => {
-    // The window this reconfirmation reopened runs out in turn, and a holder
-    // refreshes the entry without taking a second seat.
+  it("rotates nothing when one of the approvers reconfirms in turn", async () => {
+    // The window this reconfirmation reopened runs out in turn, and an
+    // operator that already signed the entry refreshes it without taking a
+    // seat — as nobody does now (D-127).
     const later = day(STALE_DAY + WINDOW_DAYS + 1);
     const response = await send(
       await reconfirmation({
@@ -847,9 +862,7 @@ describe("reconfirming a stale entry", () => {
     expect(body["reconfirmations"]).toHaveLength(2);
 
     const row = await getEntry(world.store.db, checkpoint["id"] as string);
-    expect(
-      row?.sidecar.read_share_slots?.map((slot) => slot.operator),
-    ).toEqual([a1.operator, a2.operator, a3.operator]);
+    expect(row?.sidecar.read_share_slots).toEqual([]);
   });
 
   it("refuses an agent under the submitter's own operator", async () => {

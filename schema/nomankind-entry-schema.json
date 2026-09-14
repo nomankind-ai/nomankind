@@ -357,7 +357,7 @@
     },
     "stale": {
       "type": "boolean",
-      "description": "DERIVED. True when expires_at is in the past. Stale entries stay verified and earn at half rate; the withheld half accrues as a reconfirmation bounty."
+      "description": "DERIVED. True when expires_at is in the past. Stale entries stay verified until a reconfirmation refreshes them, and nothing is withheld from them: the record is free, so the content of every sealed entry is public and CC0 from the instant of its seal (decision D-127)."
     },
     "superseded_by": {
       "type": ["string", "null"],

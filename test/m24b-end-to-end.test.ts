@@ -1,5 +1,16 @@
 /**
- * M24b end to end: observed pays more, through the Worker and the sweep.
+ * M24b end to end: observed is still observed, and pays nothing.
+ *
+ * Decision D-127, "the record is free, no money anywhere": the read share, the
+ * split and the contributor pool are gone, and with them the sentence this file
+ * was written for. What survives is the half of D-087 that was never about
+ * money — an entry verifies at the tier its evidence earned, a stated entry
+ * stays stated whatever anyone brings to it later (D-035), and a validator that
+ * reproduced earns standing where one that copied does not. So every amount
+ * this file used to assert is asserted as absent instead.
+ *
+ * The original note follows, because it says what the world here is built to
+ * exercise.
  *
  * Whitepaper Section 4, "Two tiers of evidence": "A submitter who can measure a
  * fact may submit it as observed, and is paid more for it." Section 9, "Money":
@@ -43,11 +54,8 @@ import { mintKey } from "../src/keys.js";
 import type { LedgerRow } from "../src/ledger.js";
 import { mirrorLedgerRows } from "../src/mirror.js";
 import {
-  CONTRIBUTOR_SHARE_PERCENT,
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
-  READ_PRICE_MICROS_PER_READ,
-  READ_SHARE_SPLIT,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   STANDING_VALIDATION_REPRODUCED,
@@ -407,11 +415,6 @@ async function sharesOn(entryId: string, date: string): Promise<LedgerRow[]> {
   return rows.filter((row) => row.kind === "read_share" && row.date === date);
 }
 
-/** What one day of reads pays one share, in micros: the only rounding there is. */
-function share(percent: number, count = READS): number {
-  return Math.floor((count * READ_PRICE_MICROS_PER_READ * percent) / 100);
-}
-
 /** One operator's standing, as the endpoint recomputes it from the log. */
 async function standingOf(
   operator: string,
@@ -533,7 +536,7 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe("the three entries", () => {
-  it("verify at the tier their evidence earned, with the slots it seated", async () => {
+  it("verify at the tier their evidence earned", async () => {
     const observed = await read(`/read/${observedEntry["id"] as string}`);
     const observedCore = observed.body["entry"] as Record<string, unknown>;
     expect([observedCore["status"], observedCore["evidence_tier"]]).toEqual([
@@ -542,24 +545,12 @@ describe("the three entries", () => {
     ]);
     const sidecar = observed.body["sidecar"] as Record<string, unknown>;
     expect(sidecar["effective_tier"]).toBe("observed");
-    expect(
-      (sidecar["read_share_slots"] as { operator: string }[]).map(
-        (slot) => slot.operator,
-      ),
-    ).toEqual([k2.operator, k3.operator]);
 
     const mixed = await read(`/read/${mixedEntry["id"] as string}`);
     expect([
       (mixed.body["entry"] as Record<string, unknown>)["status"],
       (mixed.body["sidecar"] as Record<string, unknown>)["effective_tier"],
     ]).toEqual(["verified", "observed"]);
-    expect(
-      (
-        (mixed.body["sidecar"] as Record<string, unknown>)[
-          "read_share_slots"
-        ] as { operator: string }[]
-      ).map((slot) => slot.operator),
-    ).toEqual([k5.operator, k6.operator, k7.operator]);
 
     const stated = await read(`/read/${statedEntry["id"] as string}`);
     expect([
@@ -573,79 +564,24 @@ describe("the three entries", () => {
 // (b) The rate rule, over one published day
 // ---------------------------------------------------------------------------
 
-describe("a day of paid reads, priced per tier (D-087)", () => {
-  it("pays an observed entry whose holders measured at the observed split", async () => {
-    const rows = await sharesOn(observedEntry["id"] as string, dayDate(0));
-    expect(rows.map((row) => [row.operator, row.role, row.amount])).toEqual([
-      [k1.operator, "submitter", share(READ_SHARE_SPLIT.observed.submitter)],
-      [k2.operator, "validator", share(READ_SHARE_SPLIT.observed.validator)],
-      [k3.operator, "validator", share(READ_SHARE_SPLIT.observed.validator)],
-    ]);
-    // The row says which rule produced the amount: the entry's tier, and for a
-    // slot holder whether its own record measured.
-    expect(rows[0]!.ref).toMatchObject({
-      price_micros_per_read: READ_PRICE_MICROS_PER_READ,
-      share_percent: READ_SHARE_SPLIT.observed.submitter,
-      stale: false,
-      tier: "observed",
-    });
-    expect(rows[0]!.ref["measured"]).toBeUndefined();
-    expect(rows[1]!.ref).toMatchObject({ tier: "observed", measured: true });
+describe("a day of reads over entries of both tiers", () => {
+  it("pays nobody, at either tier", async () => {
+    // The rule D-087 published was a rate, and there is no rate (D-127): the
+    // observed entry, the mixed one and the stated one are all worth the same
+    // nothing, and no row is written for any of them.
+    for (const core of [observedEntry, mixedEntry, statedEntry]) {
+      expect(await sharesOn(core["id"] as string, dayDate(0))).toEqual([]);
+    }
   }, 600_000);
 
-  it("pays the holder that measured nothing the stated rate beside ones that did", async () => {
-    const rows = await sharesOn(mixedEntry["id"] as string, dayDate(0));
-    expect(rows.map((row) => [row.operator, row.amount])).toEqual([
-      [k1.operator, share(READ_SHARE_SPLIT.observed.submitter)],
-      // Accepted the test, ran it, and it did not hold often enough: Section
-      // 4's operator who copied, paid the stated validator rate.
-      [k5.operator, share(READ_SHARE_SPLIT.stated.validator)],
-      [k6.operator, share(READ_SHARE_SPLIT.observed.validator)],
-      [k7.operator, share(READ_SHARE_SPLIT.observed.validator)],
-    ]);
-    expect(rows[1]!.ref).toMatchObject({ tier: "observed", measured: false });
-    expect(rows[2]!.ref).toMatchObject({ tier: "observed", measured: true });
-    // The difference stays with nomankind: the reader paid one price per read.
-    expect(rows.reduce((sum, row) => sum + row.amount, 0)).toBeLessThan(
-      share(CONTRIBUTOR_SHARE_PERCENT.observed),
-    );
-  }, 600_000);
-
-  it("pays a stated entry at the stated split", async () => {
-    const rows = await sharesOn(statedEntry["id"] as string, dayDate(0));
-    expect(rows.map((row) => [row.operator, row.amount])).toEqual([
-      [k1.operator, share(READ_SHARE_SPLIT.stated.submitter)],
-      [k2.operator, share(READ_SHARE_SPLIT.stated.validator)],
-      [k3.operator, share(READ_SHARE_SPLIT.stated.validator)],
-    ]);
-    expect(rows.every((row) => row.ref["tier"] === "stated")).toBe(true);
-    // Two slots and a submitter, so the day is the stated split less one slot.
-    expect(rows.reduce((sum, row) => sum + row.amount, 0)).toBe(
-      share(
-        CONTRIBUTOR_SHARE_PERCENT.stated - READ_SHARE_SPLIT.stated.validator,
-      ),
-    );
-    // And the same reads of the observed entry beside it paid more.
-    const observed = await sharesOn(observedEntry["id"] as string, dayDate(0));
-    expect(
-      observed.reduce((sum, row) => sum + row.amount, 0),
-    ).toBeGreaterThan(rows.reduce((sum, row) => sum + row.amount, 0));
-  }, 600_000);
-
-  it("agrees with the mirror's own recompute over the sealed events", async () => {
+  it("agrees with the mirror's own recompute, which builds nothing either", async () => {
     const sealed = (await latestSeal(world.store.db))!;
     const events = await eventsAfter(world.store.db, -1, LIST_PAGE_LIMIT * 8);
-    const recomputed = mirrorLedgerRows(events, sealed.sealed_at).filter(
-      (row) => row.kind === "read_share",
-    );
-    for (const core of [observedEntry, mixedEntry, statedEntry]) {
-      const id = core["id"] as string;
-      const stored = await sharesOn(id, dayDate(0));
-      expect(stored.length).toBeGreaterThan(0);
-      expect(
-        recomputed.filter((row) => row.entry_id === id && row.date === dayDate(0)),
-      ).toEqual(stored);
-    }
+    expect(
+      mirrorLedgerRows(events, sealed.sealed_at).filter(
+        (row) => row.kind === "read_share",
+      ),
+    ).toEqual([]);
   }, 600_000);
 });
 
@@ -705,85 +641,31 @@ describe("a reconfirmation of each entry", () => {
     await sweep(day(SECOND_DAY + 1, 1));
   }, 600_000);
 
-  it("prices the observed entry's full three slots at the observed split", async () => {
-    const rows = await sharesOn(observedEntry["id"] as string, dayDate(SECOND_DAY));
-    expect(rows.map((row) => [row.operator, row.amount])).toEqual([
-      [k1.operator, share(READ_SHARE_SPLIT.observed.submitter)],
-      [k2.operator, share(READ_SHARE_SPLIT.observed.validator)],
-      [k3.operator, share(READ_SHARE_SPLIT.observed.validator)],
-      [k4.operator, share(READ_SHARE_SPLIT.observed.validator)],
-    ]);
-    // Section 9's contributor share, at the observed tier, to the micro.
-    expect(rows.reduce((sum, row) => sum + row.amount, 0)).toBe(
-      share(CONTRIBUTOR_SHARE_PERCENT.observed),
-    );
-    expect(
-      rows.reduce((sum, row) => sum + row.amount, 0),
-    ).toBe(
-      Math.floor(
-        (READS * READ_PRICE_MICROS_PER_READ * CONTRIBUTOR_SHARE_PERCENT.observed) /
-          100,
-      ),
-    );
+  it("pays nothing for any of the three, before or after", async () => {
+    for (const core of [observedEntry, mixedEntry, statedEntry]) {
+      const id = core["id"] as string;
+      expect(await sharesOn(id, dayDate(0))).toEqual([]);
+      expect(await sharesOn(id, dayDate(SECOND_DAY))).toEqual([]);
+    }
   }, 600_000);
 
-  it("changes only the rotated slot's rate on the mixed entry", async () => {
-    const before = await sharesOn(mixedEntry["id"] as string, dayDate(0));
-    const after = await sharesOn(mixedEntry["id"] as string, dayDate(SECOND_DAY));
-    expect(after.map((row) => [row.operator, row.amount])).toEqual([
-      [k1.operator, share(READ_SHARE_SPLIT.observed.submitter)],
-      // The holder that measured nothing is gone, and the reconfirmer that did
-      // holds its slot at the observed rate.
-      [k6.operator, share(READ_SHARE_SPLIT.observed.validator)],
-      [k7.operator, share(READ_SHARE_SPLIT.observed.validator)],
-      [k8.operator, share(READ_SHARE_SPLIT.observed.validator)],
-    ]);
-    // Everything else about the entry is where it was: the tier verification
-    // fixed, the submitter's rate, and the two holders that did not move.
-    expect(after.every((row) => row.ref["tier"] === "observed")).toBe(true);
-    expect(before[0]!.amount).toBe(after[0]!.amount);
-    expect(before[2]!.amount).toBe(after[1]!.amount);
-    const entry = await read(
+  it("keeps the tier verification fixed, whatever the reconfirmation brought", async () => {
+    // D-035, which is a fact about evidence rather than about money: a stated
+    // entry stays stated, and an observed one stays observed.
+    const mixed = await read(
       `/read/${mixedEntry["id"] as string}`,
       day(SECOND_DAY, 2),
     );
     expect(
-      (entry.body["sidecar"] as Record<string, unknown>)["effective_tier"],
+      (mixed.body["sidecar"] as Record<string, unknown>)["effective_tier"],
     ).toBe("observed");
-  }, 600_000);
-
-  it("keeps the reconfirmed stated entry at the stated rate", async () => {
-    const rows = await sharesOn(statedEntry["id"] as string, dayDate(SECOND_DAY));
-    expect(rows.map((row) => [row.operator, row.amount])).toEqual([
-      [k1.operator, share(READ_SHARE_SPLIT.stated.submitter)],
-      [k2.operator, share(READ_SHARE_SPLIT.stated.validator)],
-      [k3.operator, share(READ_SHARE_SPLIT.stated.validator)],
-      [k4.operator, share(READ_SHARE_SPLIT.stated.validator)],
-    ]);
-    expect(rows.every((row) => row.ref["tier"] === "stated")).toBe(true);
-    expect(rows.every((row) => row.ref["measured"] !== true)).toBe(true);
-    expect(rows.reduce((sum, row) => sum + row.amount, 0)).toBe(
-      share(CONTRIBUTOR_SHARE_PERCENT.stated),
+    const stated = await read(
+      `/read/${statedEntry["id"] as string}`,
+      day(SECOND_DAY, 2),
     );
-  }, 600_000);
-
-  it("still agrees with the mirror's recompute, rotated rates and all", async () => {
-    // The day the rotation landed on, which is the day both readings derive the
-    // entry at: the mirror prices every day against the entry as the sealed
-    // head derives it (M21, and unchanged here), so an older day it recomputes
-    // carries today's slot holders rather than that day's. What M24b adds is
-    // the rate, and the rate the two arrive at is the same rate.
-    const sealed = (await latestSeal(world.store.db))!;
-    const events = await eventsAfter(world.store.db, -1, LIST_PAGE_LIMIT * 8);
-    const recomputed = mirrorLedgerRows(events, sealed.sealed_at).filter(
-      (row) => row.kind === "read_share" && row.date === dayDate(SECOND_DAY),
-    );
-    for (const core of [observedEntry, mixedEntry, statedEntry]) {
-      const id = core["id"] as string;
-      const stored = await sharesOn(id, dayDate(SECOND_DAY));
-      expect(stored.length).toBeGreaterThan(0);
-      expect(recomputed.filter((row) => row.entry_id === id)).toEqual(stored);
-    }
+    expect(
+      (stated.body["sidecar"] as Record<string, unknown>)["effective_tier"],
+    ).toBe("stated");
   }, 600_000);
 });
 
