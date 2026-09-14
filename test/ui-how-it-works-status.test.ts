@@ -182,6 +182,21 @@ describe("renderHowItWorks", () => {
    * reader how to read the log is where the window they are reading under
    * belongs.
    */
+  /**
+   * The seal stage is where the witnesses are named, so it is where a reader
+   * who wants to know whether they are independent has to be sent (D-121).
+   */
+  it("links the independence page from the seal stage, where the witnesses are", () => {
+    const seal = page.indexOf(`id="s3"`);
+    const next = page.indexOf(`id="s4"`);
+    const link = page.indexOf(`href="/independence"`);
+    expect(link).toBeGreaterThan(seal);
+    expect(link).toBeLessThan(next);
+    expect(page.replace(/\s+/g, " ")).toContain(
+      "the registry's tree at a size, never one event",
+    );
+  });
+
   it("names the release window in the read stage, from policy", () => {
     const squeezed = page.replace(/\s+/g, " ");
     expect(squeezed).toContain(

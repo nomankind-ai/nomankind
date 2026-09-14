@@ -1302,6 +1302,47 @@ export async function operatorDomains(
 }
 
 /**
+ * The domains of exactly these operators, by operator, in the log's own order.
+ *
+ * The directory form of `operatorDomains`: one grouped statement over the ids on
+ * a page rather than one read per row, which is what a page listing every
+ * registered operator with its domains would otherwise cost (decision D-121, the
+ * independence page). Asked in chunks of fifty for the reason
+ * `standingForOperators` asks in chunks — one id is one bound value, and D1 takes
+ * a hundred in a statement. An id with no row is absent from the map, which is an
+ * operator attested nowhere rather than an operator that does not exist.
+ *
+ * The attestation is deliberately not carried: this is the names, and the signed
+ * attestation behind each is the operator's own page.
+ */
+export async function domainsForOperators(
+  db: D1Like,
+  ids: readonly string[],
+): Promise<Map<string, string[]>> {
+  const domains = new Map<string, string[]>();
+  if (ids.length === 0) return domains;
+  const CHUNK = 50;
+  for (let from = 0; from < ids.length; from += CHUNK) {
+    const chunk = ids.slice(from, from + CHUNK);
+    const rows = await db
+      .prepare(
+        `SELECT operator, domain FROM operator_domains
+         WHERE operator IN (${chunk.map(() => "?").join(", ")})
+         ORDER BY operator, seq`,
+      )
+      .bind(...chunk)
+      .all<Row>();
+    for (const row of rows.results) {
+      const operator = readText(row, "operator");
+      const found = domains.get(operator);
+      if (found === undefined) domains.set(operator, [readText(row, "domain")]);
+      else found.push(readText(row, "domain"));
+    }
+  }
+  return domains;
+}
+
+/**
  * The operators attested in one domain, in id order.
  *
  * What the caller builds a draw's exclusion list from: the draw itself stays

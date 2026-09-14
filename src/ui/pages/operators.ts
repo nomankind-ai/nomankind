@@ -120,7 +120,10 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
         upheld dispute overturned. The co-signers column is how many distinct
         operators this one has signed an entry beside; each operator's own page
         breaks that down, pair by pair, into what the two agreed and disagreed
-        on.
+        on. This set is also one half of
+        <a href="/independence">the independence page</a>, which prints it beside
+        the pinned witness set and the intersection of the two, because no
+        pinned witness may be an operator of the record.
       </p>
     `,
   });

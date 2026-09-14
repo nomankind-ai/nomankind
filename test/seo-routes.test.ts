@@ -249,6 +249,9 @@ describe("GET /sitemap.xml", () => {
       "/genesis",
       "/dry-run",
       "/how-it-works",
+      // The independence page (D-121): a page a crawler should reach, like
+      // every other documentation page named here.
+      "/independence",
       "/status",
       "/docs",
       "/docs/fork",

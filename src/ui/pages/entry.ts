@@ -1178,9 +1178,17 @@ function seal(data: EntryData): Safe {
   // seal position: falling back to it would show a sealed position for an entry
   // whose seal object never carried one, which is a claim the log cannot back.
   const position = onEntry === null ? null : onEntry["position"];
-  const witnesses = Array.isArray(onEntry?.["witnesses"])
+  // What each witness actually countersigned (decision D-121). A real 1F916
+  // witness never signs this log's event: it signs the registry's head, and the
+  // seal's evidence is what proves our event is a leaf under it. So the covering
+  // seal's own witness records come first, because they are the only place the
+  // head is stored — the entry's `seal` object carries the countersignatures
+  // themselves and no head at all, and when that is all there is, the line shows
+  // exactly what is stored and says which it is.
+  const countersigned = data.seal?.witnesses ?? [];
+  const storedOnEntry = Array.isArray(onEntry?.["witnesses"])
     ? (onEntry?.["witnesses"] as unknown[])
-    : (data.seal?.witnesses ?? []).map((each) => each.agent);
+    : [];
   const proof = onEntry === null ? null : text(onEntry, "inclusion_proof");
   const registry = data.seal?.registry ?? null;
 
@@ -1207,9 +1215,30 @@ function seal(data: EntryData): Safe {
         </dd>
         <dt>witnesses</dt>
         <dd>
-          ${witnesses.length === 0
-            ? raw("none yet")
-            : witnesses.map((agent) => html`<div class="break">${agent}</div>`)}
+          ${countersigned.length > 0
+            ? countersigned.map(
+                (witness) => html`<div class="break">
+                  ${witness.agent}
+                  <span class="note"
+                    >${witness.head === undefined
+                      ? raw("signed this seal's hash directly · no head stored")
+                      : html`countersigned head · tree_size
+                        ${witness.head.tree_size} · root
+                        ${witness.head.root}`}</span
+                  >
+                </div>`,
+              )
+            : storedOnEntry.length > 0
+              ? storedOnEntry.map(
+                  (each) => html`<div class="break">
+                    ${each}
+                    <span class="note"
+                      >as the entry's seal object stores it; the head it covers
+                      is kept on the covering seal's own record</span
+                    >
+                  </div>`,
+                )
+              : raw("none yet")}
         </dd>
       </dl>
       <div class="field">

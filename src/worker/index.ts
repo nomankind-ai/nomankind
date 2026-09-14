@@ -60,9 +60,11 @@
  * by host, path, query and which of the two documents the path answers. A
  * request carrying a key or an agent signature is never served from that cache
  * and never stored in it, because what it is answered depends on who is asking
- * (the release window, D-100), and no JSON door but `GET /policy` is cached at
- * all. A path that answers HTML to a browser and JSON to everyone else carries
- * `vary: Accept` on both variants and on its refusals. And a HEAD is a GET
+ * (the release window, D-100), and the only JSON doors cached at all are the
+ * three whose answer is the same for every caller — `GET /policy`,
+ * `GET /status` and `GET /independence`. A path that answers HTML to a browser
+ * and JSON to everyone else carries `vary: Accept` on both variants and on its
+ * refusals. And a HEAD is a GET
  * without the body: every read door answers it, and the body is dropped once,
  * here.
  *
@@ -220,9 +222,9 @@ const PAGE_CACHE_CONTROL =
 
 /**
  * The paths whose 200 is a page: everything `handlePages` renders, plus the two
- * JSON doors that are cached with them — `GET /policy` and `GET /status`, named
- * in CACHEABLE_JSON_PATHS below. The listing, the entry, the operator directory
- * and one operator are the prefixes below.
+ * JSON doors that are cached with them — `GET /policy`, `GET /status` and
+ * `GET /independence`, named in CACHEABLE_JSON_PATHS below. The listing, the
+ * entry, the operator directory and one operator are the prefixes below.
  */
 const CACHEABLE_PATHS: ReadonlySet<string> = new Set([
   "/",
@@ -236,6 +238,7 @@ const CACHEABLE_PATHS: ReadonlySet<string> = new Set([
   "/genesis",
   "/how-it-works",
   "/domains",
+  "/independence",
   "/status",
   "/mirror/latest",
   // The four files a crawler reads (decision D-114). Anonymous GETs of bytes
@@ -316,6 +319,7 @@ function isSitemapDocument(path: string): boolean {
 const NEGOTIATED_PATHS: ReadonlySet<string> = new Set([
   "/policy",
   "/operators",
+  "/independence",
   "/status",
   "/mirror/latest",
   "/keys/claim",
@@ -382,14 +386,20 @@ function cacheable(request: Request, url: URL): boolean {
  * The JSON doors cached beside the pages, and the only ones.
  *
  * `GET /policy` is a frozen module constant and the same object for every
- * caller. `GET /status` is the same reading of the same stored rows the status
+ * caller. `GET /independence` (D-121) is the same reading of the operators
+ * table, the pinned set and the newest seal that the independence page is
+ * rendered from, and nothing on it depends on who is asking. `GET /status` is the same reading of the same stored rows the status
  * page is rendered from, and nothing on it is probed when it is asked for — so
  * the twin that a browser gets cached and the twin that an agent gets rendered
  * from D1 every time was one door answering the same question at two prices.
  * Both are anonymous answers: a request carrying a key or an agent signature is
  * never served from the cache or stored in it, whatever its path.
  */
-const CACHEABLE_JSON_PATHS: ReadonlySet<string> = new Set(["/policy", "/status"]);
+const CACHEABLE_JSON_PATHS: ReadonlySet<string> = new Set([
+  "/policy",
+  "/status",
+  "/independence",
+]);
 
 /** Whether the answer we rendered is one of the documents that may be stored. */
 function storable(path: string, response: Response): boolean {

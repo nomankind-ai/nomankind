@@ -18,6 +18,7 @@ import type { DerivedAttestation } from "../attest.js";
 import type { ConfidenceInputs } from "../confidence.js";
 import type { Sidecar } from "../derive.js";
 import type { Event } from "../events.js";
+import type { IndependenceReport } from "../independence.js";
 import type { LedgerBalance, LedgerRow } from "../ledger.js";
 import type { Seal } from "../seal.js";
 import type { StakeRecord } from "../stake.js";
@@ -712,4 +713,16 @@ export interface MirrorData {
   path: string;
   /** The newest export this instance recorded, null before the first one. */
   latest: MirrorRecord | null;
+}
+
+/**
+ * What the independence page is handed (decision D-121).
+ *
+ * The report itself and nothing beside it: `independenceReport` built both sets,
+ * their intersection, the flag and the claim, and `GET /independence` answers
+ * exactly the same object. One rule, two doors — a page that computed anything
+ * of its own here could show a reader something the JSON twin denies.
+ */
+export interface IndependenceData {
+  readonly report: IndependenceReport;
 }

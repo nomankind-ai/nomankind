@@ -346,7 +346,7 @@ describe("the page cache", () => {
     expect(cache.keys()).toHaveLength(2);
   });
 
-  it("never caches a JSON door that is neither /policy nor /status", async () => {
+  it("never caches a JSON door outside /policy, /status and /independence", async () => {
     const { db, statements } = countingDatabase();
     const env = envWith(db);
     const cache = new TestCache();

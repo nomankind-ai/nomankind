@@ -993,6 +993,14 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
           only by decision. None of them is nomankind's, so no two accepted
           countersignatures can be under common control.
         </p>
+        <p class="note">
+          The bar in full: a published key, no two under common control,
+          nomankind ineligible to be one, and no pinned witness may be an
+          operator of the record or under the control of one. The last clause is
+          the one this table cannot show on its own, so
+          <a href="/independence">the independence page</a> publishes the
+          validator set beside this one and the intersection of the two.
+        </p>
         <div class="table-wrap">
           <table class="table">
             <thead>

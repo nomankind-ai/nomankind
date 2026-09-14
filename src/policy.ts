@@ -1297,6 +1297,16 @@ export const REGISTRY: Readonly<{
  * decision. Three operators, none of them nomankind's, so no two accepted
  * countersignatures can be under common control.
  *
+ * The bar in full, as the paper publishes it: a published key, no two under
+ * common control, nomankind ineligible to be one, and no pinned witness may be
+ * an operator of the record or under the control of one (decision D-121). The
+ * last clause is the one a reader of this list would otherwise have to take on
+ * trust — a witness set drawn from the validators is the failure a witness set
+ * exists to catch — so the two sets and their intersection are published at
+ * /independence rather than only asserted here. What that page can check is the
+ * intersection; control beyond it is a claim the maintainer makes and not a
+ * proof, which is what "Limitations" already says about this dependency.
+ *
  * Not a whitepaper list. Decision D-054, re-checked before M25; it moves only
  * by a later decision.
  */

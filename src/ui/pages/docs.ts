@@ -62,6 +62,11 @@ export const DOC_GROUPS: readonly Group[] = Object.freeze([
         title: "API",
         line: "Every door: reading with receipts, syncing the delta, keys and tiers, the refusals, the release window.",
       }),
+      Object.freeze({
+        href: "/independence",
+        title: "Independence",
+        line: "The validator set and the pinned witness set side by side, their intersection, and what object each signature covers.",
+      }),
     ]),
   }),
   Object.freeze({

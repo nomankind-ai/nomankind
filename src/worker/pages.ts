@@ -56,6 +56,7 @@
 import { mirrorKindFor } from "../adapters/mirror.js";
 import { domainOf, extractCore } from "../core.js";
 import { confidenceInputs } from "../confidence.js";
+import { independenceReport, witnessAgentId } from "../independence.js";
 import type { Event } from "../events.js";
 import { ledgerBalance } from "../ledger.js";
 import {
@@ -88,6 +89,7 @@ import {
   countSeals,
   countTrustedOperators,
   disputeOf,
+  domainsForOperators,
   entryIdsInSubmittedRange,
   entryIdsNewestFirst,
   entryLedgerRows,
@@ -106,6 +108,7 @@ import {
   cosignPairsForOperator,
   cosignerCountsForOperators,
   operatorDomains,
+  operatorForAgent,
   operatorStanding,
   overturnedCountsByOperator,
   payoutRows,
@@ -153,6 +156,7 @@ import {
 import { renderGenesis } from "../ui/pages/genesis.js";
 import { renderHome } from "../ui/pages/home.js";
 import { renderHowItWorks } from "../ui/pages/how-it-works.js";
+import { renderIndependence } from "../ui/pages/independence.js";
 import { renderMirror } from "../ui/pages/mirror.js";
 import {
   LANDING_CSS,
@@ -173,6 +177,7 @@ import type {
   EntryRow,
   GenesisRow,
   HowItWorksData,
+  IndependenceData,
   LandingData,
   MirrorData,
   OperatorRow,
@@ -234,6 +239,10 @@ const PAGE_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/dry-run",
   "/how-it-works",
   "/domains",
+  // The independence page (D-121): a page with a JSON twin on the same path and
+  // no door of its own under it, so a wrong method here is this route's to
+  // refuse, exactly as it is on /policy.
+  "/independence",
   "/static/app.css",
   "/static/landing.css",
   // The four files a crawler reads (D-114). No door is mounted under any of
@@ -1333,6 +1342,66 @@ async function howItWorks(
  * environment holds, so that is all this gatherer reads: how many entries name
  * the domain, and how many trusted operators are attested in it.
  */
+/**
+ * Independence (decision D-121): the page form and the JSON twin of the two
+ * sets, read in a bounded way and never by walking the log.
+ *
+ * Three reads and no fourth. The validator set is one keyset page of the
+ * operators table at the published LIST_PAGE_LIMIT, exactly as the directory
+ * reads it, with one grouped statement for those operators' domains. The
+ * witness set is src/policy.ts's WITNESS_PIN, which is a module constant and
+ * costs nothing at all. The liveness beside each witness is the newest seal's
+ * own witness records — one row, `ORDER BY seq DESC LIMIT 1` — because the
+ * countersignatures a seal carries are stored on the seal, and a page that
+ * asked the log which seals have ever been witnessed would be scanning a table
+ * that grows every five minutes. The last read is the binding check: one
+ * primary-key lookup per pinned witness agent, which is three today and is
+ * bounded by the pin rather than by the log.
+ *
+ * Nothing here touches the events table, and that is the promise
+ * test/independence.test.ts holds against the SQL this actually prepares.
+ */
+async function independence(db: D1Like): Promise<IndependenceData> {
+  const records = await listOperators(db, { limit: LIST_PAGE_LIMIT });
+  const domains = await domainsForOperators(
+    db,
+    records.map((record) => record.id),
+  );
+  const seal = await latestSeal(db);
+
+  // One lookup per pinned witness, by agent id, which is the only comparison
+  // the log can make honestly: the witness set is names in a directory, and the
+  // agents table is where this record says which operator a key answers for.
+  const boundOperators = new Map<string, string>();
+  for (const pin of WITNESS_PIN) {
+    const agent = witnessAgentId(pin.public_key);
+    const operator = await operatorForAgent(db, agent);
+    if (operator !== null) boundOperators.set(agent, operator);
+  }
+
+  return {
+    report: independenceReport({
+      validators: records.map((record) => ({
+        operator: record.id,
+        trusted: record.details["trusted"] === true,
+        maintainer: record.maintainer,
+        provider: record.provider,
+        domains: domains.get(record.id) ?? [],
+      })),
+      pin: WITNESS_PIN,
+      counted: (seal?.witnesses ?? []).map((witness) => ({
+        agent: witness.agent,
+        head:
+          witness.head === undefined
+            ? null
+            : { tree_size: witness.head.tree_size, root: witness.head.root },
+      })),
+      boundOperators,
+      sealSeq: seal === null ? null : seal.seq,
+    }),
+  };
+}
+
 async function domains(db: D1Like, ctx: PageContext): Promise<Response> {
   // Both numbers for every registered domain in one read of the sweep's
   // counters, where it has written them: the page asked two counts per domain,
@@ -1492,6 +1561,7 @@ const SITEMAP_STATIC_PATHS: readonly string[] = Object.freeze([
   "/genesis",
   "/dry-run",
   "/how-it-works",
+  "/independence",
   "/status",
   "/docs",
   "/docs/fork",
@@ -1890,6 +1960,17 @@ async function route(
     return wants
       ? htmlResponse(renderPolicy(ctx, POLICY))
       : json(POLICY, 200);
+  }
+
+  // Independence (D-121): the two sets and their intersection, negotiated like
+  // /policy — the page for a browser, the same report as JSON for everyone else,
+  // built by one function so the two can never disagree. It is answered here
+  // rather than falling through, because there is no other door on this path.
+  if (path === "/independence") {
+    const data = await independence(db);
+    return wants
+      ? htmlResponse(renderIndependence(ctx, data))
+      : json(data.report, 200);
   }
 
   if (path === "/api") return htmlResponse(renderApi(ctx));

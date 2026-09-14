@@ -361,7 +361,13 @@ describe("a withheld entry", () => {
  * the pages are checked against. v1.5 carried the rule as four labeled
  * amendments; v1.6 folds them into the prose, so what is pinned here is that
  * each one still says what it said, in the section a reader of that sentence
- * reaches, and that no marker is left anywhere in the paper.
+ * reaches, and that none of the four left a marker behind.
+ *
+ * A marker is how this paper carries a change made since the version it is
+ * consolidated at, so the check is that no *release-window* amendment is still
+ * labeled rather than that the paper holds no label at all: D-121's witness
+ * clause is marked since v1.6 and is meant to be, and it is pinned by name
+ * below so a stray marker cannot hide behind it.
  */
 const whitepaper = readFileSync(
   fileURLToPath(new URL("../paper/WHITEPAPER.md", import.meta.url)),
@@ -369,11 +375,16 @@ const whitepaper = readFileSync(
 );
 
 describe("the paper carries the release window (D-100)", () => {
-  it("is v1.6, consolidated, with no spec-change marker left", () => {
+  it("is v1.6, consolidated, with the release window's markers all gone", () => {
     expect(whitepaper).toContain(
       "*This is v1.6. It supersedes v1.5, v1.4, v1.3, v1.2, v1.1, v1.0,",
     );
-    expect(whitepaper).not.toContain("[Spec change");
+    // Every marker the paper still carries, and what each is: one, D-121's, and
+    // the version stays v1.6 under it because a marked clause is exactly how
+    // this paper says "changed since the version above".
+    expect([...whitepaper.matchAll(/\[Spec change [^\]]+\]/g)].map((m) => m[0])).toEqual([
+      "[Spec change 2026-09-14, D-121]",
+    ]);
   });
 
   it("states the window in the abstract, as one piece", () => {

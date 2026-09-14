@@ -219,9 +219,12 @@ export function renderHowItWorks(
 
   const seal = html`<p class="prose">
       Every five minutes the sweep seals every new event into a Merkle batch with
-      an inclusion proof per event. Independent witnesses countersign the head;
-      on production they are the founding 1F916 registry's pinned witnesses, on
-      demo a mock set. Once a day the day's roots are anchored outside the
+      an inclusion proof per event. Independent witnesses countersign the head —
+      the registry's tree at a size, never one event — and
+      <a href="/independence">the independence page</a> publishes who they are
+      beside every registered operator, so a reader can check that the two sets
+      do not overlap; on production they are the founding 1F916 registry's
+      pinned witnesses, on demo a mock set. Once a day the day's roots are anchored outside the
       system, to OpenTimestamps on production.
     </p>
     <dl class="kv">

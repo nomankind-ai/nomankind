@@ -580,12 +580,39 @@ describe("renderApi", () => {
       "/operators/{id}/ledger",
       "/ledger",
       "/status",
+      "/independence",
       "/mirror/latest",
       "/how-it-works",
     ];
     for (const path of paths) {
       expect(page, `${path} is not documented`).toContain(path);
     }
+  });
+
+  /**
+   * The three answers a validator can give (D-121), on the row of the door that
+   * takes them and in the words the code actually enforces: a rejection needs a
+   * reason and may carry a measurement, an approval of an observed entry must,
+   * and the extra standing is paid for measuring rather than for a direction.
+   */
+  it("names the three answers on the validate row, as the door takes them", () => {
+    const opens = page.indexOf("/entries/{id}/validate");
+    expect(opens).toBeGreaterThan(-1);
+    const row = page.slice(opens, page.indexOf("/entries/{id}/reconfirm", opens));
+    const words = row.replace(/\s+/g, " ");
+    expect(words).toContain("There are three answers a validator can give");
+    expect(words).toContain("approve:");
+    expect(words).toContain("reject:");
+    expect(words).toContain("test_accepted false:");
+    // The door requires a reason on a rejection and a measurement only on an
+    // approval, so the page may not promise the measurement either way.
+    expect(words).toContain("may carry the measurement it found");
+    expect(words).toContain("but is not required to");
+    expect(words).toContain("A negative result is a first-class, paid answer");
+    expect(words).toContain(
+      "STANDING_VALIDATION_REPRODUCED is paid beside it for a record carrying a passing measurement",
+    );
+    expect(words).not.toContain("the same standing whichever way");
   });
 
   it("documents binding a second agent under an operator, and its refusals in order", () => {
@@ -1712,6 +1739,27 @@ describe("renderDryRun", () => {
       .filter((block) => block.includes("npm run") && block.includes("://"));
   }
 
+  it("names the three answers a validator can give, in step 4", () => {
+    const step = page.indexOf("Step 4. Judge one entry");
+    expect(step).toBeGreaterThan(-1);
+    const panel = squeeze(page.slice(step, page.indexOf("Step 5.", step)));
+    expect(panel).toContain("There are three answers to give");
+    expect(panel).toContain(">approve</span>");
+    expect(panel).toContain(">reject</span>");
+    expect(panel).toContain(">test_accepted</span> false");
+    // What the door does: a reason always, a measurement on a rejection only if
+    // the validator has one, and the judgment recorded either way.
+    expect(panel).toContain("the reason is required and public");
+    expect(panel).toContain("the door does not require one");
+    expect(panel).toContain(
+      "recorded on a rejection and an approval alike",
+    );
+    expect(panel).toContain("A negative result is a first-class, paid answer");
+    expect(panel).toContain(
+      "the extra credit for measuring is paid for a passing measurement",
+    );
+  });
+
   it("walks the six steps in order", () => {
     const headings = [
       "What you need",
@@ -2588,7 +2636,7 @@ describe("the release window, as the pages publish it", () => {
  * Before this page the answer to "where is this written down" was a list
  * somebody had to know, and two of the documents were only on GitHub. The hub
  * is that list, and the assertions below are the mockup the maintainer
- * approved: three groups, eleven cards, every card a page this Worker serves.
+ * approved: three groups, twelve cards, every card a page this Worker serves.
  */
 describe("renderDocs", () => {
   const docsCtx: PageContext = { ...ctx, path: "/docs" };
@@ -2618,13 +2666,13 @@ describe("renderDocs", () => {
     );
   });
 
-  it("groups the eleven cards in three panels, each with its own line", () => {
+  it("groups the twelve cards in three panels, each with its own line", () => {
     expect(DOC_GROUPS.map((each) => each.title)).toEqual([
       "Read the record",
       "Join",
       "Take it with you",
     ]);
-    expect(DOC_GROUPS.flatMap((each) => each.cards)).toHaveLength(11);
+    expect(DOC_GROUPS.flatMap((each) => each.cards)).toHaveLength(12);
     expect(flat).toContain(
       `<span class="stage-num">01</span>Read the record </h2> ` +
         `<span class="note">What the log is and how to read it.</span>`,
@@ -2660,6 +2708,11 @@ describe("renderDocs", () => {
         "/api",
         "API",
         "Every door: reading with receipts, syncing the delta, keys and tiers, the refusals, the release window.",
+      ],
+      [
+        "/independence",
+        "Independence",
+        "The validator set and the pinned witness set side by side, their intersection, and what object each signature covers.",
       ],
       [
         "/genesis",
