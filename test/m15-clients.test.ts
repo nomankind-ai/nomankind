@@ -25,10 +25,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { MockPayoutAdapter } from "../src/adapters/payout.js";
-import {
-  buildTranscriptArtifact,
-  transcriptArtifactHash,
-} from "../src/artifact.js";
+import { transcriptArtifactHash } from "../src/artifact.js";
 import {
   CHECKPOINT_CITATION,
   CHECKPOINT_DOMAINS,
@@ -36,7 +33,14 @@ import {
   runCheckpoint,
 } from "../src/cli/checkpoint.js";
 import { CANNOT_REPRODUCE, runReconfirm } from "../src/cli/reconfirm.js";
-import { BAD_FIELDS, checkFields, runSubmit } from "../src/cli/submit.js";
+import {
+  BAD_FIELDS,
+  BOTH_ARTIFACTS,
+  checkFields,
+  parseSubmitArgs,
+  runSubmit,
+  USAGE as SUBMIT_USAGE,
+} from "../src/cli/submit.js";
 import {
   duplicateReason,
   parseValidatorArgs,
@@ -46,7 +50,6 @@ import {
   type HttpClient,
   type ValidatorIo,
 } from "../src/cli/validator.js";
-import type { Core } from "../src/core.js";
 import type { Event } from "../src/events.js";
 import {
   DEFAULT_DOMAIN,
@@ -71,7 +74,6 @@ import {
   FixtureFetcher,
   SUBMIT_NOW,
   pageHash,
-  submission,
   submittedCore,
   type FixturePage,
 } from "./helpers/submit.js";
@@ -166,8 +168,24 @@ const http: HttpClient = {
 
 /** The checkpoint entry: a bare key's stated fact, verified by the first two. */
 let checkpointId = "";
-/** A behavior entry, submitted for its category alone. */
-let behavior: Core;
+/** A behavior entry, submitted through the command with its own transcript. */
+let behaviorId = "";
+/** That transcript's hash under the kernel's own rule: the entry's snapshot. */
+let transcriptHash = "";
+
+/**
+ * The frozen transcript a behavior entry rests on: the six measured fields and
+ * nothing else, which is exactly what `--transcript` takes and what the door
+ * rebuilds from the entry's evidence and archives.
+ */
+const TRANSCRIPT: Record<string, unknown> = {
+  model: "example/demo-model",
+  prompt: "how many requests per minute?",
+  parameters: { temperature: 0 },
+  output: "ninety",
+  predicate: "contains:ninety",
+  observed_at: "2026-09-01",
+};
 
 /** The entry as the public read answers it. */
 async function fetched(entryId: string): Promise<Record<string, unknown>> {
@@ -227,6 +245,32 @@ function fieldsFor(
   };
 }
 
+/**
+ * The author's own fields of a behavior entry: everything but the measurement.
+ *
+ * The evidence names only the verification basis — `provider_statement` null is
+ * the schema's own word for "an independent reproduction verifies this" — and
+ * the six measured fields come from the transcript file, which is the point of
+ * the flag.
+ */
+function behaviorFields(
+  claim: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    subject: CHECKPOINT_SUBJECT,
+    category: "behavior",
+    domain: DEFAULT_DOMAIN,
+    claim,
+    before: "m15 clients: answered something else",
+    after: "m15 clients: answers ninety",
+    effective_at: "2026-09-01",
+    evidence: { provider_statement: null },
+    citation: "https://example.com/transcripts/1",
+    ...overrides,
+  };
+}
+
 /** One submit run through the command, on the clock the caller names. */
 function submitAt(
   key: TestAgent,
@@ -277,35 +321,23 @@ beforeAll(async () => {
   expect(result.steps.filter((step) => !step.ok)).toEqual([]);
   checkpointId = result.entryId!;
 
-  // A behavior entry, for the one branch this fixture refuses to make up. Its
-  // snapshot is the frozen transcript, not a page, so it is built here rather
-  // than through the submit command, which snapshots the citation.
-  const evidence = {
-    model: "example/demo-model",
-    prompt: "how many requests per minute?",
-    parameters: { temperature: 0 },
-    output: "ninety",
-    predicate: "contains:ninety",
-    observed_at: "2026-09-01",
-    provider_statement: null,
-  };
-  const hashed = await transcriptArtifactHash(
-    buildTranscriptArtifact(evidence, evidence.output, evidence.observed_at),
-  );
+  // A behavior entry, through the command that could not carry one until now
+  // (the #64 gap, D-084). Its snapshot is the frozen transcript and not the
+  // cited page, which is what `--transcript` says: the artifact is checked and
+  // hashed by the kernel's own rule, its measured fields are the evidence the
+  // author signs, and nothing is fetched at all.
+  const hashed = await transcriptArtifactHash(TRANSCRIPT);
   if (!hashed.ok) throw new Error("m15 clients: the fixture transcript is refused");
-  behavior = await submittedCore(maintainer, {
-    subject: CHECKPOINT_SUBJECT,
-    category: "behavior",
-    claim: "m15 clients: the model answers ninety",
-    before: "m15 clients: answered something else",
-    after: "m15 clients: answers ninety",
-    effective_at: "2026-09-01",
-    evidence,
-    citation: "https://example.com/transcripts/1",
-    snapshot_hash: hashed.hash,
+  transcriptHash = hashed.hash;
+  const seeded = await runSubmit({
+    key: maintainer,
+    baseUrl: TEST_ORIGIN,
+    fields: behaviorFields("m15 clients: the model answers ninety"),
+    transcript: TRANSCRIPT,
+    deps: { http, fetcher: new FixtureFetcher(PAGES), now: NOW, io },
   });
-  const posted = await http.fetch(await submission(maintainer, { core: behavior }));
-  expect(posted.status).toBe(201);
+  expect([seeded.code, seeded.status]).toEqual([0, 201]);
+  behaviorId = seeded.entryId ?? "";
 }, 180_000);
 
 afterAll(async () => {
@@ -376,6 +408,199 @@ describe("submit, from the author's own fields", () => {
       BAD_FIELDS,
       true,
     ]);
+  });
+
+  it("carries a transcript entry, and the door archives the artifact at its hash", async () => {
+    // The #64 gap (D-084), closed: the entry above was seeded by the command
+    // with `--transcript` and nothing else. The snapshot the author signed is
+    // the artifact's own hash, the evidence is the artifact's measured fields
+    // with the author's verification basis, and the door reached the same hash
+    // from the entry alone.
+    const entry = await fetched(behaviorId);
+    expect([entry["status"], entry["evidence_tier"]]).toEqual([
+      "draft",
+      "observed",
+    ]);
+    expect(entry["snapshot_hash"]).toBe(transcriptHash);
+    const evidence = entry["evidence"] as Record<string, unknown>;
+    expect(evidence["output"]).toBe("ninety");
+    expect(evidence["provider_statement"]).toBeNull();
+
+    // And the artifact itself is in the archive at exactly that hash.
+    const archived = await http.fetch(
+      new Request(`${TEST_ORIGIN}/captures/${encodeURIComponent(transcriptHash)}`),
+    );
+    expect(archived.status).toBe(200);
+  });
+
+  it("refuses a transcript the kernel will not take, before any fetch", async () => {
+    const fetcher = new FixtureFetcher(PAGES);
+    let calls = 0;
+    const counted: HttpClient = {
+      fetch: (request: Request) => {
+        calls += 1;
+        return http.fetch(request);
+      },
+    };
+
+    const run = await runSubmit({
+      key: maintainer,
+      baseUrl: TEST_ORIGIN,
+      fields: behaviorFields("m15 clients: a transcript that is not one"),
+      // Two of the six measured fields, which is not a transcript artifact.
+      transcript: { model: "example/demo-model", output: "ninety" },
+      deps: { http: counted, fetcher, now: NOW, io },
+    });
+
+    expect([run.code, run.status, run.error]).toEqual([
+      2,
+      null,
+      "transcript_shape",
+    ]);
+    expect(fetcher.requests).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
+  it("refuses a fields file naming a transcript the file is not, in one line", async () => {
+    // The door rebuilds the artifact from the entry's own evidence, so evidence
+    // that says one thing and a transcript file that says another are a
+    // snapshot_hash of neither. Answered here rather than posted for the door
+    // to call `snapshot_mismatch`.
+    const run = await runSubmit({
+      key: maintainer,
+      baseUrl: TEST_ORIGIN,
+      fields: behaviorFields("m15 clients: evidence against its own transcript", {
+        evidence: { output: "eighty", provider_statement: null },
+      }),
+      transcript: TRANSCRIPT,
+      deps: { http, fetcher: new FixtureFetcher(PAGES), now: NOW, io },
+    });
+
+    expect([run.code, run.status, run.error]).toEqual([2, null, BAD_FIELDS]);
+    expect(lines.at(-1)).toBe(
+      `stderr ${BAD_FIELDS}: evidence names a transcript this file is not: output`,
+    );
+  });
+
+  it("refuses an evidence that is not an object rather than filling it", async () => {
+    const run = await runSubmit({
+      key: maintainer,
+      baseUrl: TEST_ORIGIN,
+      fields: behaviorFields("m15 clients: evidence that is a sentence", {
+        evidence: "see the transcript file",
+      }),
+      transcript: TRANSCRIPT,
+      deps: { http, fetcher: new FixtureFetcher(PAGES), now: NOW, io },
+    });
+
+    expect([run.code, run.error]).toEqual([2, BAD_FIELDS]);
+    expect(lines.at(-1)).toBe(`stderr ${BAD_FIELDS}: evidence: not an object or null`);
+  });
+
+  it("refuses a receipt and a transcript on one submission", async () => {
+    // An observed entry rests on a measurement receipt and a transcript entry
+    // on its transcript. A submission offering both names no kind of entry at
+    // all, and the usage line says so.
+    const run = await runSubmit({
+      key: maintainer,
+      baseUrl: TEST_ORIGIN,
+      fields: behaviorFields("m15 clients: both artifacts at once"),
+      transcript: TRANSCRIPT,
+      receipt: { method: "completed_request" },
+      deps: { http, fetcher: new FixtureFetcher(PAGES), now: NOW, io },
+    });
+
+    expect([run.code, run.status, run.error]).toEqual([2, null, BAD_FIELDS]);
+    expect(lines.at(-1)).toBe(`stderr ${BAD_FIELDS}: ${BOTH_ARTIFACTS}`);
+
+    // And the command line never gets that far: the two flags together are not
+    // a call at all.
+    expect(
+      parseSubmitArgs([
+        "k.json",
+        TEST_ORIGIN,
+        "fields.json",
+        "--receipt",
+        "r.json",
+        "--transcript",
+        "t.json",
+      ]),
+    ).toBeNull();
+    expect(SUBMIT_USAGE).toContain(BOTH_ARTIFACTS);
+  });
+
+  it("sends the disclosure file as the body's own, for the door to judge", async () => {
+    // D-096 is the door's rule, not the command's: what the flag has to prove
+    // here is that the file reached the body. This transcript redacts nothing,
+    // so a disclosure of anything at all is the door's own `disclosure_missing`
+    // — which it can only answer if the payload arrived.
+    const run = await runSubmit({
+      key: maintainer,
+      baseUrl: TEST_ORIGIN,
+      // A value of its own, so the entry this run makes is not the seeded one:
+      // the duplicate key is the subject, category, domain, date and value, and
+      // `duplicate_claim` is decided before the disclosure ever is.
+      fields: behaviorFields("m15 clients: a disclosure of nothing redacted", {
+        after: "m15 clients: answers ninety, with nothing held back",
+      }),
+      transcript: TRANSCRIPT,
+      disclosure: { "/prompt": "how many requests per minute?" },
+      deps: { http, fetcher: new FixtureFetcher(PAGES), now: NOW, io },
+    });
+
+    expect([run.code, run.status, run.error]).toEqual([
+      1,
+      422,
+      "disclosure_missing",
+    ]);
+  });
+
+  it("refuses a disclosure named twice", async () => {
+    const run = await runSubmit({
+      key: maintainer,
+      baseUrl: TEST_ORIGIN,
+      fields: behaviorFields("m15 clients: a disclosure named twice", {
+        disclosure: { "/prompt": "how many requests per minute?" },
+      }),
+      disclosure: { "/prompt": "how many requests per minute?" },
+      deps: { http, fetcher: new FixtureFetcher(PAGES), now: NOW, io },
+    });
+
+    expect([run.code, run.status, run.error]).toEqual([2, null, BAD_FIELDS]);
+    expect(lines.at(-1)).toBe(
+      `stderr ${BAD_FIELDS}: disclosure: named by the fields file and by --disclosure`,
+    );
+  });
+
+  it("takes each artifact file out of the positional arguments", () => {
+    expect(
+      parseSubmitArgs([
+        "k.json",
+        TEST_ORIGIN,
+        "fields.json",
+        "--transcript",
+        "t.json",
+        "--disclosure",
+        "d.json",
+      ]),
+    ).toEqual({
+      keyPath: "k.json",
+      baseUrl: TEST_ORIGIN,
+      fieldsPath: "fields.json",
+      transcriptPath: "t.json",
+      disclosurePath: "d.json",
+    });
+    // A flag whose next word is another flag names no file.
+    expect(
+      parseSubmitArgs([
+        "k.json",
+        TEST_ORIGIN,
+        "fields.json",
+        "--transcript",
+        "--disclosure",
+        "d.json",
+      ]),
+    ).toBeNull();
   });
 
   it("submits a stated entry that comes back draft with the id the kernel derives", async () => {
@@ -483,7 +708,7 @@ describe("reconfirm, by a trusted operator outside the submitter", () => {
     const run = await runReconfirm({
       key: fixtures[2]!,
       baseUrl: TEST_ORIGIN,
-      entryId: behavior["id"] as string,
+      entryId: behaviorId,
       deps: { http, fetcher: new FixtureFetcher(PAGES), now: clock, io },
     });
 

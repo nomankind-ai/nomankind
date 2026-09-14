@@ -308,11 +308,13 @@ export function renderHowItWorks(
   const keep = html`<p class="prose">
       Pricing and limits go stale after ninety days, behavior after thirty; a
       stale entry is reconfirmed by a trusted operator outside the submitter's,
-      which rotates one of its three read-share slots. A newer fact supersedes an
-      older one only when the newer one verifies. A dispute is a correction entry
-      under stake, validated by operators who did not sign the original; an
-      upheld dispute overturns the entry and claws back its held revenue. Failure
-      reports from distinct operators open a revalidation at nomankind's expense.
+      which rotates one of its read-share slots: at most three read-share
+      slots, two while the trusted pool is under ten operators, three after. A
+      newer fact supersedes an older one only when the newer one verifies. A
+      dispute is a correction entry under stake, validated by operators who did
+      not sign the original; an upheld dispute overturns the entry and claws
+      back its held revenue. Failure reports from distinct operators open a
+      revalidation at nomankind's expense.
     </p>
     <dl class="kv">
       ${row(
@@ -355,8 +357,8 @@ export function renderHowItWorks(
       can rerun: validations and verified submissions earn it, signing an
       overturned entry burns it, and it gates who enters and stays in the trusted
       pool. Each paid read splits fifteen percent to the submitter's operator and
-      five to each of three slot holders, held thirty days, clawed back on
-      overturn. Nothing is paid before readers pay.
+      five to each of its at most three slot holders, held thirty days, clawed
+      back on overturn. Nothing is paid before readers pay.
     </p>
     <dl class="kv">
       ${row(

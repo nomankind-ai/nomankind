@@ -137,6 +137,17 @@
       // Pull-request versions are uploaded, not deployed, and are reached
       // through their workers.dev preview URLs.
       "preview_urls": true,
+      // Smart Placement, on demo and on demo alone: a measurement that starts
+      // 2026-09-13 and runs a week (D-114). Every request here is several D1
+      // round trips against one database in one region, which is the case
+      // placement is for — it moves the isolate to the data instead of paying
+      // the latency per statement — and the sweep is the extreme of it. What
+      // the week is read against is already published: the per-step CPU the
+      // sweep reports and the page latencies beside it, before and after.
+      // Production is not touched until those two say it is worth touching; a
+      // placement that helped the sweep and cost the read door would be a worse
+      // trade than the one we have, and this is how we find out which it is.
+      "placement": { "mode": "smart" },
       "vars": {
         "ENVIRONMENT": "demo",
         // A second throwaway key from the same keygen (D-016), distinct from

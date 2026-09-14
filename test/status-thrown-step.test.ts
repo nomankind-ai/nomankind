@@ -3,10 +3,10 @@
  *
  * The board was already written on the way out of a run that fell over — the
  * step that threw carried the message as its reason — and the page could not see
- * it. Four of the fifteen stage rules read a step's reason at all; the rest
+ * it. Four of the sixteen stage rules read a step's reason at all; the rest
  * decide from derived facts, and derived facts are exactly what a step that
  * threw never got round to changing. So a D1 error inside the seal step left
- * fifteen green lights and "0 failing", with the error named nowhere: the one
+ * sixteen green lights and "0 failing", with the error named nowhere: the one
  * failure a reader most needs to see was the one the board hid.
  *
  * What is held here is the repair, end to end on a real miniflare D1: a run

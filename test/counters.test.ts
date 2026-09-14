@@ -473,13 +473,17 @@ describe("the counters step", () => {
     expect(counters!.position).toBe(sealedHead);
     expect(counters!.sealed_head).toBe(sealedHead);
     expect(counters!.updated_at).toBe(AT);
-    expect(report).toEqual({
+    expect(report.counters).toEqual({
       position: sealedHead,
       entries: FIXTURES.length,
       operators: OPERATORS.length,
       seals: SEAL_COUNT,
       attestations: 2,
     });
+    // And the status board's own numbers, taken in the same step at the same
+    // instant, so the gather reads them off a row it already reads.
+    expect(report.swept).not.toBeNull();
+    expect(report.swept!.head_seq).toBe(chain.length - 1);
   });
 
   it("rewrites the row whole, so a domain that empties out does not linger", async () => {
@@ -680,6 +684,7 @@ describe("the 0018 backfill on a database written before it", () => {
         "0018_counters.sql",
         "0019_duplicate_key.sql",
         "0020_duplicate_key_effective_at.sql",
+        "0021_version_stale_seq.sql",
       ]);
 
       // The column says exactly what the JSON beside it has always said.

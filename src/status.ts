@@ -3,7 +3,7 @@
  *
  * Whitepaper Section 11, Deployment and status: nomankind publishes what it is
  * running and whether it is working. This module is the second half of that
- * sentence — fifteen stages of the machine, each with a state, the last thing
+ * sentence — sixteen stages of the machine, each with a state, the last thing
  * that happened in it, the rule that decides the state, and a link a reader can
  * follow to check the answer for themselves.
  *
@@ -458,7 +458,7 @@ function detailNumber(step: SweepStep | null, key: string): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// The fifteen rules
+// The sixteen rules
 // ---------------------------------------------------------------------------
 
 /**
@@ -754,6 +754,95 @@ function sealing(input: StatusInput, now: string): Stage {
   };
 }
 
+/**
+ * The event the chain stage sends a reader to, as the log's own door takes it.
+ *
+ * `GET /events` pages from `after`, so the page that holds seq n starts at
+ * n - 1; seq 0 has nothing before it, so the bare path is the first page.
+ */
+function eventsHref(seq: number): string {
+  return seq <= 0 ? "/events" : `/events?after=${seq - 1}`;
+}
+
+/**
+ * (8) The chain re-check: is the log still the log it sealed?
+ *
+ * Whitepaper Section 6, "Seal": every event carries the hash of the one before
+ * it, so any later change leaves proof anyone can check offline. Offline is the
+ * gap the QA of 2026-09-12 named — the verifier and the mirror both catch a
+ * hand-edited `prev_hash`, and both are things somebody has to run, so nothing
+ * live noticed. The sweep's chain step re-walks one page a run against the
+ * kernel's own hash rule and wraps back to seq 0 after the head, and this is
+ * that walk read as a light.
+ *
+ * After sealing and before witnessing on purpose. Sealing is where the log's
+ * events are committed; this asks whether those same events are still the bytes
+ * that were committed; witnessing and anchoring are the outside world's word
+ * for the same thing. The record's own proof comes before anybody else's.
+ *
+ * A break is never healed here and never healed by the step: the walk stops
+ * advancing at the event that broke, so the stage reads failing until the row
+ * is put back, and the next run walks the same page, passes it, and moves on.
+ */
+function chain(input: StatusInput, now: string): Stage {
+  const rule = `every event re-hashed and linked, a page a run within ${STATUS_ATTENTION_AFTER_INTERVALS} × ${policyName("SWEEP_INTERVAL_MINUTES")}`;
+  const step = stepOf(input, "chain");
+  const checked = detailNumber(step, "checked_through");
+  const broken = detailNumber(step, "break_seq");
+  const evidence = [
+    {
+      label: "/events",
+      href: eventsHref(broken ?? (checked === null ? 0 : checked + 1)),
+    },
+  ];
+
+  if (step === null) {
+    return { stage: "chain", state: "idle", last: "never", rule, evidence };
+  }
+  if (broken !== null) {
+    return {
+      stage: "chain",
+      state: "failing",
+      last: line(
+        `seq ${broken}`,
+        detailText(step, "break_reason") ?? "broken",
+        `checked through ${checked ?? -1}`,
+        stamp(step.last_run_at, now),
+      ),
+      rule,
+      evidence,
+    };
+  }
+  if (checked === null) {
+    // The step ran and walked nothing: an empty log has no chain to re-check,
+    // which is a stage that is owed nothing rather than one that is behind.
+    return {
+      stage: "chain",
+      state: "idle",
+      last: line(freshSkip(step) ?? "nothing walked", stamp(step.last_run_at, now)),
+      rule,
+      evidence,
+    };
+  }
+
+  const window = attentionWindow(SWEEP_INTERVAL_MINUTES);
+  const stalled =
+    step.last_ok_at === null || secondsBetween(step.last_ok_at, now) > window;
+  const walked = detailNumber(step, "events") ?? 0;
+  return {
+    stage: "chain",
+    state: stalled ? "attention" : "ok",
+    last: line(
+      `checked through ${checked}`,
+      `${walked} events`,
+      step.detail["wrapped"] === true ? "wrapped" : "",
+      stamp(step.last_run_at, now),
+    ),
+    rule,
+    evidence,
+  };
+}
+
 function witnessing(input: StatusInput, now: string): Stage {
   const rule = `the newest seal countersigned by ${policyName("WITNESSES_REQUIRED")} pinned witnesses`;
   const { seal } = input;
@@ -954,7 +1043,7 @@ function attestations(input: StatusInput): Stage {
 }
 
 /**
- * (13) The day's export to the public mirror.
+ * (14) The day's export to the public mirror.
  *
  * Whitepaper Section 11: the sealed log goes out daily to a public repository
  * under CC0, and the Conclusion makes it the exit right — "the exit is not a
@@ -1028,7 +1117,7 @@ function mirrorExport(input: StatusInput, now: string): Stage {
 }
 
 /**
- * (14) The usage meter: is every published paid read on somebody's bill?
+ * (15) The usage meter: is every published paid read on somebody's bill?
  *
  * Whitepaper Section 9, Money: "Read counts are published to the sealed log
  * daily, so nomankind cannot quietly change the numbers later, and any operator
@@ -1101,7 +1190,7 @@ function usageMetering(input: StatusInput, now: string): Stage {
 }
 
 /**
- * (15) The change alerts: has every sealed change been offered to everyone who
+ * (16) The change alerts: has every sealed change been offered to everyone who
  * asked for it?
  *
  * Whitepaper Section 9, Money: "Revenue comes from high-rate API access,
@@ -1195,6 +1284,7 @@ const STAGE_STEP: ReadonlyMap<string, string> = new Map([
   ["staleness", "staleness"],
   ["read counts", "publish"],
   ["sealing", "seal"],
+  ["chain", "chain"],
   ["witnessing", "witness"],
   ["anchoring", "anchor"],
   ["ledger", "ledger"],
@@ -1232,7 +1322,7 @@ function overThrow(stage: Stage, input: StatusInput): Stage {
 }
 
 /**
- * The fifteen stages, in the page's order, read against one instant.
+ * The sixteen stages, in the page's order, read against one instant.
  *
  * The order is the machine's own — the timer, then what the timer does, then
  * what the log owes at the end of the day — and it is fixed, because a status
@@ -1242,7 +1332,7 @@ export function stageStates(input: StatusInput, now: string): Stage[] {
   return stages(input, now).map((stage) => overThrow(stage, input));
 }
 
-/** The fifteen rules, each over its own facts and before any throw is read. */
+/** The sixteen rules, each over its own facts and before any throw is read. */
 function stages(input: StatusInput, now: string): Stage[] {
   return [
     sweepTimer(input, now),
@@ -1252,6 +1342,7 @@ function stages(input: StatusInput, now: string): Stage[] {
     staleness(input, now),
     readCounts(input, now),
     sealing(input, now),
+    chain(input, now),
     witnessing(input, now),
     anchoring(input, now),
     ledger(input, now),
@@ -1264,7 +1355,7 @@ function stages(input: StatusInput, now: string): Stage[] {
 }
 
 /** How many stages there are, for a fraction that cannot drift from the list. */
-export const STAGE_COUNT = 15;
+export const STAGE_COUNT = 16;
 
 // ---------------------------------------------------------------------------
 // Exercised, not probed

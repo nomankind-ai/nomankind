@@ -143,6 +143,20 @@ describe("wrangler.jsonc routes and hostnames", () => {
     expect(config.env.production.preview_urls).toBe(false);
   });
 
+  /**
+   * Smart Placement is being measured, not adopted (D-114). It moves the
+   * isolate to the region the data is in, which is the trade every D1 round
+   * trip here pays for and the trade a request served from cache would lose;
+   * the week on demo is what says which of the two production is. So the
+   * measurement is pinned where it is allowed to run, and production is pinned
+   * to carry no placement at all until that reading is in.
+   */
+  it("measures Smart Placement on demo and never on production", () => {
+    expect(config.env.demo.placement).toEqual({ mode: "smart" });
+    expect(config.placement).toBeUndefined();
+    expect(config.env.production.placement).toBeUndefined();
+  });
+
   it("names each environment in its vars", () => {
     expect(config.vars.ENVIRONMENT).toBe("local");
     expect(config.env.demo.vars.ENVIRONMENT).toBe("demo");

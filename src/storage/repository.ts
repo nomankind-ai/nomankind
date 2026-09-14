@@ -6621,6 +6621,18 @@ const COUNTER_NAMES = {
 
 /** The prefix a per-domain counter's name carries, and its two suffixes. */
 const DOMAIN_COUNTER = "domain:";
+
+/**
+ * Which rows of the counters table the counters step owns.
+ *
+ * Its own flat names, and the `domain:` pairs. Every other prefixed name
+ * belongs to a step that keeps it between runs — `chain:` is the re-check
+ * walk's cursor and `operator:` is a validation count — and the counters step
+ * neither writes those in its batch nor clears them with it. One
+ * fragment, used by the read and the rewrite, so the two can never disagree
+ * about which rows are the step's.
+ */
+const COUNTERS_STEP_ROWS = `(name NOT LIKE '%:%' OR name LIKE '${DOMAIN_COUNTER}%')`;
 const DOMAIN_ENTRIES = ":entries";
 const DOMAIN_TRUSTED = ":trusted";
 
@@ -6686,7 +6698,9 @@ export async function trustedOperatorCountsByDomain(
  */
 export async function readCounters(db: D1Like): Promise<Counters | null> {
   const rows = await db
-    .prepare(`SELECT name, value, position, updated_at FROM counters`)
+    .prepare(
+      `SELECT name, value, position, updated_at FROM counters WHERE ${COUNTERS_STEP_ROWS}`,
+    )
     .all<Row>();
   if (rows.results.length === 0) return null;
 
@@ -6787,7 +6801,13 @@ export async function writeCounters(
   }
 
   await db.batch([
-    db.prepare(`DELETE FROM counters`),
+    // Exactly the rows this run rewrites: its own flat counters, and the
+    // `domain:` pairs it owns — dropped whole so a slug that left the registry
+    // loses its pair rather than leaving a stale one behind. Not the whole
+    // table any more: the chain step keeps its walk's cursor here and
+    // the per-operator validation counters are written in their own batch, and
+    // a counter another step is keeping is not the counters step's to drop.
+    db.prepare(`DELETE FROM counters WHERE ${COUNTERS_STEP_ROWS}`),
     db
       .prepare(
         `INSERT INTO counters (name, value, position, updated_at) VALUES ${tuples}`,
@@ -7050,6 +7070,13 @@ export interface EntryIdsThroughQuery {
 /** One stored entry row, with the id the export writes it under. */
 export interface StoredEntryRow extends StoredEntry {
   readonly id: string;
+  /**
+   * The sealed position at which an export folded the events and found this
+   * entry version-stale (0021, decisions D-096 and D-107), or null when none
+   * has. It is what tells the export's `stale` — the one derived field a row
+   * cannot be read for without a clock — apart from the calendar's answer.
+   */
+  readonly versionStaleSeq: number | null;
 }
 
 /**
@@ -7072,14 +7099,14 @@ export async function entriesThrough(
     query.afterSubmittedSeq === undefined
       ? await db
           .prepare(
-            `SELECT id, ${ENTRY_COLUMNS} FROM entries
+            `SELECT id, version_stale_seq, ${ENTRY_COLUMNS} FROM entries
              WHERE submitted_seq <= ? ORDER BY submitted_seq LIMIT ?`,
           )
           .bind(query.throughSeq, query.limit)
           .all<Row>()
       : await db
           .prepare(
-            `SELECT id, ${ENTRY_COLUMNS} FROM entries
+            `SELECT id, version_stale_seq, ${ENTRY_COLUMNS} FROM entries
              WHERE submitted_seq <= ? AND submitted_seq > ?
              ORDER BY submitted_seq LIMIT ?`,
           )
@@ -7087,6 +7114,9 @@ export async function entriesThrough(
           .all<Row>();
   return rows.results.map((row) => ({
     id: readText(row, "id"),
+    // 0021, and only here: the column is the export's own, and no other reader
+    // of an entries row has a use for it.
+    versionStaleSeq: readNullableInteger(row, "version_stale_seq"),
     ...toStoredEntry(row),
   }));
 }
@@ -7154,4 +7184,286 @@ export async function entryIdsThrough(
     id: readText(row, "id"),
     submittedSeq: readInteger(row, "submitted_seq"),
   }));
+}
+
+/**
+ * Record the sealed position at which an export found an entry version-stale.
+ *
+ * The other half of 0021. D-096's staleness is a fact about the log — a later
+ * version of the same model verified — and `stale` is the only derived field a
+ * row cannot be read for without a clock, so a row that is stale with its window
+ * still open is one the mirror cannot tell apart from a row its writer's clock
+ * staled. The export gathers that entry's whole world to find out; this is where
+ * the answer it paid for is kept, so the next export does not pay again.
+ *
+ * Written once. `IS NULL` keeps the earliest position any export proved, which
+ * is the conservative one: two runs exporting different heads cannot move the
+ * recorded position forward, and a head below it still publishes the entry from
+ * its events. Nothing ever clears it, because the sibling's verification does
+ * not unhappen — which is why this is an UPDATE of one column and not a rewrite
+ * of the row: the derivation beside it is untouched and stays the doors' own.
+ */
+export async function recordVersionStale(
+  db: D1Like,
+  entryId: string,
+  seq: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE entries SET version_stale_seq = ?
+       WHERE id = ? AND version_stale_seq IS NULL`,
+    )
+    .bind(seq, entryId)
+    .run();
+}
+
+// ---------------------------------------------------------------------------
+// The reads the housekeeping gaps closed
+// ---------------------------------------------------------------------------
+
+/**
+ * The newest event of each of several types, in one statement.
+ *
+ * The grouped form of `latestEventOfType`. The status gather asked it four
+ * times over — the newest snapshot, read count, submission and registration —
+ * which is four round trips for four answers that are all one seek on the
+ * (type, seq) index from 0001. The subquery takes the largest seq per type off
+ * that index and the outer select looks each one up by primary key, so nothing
+ * is scanned and a type the log has never held simply has no row.
+ *
+ * Keyed by type, so a caller reads the answer it asked for by name rather than
+ * by position in a list.
+ */
+export async function latestEventsOfTypes(
+  db: D1Like,
+  types: readonly EventType[],
+): Promise<Partial<Record<EventType, Event>>> {
+  if (types.length === 0) return {};
+  const marks = types.map(() => "?").join(", ");
+  const rows = await db
+    .prepare(
+      `SELECT ${EVENT_COLUMNS} FROM events
+        WHERE seq IN (
+          SELECT MAX(seq) FROM events WHERE type IN (${marks}) GROUP BY type
+        )`,
+    )
+    .bind(...types)
+    .all<Row>();
+  const newest: Partial<Record<EventType, Event>> = {};
+  for (const row of rows.results) {
+    const event = toEvent(row);
+    newest[event.type] = event;
+  }
+  return newest;
+}
+
+/**
+ * The counters the chain re-check keeps between runs.
+ *
+ * `checked_through` is the last seq the walk proved, and `break_seq` is the
+ * event a walk found broken, or -1 while none is. Two rows in the counters
+ * table 0018 created rather than a table of their own: the table is keyed by
+ * name and a new counter needs no migration, which is exactly what it was built
+ * for.
+ *
+ * The chain step owns both names, which is why `writeCounters` no longer clears
+ * them (see its delete): the counters step recounts what it counted and a
+ * cursor another step is walking is not its to drop.
+ */
+export const CHAIN_COUNTER_PREFIX = "chain:";
+const CHAIN_CHECKED_THROUGH = `${CHAIN_COUNTER_PREFIX}checked_through`;
+const CHAIN_BREAK_SEQ = `${CHAIN_COUNTER_PREFIX}break_seq`;
+
+/** What a run knows about the walk before it starts: where it got to, and what it found. */
+export interface ChainCheckState {
+  /** The last seq proved, or -1 before the first page is walked. */
+  readonly checked_through: number;
+  /** The seq a walk found broken, or null while none is. */
+  readonly break_seq: number | null;
+}
+
+/** Both chain counters, in one statement, defaulted for a log never walked. */
+export async function readChainCheckState(
+  db: D1Like,
+): Promise<ChainCheckState> {
+  const rows = await db
+    .prepare(`SELECT name, value FROM counters WHERE name IN (?, ?)`)
+    .bind(CHAIN_CHECKED_THROUGH, CHAIN_BREAK_SEQ)
+    .all<Row>();
+  let checkedThrough = -1;
+  let breakSeq = -1;
+  for (const row of rows.results) {
+    const name = readText(row, "name");
+    const value = readInteger(row, "value");
+    if (name === CHAIN_CHECKED_THROUGH) checkedThrough = value;
+    if (name === CHAIN_BREAK_SEQ) breakSeq = value;
+  }
+  // -1 is "no break" on the row, because the column is NOT NULL and a counter
+  // is an integer: a break at seq 0 is a real answer and null is not storable.
+  return {
+    checked_through: checkedThrough,
+    break_seq: breakSeq < 0 ? null : breakSeq,
+  };
+}
+
+/**
+ * Move the chain walk's cursor and record what it found, in one batch.
+ *
+ * Both rows carry the run's own position and instant, like every other counter,
+ * so a reader can ask when the walk last said this.
+ */
+export async function writeChainCheckState(
+  db: D1Like,
+  state: ChainCheckState,
+  at: string,
+): Promise<void> {
+  const upsert = (name: string, value: number): D1LikeStatement =>
+    db
+      .prepare(
+        `INSERT INTO counters (name, value, position, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (name) DO UPDATE SET
+           value = excluded.value,
+           position = excluded.position,
+           updated_at = excluded.updated_at`,
+      )
+      .bind(name, value, state.checked_through, at);
+  await db.batch([
+    upsert(CHAIN_CHECKED_THROUGH, state.checked_through),
+    upsert(CHAIN_BREAK_SEQ, state.break_seq ?? -1),
+  ]);
+}
+
+/**
+ * One operator's validation record, as the sweep counted it.
+ *
+ * The count, and when the newest decision was signed. `last_validation_ms` is
+ * the instant as epoch milliseconds because the counters table holds integers
+ * and nothing else; the page turns it back into the ISO instant it was read
+ * from, which `fmtInstant` renders to the second either way.
+ */
+export interface OperatorValidationCount {
+  readonly operator: string;
+  readonly count: number;
+  readonly lastSignedAt: string | null;
+}
+
+export const OPERATOR_COUNTER_PREFIX = "operator:";
+const OPERATOR_VALIDATIONS = ":validations";
+const OPERATOR_LAST_VALIDATION = ":last_validation";
+
+/**
+ * Write one counter pair per operator, in one batch.
+ *
+ * What the counters step materialises so the operators directory and the
+ * genesis page stop grouping over every `validation` event in the log on every
+ * view (the QA of 2026-09-12). The log is still the record —
+ * `validationCountsByOperator` is what this is counted from, and recounting it
+ * must give these numbers back — so these rows carry the run's position like
+ * every other counter.
+ *
+ * An operator with no decisions gets no row, which the pages read as the zero
+ * it is.
+ */
+export async function writeOperatorValidationCounters(
+  db: D1Like,
+  counts: readonly OperatorValidationCount[],
+  position: number,
+  at: string,
+): Promise<void> {
+  if (counts.length === 0) return;
+  const statements: D1LikeStatement[] = [];
+  const upsert = (name: string, value: number): void => {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO counters (name, value, position, updated_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT (name) DO UPDATE SET
+             value = excluded.value,
+             position = excluded.position,
+             updated_at = excluded.updated_at`,
+        )
+        .bind(name, value, position, at),
+    );
+  };
+  for (const each of counts) {
+    upsert(
+      `${OPERATOR_COUNTER_PREFIX}${each.operator}${OPERATOR_VALIDATIONS}`,
+      each.count,
+    );
+    const signed =
+      each.lastSignedAt === null ? Number.NaN : Date.parse(each.lastSignedAt);
+    // An unparseable instant is stored as "never signed" rather than as NaN:
+    // the count is the number the page shows and a missing date is an em dash.
+    upsert(
+      `${OPERATOR_COUNTER_PREFIX}${each.operator}${OPERATOR_LAST_VALIDATION}`,
+      Number.isFinite(signed) ? signed : -1,
+    );
+  }
+  await db.batch(statements);
+}
+
+/**
+ * The validation counters for exactly the operators one page shows.
+ *
+ * One statement for the whole page, by primary key, over the rows the counters
+ * step wrote — and never a group-by over the `validation` events, which is what
+ * both callers used to do per view. An operator with no row has signed nothing
+ * this sweep counted, which the caller reads as zero.
+ */
+export async function validationCountersForOperators(
+  db: D1Like,
+  operators: readonly string[],
+): Promise<Map<string, OperatorValidationCount>> {
+  const found = new Map<string, OperatorValidationCount>();
+  if (operators.length === 0) return found;
+  const names: string[] = [];
+  for (const operator of operators) {
+    names.push(`${OPERATOR_COUNTER_PREFIX}${operator}${OPERATOR_VALIDATIONS}`);
+    names.push(
+      `${OPERATOR_COUNTER_PREFIX}${operator}${OPERATOR_LAST_VALIDATION}`,
+    );
+  }
+  const marks = names.map(() => "?").join(", ");
+  const rows = await db
+    .prepare(`SELECT name, value FROM counters WHERE name IN (${marks})`)
+    .bind(...names)
+    .all<Row>();
+
+  const counts = new Map<string, number>();
+  const last = new Map<string, number>();
+  for (const row of rows.results) {
+    const name = readText(row, "name");
+    const value = readInteger(row, "value");
+    if (!name.startsWith(OPERATOR_COUNTER_PREFIX)) continue;
+    if (name.endsWith(OPERATOR_VALIDATIONS)) {
+      counts.set(
+        name.slice(
+          OPERATOR_COUNTER_PREFIX.length,
+          name.length - OPERATOR_VALIDATIONS.length,
+        ),
+        value,
+      );
+      continue;
+    }
+    if (name.endsWith(OPERATOR_LAST_VALIDATION)) {
+      last.set(
+        name.slice(
+          OPERATOR_COUNTER_PREFIX.length,
+          name.length - OPERATOR_LAST_VALIDATION.length,
+        ),
+        value,
+      );
+    }
+  }
+  for (const operator of operators) {
+    const count = counts.get(operator);
+    if (count === undefined) continue;
+    const signed = last.get(operator) ?? -1;
+    found.set(operator, {
+      operator,
+      count,
+      lastSignedAt: signed < 0 ? null : new Date(signed).toISOString(),
+    });
+  }
+  return found;
 }

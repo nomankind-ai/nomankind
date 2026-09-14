@@ -114,7 +114,7 @@ import {
   standingByOperator,
   standingForOperators,
   supersedersOf,
-  validationCountsByOperator,
+  validationCountersForOperators,
   validationsByOperator,
   type EntryLocation,
   type OperatorRecord,
@@ -892,8 +892,15 @@ async function entry(
  */
 async function operatorRows(db: D1Like): Promise<OperatorRow[]> {
   const records = await listOperators(db, { limit: LIST_PAGE_LIMIT });
-  const counts = await validationCountsByOperator(db, LIST_PAGE_LIMIT);
-  const byOperator = new Map(counts.map((each) => [each.operator, each]));
+  // The counters the sweep wrote, for exactly the operators on this page
+  // (the QA of 2026-09-12). This used to group over every `validation` event
+  // in the log on every view, which is a cost that grows with the record and
+  // is paid by whoever happens to be looking; the log is still what the count
+  // is taken from, once a run, by the counters step.
+  const byOperator = await validationCountersForOperators(
+    db,
+    records.map((record) => record.id),
+  );
   const agents = await agentCountsByOperator(db, LIST_PAGE_LIMIT);
   const agentsByOperator = new Map(
     agents.map((each) => [each.operator, each.count]),
@@ -1008,8 +1015,11 @@ async function genesis(
   env: Env,
 ): Promise<Response> {
   const records = await listOperators(db, { limit: LIST_PAGE_LIMIT });
-  const counts = await validationCountsByOperator(db, LIST_PAGE_LIMIT);
-  const byOperator = new Map(counts.map((each) => [each.operator, each]));
+  // The same materialised counters the directory reads, for the same reason.
+  const byOperator = await validationCountersForOperators(
+    db,
+    records.map((record) => record.id),
+  );
 
   const rows: GenesisRow[] = records.map((record) => {
     const trustedSeq = record.details["trusted_seq"];

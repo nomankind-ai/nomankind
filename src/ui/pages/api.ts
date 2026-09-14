@@ -968,7 +968,23 @@ npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt;
           null, and sends the artifact as the body's
           <span class="mono">receipt</span>.
         </p>
-        <pre class="block mono">npm run submit -- &lt;key.json&gt; ${origin} &lt;fields.json&gt; --receipt &lt;receipt.json&gt;</pre>
+        <pre class="block mono">npm run submit -- &lt;key.json&gt; ${origin} &lt;fields.json&gt; --receipt &lt;receipt.json&gt;
+npm run submit -- &lt;key.json&gt; ${origin} &lt;fields.json&gt; --transcript &lt;transcript.json&gt; [--disclosure &lt;file.json&gt;]</pre>
+        <p class="note">
+          <span class="mono">--transcript</span> carries the frozen transcript of
+          a behavior or misbehavior entry, whose snapshot is the artifact and not
+          the cited page: it is checked and hashed by the kernel's own rule
+          before anything is fetched, its measured fields fill the
+          <span class="mono">evidence</span> the fields file leaves null, and its
+          hash is the <span class="mono">snapshot_hash</span> the author signs,
+          which the door reaches again by rebuilding the same artifact and
+          archives at that hash. A receipt and a transcript on one submission are
+          a usage error: an observed entry carries a receipt and a transcript
+          entry a transcript, never both.
+          <span class="mono">--disclosure</span> is the body's
+          <span class="mono">disclosure</span> read from a file instead of from
+          the fields file, and naming it both ways is a usage error.
+        </p>
         <p class="note">
           The fields file carries <span class="mono">domain</span> beside
           subject and category: the author names the domain they sign, and a
