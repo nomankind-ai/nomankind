@@ -13,6 +13,13 @@
  * the entries listing does. The counters are untouched — they count entries, and
  * the window holds back content and never a count.
  *
+ * Decision D-125: the newest-sealed table carries the same `domain` column the
+ * entries listing does, in the same place — after the subject, where the listing
+ * puts it after the category — because the two tables show the same rows and a
+ * column on one of them only would be one more thing to keep in step. The line
+ * above the table says which domain was counted; the column says which domain
+ * each row is, which is a different question on an unnarrowed page.
+ *
  * Pure: every value comes off `HomeData`, which the route gathered. Nothing here
  * counts anything, and the one number named is TRUSTED_POOL_SWITCH, read from
  * src/policy.ts rather than typed out.
@@ -116,6 +123,7 @@ function latestRow(row: EntryRow): Safe {
     </td>
     <td>${badge(statusClass(row.status), row.status)}</td>
     <td>${row.subject}</td>
+    <td class="muted">${row.domain === "" ? "—" : row.domain}</td>
     <td class="prose">${claimCell(row)}</td>
     <td class="muted">${row.tier ?? "—"}</td>
     <td class="dim">${fmtDate(row.last_confirmed)}</td>
@@ -135,6 +143,7 @@ function latest(rows: EntryRow[]): Safe {
           <th>pos</th>
           <th>status</th>
           <th>subject</th>
+          <th>domain</th>
           <th>claim</th>
           <th>tier</th>
           <th>confirmed</th>

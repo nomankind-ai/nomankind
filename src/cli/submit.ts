@@ -93,6 +93,7 @@ import {
   errorOf,
   fetchAndHash,
   getJson,
+  operatorFor,
   readKeyFile,
   reasonOf,
   signedPost,
@@ -270,26 +271,12 @@ export function checkFields(fields: unknown): FieldsVerdict {
 /**
  * The operator the registry puts behind one key, or null when it has none.
  *
- * The validator asks the same question of the same route; this is the one place
- * the two client commands of M15 read it from, so a bare key answers null on
- * both doors for the same reason.
+ * The validator asks the same question of the same route, and since D-124 it
+ * asks it to tell an unregistered key from a withheld entry, so the one
+ * implementation moved beside that read (./validator.ts) and this is the name
+ * the commands of M15 have always imported it under.
  */
-export async function operatorFor(
-  http: HttpClient,
-  baseUrl: string,
-  agentId: string,
-): Promise<string | null> {
-  const { status, body } = await getJson(
-    http,
-    baseUrl,
-    `/agents/${encodeURIComponent(agentId)}`,
-  );
-  if (status !== 200) return null;
-  const operator = (body as Record<string, unknown> | null)?.["operator"];
-  if (!isRecord(operator)) return null;
-  const id = operator["id"];
-  return typeof id === "string" ? id : null;
-}
+export { operatorFor } from "./validator.js";
 
 /**
  * A core built and ready to sign, or the reason the run stopped before one

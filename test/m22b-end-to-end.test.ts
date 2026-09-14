@@ -791,18 +791,19 @@ describe("a v0.6 record is served, listed and synced", () => {
     ).toBe(false);
   });
 
-  it("refuses a new decision on it: schema_invalid is the honest answer", async () => {
-    // The entry no longer validates under v0.7, and the door validates the
-    // entry it would store before it stores anything. So the decision is
-    // refused and the log is left where it was.
+  it("refuses a new decision on it: legacy_entry is the honest answer", async () => {
+    // The entry no longer validates under v0.7, so the decision is refused and
+    // the log is left where it was. Decision D-124 changed only the word: the
+    // door used to run the whole validation and answer `schema_invalid` from
+    // the derived row, which told the validator their own record was malformed
+    // when it was the entry's core that the current schema cannot derive. It is
+    // now named for what it is, before anything is signed, and says which key
+    // the core is missing.
     const before = await head();
     const answer = await approve(k1, legacyId);
-    expect([answer.status, answer.body["error"]]).toEqual([422, "schema_invalid"]);
-    expect(
-      (answer.body["errors"] as Array<{ path: string }>).map(
-        (error) => error.path,
-      ),
-    ).toContain("/domain");
+    expect([answer.status, answer.body["error"]]).toEqual([422, "legacy_entry"]);
+    expect(answer.body["core_version"]).toBe("v0.6");
+    expect(String(answer.body["reason"])).toContain("domain");
     expect(await head()).toBe(before);
   });
 });

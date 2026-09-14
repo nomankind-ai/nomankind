@@ -42,12 +42,15 @@ import { runCommand } from "./main.js";
 import { buildAuthoredCore } from "./submit.js";
 import {
   errorOf,
-  getJson,
+  errorsOf,
+  readEntry,
   readKeyFile,
-  signingHttp,
   reasonOf,
+  refusalLines,
   signedPost,
+  stopLine,
   WebHttpClient,
+  type DoorError,
   type HttpClient,
   type ValidatorIo,
   type ValidatorKey,
@@ -228,17 +231,27 @@ export interface DisputeRun {
   readonly status: number | null;
   /** The refusal the route named, or the local failure that stopped the run. */
   readonly error: string | null;
+  /**
+   * The short phrase behind the word, or null when the word is all there is
+   * (decision D-124): the release date on `entry_withheld`, the agent on
+   * `unregistered_operator`.
+   */
+  readonly detail: string | null;
+  /** The `errors` array a 422 carried, or null when the answer had none. */
+  readonly errors: readonly DoorError[] | null;
   /** The id the kernel derived from the signed correction core. */
   readonly correctionId: string | null;
   /** The target's status after the filing, on 201. */
   readonly targetStatus: string | null;
 }
 
-function stopped(error: string): DisputeRun {
+function stopped(error: string, detail: string | null = null): DisputeRun {
   return {
     ok: false,
     status: null,
     error,
+    detail,
+    errors: null,
     correctionId: null,
     targetStatus: null,
   };
@@ -261,18 +274,16 @@ export async function runDispute(input: {
 
   // The target, for its subject: a challenge is about the same fact, so the
   // correction carries the subject the entry it challenges carries.
-  // Signed with the operator key this run already holds (decision D-100): an
-  // entry inside the release window is served to a signed request from an agent
-  // bound to a registered operator, and a validator is exactly that reader —
-  // the people who have to judge an entry are the ones the window is not for.
-  const read = await getJson(
-    signingHttp(deps.http, input.key, deps.clock ?? deps.now),
-    input.baseUrl,
-    `/entries/${encodeURIComponent(input.targetId)}`,
-  );
-  if (read.status !== 200) {
-    return stopped(errorOf(read.body) ?? `entry_unreadable_${read.status}`);
-  }
+  // Read with this run's own key, and the two 200s told apart (D-124): the
+  // entry, or the withheld view the window serves a reader it does not know.
+  const read = await readEntry({
+    http: deps.http,
+    baseUrl: input.baseUrl,
+    entryId: input.targetId,
+    key: input.key,
+    clock: deps.clock ?? deps.now,
+  });
+  if (!read.ok) return stopped(read.stop.reason, read.stop.detail);
   const subject = isRecord(read.body) ? read.body["subject"] : undefined;
   if (typeof subject !== "string") return stopped("entry_malformed");
   const domain = isRecord(read.body) ? read.body["domain"] : undefined;
@@ -327,13 +338,16 @@ export async function runDispute(input: {
 
   if (response.status !== 201) {
     const error = errorOf(answer);
-    deps.io.stdout(
-      `response ${response.status}${error === null ? "" : ` ${error}`}`,
-    );
+    // The door's own detail under the word it refused in (D-124).
+    for (const line of refusalLines(response.status, answer)) {
+      deps.io.stdout(line);
+    }
     return {
       ok: false,
       status: response.status,
       error,
+      detail: null,
+      errors: errorsOf(answer),
       correctionId,
       targetStatus: null,
     };
@@ -351,6 +365,8 @@ export async function runDispute(input: {
     ok: true,
     status: 201,
     error: null,
+    detail: null,
+    errors: null,
     correctionId,
     targetStatus,
   };
@@ -401,7 +417,7 @@ if (
           },
         });
         if (!run.ok && run.status === null) {
-          io.stderr(`dispute: ${run.error ?? "unknown error"}`);
+          io.stderr(stopLine("dispute", run));
         }
         return run.ok ? OK : FAILED;
       },

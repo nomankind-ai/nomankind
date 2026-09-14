@@ -18,8 +18,16 @@
  * Decision D-100, the release window: a row whose entry's content has not been
  * released to this reader carries "released <date>" where the claim would be.
  * Every other column — the position, the status, the subject, the category, the
- * tier, the dates — is proof or derived from proof and is shown as it always
- * is, so the listing counts and orders exactly as it did before the window.
+ * domain, the tier, the dates — is proof or derived from proof and is shown as
+ * it always is, so the listing counts and orders exactly as it did before the
+ * window.
+ *
+ * Decision D-125, the domain column: the registered domain out of each entry's
+ * signed core is read beside its category, on every page and under every filter.
+ * The chips stay the filter and the column is the reading — a reader who lands
+ * on an unfiltered listing could otherwise only learn a row's domain by opening
+ * it, and a reader who arrived from a chip had to trust the chip. Plain text and
+ * not a link, because no filter value in this table is one.
  *
  * Pure: the rows, the total and the cursor were all decided by the route.
  */
@@ -163,6 +171,7 @@ function row(entry: EntryRow): Safe {
     <td>${badge(statusClass(entry.status), entry.status)}</td>
     <td>${entry.subject}</td>
     <td class="muted">${entry.category}</td>
+    <td class="muted">${entry.domain === "" ? "—" : entry.domain}</td>
     <td class="prose">${claimCell(entry)}</td>
     <td class="muted">${entry.tier ?? "—"}</td>
     <td class="dim">${fmtDate(entry.last_confirmed)}</td>
@@ -182,6 +191,7 @@ function table(rows: EntryRow[]): Safe {
           <th>status</th>
           <th>subject</th>
           <th>category</th>
+          <th>domain</th>
           <th>claim</th>
           <th>tier</th>
           <th>confirmed</th>

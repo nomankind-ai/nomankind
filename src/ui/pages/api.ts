@@ -228,7 +228,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters:
       "category=<c>, status=<s>, domain=<slug>, source=official|recognized|other, tier=stated|observed, fresh=fresh|stale, before=<position>",
     answers:
-      "The browsing listing, newest sealed position first, one keyset page. A chip group carries each filter, domain and source among them, and every chip and the pager keep the rest of the query as it stands. The n-of-m line counts by status and domain, which are indexed columns; category, source, tier and freshness narrow the page rather than the total, and the line says so. HTML only: the JSON twin of a listing is GET /events.",
+      "An HTML page and nothing else: this path has no JSON twin, so it answers HTML whatever the Accept header says, and Accept: application/json is answered with the page. It is the browsing listing, newest sealed position first, one keyset page. A chip group carries each filter, domain and source among them, and every chip and the pager keep the rest of the query as it stands; each row shows the entry's registered domain beside its category, on every page and under every filter. The n-of-m line counts by status and domain, which are indexed columns; category, source, tier and freshness narrow the page rather than the total, and the line says so. The page size is the published one and is not a parameter: limit is refused as unknown_parameter, answered as the Bad query page with 400, rather than honored or ignored.",
     refusals:
       "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_source, bad_tier, bad_fresh, bad_before. An empty value (?category=) is a refusal and not an absence.",
   },
@@ -388,7 +388,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       `201 with the derived entry. A draft is drawn a validator by the sweep only while it is within DRAW_DRAFT_MAX_AGE_DAYS of its own submitted_at — ${DRAW_DRAFT_MAX_AGE_DAYS} days: past that it leaves the draw queue, and it is still a draft, still readable, and still open to a volunteer — a validation makes it draw-eligible again only if it is inside the window, because the cutoff is on submitted_at and nothing moves that. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation. A validator that judges the entry a duplicate of one it does not supersede rejects in the published form, the reason duplicate_claim:<entry id>, which is taken as any other reason is: nothing new is signed, and the entry page and the confidence inputs read the id back out of it. There are three answers a validator can give and the door takes all three. approve: the validator fetched the cited source itself, it says what the entry says, and the record carries that validator's own snapshot_hash — plus its own measurement (runs and holds) when the entry is observed and the category is not a transcript one, which is the missing_observation refusal above; the door checks that it is there and well formed, and whether it passed is read later by derivation and standing. reject: the same work found otherwise, and the record needs a reason (missing_reason) and may carry the measurement it found — a reproduction's runs and holds, or an observation — but is not required to, because a rejection can rest on the citation alone. test_accepted false: the proposed test does not decide the claim, which is a judgment about the test rather than about the entry, recorded on a rejection and an approval alike so testVerdict can count the majority. A negative result is a first-class, paid answer: the standing a completed validation earns (STANDING_VALIDATION_ASSIGNED or STANDING_VALIDATION_VOLUNTEERED) is earned whichever way the decision went, and STANDING_VALIDATION_REPRODUCED is paid beside it for a record carrying a passing measurement, which is work and not a direction.`,
     refusals:
-      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, deadline_passed (the operator was drawn for this entry and the draw's seventy-two hours have run out — read off the assignment the draw made, so the answer is the same whether or not a sweep has closed it yet), unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, subject_authority (the operator's own domain is, or is under, an official host of the entry's subject's authority row, in a domain whose registry says a subject excludes its own authority), operator_not_in_domain (the operator is not attested in the entry's own domain), missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, schema_invalid.",
+      "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, deadline_passed (the operator was drawn for this entry and the draw's seventy-two hours have run out — read off the assignment the draw made, so the answer is the same whether or not a sweep has closed it yet), unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, subject_authority (the operator's own domain is, or is under, an official host of the entry's subject's authority row, in a domain whose registry says a subject excludes its own authority), operator_not_in_domain (the operator is not attested in the entry's own domain), missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, legacy_entry (the entry is one the current schema cannot derive — checked after the signature and the status and before the schema, so an old entry is refused by name rather than as a schema failure), schema_invalid — whose 422 carries an errors array naming each field that failed, and which on this door is the validator's own record failing the schema rather than the entry's.",
   },
   {
     method: "POST",
@@ -747,6 +747,50 @@ export function renderApi(ctx: PageContext): string {
       )}
 
       <section class="panel">
+        <h2 class="panel-title">Reading entries as JSON</h2>
+        <p class="note">
+          <span class="mono">GET /entries</span> is the one entry path that is
+          not negotiated. It is an HTML page, it answers HTML however the request
+          asks — <span class="mono">Accept: application/json</span> included,
+          and the <span class="mono">vary: Accept</span> every page carries does
+          not make a second variant appear — and it takes no <span class="mono">limit</span>: the page size is the
+          published one, and a query naming a parameter this listing does not
+          have is the Bad query page with 400
+          <span class="mono">unknown_parameter</span> rather than a list quietly
+          narrower or wider than the caller believes. So a program that wants
+          rows should not ask this path for them. There are four places that
+          answer entries as records instead.
+        </p>
+        <dl class="dl">
+          <dt class="mono">GET /entries/{id}</dt>
+          <dd>
+            One entry, and this path <em>is</em> negotiated: without
+            <span class="mono">Accept: text/html</span> it answers the JSON
+            record, with it the entry page, and every response carries
+            <span class="mono">vary: Accept</span>.
+          </dd>
+          <dt class="mono">GET /entries/{id}/events</dt>
+          <dd>
+            That entry's whole story as JSON — its own events in seq order with
+            one proof per sealed event — bounded by the entry rather than by the
+            log.
+          </dd>
+          <dt class="mono">GET /events</dt>
+          <dd>
+            The listing's JSON twin: the log itself, keyset paged with
+            <span class="mono">after</span> and
+            <span class="mono">limit</span>, which is where a caller that wanted
+            many entries at once goes.
+          </dd>
+          <dt class="mono">npm run export</dt>
+          <dd>
+            The export CLI writes the entry and the log bundle to two files, for
+            a caller that wants the records on disk rather than over the wire.
+          </dd>
+        </dl>
+      </section>
+
+      <section class="panel">
         <h2 class="panel-title">Authenticating a write</h2>
         <p class="note">
           Four headers carry the proof, and the signature covers the request
@@ -850,6 +894,62 @@ POST
         everybody else anyway.`,
         WRITE_PATH,
       )}
+
+      <section class="panel">
+        <h2 class="panel-title">What a validator's command stops on</h2>
+        <p class="note">
+          422 <span class="mono">schema_invalid</span> from
+          <span class="mono">POST /entries/{id}/validate</span> carries an
+          <span class="mono">errors</span> array beside the word — one entry per
+          failure, as the compiled validator reported it — because a record
+          refused for its shape is refused for a named field, and a caller told
+          only "invalid" would have to guess which. The command prints that array
+          as it came back. These are the words the validator command stops on
+          before or instead of signing; each is a state of the world and not a
+          bug to debug.
+        </p>
+        <dl class="dl">
+          <dt class="mono">entry_withheld</dt>
+          <dd>
+            A free-tier read inside the release window: the entry's content is
+            not this reader's yet, and the release date is printed with the
+            refusal. A paid key or a signature from an agent bound to a
+            registered operator reaches inside the window.
+          </dd>
+          <dt class="mono">unregistered_operator</dt>
+          <dd>
+            The key is bound to no registered operator. Registration comes
+            first — a key is an identity only once a domain's DNS record and the
+            registration door have made it one.
+          </dd>
+          <dt class="mono">legacy_entry</dt>
+          <dd>
+            The validate door refuses an entry the current schema cannot derive.
+            It stays readable and stays in the log, because nothing stored is
+            rewritten to suit a later schema, but it cannot be judged under
+            today's rules. The validate door is the only one that names it: on
+            <span class="mono">reconfirm</span>,
+            <span class="mono">dispute</span> and
+            <span class="mono">revalidate</span> an entry sealed before schema
+            v0.7 still answers <span class="mono">schema_invalid</span>, because
+            those doors meet it as a derivation that failed.
+          </dd>
+          <dt class="mono">schema_invalid</dt>
+          <dd>
+            On the validate door, the validator's own submission failed the
+            schema and not the entry's, and the door's
+            <span class="mono">errors</span> array above says where. On the three
+            doors that name no <span class="mono">legacy_entry</span>, it is also
+            the word a pre-v0.7 entry is refused in, so read the array before
+            concluding the record you sent was the thing at fault.
+          </dd>
+          <dt class="mono">entry_malformed</dt>
+          <dd>
+            A body that claims to carry an entry core and cannot be parsed as
+            one. The command stops before it fetches anything.
+          </dd>
+        </dl>
+      </section>
 
       <section class="panel">
         <h2 class="panel-title">Which sources may be cited for what</h2>

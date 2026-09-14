@@ -492,7 +492,9 @@ describe("revalidate: what one run asks for", () => {
       },
     });
 
-    expect([run.ok, run.error]).toEqual([false, "unregistered_agent"]);
+    // One word for one condition (D-124): the key is bound to no registered
+    // operator, and that is the answer whichever line notices it.
+    expect([run.ok, run.error]).toEqual([false, "unregistered_operator"]);
     expect(http.asked.length).toBe(2);
   });
 });

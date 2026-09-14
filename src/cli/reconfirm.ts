@@ -59,15 +59,20 @@ import { operatorFor } from "./submit.js";
 import {
   buildValidatorReceipt,
   errorOf,
+  errorsOf,
   fetchAndHash,
-  getJson,
   parsePredicate,
+  readEntry,
   readKeyFile,
-  signingHttp,
+  refusalLines,
   runPredicate,
   signedPost,
   SNAPSHOT_MISMATCH,
+  stopLine,
+  UNREGISTERED_OPERATOR,
+  unregisteredOperatorDetail,
   WebHttpClient,
+  type DoorError,
   type HttpClient,
   type Snapshot,
   type ValidatorIo,
@@ -104,6 +109,14 @@ export interface ReconfirmRun {
   readonly status: number | null;
   /** The refusal the route named, or the local failure that stopped the run. */
   readonly error: string | null;
+  /**
+   * The short phrase behind the word, or null when the word is all there is
+   * (decision D-124): the release date on `entry_withheld`, the agent on
+   * `unregistered_operator`.
+   */
+  readonly detail: string | null;
+  /** The `errors` array a 422 carried, or null when the answer had none. */
+  readonly errors: readonly DoorError[] | null;
   /** The record that was signed and sent, when one was. */
   readonly record: ReconfirmationRecord | null;
   /** The refreshed entry's derived last-confirmed date, on 201. */
@@ -114,11 +127,13 @@ export interface ReconfirmRun {
   readonly slots: readonly string[] | null;
 }
 
-function stopped(error: string): ReconfirmRun {
+function stopped(error: string, detail: string | null = null): ReconfirmRun {
   return {
     ok: false,
     status: null,
     error,
+    detail,
+    errors: null,
     record: null,
     lastConfirmed: null,
     expiresAt: null,
@@ -225,18 +240,16 @@ export async function runReconfirm(input: {
 }): Promise<ReconfirmRun> {
   const { deps } = input;
 
-  // Signed with the operator key this run already holds (decision D-100): an
-  // entry inside the release window is served to a signed request from an agent
-  // bound to a registered operator, and a validator is exactly that reader —
-  // the people who have to judge an entry are the ones the window is not for.
-  const read = await getJson(
-    signingHttp(deps.http, input.key, deps.clock ?? deps.now),
-    input.baseUrl,
-    `/entries/${encodeURIComponent(input.entryId)}`,
-  );
-  if (read.status !== 200) {
-    return stopped(errorOf(read.body) ?? `entry_unreadable_${read.status}`);
-  }
+  // Read with this run's own key, and the two 200s told apart (D-124): the
+  // entry, or the withheld view the window serves a reader it does not know.
+  const read = await readEntry({
+    http: deps.http,
+    baseUrl: input.baseUrl,
+    entryId: input.entryId,
+    key: input.key,
+    clock: deps.clock ?? deps.now,
+  });
+  if (!read.ok) return stopped(read.stop.reason, read.stop.detail);
 
   let core: Core;
   try {
@@ -255,7 +268,15 @@ export async function runReconfirm(input: {
     input.baseUrl,
     input.key.agentId,
   );
-  if (operator === null) return stopped("unregistered_agent");
+  // The same condition the withheld read answers for, so the same word and
+  // the same sentence (D-124): the entry having released only changes which
+  // line notices that the registry puts nobody behind this key.
+  if (operator === null) {
+    return stopped(
+      UNREGISTERED_OPERATOR,
+      unregisteredOperatorDetail(input.key.agentId),
+    );
+  }
 
   // Section 4: reconfirming a behavior or misbehavior entry means rerunning the
   // frozen prompt. Asked before the citation is fetched, because a page this
@@ -323,13 +344,14 @@ export async function runReconfirm(input: {
 
   if (response.status !== 201) {
     const error = errorOf(body);
-    deps.io.stdout(
-      `response ${response.status}${error === null ? "" : ` ${error}`}`,
-    );
+    // The door's own detail under the word it refused in (D-124).
+    for (const line of refusalLines(response.status, body)) deps.io.stdout(line);
     return {
       ok: false,
       status: response.status,
       error,
+      detail: null,
+      errors: errorsOf(body),
       record,
       lastConfirmed: null,
       expiresAt: null,
@@ -355,6 +377,8 @@ export async function runReconfirm(input: {
     ok: true,
     status: 201,
     error: null,
+    detail: null,
+    errors: null,
     record,
     lastConfirmed,
     expiresAt,
@@ -397,7 +421,7 @@ if (
         },
       });
       if (!run.ok && run.status === null) {
-        io.stderr(`${entryId}: ${run.error ?? "unknown error"}`);
+        io.stderr(stopLine(entryId, run));
       }
       return run.ok ? 0 : 1;
     }),

@@ -330,6 +330,10 @@ function toRow(
     status: field(entry, "status"),
     subject: field(entry, "subject"),
     category: field(entry, "category"),
+    // The registered domain out of the signed core (D-125). `field` answers the
+    // empty string for an entry sealed before the key existed, and the listing
+    // prints that as an em dash: a page never fills a domain in.
+    domain: field(entry, "domain"),
     // The claim is content (D-100): a withheld row carries none at all, rather
     // than a string the page would have to remember not to print.
     claim: withheld === null ? field(entry, "claim") : "",

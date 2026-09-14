@@ -42,12 +42,17 @@ import { runCommand } from "./main.js";
 import { operatorFor } from "./submit.js";
 import {
   errorOf,
+  errorsOf,
   fetchAndHash,
-  getJson,
+  readEntry,
   readKeyFile,
-  signingHttp,
+  refusalLines,
   signedPost,
+  stopLine,
+  UNREGISTERED_OPERATOR,
+  unregisteredOperatorDetail,
   WebHttpClient,
+  type DoorError,
   type HttpClient,
   type ValidatorIo,
   type ValidatorKey,
@@ -143,12 +148,20 @@ export interface RevalidateRun {
   readonly status: number | null;
   /** The refusal the route named, or the local failure that stopped the run. */
   readonly error: string | null;
+  /**
+   * The short phrase behind the word, or null when the word is all there is
+   * (decision D-124): the release date on `entry_withheld`, the agent on
+   * `unregistered_operator`.
+   */
+  readonly detail: string | null;
+  /** The `errors` array a 422 carried, or null when the answer had none. */
+  readonly errors: readonly DoorError[] | null;
   /** The record signed and sent, on a resolution. */
   readonly record: ReconfirmationRecord | null;
 }
 
-function stopped(error: string): RevalidateRun {
-  return { ok: false, status: null, error, record: null };
+function stopped(error: string, detail: string | null = null): RevalidateRun {
+  return { ok: false, status: null, error, detail, errors: null, record: null };
 }
 
 /** The entry, as a core, or the reason it could not be read. */
@@ -157,31 +170,31 @@ async function readCore(
   key: ValidatorKey,
   baseUrl: string,
   entryId: string,
-): Promise<{ ok: true; core: Core } | { ok: false; reason: string }> {
-  // Signed with the operator key this run already holds (decision D-100): an
-  // entry inside the release window is served to a signed request from an agent
-  // bound to a registered operator, and a revalidator is exactly that reader.
-  const read = await getJson(
-    signingHttp(deps.http, key, deps.clock ?? deps.now),
+): Promise<
+  { ok: true; core: Core } | { ok: false; reason: string; detail: string | null }
+> {
+  // Read with this run's own key, and the two 200s told apart (D-124): the
+  // entry, or the withheld view the window serves a reader it does not know.
+  const read = await readEntry({
+    http: deps.http,
     baseUrl,
-    `/entries/${encodeURIComponent(entryId)}`,
-  );
-  if (read.status !== 200) {
-    return {
-      ok: false,
-      reason: errorOf(read.body) ?? `entry_unreadable_${read.status}`,
-    };
+    entryId,
+    key,
+    clock: deps.clock ?? deps.now,
+  });
+  if (!read.ok) {
+    return { ok: false, reason: read.stop.reason, detail: read.stop.detail };
   }
   let core: Core;
   try {
     core = extractCore(read.body);
   } catch {
-    return { ok: false, reason: "entry_malformed" };
+    return { ok: false, reason: "entry_malformed", detail: null };
   }
   // The kernel implements exactly one norm version, so an entry signed under
   // another is refused rather than hashed under rules it never claimed.
   if (core["norm_version"] !== NORM_VERSION) {
-    return { ok: false, reason: "unsupported_norm_version" };
+    return { ok: false, reason: "unsupported_norm_version", detail: null };
   }
   return { ok: true, core };
 }
@@ -216,10 +229,16 @@ async function request_(input: {
   }
 
   const error = response.status === 201 ? null : errorOf(body);
-  deps.io.stdout(
-    `response ${response.status}${error === null ? "" : ` ${error}`}`,
-  );
-  return { ok: response.status === 201, status: response.status, error, record: null };
+  // The door's own detail under the word it refused in (D-124).
+  for (const line of refusalLines(response.status, body)) deps.io.stdout(line);
+  return {
+    ok: response.status === 201,
+    status: response.status,
+    error,
+    detail: null,
+    errors: errorsOf(body),
+    record: null,
+  };
 }
 
 /**
@@ -236,14 +255,22 @@ async function resolve_(input: {
   const { deps } = input;
 
   const read = await readCore(deps, input.key, input.baseUrl, input.entryId);
-  if (!read.ok) return stopped(read.reason);
+  if (!read.ok) return stopped(read.reason, read.detail);
 
   const operator = await operatorFor(
     deps.http,
     input.baseUrl,
     input.key.agentId,
   );
-  if (operator === null) return stopped("unregistered_agent");
+  // The same condition the withheld read answers for, so the same word and
+  // the same sentence (D-124): the entry having released only changes which
+  // line notices that the registry puts nobody behind this key.
+  if (operator === null) {
+    return stopped(
+      UNREGISTERED_OPERATOR,
+      unregisteredOperatorDetail(input.key.agentId),
+    );
+  }
 
   const citation = read.core["citation"];
   if (typeof citation !== "string") return stopped("unsupported_citation");
@@ -287,13 +314,14 @@ async function resolve_(input: {
 
   const error = response.status === 200 ? null : errorOf(body);
   deps.io.stdout(`check ${input.outcome} hash ${own.snapshot.hash}`);
-  deps.io.stdout(
-    `response ${response.status}${error === null ? "" : ` ${error}`}`,
-  );
+  // The door's own detail under the word it refused in (D-124).
+  for (const line of refusalLines(response.status, body)) deps.io.stdout(line);
   return {
     ok: response.status === 200,
     status: response.status,
     error,
+    detail: null,
+    errors: errorsOf(body),
     record,
   };
 }
@@ -356,7 +384,7 @@ if (
           },
         });
         if (!run.ok && run.status === null) {
-          io.stderr(`${plan.entryId}: ${run.error ?? "unknown error"}`);
+          io.stderr(stopLine(plan.entryId, run));
         }
         return run.ok ? OK : FAILED;
       },
