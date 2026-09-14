@@ -271,6 +271,13 @@ const CACHEABLE_FILE_PATHS: ReadonlySet<string> = new Set([
  * page that went on costing the log a read per reader, quietly.
  */
 export function cacheablePath(path: string): boolean {
+  // `/entries/{id}/events` is a JSON door under a page's prefix (decision
+  // D-120), and what it answers depends on who is asking: a free reader inside
+  // the release window gets hash lines where a keyed one gets payloads. So it is
+  // named out of the prefix rather than left to `storable` to decline — a door
+  // whose answer varies by reader must never be looked for in a shared cache in
+  // the first place.
+  if (isEntryEventsPath(path)) return false;
   return (
     CACHEABLE_PATHS.has(path) ||
     path.startsWith("/entries/") ||
@@ -278,6 +285,13 @@ export function cacheablePath(path: string): boolean {
     path.startsWith("/docs/") ||
     isSitemapDocument(path)
   );
+}
+
+/** Whether this is `/entries/{id}/events`, the one JSON door under that prefix. */
+function isEntryEventsPath(path: string): boolean {
+  if (!path.startsWith("/entries/") || !path.endsWith("/events")) return false;
+  const middle = path.slice("/entries/".length, path.length - "/events".length);
+  return middle !== "" && !middle.includes("/");
 }
 
 /**

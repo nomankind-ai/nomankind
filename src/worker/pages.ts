@@ -103,6 +103,8 @@ import {
   listAttestations,
   listEntriesPage,
   listOperators,
+  cosignPairsForOperator,
+  cosignerCountsForOperators,
   operatorDomains,
   operatorStanding,
   overturnedCountsByOperator,
@@ -419,6 +421,7 @@ function toOperatorRow(
   validations: number,
   overturned: number,
   standing: OperatorStanding | undefined,
+  cosigners: number,
 ): OperatorRow {
   const trustedSeq = record.details["trusted_seq"];
   return {
@@ -432,6 +435,7 @@ function toOperatorRow(
     validations,
     overturned,
     standing: standing === undefined ? null : { ...standing },
+    cosigners,
   };
 }
 
@@ -918,6 +922,14 @@ async function operatorRows(db: D1Like): Promise<OperatorRow[]> {
     db,
     records.map((record) => record.id),
   );
+  // The co-signer column (D-119), off the rows the sweep folded and over
+  // exactly the ids on this page: one grouped statement for the directory, and
+  // never a fold over the decisions. An operator with no pair row has signed
+  // beside nobody, which is a zero.
+  const cosigners = await cosignerCountsForOperators(
+    db,
+    records.map((record) => record.id),
+  );
 
   return records.map((record) =>
     toOperatorRow(
@@ -926,6 +938,7 @@ async function operatorRows(db: D1Like): Promise<OperatorRow[]> {
       byOperator.get(record.id)?.count ?? 0,
       overturnedByOperator.get(record.id) ?? 0,
       standings.get(record.id),
+      cosigners.get(record.id) ?? 0,
     ),
   );
 }
@@ -962,6 +975,10 @@ async function operator(
   // record is carried through as the row: the page picks columns off it and
   // folds nothing.
   const attestations = await attestationsForOperator(db, id, LIST_PAGE_LIMIT);
+  // One page of this operator's co-signing pairs, newest first (D-119), read
+  // off the stored rows the counters step folded. The page shows what the rows
+  // say and folds nothing: a view of this must never walk the decisions.
+  const cosigners = await cosignPairsForOperator(db, id, LIST_PAGE_LIMIT);
   // The domains this operator is attested in (decision D-071): registration's
   // own, then every join, in the order the log put them in. The row carries the
   // signed attestation, so the version beside each domain is that attestation's
@@ -980,6 +997,7 @@ async function operator(
         validations.length,
         overturned.find((each) => each.operator === id)?.count ?? 0,
         standing ?? undefined,
+        cosigners.length,
       ),
       ledger,
       payouts,
@@ -997,6 +1015,14 @@ async function operator(
       namedBy: typeof namedBy === "string" ? namedBy : null,
       payoutStatus: typeof payoutStatus === "string" ? payoutStatus : null,
       validations,
+      cosigners: cosigners.map((each) => ({
+        cosigner: each.cosigner,
+        both: each.both,
+        agreed: each.agreed,
+        opposed: each.opposed,
+        throughSeq: each.throughSeq,
+        newestEntryId: each.newestEntryId,
+      })),
       attestations: {
         asModel: attestations.asModel.map((each) => each.attestation),
         asScorer: attestations.asScorer.map((each) => each.attestation),

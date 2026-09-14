@@ -24,6 +24,12 @@
  * The two are separate tables because they are separate relationships, and the
  * whole construction turns on the scorers being outside the model's operator.
  *
+ * The last panel is the co-signing one (D-119), which answers a reader's
+ * question about the three signatures under an entry: who has this operator
+ * signed beside, and how did the two fall. It says in one sentence what that is
+ * and what it is not, because a table of agreement counts invites a conclusion
+ * the log cannot support.
+ *
  * Pure: the route gathered all of it, the balance included.
  */
 
@@ -153,6 +159,65 @@ function validations(data: OperatorData): Safe {
             </td>
             <td class="dim">${fmtInstant(each.signed_at)}</td>
             <td class="dim">${each.seq}</td>
+          </tr>`,
+        )}
+      </tbody>
+    </table>
+  </div>`;
+}
+
+/**
+ * Who this operator has signed beside, and how the two fell (D-119).
+ *
+ * The question is a reader's, asked of the demo: how do I tell three
+ * independent confirmations from three copies of one procedure. This is as much
+ * of an answer as the log can give — for every operator this one has co-signed
+ * with, the entries both signed, and how many of those they agreed and
+ * disagreed on. A pair that has never once disagreed over many entries is not
+ * proof of anything by itself, and neither is one that has; it is a shape a
+ * reader can see and go and check, which is what the record is for.
+ *
+ * Every row carries the newest entry the two both signed, as a link, and the
+ * position the counts were folded to: fold the sealed `validation` and
+ * `reconfirmation` events up to it and the same three numbers must come back.
+ *
+ * The rows are the sweep's, read at the route's own limit. Nothing here folds.
+ */
+function cosigners(data: OperatorData): Safe {
+  if (data.cosigners.length === 0) {
+    return html`<div class="panel-empty">
+      This operator has not signed an entry beside another operator.
+    </div>`;
+  }
+  return html`<div class="table-wrap">
+    <table class="dense">
+      <thead>
+        <tr>
+          <th>co-signer</th>
+          <th>both signed</th>
+          <th>agreed</th>
+          <th>opposed</th>
+          <th>newest shared entry</th>
+          <th>through seq</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.cosigners.map(
+          (each) => html`<tr class="row">
+            <td class="break">
+              <a href="/operators/${each.cosigner}">${each.cosigner}</a>
+            </td>
+            <td>${each.both}</td>
+            <td class="accent">${each.agreed}</td>
+            <td class="${each.opposed === 0 ? "dim" : "danger"}">
+              ${each.opposed}
+            </td>
+            <td class="break">
+              <a href="/entries/${each.newestEntryId}"
+                >${each.newestEntryId}</a
+              >
+            </td>
+            <td class="dim">${each.throughSeq}</td>
           </tr>`,
         )}
       </tbody>
@@ -500,6 +565,24 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
       <section class="panel">
         <div class="panel-head"><h2>Validations</h2></div>
         ${validations(data)}
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Co-signers</h2>
+          <span class="panel-label"
+            >operators this one has signed an entry beside</span
+          >
+        </div>
+        ${cosigners(data)}
+        <p class="note">
+          This is a record of who signed beside whom and how often they agreed,
+          derived from the sealed validation and reconfirmation events; it is
+          not a finding of collusion or of independence, because exclusion here
+          is enforced honestly rather than airtightly and the log does not
+          record the frame a measurement was taken in, so two operators can
+          agree for good reasons and disagree for good reasons alike.
+        </p>
       </section>
     `,
   });

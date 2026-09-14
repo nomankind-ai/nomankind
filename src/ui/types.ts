@@ -341,10 +341,35 @@ export interface OperatorRow {
    * nothing has a standing of 0, and the two must not be shown the same way.
    */
   standing: StandingCache | null;
+  /**
+   * How many distinct operators this one has co-signed an entry with (D-119),
+   * as the sweep folded it. Zero is a reading and not a missing number: an
+   * operator that has signed alone every time has co-signed with nobody.
+   */
+  cosigners: number;
 }
 
 export interface OperatorsData {
   rows: OperatorRow[];
+}
+
+/**
+ * One operator this operator has signed beside (D-119), carried verbatim from
+ * `cosignPairsForOperator`.
+ *
+ * `both` is the entries the two have both signed, `agreed` and `opposed` how
+ * their decisions fell on those entries, and `newestEntryId` the newest of them
+ * — a link, so a reader leaves the counts and goes and looks at the record.
+ * `throughSeq` is the log position the three numbers were folded to, which is
+ * what makes them checkable.
+ */
+export interface CosignerRow {
+  cosigner: string;
+  both: number;
+  agreed: number;
+  opposed: number;
+  throughSeq: number;
+  newestEntryId: string;
 }
 
 /**
@@ -378,6 +403,12 @@ export interface OperatorData {
     seq: number;
     signed_at: string;
   }>;
+  /**
+   * Who this operator has signed beside, newest pair first, one page of them at
+   * the route's own limit. The route read them off the stored rows the sweep
+   * folded; the page adds nothing up.
+   */
+  cosigners: CosignerRow[];
   /**
    * This operator's newest ledger rows, newest first, exactly as
    * `ledgerRowsForOperator` read them at the route's own limit.

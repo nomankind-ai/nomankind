@@ -400,11 +400,16 @@ describe("a read_count event in a verified world", () => {
   it("leaves verifyOffline answering ok with no diffs", async () => {
     const world = await buildVerifyWorld();
     const before = await verifyOffline(world.entry, world.bundle);
+    // The whole report and not only its diffs: a full bundle skips nothing, so
+    // `bounded` is false and `not_run` is empty (decision D-120), which is what
+    // makes an `ok` here the wider sentence a bounded bundle's `ok` is not.
     expect(before).toEqual({
       ok: true,
       entry_id: world.entryId,
       diffs: [],
       withheld: 0,
+      bounded: false,
+      not_run: [],
     });
 
     const events: Event[] = await appendEvent(world.bundle.events, {
@@ -428,6 +433,8 @@ describe("a read_count event in a verified world", () => {
       entry_id: world.entryId,
       diffs: [],
       withheld: 0,
+      bounded: false,
+      not_run: [],
     });
   });
 });

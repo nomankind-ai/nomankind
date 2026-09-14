@@ -138,6 +138,15 @@ const READ_PATH: readonly Endpoint[] = [
   },
   {
     method: "GET",
+    path: "/entries/{id}/events",
+    parameters: "—",
+    answers:
+      "One entry's own events, in seq order, with the log's head and one proof per sealed event: entry_id, head, events, proofs. Each proof is exactly what GET /events/{seq}/proof answers — seq, hash, seal (seq, root, hash, sealed_at), inclusion_proof, witnesses — and an event nothing has sealed yet is simply absent from proofs. The release window is the paged door's: a free reader inside it is handed the events as hash lines, a key or an operator signature is served them whole, and the proofs go out either way because proof is public from the first minute. Bounded by the entry and not by the log, which is what lets a reader gather one entry's whole story without paging GET /events to its head. One call is one read: one unit against the caller's own bucket after the answer is built, and the same three x-nomankind headers every other door carries. JSON only, and never held at the edge — what it answers depends on who is asking.",
+    refusals:
+      "400 bad_id for an id that is not the schema's shape; 404 not_found for an id the log has no events for; 401 and 402 as the key gate gives them; 429 rate_limited past the cap; 405 with Allow: GET, HEAD otherwise.",
+  },
+  {
+    method: "GET",
     path: "/events/{seq}/proof",
     parameters: "—",
     answers:

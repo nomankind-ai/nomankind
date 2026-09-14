@@ -7467,3 +7467,290 @@ export async function validationCountersForOperators(
   }
   return found;
 }
+
+// ---------------------------------------------------------------------------
+// Co-signature (D-119)
+// ---------------------------------------------------------------------------
+
+/**
+ * One operator's signature on one entry, as the co-signature fold reads it.
+ *
+ * Section 5: the operator is the unit of accountability, so a signature counts
+ * against the operator its record names and never against the agent key. The
+ * stance is the decision a `validation` carries, or the one below for a
+ * `reconfirmation`, which carries no decision field of its own.
+ */
+export interface Cosignature {
+  readonly seq: number;
+  readonly entryId: string;
+  readonly operator: string;
+  readonly stance: string;
+}
+
+/**
+ * The stance a `reconfirmation` records.
+ *
+ * Reconfirming is itself the confirmation: an operator that reconfirms an entry
+ * is on the same side as one that approved it, and reading it as a third stance
+ * of its own would show two operators who agree as opposed. "approve" is the
+ * decision name the schema's approvers[] item uses, and not a knob.
+ */
+export const RECONFIRM_STANCE = "approve";
+
+/** The two event types a co-signature is read from, as the SQL names them. */
+const COSIGN_EVENT_TYPES = `('validation', 'reconfirmation')`;
+
+const COSIGN_COLUMNS = `seq, entry_id,
+              json_extract(payload, '$.record.operator') AS operator,
+              json_extract(payload, '$.record.decision') AS decision`;
+
+function toCosignature(row: Row): Cosignature {
+  return {
+    seq: readInteger(row, "seq"),
+    entryId: readText(row, "entry_id"),
+    operator: readText(row, "operator"),
+    stance: readNullableText(row, "decision") ?? RECONFIRM_STANCE,
+  };
+}
+
+/**
+ * The signatures in a slice of the log, oldest first, at the caller's limit.
+ *
+ * Served by the (type, seq) index from 0001 and narrowed to the two types, so
+ * the fold's tail walks the decisions and not the log: an idle five minutes
+ * reads one empty page.
+ */
+export async function cosignaturesInRange(
+  db: D1Like,
+  afterSeq: number,
+  throughSeq: number,
+  limit: number,
+): Promise<Cosignature[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${COSIGN_COLUMNS}
+       FROM events
+       WHERE type IN ${COSIGN_EVENT_TYPES} AND seq > ? AND seq <= ?
+       ORDER BY seq LIMIT ?`,
+    )
+    .bind(afterSeq, throughSeq, limit)
+    .all<Row>();
+  return rows.results.map(toCosignature);
+}
+
+/**
+ * Every signature on one entry, through a position, oldest first.
+ *
+ * What an incremental run needs beside its tail: a pair is formed by the second
+ * of the two operators to sign, and the first may have signed long before the
+ * cursor. Bounded by the entry rather than by the log — one entry's own events
+ * — which is the same bound the standing fold's tail uses for the same reason.
+ */
+export async function cosignaturesForEntry(
+  db: D1Like,
+  entryId: string,
+  throughSeq: number,
+): Promise<Cosignature[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${COSIGN_COLUMNS}
+       FROM events
+       WHERE entry_id = ? AND type IN ${COSIGN_EVENT_TYPES} AND seq <= ?
+       ORDER BY seq`,
+    )
+    .bind(entryId, throughSeq)
+    .all<Row>();
+  return rows.results.map(toCosignature);
+}
+
+/** One stored pair, as the pages read it: who, and the three counts. */
+export interface CosignPair {
+  readonly operator: string;
+  readonly cosigner: string;
+  readonly both: number;
+  readonly agreed: number;
+  readonly opposed: number;
+  readonly throughSeq: number;
+  readonly newestEntryId: string;
+  readonly newestSeq: number;
+}
+
+/** What one run found that the run before it had not: a pair's new entries. */
+export interface CosignDelta {
+  readonly operator: string;
+  readonly cosigner: string;
+  readonly both: number;
+  readonly agreed: number;
+  readonly opposed: number;
+  readonly newestEntryId: string;
+  readonly newestSeq: number;
+}
+
+/** The counters row the co-signature fold keeps its cursor in. */
+export const COSIGN_COUNTER_PREFIX = "cosign:";
+const COSIGN_THROUGH = `${COSIGN_COUNTER_PREFIX}through`;
+
+/**
+ * How far the fold has folded, or null before it has ever run.
+ *
+ * Null and not -1: a fold that has never run and a fold that has run over an
+ * empty log are different facts, and only the first has to read the whole log.
+ * It lives in the counters table beside the chain walk's cursor rather than in a
+ * column of its own, for the reason that table exists — a number a step keeps
+ * between runs — and its prefixed name is why the counters step's own rewrite
+ * leaves it alone.
+ */
+export async function readCosignCursor(db: D1Like): Promise<number | null> {
+  const row = await db
+    .prepare(`SELECT value FROM counters WHERE name = ? ${ONE_ROW}`)
+    .bind(COSIGN_THROUGH)
+    .first<Row>();
+  return row === null ? null : readInteger(row, "value");
+}
+
+/** Move the cursor. Written after the rows, never before: see `addCosignPairs`. */
+export async function writeCosignCursor(
+  db: D1Like,
+  through: number,
+  at: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO counters (name, value, position, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (name) DO UPDATE SET
+         value = excluded.value,
+         position = excluded.position,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(COSIGN_THROUGH, through, through, at)
+    .run();
+}
+
+/**
+ * Add one run's pairs to the stored ones, in both directions, in batches.
+ *
+ * The add is guarded by `through_seq` and that is what makes a crashed run
+ * harmless: every row of one run carries the same position, so a row already at
+ * this position has already had this run's delta and takes it again as zero.
+ * A run that wrote half its rows and died before the cursor moved is repaired
+ * exactly by the next one, which folds the same tail and finds the written half
+ * already there. The caller must hand each pair once — the delta is aggregated
+ * in memory first — because two chunks carrying the same pair at one position
+ * would look to the second chunk like a rerun.
+ *
+ * Both directions, because both reads are "for this operator, who with": see
+ * 0022. The pair's own numbers are the same either way round; only the key
+ * differs.
+ */
+export async function addCosignPairs(
+  db: D1Like,
+  deltas: readonly CosignDelta[],
+  throughSeq: number,
+): Promise<void> {
+  const statements: D1LikeStatement[] = [];
+  const add = (
+    operator: string,
+    cosigner: string,
+    delta: CosignDelta,
+  ): void => {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO cosign_pairs
+             (operator_a, operator_b, both, agreed, opposed, through_seq,
+              newest_entry_id, newest_seq)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (operator_a, operator_b) DO UPDATE SET
+             both = CASE WHEN through_seq >= excluded.through_seq
+                         THEN both ELSE both + excluded.both END,
+             agreed = CASE WHEN through_seq >= excluded.through_seq
+                           THEN agreed ELSE agreed + excluded.agreed END,
+             opposed = CASE WHEN through_seq >= excluded.through_seq
+                            THEN opposed ELSE opposed + excluded.opposed END,
+             newest_entry_id = CASE WHEN excluded.newest_seq > newest_seq
+                                    THEN excluded.newest_entry_id
+                                    ELSE newest_entry_id END,
+             newest_seq = CASE WHEN excluded.newest_seq > newest_seq
+                               THEN excluded.newest_seq ELSE newest_seq END,
+             through_seq = excluded.through_seq`,
+        )
+        .bind(
+          operator,
+          cosigner,
+          delta.both,
+          delta.agreed,
+          delta.opposed,
+          throughSeq,
+          delta.newestEntryId,
+          delta.newestSeq,
+        ),
+    );
+  };
+  for (const delta of deltas) {
+    add(delta.operator, delta.cosigner, delta);
+    add(delta.cosigner, delta.operator, delta);
+  }
+  for (let from = 0; from < statements.length; from += SWEEP_BATCH_STATEMENTS) {
+    await db.batch(statements.slice(from, from + SWEEP_BATCH_STATEMENTS));
+  }
+}
+
+/**
+ * One operator's co-signers, newest pair first, at the caller's limit.
+ *
+ * The operator page's own read, served by the (operator_a, newest_seq) index
+ * from 0022: a page of rows, and never an event the fold has already read.
+ */
+export async function cosignPairsForOperator(
+  db: D1Like,
+  operator: string,
+  limit: number,
+): Promise<CosignPair[]> {
+  const rows = await db
+    .prepare(
+      `SELECT operator_a, operator_b, both, agreed, opposed, through_seq,
+              newest_entry_id, newest_seq
+       FROM cosign_pairs WHERE operator_a = ?
+       ORDER BY newest_seq DESC, operator_b LIMIT ?`,
+    )
+    .bind(operator, limit)
+    .all<Row>();
+  return rows.results.map((row) => ({
+    operator: readText(row, "operator_a"),
+    cosigner: readText(row, "operator_b"),
+    both: readInteger(row, "both"),
+    agreed: readInteger(row, "agreed"),
+    opposed: readInteger(row, "opposed"),
+    throughSeq: readInteger(row, "through_seq"),
+    newestEntryId: readText(row, "newest_entry_id"),
+    newestSeq: readInteger(row, "newest_seq"),
+  }));
+}
+
+/**
+ * How many distinct co-signers each of a page's operators has.
+ *
+ * One grouped statement for the whole directory, over exactly the ids it shows,
+ * by the primary key's first column — never a read per row, and never a fold.
+ * An operator with no row has co-signed with nobody, which the caller reads as
+ * the zero it is.
+ */
+export async function cosignerCountsForOperators(
+  db: D1Like,
+  operators: readonly string[],
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (operators.length === 0) return counts;
+  const marks = operators.map(() => "?").join(", ");
+  const rows = await db
+    .prepare(
+      `SELECT operator_a, COUNT(*) AS n FROM cosign_pairs
+       WHERE operator_a IN (${marks}) GROUP BY operator_a`,
+    )
+    .bind(...operators)
+    .all<Row>();
+  for (const row of rows.results) {
+    counts.set(readText(row, "operator_a"), readInteger(row, "n"));
+  }
+  return counts;
+}

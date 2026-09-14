@@ -76,7 +76,13 @@ import {
   SCHEMA_VERSION,
 } from "./policy.js";
 import { validateEntry } from "./schema.js";
-import { sealFor, sealsForEntries, verifySeal, type Seal } from "./seal.js";
+import {
+  sealFor,
+  sealHash,
+  sealsForEntries,
+  verifySeal,
+  type Seal,
+} from "./seal.js";
 import { verifyEntrySignature } from "./sign.js";
 import { checkValidation, type OperatorInfo } from "./validate.js";
 import { verifyRecordSignature } from "./records.js";
@@ -124,6 +130,53 @@ export interface LogBundle {
   seals: Seal[];
   /** Captures, keyed by the snapshot hash each claims to produce. */
   captures: Record<string, Capture>;
+  /**
+   * Whether this bundle is bounded to one entry's seals rather than the whole
+   * log (decision D-120).
+   *
+   * Absent on the bundle `npm run export` has always written, which is why a
+   * full bundle is checked exactly as it always was. Present and true on the
+   * bundle `--bounded` writes: the entry's own events with an inclusion proof
+   * each, the seals those proofs are against and the seal before each of them,
+   * the registry, and the captures. What that costs is named rather than
+   * assumed -- `not_run` on the report says which checks had no inputs here.
+   */
+  bounded?: true;
+  /**
+   * The log's event head at the moment a bounded bundle was taken.
+   *
+   * A bounded bundle is a window onto a log that goes on without it, so the
+   * moment has to be in the file: `as_of` says when it was taken and this says
+   * how far the log had got. Null where the log held no events at all.
+   */
+  head?: number | null;
+  /**
+   * One inclusion proof per included event, keyed by the event's seq as a
+   * decimal string, exactly as `GET /events/{seq}/proof` serves it.
+   *
+   * The bounded bundle's replacement for the chain walk: a bounded bundle holds
+   * a handful of events out of the middle of a log, so seq 0 is not here to
+   * walk from and `prev_hash` links nothing that is. What is here instead is
+   * each event's own hash and the path from it to the root its seal committed
+   * to, which is the same tamper-evidence over a shorter read. An event nothing
+   * has sealed yet carries no proof and is not here.
+   */
+  proofs?: Record<string, BundleProof>;
+}
+
+/**
+ * One event's place under its seal: which seal covers it, and the path from its
+ * hash to that seal's root.
+ *
+ * The shape `GET /events/{seq}/proof` already serves, minus the fields the
+ * bundle carries elsewhere -- the root and the witnesses are on the seal, so
+ * copying them here would be a second place for them to disagree.
+ */
+export interface BundleProof {
+  /** The seq of the seal whose root the proof is against. */
+  seal_seq: number;
+  /** The encoded Merkle path (src/merkle.ts, `encodeProof`). */
+  inclusion_proof: string;
 }
 
 /** An entry's checks, in the order they run. */
@@ -132,6 +185,7 @@ export type EntryCheck =
   | "window"
   | "schema"
   | "chain"
+  | "proof"
   | "signature"
   | "core"
   | "records"
@@ -159,12 +213,50 @@ export type AttestationCheck =
 /** Every check either verifier can name. */
 export type Check = EntryCheck | AttestationCheck;
 
+/**
+ * A check a bundle carried no inputs for, named rather than quietly skipped.
+ *
+ * `attestations` is the whole of `verifyAttestations` and not one of its five
+ * steps: an attestation is not entry-scoped (src/events.ts), so a bundle bounded
+ * to one entry holds none of its events and there is nothing to run any step
+ * against. Naming the five would say five things where the bundle says one.
+ */
+export type SkippedCheck = EntryCheck | "attestations";
+
+/**
+ * What a bounded bundle carries no inputs for (decision D-120), in CHECKS
+ * order with the attestations last.
+ *
+ * A list and not a computation: these four are not run because of what a bounded
+ * bundle IS, not because of anything that happened to be missing from one, and
+ * a reader comparing two reports should see the same four words every time.
+ * Every one of them is a fold over the whole log — the chain from seq 0, the
+ * exclusions replayed against who was registered and assigned at each decision's
+ * position, the derived view refolded out of every event, and the attestations,
+ * which are about a model rather than about any one entry.
+ *
+ * The record signatures are not among them, and that is the door's doing:
+ * `GET /entries/{id}/events` answers one entry's own events, so a bounded bundle
+ * carries the decisions it was signed by and every signature on them is checked
+ * exactly as it is on a full bundle (decision D-120).
+ */
+const BOUNDED_NOT_RUN: readonly SkippedCheck[] = Object.freeze([
+  "chain",
+  "exclusions",
+  "derived",
+  "attestations",
+]);
+
+/** A full bundle skips nothing, which is what makes the two reports comparable. */
+const NOTHING_SKIPPED: readonly SkippedCheck[] = Object.freeze([]);
+
 /** Every entry check, in run order. */
 export const CHECKS: readonly EntryCheck[] = Object.freeze([
   "bundle",
   "window",
   "schema",
   "chain",
+  "proof",
   "signature",
   "core",
   "records",
@@ -215,6 +307,27 @@ export interface VerifyReport {
    * the same bundle is checked whole.
    */
   withheld: number;
+  /**
+   * Whether the bundle was bounded to this entry's seals (decision D-120).
+   *
+   * Beside `withheld` and for the same reason: an `ok` over a bounded bundle is
+   * a narrower sentence than an `ok` over the whole log, and a reader is owed
+   * the difference rather than left to infer it. False for every bundle
+   * `npm run export` wrote before `--bounded` existed and for every one it
+   * writes without it.
+   */
+  bounded: boolean;
+  /**
+   * The checks this bundle held no inputs for, in CHECKS order.
+   *
+   * Empty for a full bundle, which is what makes the two verdicts comparable:
+   * a report with nothing here checked everything the verifier knows how to
+   * check. A bounded bundle names what it cost — the chain cannot be walked
+   * from a seq 0 that is not here, the exclusions cannot be replayed against a
+   * registry history that is not here, the derived view cannot be refolded out
+   * of events that are not here, and there are no attestation events to read.
+   */
+  not_run: readonly SkippedCheck[];
 }
 
 /**
@@ -301,12 +414,19 @@ class Report {
     this.diffs.push({ check, field, expected, actual, reason });
   }
 
-  finish(entryId: string | null, withheld = 0): VerifyReport {
+  finish(
+    entryId: string | null,
+    withheld = 0,
+    bounded = false,
+    notRun: readonly SkippedCheck[] = [],
+  ): VerifyReport {
     return {
       ok: this.diffs.length === 0,
       entry_id: entryId,
       diffs: this.diffs,
       withheld,
+      bounded,
+      not_run: notRun,
     };
   }
 }
@@ -563,6 +683,40 @@ function readBundle(value: unknown, report: Report): LogBundle | null {
     captureMap = captures as Record<string, Capture>;
   }
 
+  // The bounded marker and what it brings with it (decision D-120). Read last
+  // and read strictly: a bundle that says it is bounded is checked by a
+  // different set of rules, so `bounded: true` has to be the value the exporter
+  // writes and not any truthy thing, and the proofs it is checked through have
+  // to be the shape the proof route serves.
+  const boundedMark = value["bounded"];
+  let bounded = false;
+  if (boundedMark !== undefined) {
+    if (boundedMark !== true) {
+      report.add("bundle", "/bounded", "shape", true, briefValue(boundedMark));
+    } else {
+      bounded = true;
+    }
+  }
+
+  const head = value["head"];
+  if (head !== undefined && head !== null && !Number.isInteger(head)) {
+    report.add("bundle", "/head", "shape", "integer", shapeOf(head));
+  }
+
+  const proofs = value["proofs"];
+  let proofMap: Record<string, BundleProof> = {};
+  if (proofs !== undefined) {
+    if (!isRecord(proofs)) {
+      report.add("bundle", "/proofs", "shape", "object", shapeOf(proofs));
+    } else {
+      for (const [seq, proof] of Object.entries(proofs)) {
+        if (isBundleProofShape(proof)) continue;
+        report.add("bundle", `/proofs/${seq}`, "shape", "proof", shapeOf(proof));
+      }
+      proofMap = proofs as Record<string, BundleProof>;
+    }
+  }
+
   if (!clockOk || !eventsOk || !sealsOk) return null;
 
   return {
@@ -571,7 +725,19 @@ function readBundle(value: unknown, report: Report): LogBundle | null {
     registry: { agents, operators },
     seals: sealList,
     captures: captureMap,
+    ...(bounded ? { bounded: true as const } : {}),
+    ...(head === undefined ? {} : { head: head as number | null }),
+    ...(proofs === undefined ? {} : { proofs: proofMap }),
   };
+}
+
+/** The same door as `isEventShape` and `isSealShape`, for one inclusion proof. */
+function isBundleProofShape(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    Number.isInteger(value["seal_seq"]) &&
+    typeof value["inclusion_proof"] === "string"
+  );
 }
 
 /** Events in seq order, without mutating the bundle's array. */
@@ -659,6 +825,161 @@ async function checkChain(
   } catch {
     report.add("chain", "/events", "unverifiable", null, bundle.events.length);
   }
+}
+
+/**
+ * c (bounded). The same tamper-evidence over a bundle that has no seq 0 to walk
+ * from: every event's own hash, and the path from it to the root its seal
+ * committed to (decision D-120).
+ *
+ * The chain and this prove the same thing by different routes. A full bundle
+ * holds every event, so an edited one is caught by `prev_hash` no longer
+ * linking and by its hash no longer recomputing. A bounded bundle holds a
+ * handful out of the middle, where `prev_hash` points at events that are not
+ * here — so what is checked is the hash itself, and then the Merkle path from
+ * that hash to a root the seal chain already committed to, which is what makes
+ * an edit here as loud as an edit there.
+ *
+ * A withheld hash line's own hash cannot be recomputed (D-100) and is checked
+ * by its proof alone, exactly as the chain leaves it to the seal. An event no
+ * seal in the bundle covers carries no proof and is not missing one: it is an
+ * event nothing had sealed when the bundle was taken, and a later export of the
+ * same entry proves it. An event a seal here DOES cover and has no proof for is
+ * a missing proof and is named.
+ */
+async function checkProofs(
+  bundle: LogBundle,
+  withheld: ReadonlySet<number>,
+  seals: readonly Seal[],
+  report: Report,
+): Promise<void> {
+  const proofs = bundle.proofs ?? {};
+  const bySeq = new Map<number, Seal>();
+  for (const seal of seals) bySeq.set(seal.seq, seal);
+
+  for (const event of inSeqOrder(bundle.events)) {
+    const field = `/events/${event.seq}`;
+    if (!withheld.has(event.seq)) {
+      const { hash, ...fields } = event;
+      let recomputed: string;
+      try {
+        recomputed = await eventHash(fields);
+      } catch {
+        report.add("proof", field, "unverifiable");
+        continue;
+      }
+      if (recomputed !== hash) {
+        report.add("proof", field, "bad_hash");
+        continue;
+      }
+    }
+
+    const proof = proofs[String(event.seq)];
+    if (proof === undefined) {
+      // Only a seal the bundle carries can make a missing proof a fault: a seal
+      // it does not carry is the `seal_missing` below, and no seal at all is an
+      // unsealed event.
+      if (sealFor(seals, event.seq) !== null) {
+        report.add("proof", field, "proof_missing");
+      }
+      continue;
+    }
+
+    const covering = bySeq.get(proof.seal_seq);
+    if (covering === undefined) {
+      report.add("proof", field, "seal_missing", proof.seal_seq, null);
+      continue;
+    }
+
+    if (event.seq < covering.first_seq || event.seq > covering.last_seq) {
+      report.add("proof", field, "wrong_seal", proof.seal_seq, event.seq);
+      continue;
+    }
+    const decoded = decodeProof(proof.inclusion_proof);
+    if (decoded === null) {
+      report.add("proof", field, "malformed");
+      continue;
+    }
+    let included = false;
+    try {
+      included = await verifyInclusion(event.hash, decoded, covering.root);
+    } catch {
+      included = false;
+    }
+    if (!included) {
+      report.add("proof", field, "bad_proof", covering.root, null);
+    }
+  }
+}
+
+/**
+ * h (bounded). The seals a bounded bundle carries: each one's own hash, and the
+ * link to the seal before it where that seal is here too.
+ *
+ * `verifySeal` cannot run here and must not: it rebuilds the batch's root out
+ * of the batch's leaves, and a bounded bundle holds a few of them on purpose,
+ * so an honest seal would be called broken. What can still be asked of a seal
+ * on its own is asked — the hash commits to the range, the size and the link
+ * (src/seal.ts, `sealHash`), so a seal whose range was widened to swallow a
+ * forged event no longer hashes to its own name — and the link is checked
+ * against the seal before it, which is what the export brings along.
+ *
+ * The predecessor is required of the seals that cover this bundle's events and
+ * of no others. A seal is here for one of two reasons: because an event's proof
+ * is against its root, or because it is the seal before one of those — and
+ * asking the second kind for a predecessor of its own would walk the chain back
+ * to seq 0, which is the walk a bounded bundle exists not to carry.
+ */
+async function checkSealLinks(
+  bundle: LogBundle,
+  covering: ReadonlySet<number>,
+  report: Report,
+): Promise<Seal[]> {
+  const ordered = [...bundle.seals].sort(
+    (left, right) => (left?.seq ?? 0) - (right?.seq ?? 0),
+  );
+  const bySeq = new Map<number, Seal>();
+  for (const seal of ordered) bySeq.set(seal.seq, seal);
+
+  for (const seal of ordered) {
+    const field = `/seals/${seal.seq}`;
+    if (seal.size !== seal.last_seq - seal.first_seq + 1) {
+      report.add("seals", field, "bad_size", seal.last_seq - seal.first_seq + 1, seal.size);
+      continue;
+    }
+    const { hash, witnesses: _witnesses, registry: _registry, ...fields } = seal;
+    let recomputed: string;
+    try {
+      recomputed = await sealHash(fields);
+    } catch {
+      report.add("seals", field, "unverifiable");
+      continue;
+    }
+    if (recomputed !== hash) {
+      report.add("seals", field, "bad_seal_hash");
+      continue;
+    }
+    const previous = seal.seq === 0 ? null : bySeq.get(seal.seq - 1) ?? null;
+    if (seal.seq === 0) {
+      if (seal.prev_hash !== null) {
+        report.add("seals", field, "bad_seal_link", null, briefValue(seal.prev_hash));
+      }
+      continue;
+    }
+    // The predecessor is the one the export was asked to bring along; a bundle
+    // that dropped it is a bundle missing a seal, and is named as one rather
+    // than passing quietly.
+    if (previous === null) {
+      if (covering.has(seal.seq)) {
+        report.add("seals", field, "seal_missing", seal.seq - 1, null);
+      }
+      continue;
+    }
+    if (seal.prev_hash !== previous.hash) {
+      report.add("seals", field, "bad_seal_link", briefValue(previous.hash), briefValue(seal.prev_hash));
+    }
+  }
+  return ordered;
 }
 
 /** e. The signed core, key by key, against the core the log sealed. */
@@ -1153,6 +1474,8 @@ export async function verifyOffline(
         },
       ],
       withheld: 0,
+      bounded: false,
+      not_run: [],
     };
   }
 }
@@ -1186,6 +1509,8 @@ async function runChecks(
     return report.finish(
       typeof heldId === "string" ? heldId : null,
       log === null ? 0 : withheldSeqs(log.events).size,
+      log?.bounded === true,
+      log?.bounded === true ? BOUNDED_NOT_RUN : NOTHING_SKIPPED,
     );
   }
 
@@ -1235,8 +1560,29 @@ async function runChecks(
   const withheld = withheldSeqs(log.events);
   const readable = readableLog(log, withheld);
 
-  // c. The hash chain, over every line.
-  await checkChain(log, withheld, report);
+  // The bounded bundle (decision D-120). One flag, read once, and every branch
+  // below is the same two checks swapped for two others: what a bounded bundle
+  // holds is this entry's events with a proof each and the seals those proofs
+  // are against, so the chain walk and the whole-batch seal rebuild have no
+  // inputs and the proofs and the seal links do. Nothing else moves — the
+  // signature, the core, the records, the captures and the entry's own seal all
+  // read exactly the same fields out of exactly the same events.
+  const bounded = log.bounded === true;
+  const notRun = bounded ? BOUNDED_NOT_RUN : NOTHING_SKIPPED;
+
+  // c. The hash chain, over every line — or, bounded, each event's own hash and
+  // its path to the root its seal committed to.
+  const coveringSeals = new Set<number>();
+  if (bounded) {
+    for (const event of log.events) {
+      const cover = sealFor(log.seals, event.seq);
+      if (cover !== null) coveringSeals.add(cover.seq);
+    }
+    await checkSealLinks(log, coveringSeals, report);
+    await checkProofs(log, withheld, log.seals, report);
+  } else {
+    await checkChain(log, withheld, report);
+  }
 
   // d. The author's signature over the core.
   if (!(await verifyEntrySignature(entry))) {
@@ -1248,7 +1594,7 @@ async function runChecks(
   if (submission === null) {
     report.add("core", "/id", "not_submitted", null, entryId);
     await checkSnapshot(readable, entry, report);
-    return report.finish(entryId, withheld.size);
+    return report.finish(entryId, withheld.size, bounded, notRun);
   }
   const logCore = (submission.payload as Json)["core"] as Json;
   checkCore(entry, logCore, report);
@@ -1262,11 +1608,18 @@ async function runChecks(
     );
   }
 
-  // f. Every record signature on this entry.
+  // f. Every record signature on this entry. A bounded bundle carries the
+  // decisions' own events (D-120), so this runs on both.
   await checkRecords(readable, entryId, report);
 
   // g. The exclusions, replayed at each decision's position.
-  checkExclusions(readable, entryId, logCore, report);
+  //
+  // The whole log or nothing: the door judged each decision against who was
+  // registered, who was assigned and what had already been decided at that
+  // moment, and a bundle holding one entry's events knows none of those. Naming
+  // it as not run is the honest answer; replaying it against a bounded bundle
+  // would refuse decisions the log gives no reason to refuse.
+  if (!bounded) checkExclusions(readable, entryId, logCore, report);
 
   // h. The seals, then every derived field.
   //
@@ -1275,9 +1628,18 @@ async function runChecks(
   // What is derived from is only the seals the reader holds whole, because an
   // inclusion proof is rebuilt from the leaves and a leaf that is not here
   // cannot be rebuilt.
-  const seals = await checkSeals(log, report);
+  //
+  // The derived view is the whole log or nothing for the same reason the
+  // exclusions are: it is a fold over everything that happened, and a fold over
+  // a few of the events would differ from the entry in every field the rest of
+  // them decided.
+  const seals = bounded
+    ? [...log.seals].sort((left, right) => (left?.seq ?? 0) - (right?.seq ?? 0))
+    : await checkSeals(log, report);
   const readableSealList = readableSeals(seals, withheld);
-  await checkDerived(readable, entry, entryId, readableSealList, report);
+  if (!bounded) {
+    await checkDerived(readable, entry, entryId, readableSealList, report);
+  }
 
   // i. The snapshot hash, under the entry's own norm version.
   await checkSnapshot(readable, entry, report);
@@ -1285,7 +1647,7 @@ async function runChecks(
   // j. The entry's seal and its inclusion proof.
   await checkEntrySeal(readable, entry, readableSealList, submission, report);
 
-  return report.finish(entryId, withheld.size);
+  return report.finish(entryId, withheld.size, bounded, notRun);
 }
 
 // ---------------------------------------------------------------------------
