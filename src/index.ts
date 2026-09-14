@@ -18,6 +18,7 @@ export * from "./evidence.js";
 export * from "./extract.js";
 export * from "./hash.js";
 export * from "./identity.js";
+export * from "./independence.js";
 export * from "./keys.js";
 export * from "./ledger.js";
 export * from "./merkle.js";

@@ -274,7 +274,7 @@ const MIRROR_PATH = "/mirror/latest";
  *
  * Five items, because a nav of nine was a table of contents: the log (Entries),
  * the registry (Domains), the people (Operators), everything written about the
- * record (Docs), and whether it is running (Status). The six documentation
+ * record (Docs), and whether it is running (Status). The documentation
  * pages that used to sit here each have their own card on /docs, and Docs is
  * the active item while a reader is on any of them — a nav that went quiet when
  * you opened the policy tables would be a nav that had lost you.
@@ -295,7 +295,14 @@ const NAV: readonly {
   {
     href: "/docs",
     label: "Docs",
-    covers: ["/how-it-works", "/api", "/policy", "/genesis", "/dry-run"],
+    covers: [
+      "/how-it-works",
+      "/api",
+      "/policy",
+      "/genesis",
+      "/dry-run",
+      "/independence",
+    ],
   },
   { href: "/status", label: "Status" },
 ];

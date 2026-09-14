@@ -225,6 +225,24 @@ export function renderDryRun(ctx: PageContext): string {
             rejection needs a reason, always, and the reason is public.
           </p>
           <p class="note">
+            There are three answers to give, and the log takes all three.
+            <span class="mono">approve</span>: the page you fetched says what the
+            entry says — and on an observed entry you accepted the test for, your
+            own measurement, the runs and holds you got, must go in the record
+            with it.
+            <span class="mono">reject</span>: it does not, and the reason is
+            required and public; you may put the measurement you ran in the
+            record beside it, the runs and holds or the observation, but the door
+            does not require one, because a rejection can rest on the citation
+            alone. <span class="mono">test_accepted</span> false: the test the
+            entry proposes does not decide the claim, which is a judgment about
+            the test rather than about the entry, and it is recorded on a
+            rejection and an approval alike. A negative result is a first-class,
+            paid answer: the standing for a completed validation is earned
+            whichever way it went, and the extra credit for measuring is paid for
+            a passing measurement, which is work and not a direction.
+          </p>
+          <p class="note">
             Your decision is recorded in the log and counts toward nothing while
             your operator is not yet trusted: it moves no status and closes no
             entry. That is not the dry run failing, that is exactly what a dry

@@ -1326,6 +1326,96 @@ describe("the entry page", () => {
     expect(nameless).not.toContain("<dd>12</dd>");
   });
 
+  /**
+   * What each witness countersigned (decision D-121).
+   *
+   * A real 1F916 witness signs the registry's head and never this log's event,
+   * so the line has to name the head: the (tree_size, root) the covering seal's
+   * own witness record carries. Three shapes, because the log holds three: a
+   * registry-form countersignature with its head, a direct-form one with none,
+   * and an entry whose covering seal is not loaded at all, where the only thing
+   * stored is the countersignature itself and the page must say that rather
+   * than print it as a head.
+   */
+  it("names the head each witness countersigned, from the covering seal", () => {
+    const withHead = renderEntry(ctx, {
+      ...entryData,
+      seal: {
+        ...seal,
+        witnesses: [
+          {
+            agent: "1F916:witness-one",
+            signature: "c2ln",
+            head: {
+              registry: "https://1f916.ai",
+              log: "identity_events",
+              tree_size: 9134,
+              root: "d".repeat(64),
+              created_at: 1789000000,
+              registry_sig: "c2ln",
+            },
+          },
+        ],
+      },
+    });
+    const witnessLine = (rendered: string): string =>
+      rendered
+        .slice(rendered.indexOf("<dt>witnesses</dt>"))
+        .slice(0, rendered.slice(rendered.indexOf("<dt>witnesses</dt>")).indexOf("</dd>"))
+        .replace(/\s+/g, " ");
+    const shown = witnessLine(withHead);
+    expect(shown).toContain("1F916:witness-one");
+    expect(shown).toContain("countersigned head · tree_size 9134");
+    expect(shown).toContain(`root ${"d".repeat(64)}`);
+    expect(shown).not.toContain("no head stored");
+  });
+
+  it("says so when the countersignature is the direct form, with no head", () => {
+    const direct = renderEntry(ctx, {
+      ...entryData,
+      seal: {
+        ...seal,
+        witnesses: [{ agent: "1F916:witness-two", signature: "c2ln" }],
+      },
+    });
+    const line = direct
+      .slice(direct.indexOf("<dt>witnesses</dt>"))
+      .replace(/\s+/g, " ");
+    expect(line).toContain("1F916:witness-two");
+    expect(line).toContain("signed this seal's hash directly · no head stored");
+    expect(line).not.toContain("tree_size");
+  });
+
+  it("shows what the entry's own seal object stores when no seal is loaded", () => {
+    const fallback = renderEntry(ctx, { ...entryData, seal: null });
+    const line = fallback
+      .slice(fallback.indexOf("<dt>witnesses</dt>"))
+      .replace(/\s+/g, " ");
+    // The entry's seal object holds the countersignatures themselves and no
+    // head, so the page says which it is showing rather than calling it a head.
+    expect(line).toContain("1F916:witness-one");
+    expect(line).toContain("as the entry's seal object stores it");
+    expect(line).toContain("the head it covers is kept on the covering seal");
+    expect(line).not.toContain("tree_size");
+  });
+
+  it("says none yet when nothing has countersigned and nothing is stored", () => {
+    const bare = renderEntry(ctx, {
+      ...entryData,
+      entry: {
+        ...entryRecord,
+        seal: {
+          ...(entryRecord["seal"] as Record<string, unknown>),
+          witnesses: [],
+        },
+      },
+      seal: { ...seal, witnesses: [] },
+    });
+    expect(
+      bare.slice(bare.indexOf("<dt>witnesses</dt>")).replace(/\s+/g, " "),
+    ).toContain("none yet");
+  });
+
   it("says unsealed rather than inventing a seal", () => {
     const unsealed = renderEntry(ctx, {
       ...entryData,
