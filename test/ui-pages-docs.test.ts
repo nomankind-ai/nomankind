@@ -283,19 +283,23 @@ describe("renderPolicy", () => {
     }
   });
 
-  it("says plainly that there is no seed fee (D-052)", () => {
-    expect(page).toContain(
-      "There is no seed fee: contributors are paid only from read revenue",
-    );
-    expect(page).toContain("D-052");
+  it("says plainly that the record is free and nothing is staked in money", () => {
+    // Decision D-127. The seed-fee note and the read-revenue promise beside it
+    // went with the money they were about: what a contributor earns is standing,
+    // and a stake is contribution rather than a payment.
+    expect(page).toContain("The record is free (decision D-127).");
+    expect(page).toContain("no read-share slot, no payout");
+    expect(page).toContain("staked in money");
+    expect(page).not.toContain("seed fee");
+    expect(page).not.toContain("read revenue");
   });
 
-  it("groups paid access, and reads every one of its numbers from POLICY", () => {
-    // Section 9, Money. The tiers, the contributor floor beside the share, the
-    // alert numbers and the payment provider's fixed strings, each read off the
-    // frozen object: a page that held any of them itself would be a second
-    // place a published amount lives.
-    expect(page).toContain(">Paid access</h2>");
+  it("groups access and alerts, and reads every one of its numbers from POLICY", () => {
+    // The tiers and the alert numbers, each read off the frozen object: a page
+    // that held any of them itself would be a second place a published number
+    // lives. No provider strings any more — there is no provider (D-127).
+    expect(page).toContain(">Access and alerts</h2>");
+    expect(page).not.toContain("STRIPE");
 
     for (const [slug, tier] of Object.entries(POLICY.RATE_TIERS)) {
       expect(page, `RATE_TIERS.${slug} has no row`).toContain(
@@ -310,19 +314,18 @@ describe("renderPolicy", () => {
 
     for (const [name, value] of [
       ["FREE_TIER", POLICY.FREE_TIER],
+      [
+        "FREE_READS_PER_DAY_GLOBAL",
+        `${POLICY.FREE_READS_PER_DAY_GLOBAL} reads per day`,
+      ],
+      [
+        "OPERATOR_READS_PER_DAY",
+        `${POLICY.OPERATOR_READS_PER_DAY} reads per day`,
+      ],
       ["ALERT_ENDPOINTS_PER_KEY", String(POLICY.ALERT_ENDPOINTS_PER_KEY)],
       ["ALERT_TIMEOUT_MS", `${POLICY.ALERT_TIMEOUT_MS} ms`],
       ["ALERT_RETRY_MINUTES", POLICY.ALERT_RETRY_MINUTES.join(", ")],
       ["ALERT_KINDS", POLICY.ALERT_KINDS.join(", ")],
-      ["STRIPE.api", POLICY.STRIPE.api],
-      ["STRIPE.meter_event_name", POLICY.STRIPE.meter_event_name],
-      ["STRIPE.price_lookup_prefix", POLICY.STRIPE.price_lookup_prefix],
-      ["STRIPE.currency", POLICY.STRIPE.currency],
-      [
-        "STRIPE.webhook_tolerance_seconds",
-        `${POLICY.STRIPE.webhook_tolerance_seconds} seconds`,
-      ],
-      ["STRIPE.webhook_path", POLICY.STRIPE.webhook_path],
     ] as const) {
       expect(page, `${name} has no row`).toContain(
         `<td class="mono">${name}</td>`,
@@ -333,55 +336,31 @@ describe("renderPolicy", () => {
     }
   });
 
-  it("publishes the read-share split per evidence tier, both rows, from POLICY", () => {
-    // Decision D-087, and Section 9's "observed entries take a larger read
-    // share than stated ones, by published policy". Two rows and not one, each
-    // naming both roles, and every number read off the frozen object: a page
-    // that printed one split would be publishing a rule the ledger no longer
-    // applies, and a literal here would let the page and the module disagree.
-    expect(page).toContain(">Money and standing</h2>");
-    for (const [tier, split] of Object.entries(POLICY.READ_SHARE_SPLIT)) {
-      expect(page, `READ_SHARE_SPLIT.${tier} has no row`).toContain(
-        `<td class="mono">READ_SHARE_SPLIT.${tier}</td>`,
-      );
-      expect(page, `READ_SHARE_SPLIT.${tier} does not print its value`).toContain(
-        `<td class="mono">submitter ${split.submitter} percent · validator ${split.validator} percent</td>`,
-      );
+  it("publishes the release window as a Release group, from POLICY", () => {
+    // Decision D-127 put the record's release where the money group used to be,
+    // and the number is rendered rather than spelled: a fork that sets a window
+    // of its own gets a page that says so instead of a word that would lie.
+    expect(page).toContain(">Release</h2>");
+    expect(page).toContain(`<td class="mono">RELEASE_WINDOW_DAYS</td>`);
+    expect(page).toContain(
+      `<td class="mono">${POLICY.RELEASE_WINDOW_DAYS} days</td>`,
+    );
+    expect(page).toContain("released the moment it is sealed");
+    expect(page).not.toContain(">Money and standing</h2>");
+    for (const gone of [
+      "READ_SHARE_SPLIT",
+      "SLOT_COUNT",
+      "READ_PRICE_MICROS_PER_READ",
+      "CONTRIBUTOR_SHARE_PERCENT",
+      "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
+      "PAYOUT_MINIMUM_MICROS",
+      "PAYOUT_CYCLE",
+    ]) {
+      expect([gone, page.includes(`<td class="mono">${gone}</td>`)]).toEqual([
+        gone,
+        false,
+      ]);
     }
-    // The observed row is the larger one, which is the whole point of there
-    // being two of them.
-    expect(POLICY.READ_SHARE_SPLIT.observed.submitter).toBeGreaterThan(
-      POLICY.READ_SHARE_SPLIT.stated.submitter,
-    );
-    expect(POLICY.READ_SHARE_SPLIT.observed.validator).toBeGreaterThan(
-      POLICY.READ_SHARE_SPLIT.stated.validator,
-    );
-    // The pool per tier, beside the one floor both of them sit above.
-    expect(page).toContain(
-      `<td class="mono">CONTRIBUTOR_SHARE_FLOOR_PERCENT</td>`,
-    );
-    expect(page).toContain(
-      `<td class="mono">${POLICY.CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent</td>`,
-    );
-    for (const [tier, percent] of Object.entries(
-      POLICY.CONTRIBUTOR_SHARE_PERCENT,
-    )) {
-      expect(page, `CONTRIBUTOR_SHARE_PERCENT.${tier} has no row`).toContain(
-        `<td class="mono">CONTRIBUTOR_SHARE_PERCENT.${tier}</td>`,
-      );
-      expect(page).toContain(`<td class="mono">${percent} percent</td>`);
-      expect(percent).toBeGreaterThanOrEqual(
-        POLICY.CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-      );
-    }
-    // The rule beside the numbers: the observed validator rate is earned by a
-    // measurement, and the difference never reaches the reader's price. Both
-    // sentences are interpolated, so the apostrophes are escaped ones.
-    expect(page).toContain("larger than the stated row above");
-    expect(page).toContain(
-      "only when its own signed record carried a passing measurement",
-    );
-    expect(page).toContain("never out of the reader&#39;s price");
   });
 
   it("has no placeholder left: every number the paper names is published", () => {
@@ -446,35 +425,11 @@ describe("renderPolicy", () => {
     expect(page).toContain("there is no decay term at all");
   });
 
-  it("publishes the price, the payout minimum and the cycle, all from POLICY", () => {
-    for (const [name, value] of [
-      [
-        "READ_PRICE_MICROS_PER_READ",
-        `${POLICY.READ_PRICE_MICROS_PER_READ} micro-USD per read`,
-      ],
-      ["PAYOUT_MINIMUM_MICROS", `${POLICY.PAYOUT_MINIMUM_MICROS} micro-USD`],
-      ["PAYOUT_CYCLE", POLICY.PAYOUT_CYCLE],
-    ] as const) {
-      expect(page, `${name} has no row`).toContain(
-        `<td class="mono">${name}</td>`,
-      );
-      expect(page, `${name} does not print its value`).toContain(
-        `<td class="mono">${value}</td>`,
-      );
-    }
-    // The per-thousand figure is derived from the price rather than restated, so
-    // a price that moves by decision moves this with it. It is the paper's own
-    // worked example at today's number: fifty cents per thousand reads.
-    expect(page).toContain("$0.50 per thousand reads");
-    expect(page).toContain("$5.00");
-  });
-
   it("groups the dispute and report numbers, and reads each from POLICY", () => {
     expect(page).toContain("Disputes and reports");
     for (const [name, value] of [
       ["FAILURE_REPORT_THRESHOLD", String(POLICY.FAILURE_REPORT_THRESHOLD)],
       ["DISPUTE_STAKE_STANDING", `${POLICY.DISPUTE_STAKE_STANDING} standing`],
-      ["DISPUTE_FILING_FEE_CENTS", `${POLICY.DISPUTE_FILING_FEE_CENTS} cents`],
       [
         "REVALIDATION_REQUEST_STAKE_STANDING",
         `${POLICY.REVALIDATION_REQUEST_STAKE_STANDING} standing`,
@@ -491,10 +446,12 @@ describe("renderPolicy", () => {
         `<td class="mono">${value}</td>`,
       );
     }
-    // The stakes are placeholders and the page says so rather than implying
-    // that a number nobody priced is a price.
-    expect(page).toContain("a stake is a");
-    expect(page).toContain("no money");
+    // The stakes are placeholders in standing, and the page says so rather than
+    // implying that a number nobody priced is a price. Nothing is staked in
+    // money, because there is none (D-127).
+    expect(page).toContain("Every stake above is standing");
+    expect(page).toContain("there is no money here to stake");
+    expect(page).not.toContain("DISPUTE_FILING_FEE_CENTS");
   });
 
   it("groups the attestation numbers, and reads all four from POLICY", () => {
@@ -608,7 +565,9 @@ describe("renderApi", () => {
     // approval, so the page may not promise the measurement either way.
     expect(words).toContain("may carry the measurement it found");
     expect(words).toContain("but is not required to");
-    expect(words).toContain("A negative result is a first-class, paid answer");
+    expect(words).toContain(
+      "A negative result is a first-class answer and earns what a positive one earns",
+    );
     expect(words).toContain(
       "STANDING_VALIDATION_REPRODUCED is paid beside it for a record carrying a passing measurement",
     );
@@ -761,14 +720,20 @@ describe("renderApi", () => {
     expect(page).toContain("the recompute is the command");
     expect(page).toContain("formula");
     expect(page).toContain("stored");
-    expect(page).toContain(
-      "accrued, held, released, clawed_back, paid, carried_forward",
-    );
+    // The ledger doors carry no money any more (D-127): a row's unit is
+    // standing, and the reconciliations are the published counts against the
+    // rows written for them.
+    expect(page).toContain("Nothing here is money and nothing is owed");
     expect(page).toContain("reconciliations");
-    expect(page).toContain("READ_PRICE_MICROS_PER_READ");
-    expect(page).toContain("PAYOUT_MINIMUM_MICROS");
-    expect(page).toContain("PAYOUT_CYCLE");
-    expect(page).toContain("HOLDBACK_DAYS");
+    expect(page).toContain("no share and no payout to reconcile against");
+    for (const gone of [
+      "READ_PRICE_MICROS_PER_READ",
+      "PAYOUT_MINIMUM_MICROS",
+      "PAYOUT_CYCLE",
+      "HOLDBACK_DAYS",
+    ]) {
+      expect([gone, page.includes(gone)]).toEqual([gone, false]);
+    }
     expect(page).toContain("404 not_found.");
   });
 
@@ -776,9 +741,10 @@ describe("renderApi", () => {
     expect(page).toContain(`npm run standing -- ${ctx.origin} &lt;operator&gt;`);
   });
 
-  it("documents --sign on every command that reads past the window", () => {
-    // The QA of 2026-09-13: the page listed these three without the flag, so a
-    // reader following it ran a command that stops on a withheld line.
+  it("documents --sign on every command that reads the log", () => {
+    // The flag no longer reaches content — the record is released at the seal
+    // (D-127) — and it is still what names who is reading, so the commands
+    // still carry it and the page still lists it.
     expect(page).toContain(
       `npm run standing -- ${ctx.origin} &lt;operator&gt; [--sign &lt;key.json&gt;]`,
     );
@@ -787,14 +753,15 @@ describe("renderApi", () => {
     );
     expect(page).toContain("&lt;attestation-id&gt; [--sign &lt;key.json&gt;]");
     expect(page).toContain("npm run checkpoint -- [--wait-seal]");
-    // And the refusal an unsigned run earns is named where the flag is.
+    // And what the flag actually buys, said where the flag is.
     expect(page.replace(/\s+/g, " ")).toContain(
-      "withheld inside the release window; pass --sign &lt;key.json&gt;",
+      "the flag buys the run its operator's own daily cap rather than the",
     );
+    expect(page).not.toContain("withheld inside the release window");
   });
 
-  it("documents paid access: the tiers table, the header, and every key door", () => {
-    expect(page).toContain(">Paid access: tiers and keys</h2>");
+  it("documents free access: the tiers table, the header, and every key door", () => {
+    expect(page).toContain(">Free access: caps and keys</h2>");
 
     // Every registered tier, by its slug, with the cap and whether it takes a
     // key: a table that showed two of three would be documenting a ladder
@@ -805,7 +772,6 @@ describe("renderApi", () => {
       );
       expect(page).toContain(`<td class="mono">${tier.reads_per_day}</td>`);
     }
-    expect(page).toContain(String(POLICY.READ_PRICE_MICROS_PER_READ));
 
     expect(page).toContain("Authorization: Bearer nmk_");
     for (const header of [
@@ -816,17 +782,29 @@ describe("renderApi", () => {
       expect(page, `${header} is not documented`).toContain(header);
     }
 
+    // The free door, and the four the paid loop left behind, each named with
+    // the 410 it answers rather than deleted from the page (D-127).
     for (const door of [
       "/keys/tiers",
-      "/keys/checkout",
-      "/keys/claim",
+      "/keys/free",
       "/keys/me",
       "/keys/me/usage",
       "/keys/me/receipts",
-      "/keys/me/portal",
     ]) {
       expect(page, `${door} is not documented`).toContain(door);
     }
+    for (const retired of [
+      "POST /keys/checkout",
+      "GET /keys/claim",
+      "POST /keys/me/portal",
+      "POST /stripe/webhook",
+    ]) {
+      expect(page, `${retired} is not named as retired`).toContain(retired);
+    }
+    expect(page).toContain("410 retired");
+    expect(page).toContain(
+      "Four doors of the paid loop are retired and answer 410",
+    );
 
     // Every word the gate and the doors refuse in.
     for (const refusal of [
@@ -836,17 +814,21 @@ describe("renderApi", () => {
       "key_canceled",
       "key_past_due",
       "rate_limited",
-      "unknown_tier",
+      "key_today",
+      "no_keyed_tier",
+      "bad_body",
+    ]) {
+      expect(page, `${refusal} is not named`).toContain(refusal);
+    }
+    // And nothing about buying one.
+    for (const gone of [
       "free_tier_needs_no_key",
-      "missing_session",
       "unknown_session",
       "not_paid",
       "already_claimed",
       "payments_unavailable",
-      "provider_error",
-      "bad_response",
     ]) {
-      expect(page, `${refusal} is not named`).toContain(refusal);
+      expect([gone, page.includes(gone)]).toEqual([gone, false]);
     }
 
     // The 429 body, whole, because a caller that cannot see resets_at has to
@@ -858,18 +840,19 @@ describe("renderApi", () => {
       `{ "error": "rate_limited", "tier": "standard", "limit": ${cap},`,
     );
     expect(page).toContain(`"used": ${cap}, "resets_at":`);
-    expect(page).toContain("resets_at");
     expect(page).toContain("retry-after");
 
-    // And the claim page a browser lands on, which is the JSON's twin.
-    expect(page).toContain("success redirect lands a person on it");
+    // The key is shown once, at the free door, and nowhere else ever again.
+    expect(page).toContain("The secret is shown exactly once");
   });
 
-  it("documents what a paid read's receipt carries, and how it reconciles", () => {
-    expect(page).toContain(">Receipts for paid reads</h2>");
+  it("documents what a keyed read's receipt carries, and how it reconciles", () => {
+    expect(page).toContain(">Receipts and the key's own counter</h2>");
     expect(page).toContain("key_counter");
     expect(page).toContain("read_count");
-    expect(page).toContain("paid.keys");
+    // The day's counts are evidence of use and never a bill (D-127).
+    expect(page).toContain("evidence that the record is used");
+    expect(page).not.toContain("paid.keys");
     // A receipt issued before the two fields existed still verifies: the page
     // has to say so, or every M17 receipt looks broken.
     expect(page).toContain("carries neither property at all");
@@ -923,20 +906,23 @@ describe("renderApi", () => {
     expect(page).toContain(String(POLICY.ALERT_ENDPOINTS_PER_KEY));
   });
 
-  it("documents the provider's own webhook path and its two refusals", () => {
-    expect(page).toContain(POLICY.STRIPE.webhook_path);
-    expect(page).toContain("bad_signature");
-    expect(page).toContain("payments_unavailable");
-    expect(page).toContain(
-      `${POLICY.STRIPE.webhook_tolerance_seconds} seconds`,
-    );
+  it("names the provider's own webhook as a retired door and nothing else", () => {
+    // Decision D-127: there is no provider and no subscription to report on, so
+    // the door keeps its address, answers 410, and the page says only that.
+    expect(page).toContain("POST /stripe/webhook");
+    expect(page).toContain("410 retired");
+    expect(page).toContain("the payment provider&#39;s own webhook");
+    expect(page).not.toContain("payments_unavailable");
+    expect(page).not.toContain("webhook_tolerance");
   });
 
-  it("names the three units and what each one is", () => {
+  it("names the one unit there is, and says there is no other", () => {
     expect(page).toContain(">Units</h2>");
-    expect(page).toContain("a millionth of a dollar: 1,000,000 to the dollar");
+    expect(page).toContain("One unit appears on the ledger");
     expect(page).toContain("Standing units, which are not money");
-    expect(page).toContain(`${POLICY.DISPUTE_FILING_FEE_CENTS} cents`);
+    expect(page).toContain("There is no micro-USD");
+    expect(page).not.toContain("a millionth of a dollar: 1,000,000 to the dollar");
+    expect(page).not.toContain("cents");
   });
 
   it("names the four headers a signed write carries", () => {
@@ -1175,6 +1161,10 @@ describe("renderApi", () => {
       // otherwise the envelope is a way around it — so the page says it there.
       "self_dispute",
       "author_mismatch",
+      // Section 9: standing gates the stake, and the gate stands in front of
+      // the submission pipeline because that pipeline fetches the cited page —
+      // a filing that cannot cover its stake costs the log no fetch at all.
+      "insufficient_standing",
       "POST /entries refusal",
       "entry_not_verified",
       "not_correction",
@@ -1187,9 +1177,6 @@ describe("renderApi", () => {
       "source_not_official",
       "bad_report_link",
       "bad_revalidation_link",
-      // Section 9: standing gates the stake, checked after every M20 rule and
-      // before anything is written.
-      "insufficient_standing",
       // The target's rederivation is schema-checked last, after every filing
       // rule has passed, so schema_invalid closes the row.
       "schema_invalid",
@@ -1246,18 +1233,22 @@ describe("renderApi", () => {
     ]);
   });
 
-  it("says in words what each mechanism is, and how a reward is priced", () => {
+  it("says in words what each mechanism is, and what a stake is put up in", () => {
     expect(page).toContain("A dispute is a challenge to a verified entry");
     expect(page).toContain("A revalidation request is an operator asking");
     expect(page).toContain("A failure report is a signed report");
     expect(page).toContain("distinct registered\n          operators");
     expect(page).toContain("drawn from the trusted pool by the public randomness");
-    expect(page).toContain("ledger records in the unit they were put up in");
-    // The reward is the one stake row with a number of its own, and the page
-    // says where the number comes from: the entry the challenge overturned.
-    expect(page).toContain("ledger step prices it at exactly what the clawbacks");
-    expect(page).toContain("prices the reward at zero");
-    expect(page).toContain("A revalidation request\n          has no reward of its own");
+    // Decision D-127: the stake is contribution and so is the reward. Nothing
+    // is clawed back, because nothing was ever paid out.
+    expect(page).toContain("Filing takes a stake, and the stake is contribution");
+    expect(page).toContain(
+      `${POLICY.DISPUTE_STAKE_STANDING} standing to file a dispute`,
+    );
+    expect(page).toContain("STANDING_DISPUTE_UPHELD");
+    expect(page).toContain("STANDING_OVERTURNED_SIGNER");
+    expect(page).toContain("Nothing is clawed back");
+    expect(page).not.toContain("filing fee");
   });
 
   it("gives the three 409 conflicts and never a status of its own", () => {
@@ -1502,31 +1493,22 @@ describe("renderApi", () => {
     );
   });
 
-  it("documents the per-tier split and the measured rule (D-087)", () => {
-    // Section 9's promise, on the page a caller reads before they call: both
-    // splits by number, what earns the observed validator rate, and the two ref
-    // fields a row carries so the caller can check a row against the rule.
-    expect(page).toContain("What the ledger pays, per evidence tier");
-    for (const [tier, split] of Object.entries(POLICY.READ_SHARE_SPLIT)) {
-      expect(page, `${tier} submitter rate is not documented`).toContain(
-        `${split.submitter} percent`,
-      );
-      expect(page, `${tier} validator rate is not documented`).toContain(
-        `${split.validator} percent`,
-      );
+  it("publishes no split, no price and no share at all (D-127)", () => {
+    // Section 9's old promise was about money; the record is free, so what the
+    // page says now is what a contributor earns instead — standing, named on
+    // the policy page — and every word of the split is gone.
+    expect(page).toContain("What a contributor earns is standing and nothing else");
+    // The one place micro-USD is still named is the Units panel, saying there
+    // is no amount in one anywhere.
+    expect(page).toContain("There is no micro-USD");
+    for (const gone of [
+      "What the ledger pays, per evidence tier",
+      "READ_SHARE_SPLIT",
+      "read_share",
+      "contributor pool",
+    ]) {
+      expect([gone, page.includes(gone)]).toEqual([gone, false]);
     }
-    expect(page).toContain(
-      `${POLICY.CONTRIBUTOR_SHARE_PERCENT.observed} percent of a read of an`,
-    );
-    expect(page).toContain("carries a passing measurement");
-    expect(page).toContain("paid at the stated rate on the same entry");
-    // The two fields the ledger row actually carries, named as fields.
-    expect(page).toContain("<span class=\"mono\">tier</span>");
-    expect(page).toContain("<span class=\"mono\">measured</span>");
-    // And the reader's side of it: one price per read, whatever the tier.
-    expect(page).toContain(
-      `${POLICY.READ_PRICE_MICROS_PER_READ} micro-USD whatever tier the entry is`,
-    );
   });
 
   it("counts the status stages as the status rules count them", () => {
@@ -1573,29 +1555,28 @@ const EMPTY_PIPELINE: HowItWorksData = {
   mirror: null,
 };
 
-describe("renderHowItWorks: paid access, metering, and alerts", () => {
+describe("renderHowItWorks: free access, caps, and alerts", () => {
   const page = renderHowItWorks(
     { ...ctx, path: "/how-it-works" },
     EMPTY_PIPELINE,
   );
-  const STAGE = "Paid access, metering, and alerts";
+  const STAGE = "Free access, caps, and alerts";
 
   it("puts the stage in the stack and in the strip, tenth and after the mirror", () => {
     expect(page).toContain('class="panel" id="s10"');
     expect(page).toContain('<span class="stage-num">10</span>');
     expect(page).toContain(STAGE);
-    expect(page).toContain("SECTION 9 · MONEY");
+    expect(page).toContain("SECTION 9 · THE RECORD IS FREE");
     // The strip is the page's own table of contents: a stage in the stack and
     // not in it is a stage a reader never learns is there.
     expect(page).toContain('class="step" href="#s10"');
     expect(page.indexOf("Mirror and fork")).toBeLessThan(page.indexOf(STAGE));
   });
 
-  it("names the four policy numbers it runs under, through the link to /policy", () => {
+  it("names the policy numbers it runs under, through the link to /policy", () => {
     const tiers = Object.keys(POLICY.RATE_TIERS).join("/");
-    const share = `${POLICY.CONTRIBUTOR_SHARE_PERCENT.stated}/${POLICY.CONTRIBUTOR_SHARE_PERCENT.observed}`;
     expect(page).toContain(
-      `<a href="/policy">RATE_TIERS ${tiers} · READ_PRICE_MICROS_PER_READ ${POLICY.READ_PRICE_MICROS_PER_READ} · CONTRIBUTOR_SHARE_PERCENT ${share} · ALERT_KINDS ${POLICY.ALERT_KINDS.length}</a>`,
+      `<a href="/policy">RATE_TIERS ${tiers} · RELEASE_WINDOW_DAYS ${POLICY.RELEASE_WINDOW_DAYS} · ALERT_KINDS ${POLICY.ALERT_KINDS.length}</a>`,
     );
   });
 
@@ -1611,14 +1592,19 @@ describe("renderHowItWorks: paid access, metering, and alerts", () => {
     }
   });
 
-  it("says what Section 9 says about the money", () => {
+  it("says what D-127 says: the record is free and a key is an identity", () => {
     // The prose wraps, so the whitespace is collapsed before a sentence of it
     // is looked for.
     const prose = page.replace(/\s+/g, " ");
-    expect(prose).toContain("free to read at low volume, forever");
-    expect(prose).toContain("the paid product is never the data");
-    expect(prose).toContain("No ads, no token");
-    expect(prose).toContain("a daily cap and nothing else");
+    expect(prose).toContain("The record is free, from the seal (decision D-127)");
+    expect(prose).toContain(
+      "no paid tier, no key to buy, no read share, no payout",
+    );
+    expect(prose).toContain("POST /keys/free");
+    expect(prose).toContain("A tier is that daily cap and nothing else");
+    expect(prose).toContain(
+      "as evidence the record is used rather than as a bill",
+    );
   });
 });
 
@@ -1819,9 +1805,11 @@ describe("renderDryRun", () => {
     expect(panel).toContain(
       "recorded on a rejection and an approval alike",
     );
-    expect(panel).toContain("A negative result is a first-class, paid answer");
     expect(panel).toContain(
-      "the extra credit for measuring is paid for a passing measurement",
+      "A negative result is a first-class answer and earns what a positive one earns",
+    );
+    expect(panel).toContain(
+      "the extra credit for measuring is earned for a passing measurement",
     );
   });
 
@@ -1938,19 +1926,21 @@ describe("renderDryRun", () => {
     expect(panel).toContain(
       "signs the export's reads with the key you registered in step 3",
     );
+    // The flag no longer reaches content: every entry is released at its seal
+    // (D-127), so what it buys is the bucket the reads are counted in.
     expect(panel).toContain(
-      "a signature reaches inside the release window because the key is bound" +
-        " to a registered operator and not because it exists",
+      "It is not what reaches the content",
+    );
+    expect(panel).toContain(
+      "a signed read is metered under your operator rather than under the" +
+        " address you came from",
     );
     expect(panel).not.toContain("the key you generated in step 1");
-    // The export CLI never classifies the key: an unregistered --sign is a
-    // success that wrote the released view, not a refusal, so the page may not
-    // promise a refusal word here.
-    expect(panel).toContain(
-      "The same file before step 3 is not an error — the export succeeds, and" +
-        " writes the released view with the" +
-        ' <span class="mono">release_date</span> it was handed',
-    );
+    // The export CLI never classifies the key, and it never refuses one: the
+    // page may not promise a refusal word here.
+    expect(
+      squeeze(page.slice(page.indexOf("Step 6. Verify it yourself"))),
+    ).not.toContain("unregistered_operator");
     expect(
       squeeze(page.slice(page.indexOf("Step 6. Verify it yourself"))),
     ).not.toContain("unregistered_operator");
@@ -1985,7 +1975,7 @@ describe("renderDryRun", () => {
         `<span class="mono">${reason}</span>`,
       );
     }
-    expect(panel).toContain("the command prints the date it opens");
+    expect(panel).toContain("You will not meet it here");
     expect(panel).toContain("Registration is step 3");
     expect(panel).toContain("cannot be judged under today's rules");
     expect(panel).toContain("errors</span> array is printed");
@@ -2005,8 +1995,10 @@ describe("renderDryRun", () => {
     expect(page).toContain("payout_unavailable");
     expect(page).toContain("mock");
     expect(page).toContain("nothing on demo is money");
+    expect(squeeze(page)).toContain("Nothing here is the record");
     expect(squeeze(page)).toContain(
-      "Nothing here is money, and nothing here is the record",
+      "the record is free to read from the seal, and the only thing anyone" +
+        " earns for this work is standing",
     );
     expect(page).toContain("counts toward nothing");
   });
@@ -2385,7 +2377,7 @@ describe("renderLanding", () => {
   it("holds the five values", () => {
     expect(page).toContain("Owned by no lab.");
     expect(page).toContain("Facts, never opinions.");
-    expect(page).toContain("Paid for being right.");
+    expect(page).toContain("Credited for being right.");
     expect(page).toContain("Checkable offline.");
     expect(page).toContain("Forkable.");
   });
@@ -2494,16 +2486,15 @@ describe("renderLanding", () => {
     // measurements. The old pair is gone from the page, not merely joined.
     expect(page).not.toContain("Quotations");
     expect(page).not.toContain("Measurements");
-    // The maintainer's words, 2026-09-11 (D-103): the data is CC0 and training
-    // on it is free once the release window is up, and the line says so.
+    // The maintainer's words, as decision D-127 left them: the data is CC0 from
+    // the seal that covers it, and training on it is free, full stop. The
+    // three-part shape is kept and the waiting is gone.
     expect(page).toContain(
-      "CODE APACHE-2.0 · DATA CC0 ON RELEASE · TRAINING ON THE DATA IS FREE ON RELEASE",
+      "CODE APACHE-2.0 · DATA CC0 FROM THE SEAL · TRAINING ON THE DATA IS FREE",
     );
-    expect(page).not.toContain(
-      "CODE APACHE-2.0 · DATA CC0 · TRAINING ON THE FEED IS FREE",
-    );
+    expect(page).not.toContain("ON RELEASE");
     // And the one other sentence that called the data free says the same.
-    expect(page).toContain("public-domain data on release");
+    expect(page).toContain("public-domain data from the seal");
   });
 
   it("survives the content-security-policy: no script, no inline style", () => {
@@ -2680,27 +2671,30 @@ describe("the paper and the README carry observed pays more (D-087)", () => {
     expect(whitepaper).toContain(
       "a dispute's reward is money because a dispute claws money back",
     );
-    // The README says it too, in the section that names the stake.
-    const section = readme.indexOf("## Standing and the ledger");
-    const rule = readme.indexOf("**A changed check pays standing**");
+    // The README says it too, in the section that names the stake. It is one
+    // currency there now (D-127), so the reward is named where the rest of the
+    // fold is rather than under a heading of its own.
+    const section = readme.indexOf("## Standing and contribution");
+    const rule = readme.indexOf("`STANDING_REVALIDATION_CHANGED` (D-095)");
     const next = readme.indexOf("## Attesting a model");
     expect(section).toBeGreaterThan(-1);
     expect(rule).toBeGreaterThan(section);
     expect(rule).toBeLessThan(next);
-    expect(readme).toContain("`STANDING_REVALIDATION_CHANGED`");
   });
 
-  it("names the rule in the README, in the section about the ledger", () => {
-    const section = readme.indexOf("## Standing and the ledger");
-    const rule = readme.indexOf("**Observed pays more**");
+  it("names the rule in the README, in the section about contribution", () => {
+    // D-087's promise, in the currency D-127 left: measuring earns more
+    // standing, and nobody is paid more because nobody is paid.
+    const section = readme.indexOf("## Standing and contribution");
+    const rule = readme.indexOf("**Measuring earns more than copying**");
     const next = readme.indexOf("## Attesting a model");
     expect(section).toBeGreaterThan(-1);
     expect(rule).toBeGreaterThan(section);
     expect(rule).toBeLessThan(next);
-    expect(readme).toContain("`READ_SHARE_SPLIT.observed`");
     expect(readme).toContain("`STANDING_VALIDATION_REPRODUCED`");
-    expect(readme).toContain("`measured` on a slot holder");
-    expect(readme).toContain("never out of the reader's price");
+    expect(readme).toContain("carries a passing measurement under the n-of-k rule");
+    expect(readme).toContain("nobody is paid more, because nobody is paid");
+    expect(readme).not.toContain("`READ_SHARE_SPLIT.observed`");
   });
 });
 
@@ -2718,34 +2712,40 @@ describe("the release window, as the pages publish it", () => {
     expect(policy).toContain(
       `<td class="mono">${POLICY.RELEASE_WINDOW_DAYS} days</td>`,
     );
-    // In the money group, where the thing it prices is: the window is what a
-    // key buys, beside the holdback and the read price.
-    const money = policy.indexOf("Money and standing");
-    const paid = policy.indexOf("Paid access");
-    expect(policy.indexOf("RELEASE_WINDOW_DAYS")).toBeGreaterThan(money);
-    expect(policy.indexOf("RELEASE_WINDOW_DAYS")).toBeLessThan(paid);
+    // In its own Release group, where the money group used to be: the window
+    // prices nothing any more, it says when the record opens (D-127).
+    const release = policy.indexOf(">Release</h2>");
+    const access = policy.indexOf(">Access and alerts</h2>");
+    expect(release).toBeGreaterThan(-1);
+    expect(policy.indexOf("RELEASE_WINDOW_DAYS")).toBeGreaterThan(release);
+    expect(policy.indexOf("RELEASE_WINDOW_DAYS")).toBeLessThan(access);
   });
 
-  it("names every door the window changed, in the doors' own words", () => {
-    // 402 on a free read, with the date; the released head on a free sync; the
-    // envelope on the plain entry fetch; hash lines on the events door; and the
-    // 403 on a capture nothing of whose entries is released.
-    expect(api).toContain("402 unreleased with release_date");
-    expect(api).toContain("served to the released head rather than the sealed");
-    expect(api).toContain("{ proof, release_date }");
-    expect(api).toContain("goes to a free reader as a hash line");
-    expect(api).toContain("403 unreleased, carrying release_date");
+  it("names no door the window holds back, because at zero it holds none", () => {
+    // The doors the window used to change say what they do now: the same record
+    // to everybody, with no 402, no released head and no hash line (D-127).
+    for (const gone of [
+      "402 unreleased with release_date",
+      "served to the released head rather than the sealed",
+      "{ proof, release_date }",
+      "goes to a free reader as a hash line",
+      "403 unreleased, carrying release_date",
+    ]) {
+      expect([gone, api.includes(gone)]).toEqual([gone, false]);
+    }
+    expect(api).toContain("the content is public and CC0 from the seal");
+    expect(api).toContain("Every event goes out in full the moment a seal covers it");
+    expect(api).toContain("head and sealed_head name the same position");
   });
 
   it("explains the rule once, under the keys section, and links it", () => {
     expect(api).toContain(`<section class="panel" id="keys">`);
     const keys = api.indexOf(`id="keys"`);
-    const rule = api.indexOf("The release window (decision D-100) is what a key");
+    const rule = api.indexOf("The record is free (decision D-127).");
     expect(rule).toBeGreaterThan(keys);
-    expect(api).toContain(
-      `${POLICY.RELEASE_WINDOW_DAYS} days after the seal that covers`,
-    );
-    expect(api).toContain("The proof is never withheld from anyone");
+    expect(api).toContain("the release window is one number in");
+    expect(api).toContain('<a href="/policy">policy</a>');
+    expect(api).toContain("at zero, with its code dormant behind it");
   });
 
   it("names the flag that reaches unreleased content from a command", () => {
@@ -2757,7 +2757,10 @@ describe("the release window, as the pages publish it", () => {
 
   it("names the window in the Domains lede, from policy", () => {
     expect(domains.replace(/\s+/g, " ")).toContain(
-      `its content is released ${POLICY.RELEASE_WINDOW_DAYS} days after the seal that covers it (decision D-100)`,
+      `its content is released ${POLICY.RELEASE_WINDOW_DAYS} days after the seal that covers it`,
+    );
+    expect(domains.replace(/\s+/g, " ")).toContain(
+      "at zero, the moment it is sealed, public and CC0 from that instant, with nothing to pay and no key to hold (decisions D-100 and D-127)",
     );
   });
 

@@ -8,10 +8,11 @@
  * Worker does not serve would be the first thing a reader tried and the first
  * thing that failed.
  *
- * Decision D-100, the release window: a latest row whose content this reader has
- * not been served shows "released <date>" where the claim would be, exactly as
- * the entries listing does. The counters are untouched — they count entries, and
- * the window holds back content and never a count.
+ * Decision D-127, the record is free: every entry is released the moment it is
+ * sealed, so the newest rows carry their claims to every reader, keyed or not.
+ * The withheld cell the listing shares with this table stays dormant behind a
+ * release window of zero days, and the counters were never touched by it: they
+ * count entries, and a window holds back content and never a count.
  *
  * Decision D-125: the newest-sealed table carries the same `domain` column the
  * entries listing does, in the same place — after the subject, where the listing

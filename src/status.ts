@@ -3,7 +3,7 @@
  *
  * Whitepaper Section 11, Deployment and status: nomankind publishes what it is
  * running and whether it is working. This module is the second half of that
- * sentence — sixteen stages of the machine, each with a state, the last thing
+ * sentence — fifteen stages of the machine, each with a state, the last thing
  * that happened in it, the rule that decides the state, and a link a reader can
  * follow to check the answer for themselves.
  *
@@ -28,7 +28,6 @@
  */
 
 import type { MirrorKind } from "./adapters/mirror.js";
-import type { PaymentsKind } from "./adapters/stripe.js";
 import { utcDay } from "./anchor.js";
 import {
   POLICY,
@@ -121,8 +120,8 @@ export interface ReconciliationFact {
 }
 
 /**
- * The five doors nobody probes on a schedule: what the last person through each
- * one left behind.
+ * The doors nobody probes on a schedule: what the last person through each one
+ * left behind.
  */
 export interface ExercisedFacts {
   readonly submission: { readonly at: string; readonly id: string } | null;
@@ -134,9 +133,6 @@ export interface ExercisedFacts {
     | null;
   readonly sync_receipt:
     | { readonly counter: number; readonly created_at: string }
-    | null;
-  readonly payout:
-    | { readonly at: string; readonly operator: string; readonly amount: number }
     | null;
 }
 
@@ -153,8 +149,6 @@ export interface StatusInput {
   readonly environment: string;
   /** Which witness track this environment runs: mock, registry or unavailable. */
   readonly witness_kind: string;
-  /** Which payout adapter this environment runs: mock or unavailable. */
-  readonly payout_kind: string;
   readonly steps: readonly SweepStep[];
   readonly head_seq: number | null;
   readonly seal: SealFact | null;
@@ -214,18 +208,6 @@ export interface StatusInput {
       readonly head: number;
       readonly url: string;
     } | null;
-  };
-  /**
-   * Usage metering (M24): which payment track this environment runs, how many
-   * key-days have been reported, and how many published ones have not.
-   *
-   * `kind` is asked of the same `paymentsAdapterFor` the sweep asks, so the page
-   * cannot claim a provider the sweep is not billing through.
-   */
-  readonly metering: {
-    readonly kind: PaymentsKind;
-    readonly reported_days: number;
-    readonly owed: number;
   };
   /**
    * Change alerts (M24): how many endpoints are subscribed, how far the alert
@@ -458,7 +440,7 @@ function detailNumber(step: SweepStep | null, key: string): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// The sixteen rules
+// The fifteen rules
 // ---------------------------------------------------------------------------
 
 /**
@@ -952,36 +934,65 @@ function anchoring(input: StatusInput, now: string): Stage {
   };
 }
 
+/**
+ * (11) The ledger: has the fold walked everything the seal committed to?
+ *
+ * Decision D-127, "the record is free, no money anywhere": the step prices
+ * nothing, so the question it used to answer — does yesterday's reconciliation
+ * agree with what the log published — has no row behind it any more and never
+ * will. What is left is the one thing the step still does and the one thing a
+ * reader can still check: it walks to the sealed head and leaves its cursor
+ * there, which is where a fork restarts from (`npm run import-mirror`).
+ *
+ * A log with nothing sealed is idle rather than behind: there is no head to
+ * walk to. A ledger behind the seal is attention, because the next run catches
+ * it up; there is no failing state a position alone can prove.
+ */
 function ledger(input: StatusInput, now: string): Stage {
-  const rule = "yesterday's reconciliation row present and equal";
+  const rule = "the ledger walked to the sealed head";
   const evidence = [{ label: "/ledger", href: "/ledger" }];
-  const published = input.read_counts.newest;
-  if (published === null) {
+  const head = input.seal === null ? null : input.seal.last_seq;
+  if (head === null) {
     return {
       stage: "ledger",
       state: "idle",
-      last: "no read count",
+      last: "nothing sealed",
       rule,
       evidence,
     };
   }
-  const row = input.reconciliation;
-  // The day the ledger owes a reconciliation for is the day the log published a
-  // count for, not the calendar's yesterday: the ledger prices what the seal
-  // committed to, so it cannot be ahead of the publishing step.
-  if (row === null || row.date !== published.date) {
+  const step = stepOf(input, "ledger");
+  const through = detailNumber(step, "through");
+  if (through === null) {
     return {
       stage: "ledger",
       state: "attention",
-      last: line(published.date, row === null ? "never" : `last ${row.date}`),
+      last: line(`head ${head}`, "never run"),
+      rule,
+      evidence,
+    };
+  }
+  if (through < head) {
+    return {
+      stage: "ledger",
+      state: "attention",
+      last: line(
+        `through ${through}`,
+        `head ${head}`,
+        step === null ? "" : stamp(step.last_run_at, now),
+      ),
       rule,
       evidence,
     };
   }
   return {
     stage: "ledger",
-    state: row.ok ? "ok" : "failing",
-    last: line(row.date, row.ok ? "agrees" : "disagrees", stamp(row.at, now)),
+    state: "ok",
+    last: line(
+      `through ${through}`,
+      "prices nothing",
+      step === null ? "" : stamp(step.last_run_at, now),
+    ),
     rule,
     evidence,
   };
@@ -1117,79 +1128,6 @@ function mirrorExport(input: StatusInput, now: string): Stage {
 }
 
 /**
- * (15) The usage meter: is every published paid read on somebody's bill?
- *
- * Whitepaper Section 9, Money: "Read counts are published to the sealed log
- * daily, so nomankind cannot quietly change the numbers later, and any operator
- * can reconcile their payout against the log." The bill is the other side of
- * that sentence, and this is the light that says whether the two are in step: a
- * key-day the log published and the provider was never told about is revenue
- * the reader was not charged for, and — worse for the reader — a number that
- * could later be billed from somewhere other than the published count.
- *
- * Two kinds of nothing to do, told apart. An environment with no payment
- * provider is not configured to meter at all, which is production's state until
- * M25 and is not a fault; an environment that has published no paid read has
- * nothing to report, which is every deployment before its first key.
- */
-function usageMetering(input: StatusInput, now: string): Stage {
-  const rule = "every published paid read reported to the provider";
-  const evidence = [{ label: "/status", href: "/status" }];
-  const { kind, reported_days, owed } = input.metering;
-
-  if (kind === "unavailable") {
-    return {
-      stage: "usage metering",
-      state: "idle",
-      last: "not configured",
-      rule,
-      evidence,
-    };
-  }
-  if (reported_days === 0 && owed === 0) {
-    return {
-      stage: "usage metering",
-      state: "idle",
-      last: "no paid read",
-      rule,
-      evidence,
-    };
-  }
-
-  const step = stepOf(input, "metering");
-  if (owed === 0) {
-    return {
-      stage: "usage metering",
-      state: "ok",
-      last: line(
-        `${reported_days} key-days reported`,
-        step === null ? "" : stamp(step.last_run_at, now),
-      ),
-      rule,
-      evidence,
-    };
-  }
-
-  // Owed, and not reported. How long that has stood is the step's own record of
-  // when it last got through, exactly as the ledger stage reads its day: a
-  // provider that refused one run is a run to try again, and one that has been
-  // refusing since before the failing bar is somebody's morning.
-  const lastOk = step === null ? null : step.last_ok_at;
-  const stale = lastOk !== null && secondsBetween(lastOk, now) > FAILING_AFTER_SECONDS;
-  return {
-    stage: "usage metering",
-    state: stale ? "failing" : "attention",
-    last: line(
-      `${owed} key-days owed`,
-      freshSkip(step) ?? `${reported_days} reported`,
-      step === null ? "never run" : stamp(step.last_run_at, now),
-    ),
-    rule,
-    evidence,
-  };
-}
-
-/**
  * (16) The change alerts: has every sealed change been offered to everyone who
  * asked for it?
  *
@@ -1291,7 +1229,6 @@ const STAGE_STEP: ReadonlyMap<string, string> = new Map([
   ["standing", "standing"],
   ["attestations", "attestation"],
   ["mirror export", "mirror"],
-  ["usage metering", "metering"],
   ["change alerts", "alerts"],
 ]);
 
@@ -1322,7 +1259,7 @@ function overThrow(stage: Stage, input: StatusInput): Stage {
 }
 
 /**
- * The sixteen stages, in the page's order, read against one instant.
+ * The fifteen stages, in the page's order, read against one instant.
  *
  * The order is the machine's own — the timer, then what the timer does, then
  * what the log owes at the end of the day — and it is fixed, because a status
@@ -1332,7 +1269,7 @@ export function stageStates(input: StatusInput, now: string): Stage[] {
   return stages(input, now).map((stage) => overThrow(stage, input));
 }
 
-/** The sixteen rules, each over its own facts and before any throw is read. */
+/** The fifteen rules, each over its own facts and before any throw is read. */
 function stages(input: StatusInput, now: string): Stage[] {
   return [
     sweepTimer(input, now),
@@ -1349,20 +1286,25 @@ function stages(input: StatusInput, now: string): Stage[] {
     standing(input, now),
     attestations(input),
     mirrorExport(input, now),
-    usageMetering(input, now),
     changeAlerts(input, now),
   ];
 }
 
 /** How many stages there are, for a fraction that cannot drift from the list. */
-export const STAGE_COUNT = 16;
+export const STAGE_COUNT = 15;
+
+/**
+ * How many exercised rows there are, for the same reason: a page that says the
+ * number in prose reads it from here rather than counting by hand.
+ */
+export const EXERCISED_COUNT = 4;
 
 // ---------------------------------------------------------------------------
 // Exercised, not probed
 // ---------------------------------------------------------------------------
 
 /**
- * The five doors with no timer behind them.
+ * The four doors with no timer behind them.
  *
  * Nothing here has a state. A door nobody has used is not broken, and a page
  * that painted it red would be reporting the traffic rather than the machine —
@@ -1370,7 +1312,10 @@ export const STAGE_COUNT = 16;
  * stop there.
  */
 export function exercisedStages(input: StatusInput): Exercised[] {
-  const { submission, registration, read_receipt, sync_receipt, payout } =
+  // `payout` is deliberately not read: the payout step is retired (D-127), so
+  // there is no door behind that row and a page that still showed it would be
+  // reporting a thing nobody can do.
+  const { submission, registration, read_receipt, sync_receipt } =
     input.exercised;
   return [
     {
@@ -1426,22 +1371,6 @@ export function exercisedStages(input: StatusInput): Exercised[] {
               `receipt ${sync_receipt.counter}`,
             ),
       evidence: [{ label: "/api", href: "/api" }],
-    },
-    {
-      stage: "payouts",
-      last:
-        payout === null
-          ? line(
-              `never`,
-              `${input.payout_kind} adapter`,
-              "every operator below PAYOUT_MINIMUM_MICROS",
-            )
-          : line(
-              clockOf(payout.at),
-              payout.operator,
-              `${payout.amount} micros`,
-            ),
-      evidence: [{ label: "/ledger", href: "/ledger" }],
     },
   ];
 }

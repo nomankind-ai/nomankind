@@ -30,6 +30,7 @@ import {
   DEFAULT_DOMAIN,
   DOMAIN_SLUGS,
   LIST_PAGE_LIMIT,
+  POLICY,
   RELEASE_WINDOW_DAYS,
   TRUSTED_POOL_SWITCH,
 } from "../src/policy.js";
@@ -1306,17 +1307,19 @@ describe("the entry page", () => {
     expect(document).toContain(`<span class="badge s-verified">verified</span>`);
   });
 
-  it("shows the sidecar the schema cannot hold", () => {
+  it("shows the sidecar the schema cannot hold, and no read-share slot (D-127)", () => {
     for (const name of [
       "effective_tier",
       "test_verdict",
       "needs_replacement",
       "trusted_count_at_decision",
-      "read_share_slots",
     ]) {
       expect([name, document.includes(`<dt>${name}</dt>`)]).toEqual([name, true]);
     }
-    expect(document).toContain("k1.example · seq 8");
+    // No read is priced, so a seat on an entry's revenue is a seat on nothing
+    // and the page publishes no row for one.
+    expect(document).not.toContain("read_share_slots");
+    expect(document).not.toContain("k1.example · seq 8");
   });
 
   it("shows every decision, its operator's trust and its position in the log", () => {
@@ -1551,139 +1554,91 @@ describe("the entry page's disputes, reports, revalidations and stakes", () => {
     expect(document).toContain(`<span class="dim">not yet drawn</span>`);
   });
 
-  it("lists the stakes, and never prices what the log left unpriced", () => {
-    expect(document).toContain(">Stakes</h2>");
-    expect(document).toContain("dispute_stake");
-    expect(document).toContain("dispute_reward");
-    expect(document).toContain("10 standing");
-    expect(document).toContain(`<span class="dim">unpriced</span>`);
-    expect(document).toContain("<td class=\"dim\">41</td>");
-    expect(document).toContain("<td class=\"dim\">42</td>");
-    // A reward the ledger step has priced shows the price, in its own unit.
-    expect(document).toContain("1250 micros");
-    expect(document).toContain("<td class=\"dim\">43</td>");
-    // The sentence below the table spells no number of its own.
+  it("shows one contribution row per act, in standing and never in money", () => {
+    // Decision D-127: the read shares and the stakes were two panels of money
+    // and are one panel of contribution. Every amount is a STANDING_* constant
+    // applied to an act the sealed record already carries.
+    expect(document).toContain(">Contribution</h2>");
+    expect(document).toContain("standing, the only currency here");
+    // The submitter, once the entry has derived verified.
+    expect(document).toContain("1F916:author");
+    expect(document).toContain("submitted · verified");
     expect(document).toContain(
-      "micro-USD and is what the upheld dispute clawed back from the entry",
+      `+${POLICY.STANDING_SUBMISSION_VERIFIED} standing · STANDING_SUBMISSION_VERIFIED`,
+    );
+    // A volunteered approval that carried a passing measurement earns twice.
+    expect(document).toContain("approve · volunteered · measured");
+    expect(document).toContain(
+      `+${POLICY.STANDING_VALIDATION_VOLUNTEERED} standing · STANDING_VALIDATION_VOLUNTEERED`,
+    );
+    expect(document).toContain(
+      `+${POLICY.STANDING_VALIDATION_REPRODUCED} standing · STANDING_VALIDATION_REPRODUCED`,
+    );
+    // A rejection the beacon assigned earns the assigned amount, either way.
+    expect(document).toContain("reject · assigned");
+    expect(document).toContain(
+      `+${POLICY.STANDING_VALIDATION_ASSIGNED} standing · STANDING_VALIDATION_ASSIGNED`,
+    );
+    // The reconfirmer, and the challenger with the outcome of its challenge.
+    expect(document).toContain("reconfirmed");
+    expect(document).toContain("dispute · upheld");
+    expect(document).toContain(
+      `+${POLICY.STANDING_DISPUTE_UPHELD} standing · STANDING_DISPUTE_UPHELD`,
+    );
+    expect(document).toContain(
+      `${POLICY.DISPUTE_STAKE_STANDING} standing returned · DISPUTE_STAKE_STANDING`,
     );
   });
 
-  it("shows every money row the entry earned, and prices none of them", () => {
-    expect(document).toContain(">Read shares</h2>");
-    // The share, the half the stale day withheld, and the clawback against it.
-    expect(document).toContain("read_share");
-    expect(document).toContain("bounty_pool");
-    expect(document).toContain("clawback");
-    expect(document).toContain("375000 micros");
-    expect(document).toContain("-375000 micros");
-    expect(document).toContain("submitter");
-    expect(document).toContain('href="/operators/k1.example"');
-    // available_at, as the row carries it: the day plus the holdback.
-    expect(document).toContain("2026-10-08 00:00:00Z");
+  it("names no money anywhere on the entry page", () => {
+    for (const word of [
+      "micros",
+      "micro-USD",
+      "Read shares",
+      "read_share",
+      "bounty",
+      "clawback",
+      "payout",
+      "unpriced",
+    ]) {
+      expect([word, document.includes(word)]).toEqual([word, false]);
+    }
   });
 
-  it("names each read share's rate from the row's own ref (D-087)", () => {
-    // Section 9: the split is published per evidence tier, so an amount alone
-    // no longer says why it is that amount. The page reads the rate back out of
-    // ref — never recomputing it — so a row says what it was actually priced at.
-    // Five rows, one per case the rule has: the submitter of an observed entry,
-    // which takes its tier's rate; a slot holder that measured, which earns the
-    // observed validator rate; one beside it that did not, which takes the
-    // stated rate on the same observed entry; a stated entry's holder; and a row
-    // written before the tier was in ref at all.
-    const base = entryShares[0]!;
-    const priced = renderEntry(ctx, {
+  it("burns every signer of an overturned entry, beside what its act earned", () => {
+    const overturned = renderEntry(ctx, {
       ...entryData,
-      readShares: [
-        {
-          ...base,
-          id: "read_share:60:observed:submitter",
-          role: "submitter",
-          amount: 100_000,
-          ref: {
-            price_micros_per_read: 500,
-            share_percent: 20,
-            stale: false,
-            tier: "observed",
-          },
-        },
-        {
-          ...base,
-          id: "read_share:60:observed:validator:measured",
-          role: "validator",
-          amount: 35_000,
-          ref: {
-            price_micros_per_read: 500,
-            share_percent: 7,
-            stale: false,
-            tier: "observed",
-            measured: true,
-          },
-        },
-        {
-          ...base,
-          id: "read_share:60:observed:validator:unmeasured",
-          role: "validator",
-          amount: 25_000,
-          ref: {
-            price_micros_per_read: 500,
-            share_percent: 5,
-            stale: false,
-            tier: "observed",
-            measured: false,
-          },
-        },
-        {
-          ...base,
-          id: "read_share:60:stated:validator",
-          role: "validator",
-          amount: 25_000,
-          ref: {
-            price_micros_per_read: 500,
-            share_percent: 5,
-            stale: false,
-            tier: "stated",
-            measured: false,
-          },
-        },
-        {
-          ...base,
-          id: "read_share:10:legacy:submitter",
-          role: "submitter",
-          amount: 60_000,
-          ref: { price_micros_per_read: 500, share_percent: 12, stale: false },
-        },
-      ],
+      entry: { ...entryRecord, status: "overturned" },
     });
-    expect(priced).toContain("<th>rate</th>");
-    // The submitter of an observed entry: its tier's rate, and no measured note,
-    // because measuring is what a slot holder does and not what it does.
-    expect(priced).toContain(
-      '<td class="dim">20 percent · observed rate</td>',
+    expect(overturned).toContain(
+      `-${POLICY.STANDING_OVERTURNED_SIGNER} standing · STANDING_OVERTURNED_SIGNER`,
     );
-    // The holder that measured, and the one beside it that did not: the same
-    // entry, the same tier, two rates.
-    expect(priced).toContain(
-      '<td class="dim">7 percent · observed rate · measured</td>',
-    );
-    expect(priced).toContain('<td class="dim">5 percent · stated rate</td>');
-    // A row written before D-087 carries no tier, so it names its percent alone
-    // rather than being labeled with a tier nobody priced it under.
-    expect(priced).toContain('<td class="dim">12 percent</td>');
-    expect(priced).not.toContain('12 percent · ');
-    // The rule itself is on the page beside the column, in words.
-    expect(priced).toContain("says measured when that holder");
-    expect(priced).not.toContain("<script");
-    expect(priced).not.toContain(" style=");
   });
 
-  it("says no read has been priced rather than showing an empty table", () => {
-    const unread = renderEntry(ctx, { ...entryData, readShares: [] });
-    expect(unread).toContain("No read of this entry has been priced.");
-    expect(unread).not.toContain("<th>available at</th>");
-    // The panel is still a page a browser can render on its own.
-    expect(unread).not.toContain("<script");
-    expect(unread).not.toContain(" style=");
+  it("holds an open dispute's stake rather than burning it", () => {
+    const open = renderEntry(ctx, {
+      ...entryData,
+      entry: {
+        ...entryRecord,
+        disputes: [
+          {
+            id: CORRECTION_ID,
+            challenger: "1F916:k4",
+            operator: "k4.example",
+            citation: null,
+            snapshot_hash: null,
+            outcome: "open",
+            reason: null,
+            filed_at: "2026-09-10T09:00:00.000Z",
+            resolved_at: null,
+          },
+        ],
+      },
+    });
+    expect(open).toContain("dispute · open");
+    expect(open).toContain(
+      `${POLICY.DISPUTE_STAKE_STANDING} standing staked and held · DISPUTE_STAKE_STANDING`,
+    );
   });
 
   it("links the entry this one was filed against, both ways", () => {
@@ -1705,7 +1660,9 @@ describe("the entry page's disputes, reports, revalidations and stakes", () => {
     expect(quiet).toContain("No dispute has been filed.");
     expect(quiet).toContain("No failure report has been filed.");
     expect(quiet).toContain("No revalidation has been requested.");
-    expect(quiet).toContain("No stake has been recorded.");
+    // The contribution panel is never empty on an entry that was submitted:
+    // somebody signed the core, and that is an act.
+    expect(quiet).toContain(">Contribution</h2>");
     expect(quiet).not.toContain("<dt>dispute of</dt>");
   });
 });
@@ -2041,7 +1998,7 @@ describe("the operator pages", () => {
    * that make that true: the number, the position it was computed at, and the
    * two ways to check it.
    */
-  it("shows the stored standing, its position, and how to recompute it", () => {
+  it("shows the stored standing, its position, the counts, and how to recompute it", () => {
     const one = renderOperator(ctx, {
       cosigners: [],
       row: operatorRow,
@@ -2050,78 +2007,48 @@ describe("the operator pages", () => {
       attestation: null,
       namedBy: null,
       payoutStatus: null,
-      validations: [],
+      validations: [
+        {
+          entryId: ENTRY_ID,
+          decision: "approve",
+          seq: 12,
+          signed_at: "2026-09-08T12:00:00.000Z",
+        },
+        {
+          entryId: OTHER_ID,
+          decision: "reject",
+          seq: 13,
+          signed_at: "2026-09-08T13:00:00.000Z",
+        },
+      ],
       ledger: operatorLedger,
       payouts: operatorPayouts,
       balance: operatorBalance,
       attestations: NO_ATTESTATIONS,
     });
-    expect(one).toContain("<h2>Standing</h2>");
+    expect(one).toContain("<h2>Contribution</h2>");
     expect(one).toContain("<dd>14</dd>");
     expect(one).toContain("<dd>position 61</dd>");
-    expect(one).toContain("recomputable by anyone");
+    expect(one).toContain("standing, recomputable by anyone");
     expect(one).toContain("GET /operators/k1.example/standing");
-    expect(one).toContain(
-      `npm run standing -- ${ctx.origin} k1.example`,
-    );
-  });
-
-  it("says in words that no standing has been computed rather than showing a zero", () => {
-    expect(quiet).toContain(
-      "No standing has been computed for this operator yet.",
-    );
-    expect(quiet).toContain("That is not a\n          standing of zero");
-    // The command is still there: the endpoint computes it on demand, so an
-    // operator with no cached number is not an operator with nothing to check.
-    expect(quiet).toContain("npm run standing --");
-  });
-
-  it("shows the ledger balance in micro-USD with a dollar rendering beside it", () => {
-    const one = renderOperator(ctx, {
-      cosigners: [],
-      row: operatorRow,
-      agents: [],
-      domains: OPERATOR_DOMAINS,
-      attestation: null,
-      namedBy: null,
-      payoutStatus: null,
-      validations: [],
-      ledger: operatorLedger,
-      payouts: operatorPayouts,
-      balance: operatorBalance,
-      attestations: NO_ATTESTATIONS,
-    });
-    // The balance is the one `ledgerBalance` computed at the fixture's clock, so
-    // the page is checked against the kernel and never against a number typed
-    // into a test: one share held, one released and paid.
-    expect(operatorBalance).toEqual({
-      accrued: 1_000_000,
-      held: 750_000,
-      released: 250_000,
-      clawed_back: 0,
-      paid: 250_000,
-      carried_forward: 0,
-    });
-    expect(one).toContain("<h2>Ledger</h2>");
-    expect(one).toContain("micro-USD, a millionth of a dollar");
+    expect(one).toContain(`npm run standing -- ${ctx.origin} k1.example`);
+    // The counts under it are the stored readings the sweep folded and the
+    // decisions the page already lists: nothing here opens a statement.
     for (const name of [
-      "accrued",
-      "held",
-      "released",
-      "clawed_back",
-      "paid",
-      "carried_forward",
+      "decisions",
+      "approved",
+      "rejected",
+      "attestations scored",
+      "co-signers",
+      "overturned",
     ]) {
       expect(one, `${name} has no field`).toContain(
         `<span class="field-name">${name}</span>`,
       );
     }
-    expect(one).toContain("1000000");
-    expect(one).toContain("$1.000000");
-    expect(one).toContain("$0.750000");
   });
 
-  it("shows one ledger row per stored row, and marks a row a payout covered", () => {
+  it("shows no money panel and no amount in any currency (D-127)", () => {
     const one = renderOperator(ctx, {
       cosigners: [],
       row: operatorRow,
@@ -2136,19 +2063,22 @@ describe("the operator pages", () => {
       balance: operatorBalance,
       attestations: NO_ATTESTATIONS,
     });
-    expect(one).toContain("<th>available_at</th>");
-    expect(one).toContain("<td>read_share</td>");
-    expect(one).toContain("<td>payout</td>");
-    expect(one).toContain(`<a href="/entries/${ENTRY_ID}">`);
-    expect(one).toContain("2026-10-08 00:00:00Z");
-    // The paid column is a fact off the payout itself: it names the row ids it
-    // covered, so the held share is unpaid and the released one is paid.
-    expect(one).toContain(`<td class="accent">\n                      paid\n`);
+    for (const word of [
+      "<h2>Ledger</h2>",
+      "micro-USD",
+      "micros",
+      "$1.000000",
+      "read_share",
+      "clawed_back",
+      "carried_forward",
+    ]) {
+      expect([word, one.includes(word)]).toEqual([word, false]);
+    }
   });
 
-  it("says in words when nothing has been recorded against an operator", () => {
+  it("says in words when standing has never been folded for an operator", () => {
     expect(quiet).toContain(
-      "Nothing has been recorded against this operator: no read share, no",
+      "No standing has been computed for this operator yet.",
     );
   });
 });
@@ -2473,10 +2403,16 @@ describe("an entry whose content has not been released", () => {
     expect(page).toContain(hash);
   });
 
-  it("says when it opens, and where a key is bought", () => {
-    expect(page).toContain(`Released on ${RELEASE_DAY}.`);
-    expect(page).toContain(`href="/api#keys"`);
-    expect(page).toContain("Read it now with");
+  it("says the content was not served, and names no key and no window", () => {
+    // Decision D-127: the withheld view stays in the code for a fork that
+    // publishes a window of its own, and the window sentences are gone with the
+    // money — there is no key to buy and nothing to wait for on this log.
+    expect(page).toContain(
+      "The content of this entry is not served to this reader.",
+    );
+    expect(page).toContain(`It is served from ${RELEASE_DAY}.`);
+    expect(page).not.toContain(`href="/api#keys"`);
+    expect(page).not.toContain("Read it now with");
   });
 
   it("reads every decision's reason as withheld until release", () => {
@@ -2501,15 +2437,15 @@ describe("an entry whose content has not been released", () => {
     expect(page).toContain("npm run verify -- ./out/entry.json ./out/log.json");
   });
 
-  it("names the rule rather than a date when nothing seals it yet", () => {
+  it("names no date at all when nothing seals it yet", () => {
     const unsealed = renderEntry(ctx, {
       ...withheldData,
       withheld: { releaseDate: null },
     });
     expect(unsealed).toContain(
-      `Released ${RELEASE_WINDOW_DAYS} days after the seal that covers`,
+      "The content of this entry is not served to this reader.",
     );
-    expect(unsealed).not.toContain("Released on");
+    expect(unsealed).not.toContain("It is served from");
   });
 
   it("is the whole entry again for a reader the window is done with", () => {
@@ -2521,7 +2457,7 @@ describe("an entry whose content has not been released", () => {
     expect(whole).toContain("https://kestrel.example/transcript");
     expect(whole).toContain(escapeHtml("the source says otherwise"));
     expect(whole).not.toContain("withheld until release");
-    expect(whole).not.toContain("Released on");
+    expect(whole).not.toContain("is not served to this reader");
     for (const key of CORE_KEYS) {
       expect([key, whole.includes(`<dt>${key}</dt>`)]).toEqual([key, true]);
     }
@@ -2541,7 +2477,7 @@ describe("an entry whose content has not been released", () => {
     withheld: { releaseDate: RELEASE_DATE },
   };
 
-  it("shows released <date> where the listing's claim would be", () => {
+  it("shows the content-not-served cell where the listing's claim would be", () => {
     const listing = renderEntries(ctx, {
       filter: {
         category: null,
@@ -2555,7 +2491,7 @@ describe("an entry whose content has not been released", () => {
       total: 1,
       nextBefore: null,
     });
-    expect(listing).toContain(`released ${RELEASE_DAY}`);
+    expect(listing).toContain(`content served from ${RELEASE_DAY}`);
     expect(listing).not.toContain(escapeHtml(row.claim));
     // Subject, category, status, tier and position are proof and stay.
     expect(listing).toContain(escapeHtml(row.subject));
@@ -2564,7 +2500,7 @@ describe("an entry whose content has not been released", () => {
     expect(listing).toContain(`<a href="/entries/${ENTRY_ID}">12</a>`);
   });
 
-  it("shows released <date> on the home page's latest rows too", () => {
+  it("shows the same cell on the home page's latest rows too", () => {
     const home = renderHome(ctx, {
       domain: null,
       counters: {
@@ -2578,14 +2514,14 @@ describe("an entry whose content has not been released", () => {
       },
       latest: [withheldRow],
     });
-    expect(home).toContain(`released ${RELEASE_DAY}`);
+    expect(home).toContain(`content served from ${RELEASE_DAY}`);
     expect(home).not.toContain(escapeHtml(row.claim));
     expect(home).toContain(escapeHtml(row.subject));
     // The counters are untouched: the window holds back content, never a count.
     expect(home).toContain(`<div class="counter-value">1</div>`);
   });
 
-  it("says released after sealing on a row nothing covers yet", () => {
+  it("names no date on a row nothing covers yet", () => {
     const listing = renderEntries(ctx, {
       filter: {
         category: null,
@@ -2599,7 +2535,7 @@ describe("an entry whose content has not been released", () => {
       total: 1,
       nextBefore: null,
     });
-    expect(listing).toContain("released after sealing");
+    expect(listing).toContain("content not served to this reader");
     expect(listing).toContain("unsealed");
   });
 });

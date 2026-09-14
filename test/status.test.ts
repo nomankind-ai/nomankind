@@ -25,6 +25,7 @@ import {
   WITNESSES_REQUIRED,
 } from "../src/policy.js";
 import {
+  EXERCISED_COUNT,
   STAGE_COUNT,
   exercisedStages,
   stageStates,
@@ -72,7 +73,6 @@ function empty(): StatusInput {
   return {
     environment: "local",
     witness_kind: "mock",
-    payout_kind: "mock",
     steps: [],
     head_seq: null,
     seal: null,
@@ -89,14 +89,12 @@ function empty(): StatusInput {
     standing_position: null,
     attestations: { due: 0, total: 0 },
     mirror: { kind: "unavailable", newest: null },
-    metering: { kind: "unavailable", reported_days: 0, owed: 0 },
     alerts: { endpoints: 0, cursor: -1, due: 0, failed: 0 },
     exercised: {
       submission: null,
       registration: null,
       read_receipt: null,
       sync_receipt: null,
-      payout: null,
     },
   };
 }
@@ -120,8 +118,8 @@ function swept(over: Partial<StatusInput> = {}): StatusInput {
   return { ...empty(), steps: [step("sweep")], ...over };
 }
 
-describe("the sixteen stages", () => {
-  it("names them in the pipeline's order and answers all sixteen", () => {
+describe("the fifteen stages", () => {
+  it("names them in the pipeline's order and answers all fifteen", () => {
     expect(stageStates(empty(), NOW).map((one) => one.stage)).toEqual([
       "sweep timer",
       "pool snapshot",
@@ -137,14 +135,13 @@ describe("the sixteen stages", () => {
       "standing",
       "attestations",
       "mirror export",
-      "usage metering",
       "change alerts",
     ]);
     expect(stageStates(empty(), NOW)).toHaveLength(STAGE_COUNT);
   });
 
   it("says each rule in the page's words, with the numbers from policy", () => {
-    // The sixteen sentences the mockup approved, pinned: the wording is the page
+    // The fifteen sentences the mockup approved, pinned: the wording is the page
     // and changing it is a design change. Two of them say a number, and both
     // come from src/policy.ts rather than from a digit typed here.
     const rules = [
@@ -158,11 +155,10 @@ describe("the sixteen stages", () => {
       `every event re-hashed and linked, a page a run within ${STATUS_ATTENTION_AFTER_INTERVALS} × SWEEP_INTERVAL_MINUTES`,
       "the newest seal countersigned by WITNESSES_REQUIRED pinned witnesses",
       "yesterday's anchor exists; posted to OpenTimestamps on production",
-      "yesterday's reconciliation row present and equal",
+      "the ledger walked to the sealed head",
       "standing stored at the sealed head",
       "no open attestation past ATTESTATION_WINDOW_HOURS",
       "today's export committed to the mirror repository",
-      "every published paid read reported to the provider",
       "every sealed change delivered to every subscribed endpoint",
     ];
     // And the clause every one of them carries, because every one of them is
@@ -174,7 +170,7 @@ describe("the sixteen stages", () => {
     );
     expect(stageStates(empty(), NOW).map((one) => one.rule)).toEqual(said);
     // The rule is what the state was decided by and not a reading of it, so a
-    // world where things have happened says exactly the same sixteen.
+    // world where things have happened says exactly the same fifteen.
     expect(stageStates(swept(), NOW).map((one) => one.rule)).toEqual(said);
   });
 
@@ -742,36 +738,38 @@ describe("10. anchoring", () => {
 });
 
 describe("11. ledger", () => {
-  const count = { seq: 40, date: YESTERDAY, total: 12, at: minutesAgo(30) };
+  const SEALED = { seq: 3, last_seq: 30, sealed_at: minutesAgo(1), witnesses: 1 };
 
-  it("is idle before any read count", () => {
+  it("is idle before anything is sealed", () => {
     expect(stateOf(swept(), "ledger")).toBe("idle");
+    expect(rowOf(swept(), "ledger").last).toBe("nothing sealed");
   });
 
-  it("is ok when the published day reconciles", () => {
+  it("is ok once the step has walked to the sealed head", () => {
     const input = swept({
-      read_counts: { newest: count, earliest_receipt_day: "2026-09-01" },
-      reconciliation: { date: YESTERDAY, ok: true, at: minutesAgo(29) },
+      seal: SEALED,
+      steps: [step("sweep"), step("ledger", { detail: { through: 30 } })],
     });
     expect(stateOf(input, "ledger")).toBe("ok");
-    expect(rowOf(input, "ledger").last).toContain("agrees");
+    // The reading a reader can check, and the fact that matters under D-127:
+    // the position the fold reached, and that it priced nothing on the way.
+    expect(rowOf(input, "ledger").last).toContain("through 30");
+    expect(rowOf(input, "ledger").last).toContain("prices nothing");
   });
 
-  it("wants attention while the row is missing", () => {
+  it("wants attention while it is behind the sealed head", () => {
     const input = swept({
-      read_counts: { newest: count, earliest_receipt_day: "2026-09-01" },
-      reconciliation: null,
+      seal: SEALED,
+      steps: [step("sweep"), step("ledger", { detail: { through: 12 } })],
     });
     expect(stateOf(input, "ledger")).toBe("attention");
+    expect(rowOf(input, "ledger").last).toContain("head 30");
   });
 
-  it("is failing when the row is there and does not agree", () => {
-    const input = swept({
-      read_counts: { newest: count, earliest_receipt_day: "2026-09-01" },
-      reconciliation: { date: YESTERDAY, ok: false, at: minutesAgo(29) },
-    });
-    expect(stateOf(input, "ledger")).toBe("failing");
-    expect(rowOf(input, "ledger").last).toContain("disagrees");
+  it("wants attention where the step has never run at all", () => {
+    const input = swept({ seal: SEALED, steps: [step("sweep")] });
+    expect(stateOf(input, "ledger")).toBe("attention");
+    expect(rowOf(input, "ledger").last).toContain("never run");
   });
 });
 
@@ -828,66 +826,7 @@ describe("13. attestations", () => {
   });
 });
 
-describe("15. usage metering", () => {
-  it("is idle where there is no provider to meter through", () => {
-    const input = swept({
-      metering: { kind: "unavailable", reported_days: 0, owed: 0 },
-    });
-    expect(stateOf(input, "usage metering")).toBe("idle");
-    expect(rowOf(input, "usage metering").last).toBe("not configured");
-  });
-
-  it("is idle while no paid read has ever been published", () => {
-    const input = swept({
-      metering: { kind: "mock", reported_days: 0, owed: 0 },
-    });
-    expect(stateOf(input, "usage metering")).toBe("idle");
-    expect(rowOf(input, "usage metering").last).toBe("no paid read");
-  });
-
-  it("is ok when every published key-day has been reported", () => {
-    const input = swept({
-      metering: { kind: "mock", reported_days: 3, owed: 0 },
-      steps: [step("sweep"), step("metering")],
-    });
-    expect(stateOf(input, "usage metering")).toBe("ok");
-    expect(rowOf(input, "usage metering").last).toContain("3 key-days reported");
-  });
-
-  it("wants attention on a key-day the provider has not been told about", () => {
-    const input = swept({
-      metering: { kind: "mock", reported_days: 1, owed: 2 },
-      steps: [
-        step("sweep"),
-        step("metering", {
-          last_ok_at: null,
-          last_skip_reason: "metering_failed",
-          last_skip_at: NOW,
-        }),
-      ],
-    });
-    expect(stateOf(input, "usage metering")).toBe("attention");
-    expect(rowOf(input, "usage metering").last).toContain("2 key-days owed");
-    expect(rowOf(input, "usage metering").last).toContain("metering_failed");
-  });
-
-  it("is failing once the step has not got through since the bar", () => {
-    const input = swept({
-      metering: { kind: "mock", reported_days: 1, owed: 2 },
-      steps: [
-        step("sweep"),
-        step("metering", {
-          last_ok_at: minutesAgo(STATUS_FAILING_AFTER_MINUTES + 1),
-          last_skip_reason: "metering_failed",
-          last_skip_at: NOW,
-        }),
-      ],
-    });
-    expect(stateOf(input, "usage metering")).toBe("failing");
-  });
-});
-
-describe("16. change alerts", () => {
+describe("15. change alerts", () => {
   const SEALED = { seq: 3, last_seq: 30, sealed_at: NOW, witnesses: 2 };
 
   it("is idle while nobody has subscribed", () => {
@@ -951,8 +890,8 @@ describe("the four counters", () => {
       lastSweepAt: null,
       lastSweepAge: null,
       lastSweepTrigger: null,
-      stagesOk: 16,
-      stagesTotal: 16,
+      stagesOk: 15,
+      stagesTotal: 15,
       stagesFailing: 0,
       stagesAttention: 0,
       sealedHead: null,
@@ -967,7 +906,7 @@ describe("the four counters", () => {
   it("counts idle stages with the ok ones", () => {
     const input = swept();
     const counters = statusCounters(stageStates(input, NOW), input);
-    expect([counters.stagesOk, counters.stagesTotal]).toEqual([16, 16]);
+    expect([counters.stagesOk, counters.stagesTotal]).toEqual([15, 15]);
     expect(counters.lastSweepAge).toBe("0 min ago");
     expect(counters.lastSweepTrigger).toBe("alarm");
   });
@@ -987,10 +926,11 @@ describe("the four counters", () => {
     const counters = statusCounters(stageStates(input, NOW), input);
     // The sweep timer and the witnessing of a ninety-minute-old seal are both
     // past the failing threshold; sealing has one event waiting past the seal
-    // interval and not past the failing one.
+    // interval and not past the failing one, and the ledger has a seal to walk
+    // to and no run of its own to show for it.
     expect(counters.stagesFailing).toBe(2);
-    expect(counters.stagesAttention).toBe(1);
-    expect(counters.stagesOk).toBe(13);
+    expect(counters.stagesAttention).toBe(2);
+    expect(counters.stagesOk).toBe(11);
     expect([counters.sealedHead, counters.newestSealSeq]).toEqual([30, 3]);
     expect([counters.seals, counters.witnessedSeals]).toEqual([4, 3]);
     expect(counters.unsealedEvents).toBe(1);
@@ -1005,27 +945,25 @@ describe("the four counters", () => {
 });
 
 describe("the exercised rows", () => {
-  it("names five doors and says never for each on an untouched log", () => {
+  it("names four doors and says never for each on an untouched log", () => {
     const rows = exercisedStages(empty());
+    // Four, not five: the payouts row is gone with the payout step (D-127), so
+    // the page no longer shows a door nobody can come through.
     expect(rows.map((row) => row.stage)).toEqual([
       "submit and archive",
       "registration, DNS check",
       "read receipts",
       "sync receipts",
-      "payouts",
     ]);
-    expect(rows.slice(0, 4).map((row) => row.last)).toEqual([
+    // The constant the API page prints, pinned to the list it counts, exactly
+    // as STAGE_COUNT is pinned to the stages above.
+    expect(rows).toHaveLength(EXERCISED_COUNT);
+    expect(rows.map((row) => row.last)).toEqual([
       "never",
       "never",
       "never",
       "never",
     ]);
-    // The payout row says why nobody has been paid rather than only that nobody
-    // has: an operator under the floor carries forward, which is the rule
-    // working and not a payout that failed.
-    expect(rows[4]!.last).toBe(
-      "never · mock adapter · every operator below PAYOUT_MINIMUM_MICROS",
-    );
   });
 
   it("says who last came through each door, and links what they left", () => {
@@ -1036,7 +974,6 @@ describe("the exercised rows", () => {
         registration: { at: minutesAgo(400), operator: "lattice.example" },
         read_receipt: { counter: 91, created_at: minutesAgo(2) },
         sync_receipt: { counter: 90, created_at: minutesAgo(9) },
-        payout: { at: minutesAgo(60), operator: "lattice.example", amount: 5_000_000 },
       },
     });
     expect(rows[0]!.last).toBe(
@@ -1051,7 +988,7 @@ describe("the exercised rows", () => {
     expect(rows[1]!.last).toBe("05:20:00 UTC · lattice.example");
     expect(rows[2]!.last).toBe("11:58:00 UTC · receipt 91");
     expect(rows[3]!.last).toBe("11:51:00 UTC · receipt 90");
-    expect(rows[4]!.last).toBe("11:00:00 UTC · lattice.example · 5000000 micros");
+    expect(rows[4]).toBeUndefined();
   });
 });
 

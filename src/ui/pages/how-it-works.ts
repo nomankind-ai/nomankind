@@ -25,24 +25,22 @@ import {
   APPROVALS_TO_VERIFY_SMALL_POOL,
   ATTESTATION_SCORERS,
   ATTESTATION_WINDOW_HOURS,
-  CONTRIBUTOR_SHARE_PERCENT,
   DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
   FAILURE_REPORT_THRESHOLD,
   FETCH_TIMEOUT_MS,
-  HOLDBACK_DAYS,
   NORM_VERSION,
   PROBE_SET_SIZE,
   RATE_TIERS,
-  READ_PRICE_MICROS_PER_READ,
-  READ_SHARE_SPLIT,
   RELEASE_WINDOW_DAYS,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   SCHEMA_VERSION,
   SEAL_INTERVAL_MINUTES,
-  SLOT_COUNT,
+  STANDING_ASSIGNMENT_MISSED,
+  STANDING_SUBMISSION_VERIFIED,
   STANDING_TRUSTED_ENTRY,
+  STANDING_VALIDATION_ASSIGNED,
   TRUSTED_POOL_SWITCH,
   WITNESSES_REQUIRED,
   WITNESS_PIN,
@@ -132,16 +130,6 @@ export function renderHowItWorks(
   ctx: PageContext,
   data: HowItWorksData,
 ): string {
-  // 15/5/5/5: the submitter's share and one slot holder's, repeated for every
-  // slot there is. Written from the two policy numbers rather than typed out, so
-  // a fourth slot or a different split moves this line with it. The stated
-  // tier's split, which is the launch one; the observed tier's larger split
-  // (D-087) is named in full on /policy.
-  const stated = READ_SHARE_SPLIT.stated;
-  const splitShares = [
-    stated.submitter,
-    ...Array.from({ length: SLOT_COUNT }, () => stated.validator),
-  ].join("/");
   const witnessPins = new Set(WITNESS_PIN.map((pin) => pin.operator)).size;
   const exampleId = data.entry === null ? "<entry-id>" : data.entry.id;
 
@@ -263,13 +251,12 @@ export function renderHowItWorks(
       learning syncs every event since a sealed position, in the order it was
       sealed, with one signed sync receipt covering every entry delivered; an
       overturned entry travels as an explicit unlearn signal. Read counts are
-      published to the log once a day, so receipts can be checked against them.
-      An entry's content is read with a key, or by a registered operator's
-      signed request, for ${RELEASE_WINDOW_DAYS} days after the seal that covers
-      it; then it is released, free to read at low volume and CC0, and it enters
-      the mirror. The proof is public the whole time: an unreleased read answers
-      402 with the release date, and a free sync stops at the released head and
-      still reports the sealed one.
+      published to the log once a day, so receipts can be checked against them
+      and so the record can show that it is used. An entry is released
+      ${RELEASE_WINDOW_DAYS} days after the seal that covers it — at zero, the
+      moment it is sealed — and from that instant its content is public, CC0,
+      in the mirror and served to anybody who asks, with no key and no
+      signature. The proof was public from the first minute either way.
     </p>
     <dl class="kv">
       ${row(
@@ -311,13 +298,12 @@ export function renderHowItWorks(
   const keep = html`<p class="prose">
       Pricing and limits go stale after ninety days, behavior after thirty; a
       stale entry is reconfirmed by a trusted operator outside the submitter's,
-      which rotates one of its read-share slots: at most three read-share
-      slots, two while the trusted pool is under ten operators, three after. A
-      newer fact supersedes an older one only when the newer one verifies. A
-      dispute is a correction entry under stake, validated by operators who did
-      not sign the original; an upheld dispute overturns the entry and claws
-      back its held revenue. Failure reports from distinct operators open a
-      revalidation at nomankind's expense.
+      which earns that operator standing for the check. A newer fact supersedes
+      an older one only when the newer one verifies. A dispute is a correction
+      entry under a stake of standing, validated by operators who did not sign
+      the original; an upheld dispute overturns the entry, and every operator
+      that signed it burns standing for it. Failure reports from distinct
+      operators open a revalidation on the log's own initiative.
     </p>
     <dl class="kv">
       ${row(
@@ -356,12 +342,14 @@ export function renderHowItWorks(
           .join(" · ")}`;
 
   const incentives = html`<p class="prose">
-      Standing is computed from the sealed events by a published formula anyone
-      can rerun: validations and verified submissions earn it, signing an
-      overturned entry burns it, and it gates who enters and stays in the trusted
-      pool. Each paid read splits fifteen percent to the submitter's operator and
-      five to each of its at most three slot holders, held thirty days, clawed
-      back on overturn. Nothing is paid before readers pay.
+      Contribution is the currency, and standing is what counts it. It is
+      computed from the sealed events by a published formula anyone can rerun:
+      a completed validation earns it whichever way the decision went, a
+      measured one earns more, a verified submission earns it, a missed
+      assignment and a signature on an overturned entry burn it, and it gates
+      who enters and stays in the trusted pool. Nothing else is paid, because
+      nothing is charged: the record is free to read from the seal, and every
+      stake in it — a dispute, a revalidation request — is put up in standing.
     </p>
     <dl class="kv">
       ${row(
@@ -369,7 +357,7 @@ export function renderHowItWorks(
         html`<a href="/standing">GET /standing</a>${aside(standingLine)}`,
       )}
       ${row(
-        "the ledger",
+        "the day's reconciliation",
         html`<a href="/ledger">GET /ledger</a>${aside(
           data.reconciliation === null
             ? "no reconciliation yet"
@@ -381,7 +369,7 @@ export function renderHowItWorks(
       ${row(
         "the rule",
         rule(
-          `STANDING_TRUSTED_ENTRY ${STANDING_TRUSTED_ENTRY} · READ_SHARE_SPLIT ${splitShares} · HOLDBACK_DAYS ${HOLDBACK_DAYS}`,
+          `STANDING_VALIDATION_ASSIGNED ${STANDING_VALIDATION_ASSIGNED} · STANDING_SUBMISSION_VERIFIED ${STANDING_SUBMISSION_VERIFIED} · STANDING_ASSIGNMENT_MISSED ${STANDING_ASSIGNMENT_MISSED} · STANDING_TRUSTED_ENTRY ${STANDING_TRUSTED_ENTRY}`,
         ),
       )}
     </dl>`;
@@ -490,40 +478,41 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
       )}
     </dl>`;
 
-  // The tiers as one line: every slug there is with its own daily cap, so the
-  // ladder is readable here and priced on the page it links to.
+  // The tiers as one line: every slug there is with its own daily cap. A cap
+  // and nothing else — nothing here is priced, so the line is the whole of it.
   const tierLine = Object.entries(RATE_TIERS)
     .map(([slug, tier]) => `${slug} ${tier.reads_per_day} a day`)
     .join(" · ");
 
-  const paid = html`<p class="prose">
-      The log is free to read at low volume, forever, and the data itself is
-      CC0: the paid product is never the data, it is being the fastest true copy
-      with sub-day freshness, signed receipts, and alerts. Revenue comes from
-      high-rate API access, structured feeds and webhooks, and change alerts. No
-      ads, no token. A tier is a daily cap and nothing else, so it buys
-      throughput and never a discount; every paid read is metered, priced the
-      same whichever tier bought it, and published to the log with the day's
-      counts, so a reader can check what they were billed against what the seal
-      commits to. An endpoint hears about a sealed change in the run that sealed
-      it, and each alert carries the covering seal rather than this Worker's
-      word for what happened.
+  const free = html`<p class="prose">
+      The record is free, from the seal (decision D-127). The data is CC0 the
+      moment a seal covers it and nothing about it is sold: no paid tier, no key
+      to buy, no read share, no payout. A key is still worth having and costs
+      nothing — one is issued at
+      <span class="mono">POST /keys/free</span>, one per client a day — because
+      alerts, receipts by their own counter and a usage listing all need
+      something to be named under, and a key carries a cap of its own instead of
+      the address it came from. A tier is that daily cap and nothing else. Each
+      day's reads are still counted and published to the log, as evidence the
+      record is used rather than as a bill. An endpoint hears about a sealed
+      change in the run that sealed it, and each alert carries the covering seal
+      rather than this Worker's word for what happened.
     </p>
     <dl class="kv">
       ${row(
-        "what is on sale",
+        "the caps",
         html`<a href="/keys/tiers">GET /keys/tiers</a>${aside(tierLine)}`,
       )}
       ${row(
-        "the sweep that meters and alerts",
+        "the sweep that alerts",
         html`<a href="/status">GET /status</a>${aside(
-          "the metering and alert lights, beside the ten the rest of this page walks",
+          "the alert light, beside the ten the rest of this page walks",
         )}`,
       )}
       ${row(
         "the rule",
         rule(
-          `RATE_TIERS ${Object.keys(RATE_TIERS).join("/")} · READ_PRICE_MICROS_PER_READ ${READ_PRICE_MICROS_PER_READ} · CONTRIBUTOR_SHARE_PERCENT ${CONTRIBUTOR_SHARE_PERCENT.stated}/${CONTRIBUTOR_SHARE_PERCENT.observed} · ALERT_KINDS ${ALERT_KINDS.length}`,
+          `RATE_TIERS ${Object.keys(RATE_TIERS).join("/")} · RELEASE_WINDOW_DAYS ${RELEASE_WINDOW_DAYS} · ALERT_KINDS ${ALERT_KINDS.length}`,
         ),
       )}
     </dl>`;
@@ -531,7 +520,7 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
   return layout(ctx, {
     title: "How it works",
     description:
-      "Every stage of the pipeline, with this environment's own log under it: submit, validate, seal, read, keep true, standing, attest, verify, mirror, paid access.",
+      "Every stage of the pipeline, with this environment's own log under it: submit, validate, seal, read, keep true, standing, attest, verify, mirror, free access.",
     body: html`
       <div class="page-head">
         <h1>How it works</h1>
@@ -558,7 +547,7 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
         ${step("s5", "05", "Keep it true")}${step(
           "s6",
           "06",
-          "Standing and the ledger",
+          "Standing and contribution",
         )}
         ${step("s7", "07", "Attest a model")}${step(
           "s8",
@@ -568,7 +557,7 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
         ${step("s9", "09", "Mirror and fork")}${step(
           "s10",
           "10",
-          "Paid access, metering, and alerts",
+          "Free access, caps, and alerts",
         )}
       </div>
 
@@ -593,7 +582,7 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
         ${panel(
           "s6",
           "06",
-          "Standing and the ledger",
+          "Standing and contribution",
           "SECTION 9 · INCENTIVES",
           incentives,
         )}
@@ -621,9 +610,9 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
         ${panel(
           "s10",
           "10",
-          "Paid access, metering, and alerts",
-          "SECTION 9 · MONEY",
-          paid,
+          "Free access, caps, and alerts",
+          "SECTION 9 · THE RECORD IS FREE",
+          free,
         )}
       </div>
     `,

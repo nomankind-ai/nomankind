@@ -51,7 +51,25 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+/**
+ * A window this file publishes for itself: thirty days, which is what the
+ * policy module published before D-127 zeroed it.
+ *
+ * D-127 made the record free — RELEASE_WINDOW_DAYS is 0 and everything is
+ * released the instant it is sealed — and left the window's code exactly as it
+ * was, dormant behind that zero. The withheld paths this file covers are part
+ * of that code, so the regression cover stays by publishing a window here
+ * instead: every rule below the mock is the kernel's own, read from the same
+ * one place, and only the number is this file's.
+ */
+vi.mock("../src/policy.js", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    "../src/policy.js",
+  );
+  return { ...actual, RELEASE_WINDOW_DAYS: 30 };
+});
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { MockMirrorAdapter } from "../src/adapters/mirror.js";
@@ -91,6 +109,7 @@ import {
   headSeq,
   latestAnchor,
   latestSeal,
+  setOperatorStanding,
   sweepSteps,
   recordAttestationAnswers,
   recordAttestationRequest,
@@ -214,8 +233,13 @@ let k1: Party;
 let k2: Party;
 let k3: Party;
 let k4: Party;
-/** A bare key with no operator behind it: the challenger. */
+/**
+ * The challenger, bound to an operator of its own: since D-127 a dispute is
+ * staked in standing and nothing else, so a filer with no operator covers
+ * nothing and the door refuses it.
+ */
 let challenger: TestAgent;
+const CHALLENGER_OPERATOR = "challenger.example";
 /** The operator that joins the fork after nomankind stopped. */
 let newcomer: Party;
 
@@ -617,6 +641,7 @@ beforeAll(async () => {
   for (const party of [k1, k2, k3, k4, newcomer, maintainerParty]) {
     records[txtRecordName(party.operator)] = [party.agent.agentId];
   }
+  records[txtRecordName(CHALLENGER_OPERATOR)] = [challenger.agentId];
 
   originEnv = envFor(origin, sealingKey);
   forkEnv = envFor(fork, sealingKey);
@@ -636,6 +661,10 @@ beforeAll(async () => {
     await name(party);
   }
   await register(maintainerParty);
+  // Registered and never named: the challenger needs standing to stake a
+  // filing, and no place in the trusted pool to file one.
+  await register({ operator: CHALLENGER_OPERATOR, agent: challenger });
+  await setOperatorStanding(origin.db, CHALLENGER_OPERATOR, 1_000, 0);
 
   // One v0.7 entry through the real door, decided on by the two operators that
   // did not submit it.
@@ -659,12 +688,12 @@ beforeAll(async () => {
   await approve(k2, entryId, snapshotHash);
   await approve(k3, entryId, snapshotHash);
 
-  // And one dispute against it, by a bare key. Section 6: filing takes a stake
-  // and the challenge is a correction entry of its own, so the log carries a
+  // And one dispute against it. Section 6: filing takes a stake and the
+  // challenge is a correction entry of its own, so the log carries a
   // `dispute_filed`, a second submission and a stake — three shapes the replay
   // has to carry and the pages have to answer for.
   const correction = await submittedCore(challenger, {
-    author_operator: null,
+    author_operator: CHALLENGER_OPERATOR,
     subject: SUBJECT,
     category: "correction",
     claim: "example/kestrel-1 seat pricing is $44 per seat per month, not $40",
@@ -744,7 +773,9 @@ describe("the fork answers what nomankind answered", () => {
     // Two entries — the entry and the correction it is disputed by — one seal,
     // one anchor, five operators and the scored attestation.
     expect([summary.entries, summary.seals, summary.anchors]).toEqual([2, 1, 1]);
-    expect([summary.operators, summary.attestations]).toEqual([5, 1]);
+    // Six operators: the four that validate, the maintainer, and the one the
+    // challenger stakes its filing through.
+    expect([summary.operators, summary.attestations]).toEqual([6, 1]);
     expect(await headSeq(fork.db)).toBe(released.last_seq);
     // And the export's own newest seal, which is still inside its window, was
     // not replayed: a hash line has no payload to chain.

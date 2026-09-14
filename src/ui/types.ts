@@ -694,7 +694,7 @@ export interface StatusData {
   counters: Counter;
   /** Every stage, in the order the pipeline runs them. */
   stages: readonly Stage[];
-  /** The five stages that run only when someone asks. */
+  /** The stages that run only when someone asks. */
   exercised: readonly Exercised[];
 }
 

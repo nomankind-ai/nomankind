@@ -23,7 +23,6 @@ import {
   APPROVALS_TO_VERIFY_LARGE_POOL,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
-  SLOT_COUNT,
   DEFAULT_DOMAIN,
   stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
@@ -478,7 +477,7 @@ describe("M6 end to end: supersession and reconfirmation over one sealed log", (
     expect(trusted.size).toBe(TRUSTED_POOL_SWITCH);
     expect(trusted.has(SUBMITTER_OPERATOR)).toBe(false);
     expect(trusted.has(OUTSIDER_OPERATOR)).toBe(false);
-    expect(APPROVALS_TO_VERIFY_LARGE_POOL).toBe(SLOT_COUNT);
+    expect(APPROVALS_TO_VERIFY_LARGE_POOL).toBe(3);
   });
 
   it("refuses a superseder in another category and one naming a missing target", async () => {
@@ -598,28 +597,37 @@ describe("M6 end to end: supersession and reconfirmation over one sealed log", (
     await expectChainOk(events);
   });
 
-  it("reopens the window and rotates the oldest slot on the accepted reconfirmation", async () => {
+  it("reopens the window on the accepted reconfirmation, and rotates nothing", async () => {
     const { events, staleSeats, seated } = await finalStage();
     expect(countEvents(events, "reconfirmation", STALE_ID)).toBe(1);
-    expect(staleSeats).toHaveLength(SLOT_COUNT);
+    expect(staleSeats).toHaveLength(3);
 
     const derived = deriveEntry(events, STALE_ID, CLOCK);
     expect(derived.derived.status).toBe("verified");
     expect(derived.derived.stale).toBe(false);
     expect(derived.derived.last_confirmed).toBe(RECONFIRMED_DATE);
 
-    // The oldest holder is replaced, not added to: still SLOT_COUNT slots.
-    expect(derived.sidecar.read_share_slots).toEqual([
-      staleSeats[1],
-      staleSeats[2],
-      seated,
-    ]);
-    expect(derived.sidecar.read_share_slots).toHaveLength(SLOT_COUNT);
+    // The reconfirmation does the whole of its job — the window reopens and
+    // the entry is fresh again — and it seats nobody. D-127 retired the read
+    // share, so there is no slot for the reconfirmer to rotate into and none
+    // for the oldest approval to be pushed out of: the sidecar's list keeps
+    // its shape and stays empty, before this reconfirmation and after it.
+    expect(derived.sidecar.read_share_slots).toEqual([]);
     expect(
-      derived.sidecar.read_share_slots?.some(
-        (slot) => slot.operator === staleSeats[0]!.operator,
-      ),
-    ).toBe(false);
+      deriveEntry(
+        events.filter((event) => event.seq < seated.seq),
+        STALE_ID,
+        CLOCK,
+      ).sidecar.read_share_slots,
+    ).toEqual([]);
+    for (const seat of [...staleSeats, seated]) {
+      expect([
+        seat.operator,
+        derived.sidecar.read_share_slots?.some(
+          (slot) => slot.operator === seat.operator,
+        ),
+      ]).toEqual([seat.operator, false]);
+    }
   });
 
   it("verifies the chain over the final log", async () => {

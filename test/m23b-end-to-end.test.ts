@@ -60,7 +60,11 @@ import {
   sourceClassOf,
   sourceClassSatisfies,
 } from "../src/sources.js";
-import { getEntry, ledgerRowsForEntry } from "../src/storage/repository.js";
+import {
+  getEntry,
+  ledgerRowsForEntry,
+  setOperatorStanding,
+} from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
 import { runSweep } from "../src/worker/sweep.js";
@@ -135,6 +139,12 @@ let maintainer: TestAgent;
 let author: TestAgent;
 /** A second bare key, so a dispute is never a self-dispute. */
 let challenger: TestAgent;
+/**
+ * The operator the challenger stakes through. Since D-127 a dispute is staked
+ * in standing and nothing else, so a filer without an operator covers nothing;
+ * registered and never named, so the trusted pool here is still k1, k2 and k3.
+ */
+const CHALLENGER_OPERATOR = "challenger.example";
 let k1: Party;
 let k2: Party;
 let k3: Party;
@@ -405,6 +415,7 @@ beforeAll(async () => {
   for (const party of [k1, k2, k3, maintainerParty]) {
     records[txt(party.operator)] = [party.agent.agentId];
   }
+  records[txt(CHALLENGER_OPERATOR)] = [challenger.agentId];
 
   // Every citation the fetcher can answer. A URL that is not here cannot be
   // fetched at all, which is how a refusal is shown to have happened before the
@@ -437,6 +448,7 @@ beforeAll(async () => {
     await name(party);
   }
   await register(maintainerParty);
+  await register({ operator: CHALLENGER_OPERATOR, agent: challenger });
 
   // The official pricing entry: cited correctly, verified by two of the three.
   const officialCore = await submittedCore(author, {
@@ -496,6 +508,12 @@ beforeAll(async () => {
     anchor: new FakeAnchorAdapter(null),
     payout,
   });
+
+  // After the sweep, because the standing step recomputes every operator's
+  // column from the sealed log: the challenger has earned nothing and would
+  // fold back to zero, and what is under test here is the source gate rather
+  // than the standing one.
+  await setOperatorStanding(store.db, CHALLENGER_OPERATOR, 1_000, 0);
 }, 600_000);
 
 afterAll(async () => {
@@ -664,6 +682,7 @@ describe("a dispute's correction is gated on the entry it challenges", () => {
     after: string = "$44 per million tokens",
   ): Promise<Core> {
     return submittedCore(challenger, {
+      author_operator: CHALLENGER_OPERATOR,
       subject: SUBJECT,
       category: "correction",
       domain: DEFAULT_DOMAIN,

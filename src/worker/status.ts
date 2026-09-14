@@ -3,7 +3,7 @@
  *
  * Whitepaper Section 11, Deployment and status: nomankind publishes what it is
  * running and whether it is working. `GET /status` is the second half of that as
- * JSON — sixteen stages, the five doors nobody probes, four counters, and the two
+ * JSON — the stages, the doors nobody probes, four counters, and the two
  * thresholds the states were decided by, so a reader can check the arithmetic
  * without this Worker.
  *
@@ -25,8 +25,6 @@
  */
 
 import { mirrorKindFor } from "../adapters/mirror.js";
-import { paymentsAdapterFor } from "../adapters/stripe.js";
-import { PRODUCTION } from "../adapters/payout.js";
 import { witnessAdapterFor } from "../adapters/witness.js";
 import { utcDay } from "../anchor.js";
 import type { Core } from "../core.js";
@@ -53,7 +51,6 @@ import {
 import {
   countAttestations,
   countEntries,
-  countMeterReports,
   countOperators,
   countSeals,
   countSealsSealedOn,
@@ -70,7 +67,6 @@ import {
   latestSeal,
   ledgerCursor,
   newestUpgradedAnchor,
-  owedMeterReports,
   payoutRows,
   readCounters,
   reconciliationRows,
@@ -96,15 +92,6 @@ export interface StatusDeps {
 }
 
 const MILLISECONDS_PER_DAY = 86_400_000;
-
-/**
- * The metering step's cursor, by the name the step writes it under.
- *
- * Spelled here rather than imported from src/worker/sweep.ts, which imports the
- * whole sweep: the name is one string and the step owns its meaning, while this
- * module only asks the store how far that cursor has got.
- */
-const METERING_CURSOR = "metering";
 
 /**
  * The log's counts: the row the sweep folded, or the counts themselves when no
@@ -187,8 +174,6 @@ interface SweptNumbers {
   readonly due_attestations: number;
   readonly seals_yesterday: number;
   readonly earliest_receipt_day: string | null;
-  readonly meter_reported_days: number;
-  readonly meter_owed: number;
   readonly alert_endpoints: number;
   readonly alert_cursor: number;
   readonly alert_due: number;
@@ -227,8 +212,6 @@ function sweptNumbers(
     due_attestations: at("due_attestations"),
     seals_yesterday: at("seals_yesterday"),
     earliest_receipt_day: detailText(row.detail, "earliest_receipt_day"),
-    meter_reported_days: at("meter_reported_days"),
-    meter_owed: at("meter_owed"),
     alert_endpoints: at("alert_endpoints"),
     // The alert cursor is -1 before the step has read anything, which is not
     // the zero `at` would give: seq 0 is a real position.
@@ -252,7 +235,6 @@ async function countedNow(
   seal: { readonly last_seq: number } | null,
 ): Promise<SweptNumbers> {
   const head = await headSeq(db);
-  const cursor = (await ledgerCursor(db, METERING_CURSOR)) ?? -1;
   return {
     drafts: await countEntries(db, { status: "draft" }),
     head_seq: head ?? -1,
@@ -262,11 +244,6 @@ async function countedNow(
     ).length,
     seals_yesterday: await countSealsSealedOn(db, yesterdayOf(now)),
     earliest_receipt_day: await earliestReadReceiptDay(db),
-    meter_reported_days: await countMeterReports(db),
-    meter_owed:
-      seal === null
-        ? 0
-        : await owedMeterReports(db, cursor, seal.last_seq, LIST_PAGE_LIMIT),
     alert_endpoints: await countAlertEndpoints(db),
     alert_cursor: await alertCursor(db),
     alert_due: await countDueDeliveries(db, now),
@@ -365,10 +342,6 @@ export async function statusInput(
     // The track this environment actually runs, asked of the same function the
     // sweep asks, so the page cannot claim a registry the sweep is not on.
     witness_kind: witnessAdapterFor(env).kind,
-    // The payout adapter has no kind of its own to ask for, so this is the same
-    // branch `payoutAdapterFor` makes, in the same words the two adapters are
-    // named by (decision D-013 as amended, D-053).
-    payout_kind: env.ENVIRONMENT === PRODUCTION ? "unavailable" : "mock",
     steps,
     // Live, and beside the unsealed count on purpose. The sealing rule reads
     // the two together — "is there an event the newest seal does not cover, and
@@ -470,14 +443,6 @@ export async function statusInput(
               url: mirror.url,
             },
     },
-    // Usage metering (M24): the track this environment runs, asked of the same
-    // `paymentsAdapterFor` the sweep asks, and the two numbers the stage reads —
-    // what has been reported, and what the published log says is still owed.
-    metering: {
-      kind: paymentsAdapterFor(env).kind,
-      reported_days: swept.meter_reported_days,
-      owed: swept.meter_owed,
-    },
     // Change alerts (M24), through the four counts the alert step left behind.
     alerts: {
       endpoints: swept.alert_endpoints,
@@ -499,10 +464,6 @@ export async function statusInput(
           : { at: registeredEvent.at, operator: registered.operator },
       read_receipt: await latestReceipt(db, "read"),
       sync_receipt: await latestReceipt(db, "sync"),
-      payout:
-        paid === null || paid.operator === null
-          ? null
-          : { at: paid.at, operator: paid.operator, amount: paid.amount },
     },
   };
 }
@@ -512,7 +473,7 @@ export async function statusInput(
  *
  * The thresholds go out with the answer because a state nobody can recompute is
  * a state nobody can check: a reader holding this document and src/status.ts's
- * rules gets the same sixteen readings we did.
+ * rules gets the same readings we did.
  *
  * `as_of` is the last sweep run and never the request. The page is a reading of
  * a record, so it is dated by the record — an `as_of` of "now" would say the

@@ -1,39 +1,30 @@
 /**
- * M24 end to end: buying a key, claiming it once, and the door the provider
- * knocks on.
+ * The key doors end to end, under decision D-127: a key is free.
  *
- * Whitepaper Section 9, Money: "The log is free to read at low volume, forever.
- * Revenue comes from high-rate API access, structured feeds and webhooks,
- * change alerts." This drives the real router — miniflare's D1 with the real
- * migrations applied, the real key doors, the real webhook door — with the
- * clock injected and the payment provider mocked, because the one thing a test
- * of a paid loop must never do is reach a payment provider.
+ * "The record is free, no money anywhere." Nothing is bought, so the checkout,
+ * the claim, the portal and the provider's webhook answer 410 and touch no
+ * storage on the way; what replaces them is one door, `POST /keys/free`, which
+ * hands a client one key per UTC day. A key is still an identity the log counts
+ * under, so the three things a holder could always do — see the key, see what it
+ * read day by day, and page its own receipts by counter — go on working exactly
+ * as they did.
  *
- * The four things it holds hardest. A key is handed over exactly once: the
- * second and third attempt on the same checkout session are 409, whatever else
- * happens. The free tier is served on a deployment that cannot take money at
- * all, which is production's state until M25 — a Worker that refused everything
- * because it had no Stripe key would have broken the paper's "free to read at
- * low volume, forever". The webhook trusts nothing it is sent: a forged
- * signature and a stale one are both 400, and a retried message changes
- * nothing. And a secret appears in exactly one response body, ever.
+ * This drives the real router: miniflare's D1 with the real migrations applied,
+ * the real key doors, the clock injected, and no payment provider constructed
+ * anywhere, because there is nothing left to construct one for.
+ *
+ * The three things it holds hardest. A key is handed over exactly once and
+ * stored as a hash, so a secret appears in exactly one response body, ever. One
+ * client gets one key a day and the second ask is 429, which is the whole of
+ * what stands between a free identity and an identity factory. And every retired
+ * door says the same word, `retired`, rather than four different ones.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import {
-  MockPaymentsAdapter,
-  StripeAdapter,
-  UnavailablePaymentsAdapter,
-} from "../src/adapters/stripe.js";
 import { keyHash } from "../src/keys.js";
-import {
-  CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-  CONTRIBUTOR_SHARE_PERCENT,
-  RATE_TIERS,
-  READ_PRICE_MICROS_PER_READ,
-} from "../src/policy.js";
-import { keyByHash, keyById } from "../src/storage/keys.js";
+import { RATE_TIERS } from "../src/policy.js";
+import { keyByHash } from "../src/storage/keys.js";
 import type { Env } from "../src/worker/env.js";
 import { resolveAccess } from "../src/worker/access.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
@@ -44,20 +35,17 @@ const NOW = new Date("2026-09-11T12:00:00.000Z");
 const UNIX = Math.floor(NOW.getTime() / 1000);
 const DAY = "2026-09-11";
 
-const WEBHOOK_SECRET = "whsec_the_signing_secret_and_it_must_never_leak";
-
 /**
- * The sixteen hex characters the mock provider writes its ids on. A mock
- * session id carries the tier and this suffix and nothing else, which is what
- * lets the claim door read back a session a previous request made: the Worker
- * builds a fresh adapter per request and no map survives between them.
+ * Two client addresses, because "one key per client per day" is a claim with two
+ * sides: the same address twice is refused, and a different address is not.
+ * The Worker hashes these before they reach any row (src/keys.ts); nothing here
+ * or in the table is the address itself.
  */
-const SUFFIX_ONE = "cafe0001cafe0001";
-const SUFFIX_TWO = "cafe0002cafe0002";
+const CLIENT = "203.0.113.7";
+const OTHER_CLIENT = "203.0.113.8";
 
 let store: TestDatabase;
 let env: Env;
-let payments: MockPaymentsAdapter;
 let deps: RequestDeps;
 
 beforeAll(async () => {
@@ -68,8 +56,7 @@ beforeAll(async () => {
     ENVIRONMENT: "local",
     MAINTAINER_AGENT_ID: "",
   };
-  payments = new MockPaymentsAdapter({ random: () => SUFFIX_ONE });
-  deps = { now: NOW, payments };
+  deps = { now: NOW };
 }, 600_000);
 
 afterAll(async () => {
@@ -87,6 +74,36 @@ function get(path: string, headers: Record<string, string> = {}): Request {
   return new Request(`${ORIGIN}${path}`, { headers });
 }
 
+/**
+ * The same database, with every statement it is asked to prepare counted.
+ *
+ * A retired door must cost the log nothing at all: not a row, and not a read
+ * either. Counting rows written would pass a door that read `api_keys` and then
+ * answered 410, so what is counted is what reaches D1 in the first place.
+ */
+function counting(db: TestDatabase["db"]): {
+  db: TestDatabase["db"];
+  statements: () => number;
+} {
+  let seen = 0;
+  return {
+    db: {
+      prepare(sql: string) {
+        seen += 1;
+        return db.prepare(sql);
+      },
+      batch: (statements) => db.batch(statements),
+      exec: (sql: string) => db.exec(sql),
+    },
+    statements: () => seen,
+  };
+}
+
+/** The header the platform names a client with, which is what a day is counted on. */
+function from(ip: string): Record<string, string> {
+  return { "cf-connecting-ip": ip };
+}
+
 function post(
   path: string,
   body: unknown,
@@ -99,25 +116,24 @@ function post(
   });
 }
 
-/** Everything the paid loop answers must be uncacheable. */
+/** Everything these doors answer must be uncacheable. */
 function noStore(response: Response): void {
   expect(response.headers.get("cache-control")).toBe("no-store");
 }
 
 // ---------------------------------------------------------------------------
-// What is on sale
+// What a tier allows, and nothing about what it costs
 // ---------------------------------------------------------------------------
 
 describe("GET /keys/tiers", () => {
-  it("publishes the tiers, the price and both contributor shares", async () => {
+  it("publishes the caps, with no price and no share beside them", async () => {
     const response = await send(get("/keys/tiers"));
     expect(response.status).toBe(200);
     noStore(response);
+    // Exactly one key in the object: a reader who went looking for a price here
+    // must find that there is not one rather than find a zero.
     expect(await response.json()).toEqual({
       tiers: JSON.parse(JSON.stringify(RATE_TIERS)),
-      price_micros_per_read: READ_PRICE_MICROS_PER_READ,
-      contributor_share_percent: CONTRIBUTOR_SHARE_PERCENT,
-      contributor_share_floor_percent: CONTRIBUTOR_SHARE_FLOOR_PERCENT,
     });
   }, 600_000);
 
@@ -133,66 +149,15 @@ describe("GET /keys/tiers", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Buying, and claiming exactly once
+// The free door: one key, one client, one day
 // ---------------------------------------------------------------------------
 
-let session = "";
 let secret = "";
 let keyId = "";
 
-describe("POST /keys/checkout", () => {
-  it("refuses a body that is not an object", async () => {
-    for (const body of ["not json", "[]", '"a string"']) {
-      const response = await send(post("/keys/checkout", body));
-      expect([body, response.status]).toEqual([body, 400]);
-      expect(await response.json()).toEqual({ error: "bad_body" });
-    }
-  }, 600_000);
-
-  it("refuses a tier nobody publishes", async () => {
-    const response = await send(post("/keys/checkout", { tier: "platinum" }));
-    expect(response.status).toBe(422);
-    expect(await response.json()).toEqual({ error: "unknown_tier" });
-  }, 600_000);
-
-  it("refuses to sell the tier that is free", async () => {
-    const response = await send(post("/keys/checkout", { tier: "free" }));
-    expect(response.status).toBe(422);
-    expect(await response.json()).toEqual({ error: "free_tier_needs_no_key" });
-  }, 600_000);
-
-  it("hands back a session and the URL to pay at", async () => {
-    const response = await send(
-      post("/keys/checkout", { tier: "standard", email: "reader@example.com" }),
-    );
-    expect(response.status).toBe(200);
-    noStore(response);
-    const body = (await response.json()) as { session: string; url: string };
-    expect(body.session).toBe(`mock_cs_standard_${SUFFIX_ONE}`);
-    // The success URL is this Worker's own claim door, with the provider's
-    // placeholder filled in.
-    expect(body.url).toBe(
-      `${ORIGIN}/keys/claim?session=mock_cs_standard_${SUFFIX_ONE}`,
-    );
-    session = body.session;
-  }, 600_000);
-});
-
-describe("GET /keys/claim", () => {
-  it("refuses without a session", async () => {
-    const response = await send(get("/keys/claim"));
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "missing_session" });
-  }, 600_000);
-
-  it("refuses a session the provider never made", async () => {
-    const response = await send(get("/keys/claim?session=mock_cs_nobody"));
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: "unknown_session" });
-  }, 600_000);
-
+describe("POST /keys/free", () => {
   it("hands the key over once, and stores only its hash", async () => {
-    const response = await send(get(`/keys/claim?session=${session}`));
+    const response = await send(post("/keys/free", {}, from(CLIENT)));
     expect(response.status).toBe(201);
     noStore(response);
     const body = (await response.json()) as Record<string, string>;
@@ -201,7 +166,7 @@ describe("GET /keys/claim", () => {
       id: expect.stringMatching(/^key_[0-9a-f]{16}$/),
       tier: "standard",
       status: "active",
-      customer: `mock_cus_${SUFFIX_ONE}`,
+      limit: RATE_TIERS["standard"]!.reads_per_day,
       created_at: NOW.toISOString(),
     });
     secret = body["key"]!;
@@ -210,87 +175,146 @@ describe("GET /keys/claim", () => {
     // What the table holds is the hash and never the secret.
     const stored = await keyByHash(store.db, await keyHash(secret));
     expect(stored?.id).toBe(keyId);
-    expect(stored?.subscription).toBe(`mock_sub_${SUFFIX_ONE}`);
     expect(stored?.counter).toBe(0);
     const raw = await store.db
-      .prepare(`SELECT key_hash FROM api_keys WHERE id = ?`)
+      .prepare(
+        `SELECT key_hash, customer, subscription, checkout_session
+           FROM api_keys WHERE id = ?`,
+      )
       .bind(keyId)
-      .first<{ key_hash: string }>();
-    expect(raw?.key_hash).toBe(await keyHash(secret));
-    expect(raw?.key_hash).not.toBe(secret);
+      .first<Record<string, string>>();
+    expect(raw?.["key_hash"]).toBe(await keyHash(secret));
+    expect(raw?.["key_hash"]).not.toBe(secret);
+    // The three NOT NULL columns the paid loop left behind carry synthetic
+    // values and no provider reference: no migration in this milestone.
+    expect(raw?.["customer"]).toMatch(/^free:client:[0-9a-f]{64}$/);
+    expect(raw?.["subscription"]).toMatch(/^free:sub:[0-9a-f]{64}:2026-09-11$/);
+    expect(raw?.["checkout_session"]).toMatch(
+      /^free:day:[0-9a-f]{64}:2026-09-11$/,
+    );
+    // And the address itself is nowhere in any of them.
+    expect(JSON.stringify(raw)).not.toContain(CLIENT);
   }, 600_000);
 
-  it("refuses the second claim, and the third", async () => {
+  it("refuses the same client a second key on the same day", async () => {
     for (const attempt of [2, 3]) {
-      const response = await send(get(`/keys/claim?session=${session}`));
-      expect([attempt, response.status]).toEqual([attempt, 409]);
-      expect(await response.json()).toEqual({ error: "already_claimed" });
+      const response = await send(post("/keys/free", {}, from(CLIENT)));
+      expect([attempt, response.status]).toEqual([attempt, 429]);
+      expect(await response.json()).toEqual({ error: "key_today" });
     }
-    // And exactly one key came of that session, whatever was asked.
     const count = await store.db
-      .prepare(`SELECT COUNT(*) AS n FROM api_keys WHERE checkout_session = ?`)
-      .bind(session)
+      .prepare(`SELECT COUNT(*) AS n FROM api_keys`)
       .first<{ n: number }>();
     expect(count?.n).toBe(1);
   }, 600_000);
 
-  it("shows a browser the same fields on a page, with the warning", async () => {
-    // The provider's success redirect lands a person here, so a person gets a
-    // readable page rather than a JSON blob they might close.
-    const second = await send(post("/keys/checkout", { tier: "high" }), {
-      payments: new MockPaymentsAdapter({ random: () => SUFFIX_TWO }),
-    });
-    expect(second.status).toBe(200);
-
-    const browser = new MockPaymentsAdapter({ random: () => SUFFIX_TWO });
-    await browser.createCheckout({
-      price: "price_mock_high",
-      tier: "high",
-      environment: "local",
-      successUrl: `${ORIGIN}/keys/claim?session={CHECKOUT_SESSION_ID}`,
-      cancelUrl: `${ORIGIN}/api`,
-    });
-    const response = await send(
-      get(`/keys/claim?session=mock_cs_high_${SUFFIX_TWO}`, {
-        accept: "text/html",
-      }),
-      { payments: browser },
-    );
+  it("gives another client its own key on the same day", async () => {
+    const response = await send(post("/keys/free", {}, from(OTHER_CLIENT)));
     expect(response.status).toBe(201);
-    expect(response.headers.get("content-type")).toContain("text/html");
-    const page = await response.text();
-    expect(page).toContain("This is the only time the key is shown");
-    expect(page).toContain(`mock_cus_${SUFFIX_TWO}`);
-    expect(page).toMatch(/nmk_[A-Za-z0-9_-]{43}/);
+    const body = (await response.json()) as Record<string, string>;
+    expect(body["id"]).not.toBe(keyId);
+    expect(body["tier"]).toBe("standard");
+    expect(body["status"]).toBe("active");
   }, 600_000);
 
-  it("refuses a session that has not paid", async () => {
-    const unpaid: MockPaymentsAdapter = new MockPaymentsAdapter();
-    const open = {
-      ...unpaid,
-      kind: "mock" as const,
-      ensurePrice: unpaid.ensurePrice.bind(unpaid),
-      createCheckout: unpaid.createCheckout.bind(unpaid),
-      createPortal: unpaid.createPortal.bind(unpaid),
-      reportUsage: unpaid.reportUsage.bind(unpaid),
-      verifyWebhook: unpaid.verifyWebhook.bind(unpaid),
-      retrieveCheckout: async () => ({
-        ok: true as const,
-        value: {
-          id: "cs_open",
-          status: "open",
-          mode: "subscription",
-          customer: null,
-          subscription: null,
-          metadata: { tier: "standard" },
-        },
-      }),
-    };
-    const response = await send(get("/keys/claim?session=cs_open"), {
-      payments: open,
+  it("gives the first client another key the next day", async () => {
+    const tomorrow = new Date("2026-09-12T00:00:01.000Z");
+    const response = await send(post("/keys/free", {}, from(CLIENT)), {
+      now: tomorrow,
     });
-    expect(response.status).toBe(402);
-    expect(await response.json()).toEqual({ error: "not_paid" });
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as Record<string, string>;
+    expect(body["id"]).not.toBe(keyId);
+    expect(body["created_at"]).toBe(tomorrow.toISOString());
+  }, 600_000);
+
+  it("needs no body, and refuses one that says anything", async () => {
+    const bare = new Request(`${ORIGIN}/keys/free`, {
+      method: "POST",
+      headers: from("203.0.113.9"),
+    });
+    expect((await send(bare)).status).toBe(201);
+
+    for (const body of ["not json", "[]", '"a string"', '{"tier":"high"}']) {
+      const response = await send(
+        post("/keys/free", body, from("203.0.113.10")),
+      );
+      expect([body, response.status]).toEqual([body, 400]);
+      expect(await response.json()).toEqual({ error: "bad_body" });
+    }
+  }, 600_000);
+
+  it("takes a POST and nothing else", async () => {
+    const response = await send(get("/keys/free"));
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("POST");
+  }, 600_000);
+});
+
+// ---------------------------------------------------------------------------
+// The doors of the paid loop, retired
+// ---------------------------------------------------------------------------
+
+describe("the retired money doors", () => {
+  it("answers 410 retired at all four, in the standard envelope", async () => {
+    const retired = [
+      await send(post("/keys/checkout", { tier: "standard" })),
+      await send(get("/keys/claim?session=cs_anything")),
+      await send(
+        post("/keys/me/portal", {}, { authorization: `Bearer ${secret}` }),
+      ),
+      await send(post("/stripe/webhook", { id: "evt_1" })),
+    ];
+    for (const response of retired) {
+      expect(response.status).toBe(410);
+      expect(await response.json()).toEqual({ error: "retired" });
+    }
+  }, 600_000);
+
+  it("asks the database nothing at all on the way to the 410", async () => {
+    // The reviewer's mutation: a door that read `api_keys` before answering 410
+    // would still answer 410 and still write nothing, and every assertion below
+    // would have passed. This is the one that catches it.
+    const watched = counting(store.db);
+    const watchedEnv = { ...env, DB: watched.db };
+    const calls: Request[] = [
+      post("/keys/checkout", { tier: "standard" }),
+      get("/keys/claim?session=cs_anything"),
+      post("/keys/me/portal", {}, { authorization: `Bearer ${secret}` }),
+      post("/stripe/webhook", { id: "evt_3" }),
+    ];
+    for (const request of calls) {
+      const response = await handleRequest(request, watchedEnv, deps);
+      expect([request.url, response.status]).toEqual([request.url, 410]);
+    }
+    expect(watched.statements()).toBe(0);
+  }, 600_000);
+
+  it("writes nothing: no key, no stripe event, no row of any kind", async () => {
+    const before = await store.db
+      .prepare(`SELECT COUNT(*) AS n FROM api_keys`)
+      .first<{ n: number }>();
+    await send(post("/keys/checkout", { tier: "standard" }));
+    await send(get("/keys/claim?session=cs_anything"));
+    await send(post("/stripe/webhook", { id: "evt_2" }));
+    const after = await store.db
+      .prepare(`SELECT COUNT(*) AS n FROM api_keys`)
+      .first<{ n: number }>();
+    expect(after?.n).toBe(before?.n);
+    const events = await store.db
+      .prepare(`SELECT COUNT(*) AS n FROM stripe_events`)
+      .first<{ n: number }>();
+    expect(events?.n).toBe(0);
+  }, 600_000);
+
+  it("still says what the method is, before it says the door is gone", async () => {
+    const checkout = await send(get("/keys/checkout"));
+    expect(checkout.status).toBe(405);
+    expect(checkout.headers.get("allow")).toBe("POST");
+
+    const webhook = await send(get("/stripe/webhook"));
+    expect(webhook.status).toBe(405);
+    expect(webhook.headers.get("allow")).toBe("POST");
   }, 600_000);
 });
 
@@ -421,237 +445,7 @@ describe("the holder's own reads", () => {
     };
     expect(page.receipts.map((row) => row.key_counter)).toEqual([2]);
   }, 600_000);
-
-  it("opens the provider's own billing page and holds no card of its own", async () => {
-    const response = await send(post("/keys/me/portal", {}, withKey()));
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ url: `${ORIGIN}/api` });
-  }, 600_000);
 });
-
-// ---------------------------------------------------------------------------
-// A deployment that cannot take money
-// ---------------------------------------------------------------------------
-
-describe("a deployment with no payment provider", () => {
-  const unavailable = new UnavailablePaymentsAdapter();
-
-  it("refuses a checkout with one word", async () => {
-    const response = await handleRequest(
-      post("/keys/checkout", { tier: "standard" }),
-      { ...env, ENVIRONMENT: "production" },
-      { now: NOW, payments: unavailable },
-    );
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "payments_unavailable" });
-  }, 600_000);
-
-  it("still serves the free tier, which is the paper's promise", async () => {
-    const response = await handleRequest(
-      get("/keys/tiers"),
-      { ...env, ENVIRONMENT: "production" },
-      { now: NOW, payments: unavailable },
-    );
-    expect(response.status).toBe(200);
-    expect(
-      ((await response.json()) as { tiers: Record<string, unknown> }).tiers,
-    ).toHaveProperty("free");
-  }, 600_000);
-
-  it("refuses the webhook rather than trusting an unsigned message", async () => {
-    const response = await handleRequest(
-      post("/stripe/webhook", { id: "evt_x", type: "invoice.paid" }),
-      { ...env, ENVIRONMENT: "production" },
-      { now: NOW, payments: unavailable },
-    );
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "payments_unavailable" });
-  }, 600_000);
-});
-
-// ---------------------------------------------------------------------------
-// The provider's own door
-// ---------------------------------------------------------------------------
-
-/** The HMAC a provider signs with, computed here independently of the adapter. */
-async function sign(timestamp: number, body: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await globalThis.crypto.subtle.importKey(
-    "raw",
-    encoder.encode(WEBHOOK_SECRET) as unknown as BufferSource,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const digest = await globalThis.crypto.subtle.sign(
-    "HMAC",
-    key,
-    encoder.encode(`${timestamp}.${body}`) as unknown as BufferSource,
-  );
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-/** The real adapter, with a webhook secret and a fetch it must never reach. */
-function signed(): StripeAdapter {
-  return new StripeAdapter({
-    secretKey: "sk_test_never_used_here",
-    webhookSecret: WEBHOOK_SECRET,
-    fetch: (async (): Promise<Response> => {
-      throw new Error("the webhook door must not reach the network");
-    }) as typeof fetch,
-  });
-}
-
-/** One signed message through the real door. */
-async function webhook(
-  event: unknown,
-  options: { timestamp?: number; signature?: string } = {},
-): Promise<Response> {
-  const body = JSON.stringify(event);
-  const timestamp = options.timestamp ?? UNIX;
-  const signature = options.signature ?? (await sign(timestamp, body));
-  return send(
-    post(
-      "/stripe/webhook",
-      body,
-      { "stripe-signature": `t=${timestamp},v1=${signature}` },
-    ),
-    { payments: signed() },
-  );
-}
-
-describe("POST /stripe/webhook", () => {
-  it("refuses a forged signature", async () => {
-    const response = await webhook(
-      { id: "evt_forged", type: "invoice.paid", created: UNIX, data: { object: {} } },
-      { signature: "f".repeat(64) },
-    );
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "bad_signature" });
-  }, 600_000);
-
-  it("refuses a signature older than the tolerance", async () => {
-    const response = await webhook(
-      { id: "evt_stale", type: "invoice.paid", created: UNIX, data: { object: {} } },
-      { timestamp: UNIX - 3600 },
-    );
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "bad_signature" });
-  }, 600_000);
-
-  it("refuses a message with no signature header at all", async () => {
-    const response = await send(
-      post("/stripe/webhook", { id: "evt_bare", type: "invoice.paid" }),
-      { payments: signed() },
-    );
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "bad_signature" });
-  }, 600_000);
-
-  it("records a message about a subscription nobody here holds", async () => {
-    const response = await webhook({
-      id: "evt_stranger",
-      type: "customer.subscription.updated",
-      created: UNIX,
-      data: { object: { id: "sub_somebody_else", status: "past_due" } },
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      received: true,
-      outcome: "unknown_subscription",
-    });
-  }, 600_000);
-
-  it("suspends a key when the subscription says the bill did not clear", async () => {
-    const response = await webhook({
-      id: "evt_past_due",
-      type: "customer.subscription.updated",
-      created: UNIX,
-      data: { object: { id: `mock_sub_${SUFFIX_ONE}`, status: "past_due" } },
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ received: true, outcome: "applied" });
-    expect((await keyById(store.db, keyId))?.status).toBe("past_due");
-  }, 600_000);
-
-  it("ignores a message it has already acted on", async () => {
-    const response = await webhook({
-      id: "evt_past_due",
-      type: "customer.subscription.updated",
-      created: UNIX,
-      // A retry could carry anything; what stops it is the id, not the body.
-      data: { object: { id: `mock_sub_${SUFFIX_ONE}`, status: "canceled" } },
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      received: true,
-      outcome: "duplicate",
-    });
-    expect((await keyById(store.db, keyId))?.status).toBe("past_due");
-  }, 600_000);
-
-  it("restores the key when the invoice is paid", async () => {
-    const response = await webhook({
-      id: "evt_paid",
-      type: "invoice.paid",
-      created: UNIX,
-      data: { object: { id: "in_1", subscription: `mock_sub_${SUFFIX_ONE}` } },
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ received: true, outcome: "applied" });
-    expect((await keyById(store.db, keyId))?.status).toBe("active");
-  }, 600_000);
-
-  it("ignores a checkout completion, because the claim door mints the key", async () => {
-    const response = await webhook({
-      id: "evt_checkout",
-      type: "checkout.session.completed",
-      created: UNIX,
-      data: { object: { id: `mock_cs_standard_${SUFFIX_ONE}` } },
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ received: true, outcome: "ignored" });
-  }, 600_000);
-
-  it("cancels a key when the subscription is deleted", async () => {
-    const response = await webhook({
-      id: "evt_deleted",
-      type: "customer.subscription.deleted",
-      created: UNIX,
-      data: { object: { id: `mock_sub_${SUFFIX_ONE}`, status: "canceled" } },
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ received: true, outcome: "applied" });
-    expect((await keyById(store.db, keyId))?.status).toBe("canceled");
-  }, 600_000);
-
-  it("leaves the canceled key refused 402 at the gate the doors read", async () => {
-    // The read and sync doors are another builder's to wire to the gate; the
-    // gate itself is what a canceled subscription costs a key, and it is this.
-    const resolved = await resolveAccess(
-      store.db,
-      get("/read/nmk_00000000000000000000000000000001", {
-        authorization: `Bearer ${secret}`,
-      }),
-      NOW,
-    );
-    expect(resolved.ok).toBe(false);
-    if (resolved.ok) return;
-    expect([resolved.refusal.status, resolved.refusal.reason]).toEqual([
-      402,
-      "key_canceled",
-    ]);
-  }, 600_000);
-
-  it("takes a POST and nothing else", async () => {
-    const response = await send(get("/stripe/webhook"), { payments: signed() });
-    expect(response.status).toBe(405);
-    expect(response.headers.get("allow")).toBe("POST");
-  }, 600_000);
-});
-
 // ---------------------------------------------------------------------------
 // What the doors do not own
 // ---------------------------------------------------------------------------

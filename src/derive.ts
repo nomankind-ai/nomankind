@@ -25,7 +25,6 @@ import {
   DEFAULT_DOMAIN,
   isRegisteredDomain,
   REJECTIONS_TO_REJECT,
-  SLOT_COUNT,
   isVersionStalenessCategory,
   stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
@@ -80,11 +79,16 @@ export interface DerivedFields {
 }
 
 /**
- * One of the entry's read-share slots: who holds it, and the position of the
- * event that seated them. Incentives / Money: the read share is split among the
- * submitter and three current slot holders, so a slot is a claim on future
- * revenue and the seq is what makes "the oldest slot" a fact of the log rather
- * than a matter of opinion.
+ * One of the entry's read-share slots: who held it, and the position of the
+ * event that seated them.
+ *
+ * Nothing seats one any more. Decision D-127 retired the read share with the
+ * rest of the money — contribution is the currency, and a claim on future
+ * revenue is a claim on revenue that does not exist — so `read_share_slots` is
+ * an empty list on every entry the log derives. The shape stays exactly as it
+ * was, here and in the sidecar, so an export, a mirror import and the verifier
+ * read the same document they always did, and so a row sealed before the
+ * decision still has a type to be read back under.
  */
 export interface ReadShareSlot {
   readonly operator: string;
@@ -121,15 +125,17 @@ export interface Sidecar {
   /** Size of the trusted pool at the promoting decision's position. */
   readonly trusted_count_at_decision: number | null;
   /**
-   * Incentives / Money: "Reconfirming a stale entry ... rotates the reconfirmer
-   * into one of the three validator read-share slots ... replacing the holder
-   * of the oldest slot rather than adding to the pool. A reconfirmation by an
-   * operator already holding a slot refreshes the entry but rotates nothing."
+   * The read-share slots, retired by decision D-127: empty, always.
    *
-   * Null until the entry verifies: there is no read share to split before
-   * then. The slots are seeded by the approvals that promoted it and then
-   * rotated by every later reconfirmation, and once seeded they are never reset
-   * to null, superseded and overturned included — the entry still earns.
+   * The paper's "Reconfirming a stale entry ... rotates the reconfirmer into
+   * one of the three validator read-share slots" is superseded — there is no
+   * read share to rotate into, because there is no money anywhere in this
+   * record. So no approval seats a slot and no reconfirmation rotates one.
+   *
+   * Null until the entry verifies, and an empty list from the decision that
+   * promotes it: the field keeps its shape, which is what lets the exports, the
+   * mirror and the verifier keep theirs, and what makes the difference between
+   * "no read share yet" and "no read share ever" readable rather than guessed.
    */
   readonly read_share_slots: readonly ReadShareSlot[] | null;
   /**
@@ -357,8 +363,6 @@ interface Consensus {
   readonly approvers: readonly ApproverRecord[];
   /** seq of the decision that promoted the entry; null unless it verified. */
   readonly promotingSeq: number | null;
-  /** The slots the promoting approvals seated; null unless it verified. */
-  readonly seededSlots: readonly ReadShareSlot[] | null;
 }
 
 /**
@@ -404,9 +408,6 @@ function consensusFor(
   // seq order: the same records the counts above are built from, kept so the
   // evidence gate reads exactly what consensus counted.
   const countedRecords: ApproverRecord[] = [];
-  // The seq each counted record arrived at, parallel to countedRecords: a
-  // read-share slot is identified by the position that seated it.
-  const countedSeqs: number[] = [];
   const countedOperators = new Set<string>();
   let hasRandomApproval = false;
   let status: "draft" | "rejected" | "verified" = "draft";
@@ -416,7 +417,6 @@ function consensusFor(
   let testVerdictAtDecision: TestVerdict | null = null;
   let needsReplacement = false;
   let promotingSeq: number | null = null;
-  let seededSlots: readonly ReadShareSlot[] | null = null;
 
   for (const event of inSeqOrder(events)) {
     if (!isType(event, "validation")) continue;
@@ -447,7 +447,6 @@ function consensusFor(
     if (!countedOperators.has(decision.operator)) {
       countedOperators.add(decision.operator);
       countedRecords.push(record);
-      countedSeqs.push(position);
     }
 
     if (decision.decision === "approve") {
@@ -491,7 +490,6 @@ function consensusFor(
         effectiveTier = gate.effective_tier;
         testVerdictAtDecision = gate.test_verdict;
         promotingSeq = position;
-        seededSlots = seatsFrom(countedRecords, countedSeqs);
       } else if (rejections >= REJECTIONS_TO_REJECT) {
         status = "rejected";
         trustedCountAtDecision = trustedCount;
@@ -519,80 +517,31 @@ function consensusFor(
     needsReplacement,
     approvers,
     promotingSeq,
-    seededSlots,
   };
 }
 
 /**
- * The slots the promoting approvals seat.
+ * The entry's read-share slots: none, and an empty list once it has verified.
  *
- * Incentives / Money: the read share goes to "the submitter and the three
- * validators", so the seats are the approvals consensus counted — approve
- * decisions only, one per eligible operator, the same set the evidence gate
- * read — each at the position of its own validation event, earliest first.
- * Never more than SLOT_COUNT: the split is over exactly that many slots, and a
- * rejection buys no share of an entry it argued against.
+ * Decision D-127 retired the read share. The paper's rotation — "Reconfirming a
+ * stale entry ... rotates the reconfirmer into one of the three validator
+ * read-share slots ... replacing the holder of the oldest slot rather than
+ * adding to the pool" — is superseded with the money it divided: no approval
+ * seats a seat, no reconfirmation rotates one, and a reconfirmation still does
+ * everything else it ever did (it refreshes the entry, which is Freshness and
+ * decay's job and is not this function's).
+ *
+ * Null before the promoting decision and an empty list from it, so the field
+ * keeps the shape every export, mirror and verifier already reads: "no read
+ * share yet" and "no read share ever" stay two different answers.
  */
-function seatsFrom(
-  countedRecords: readonly ApproverRecord[],
-  countedSeqs: readonly number[],
-): readonly ReadShareSlot[] {
-  const seats: ReadShareSlot[] = [];
-  for (let index = 0; index < countedRecords.length; index += 1) {
-    const decision = countedRecords[index] as unknown as DecisionFields;
-    if (decision.decision !== "approve") continue;
-    seats.push({ operator: decision.operator, seq: countedSeqs[index]! });
-  }
-  seats.sort((left, right) => left.seq - right.seq);
-  return seats.slice(0, SLOT_COUNT);
+function readShareSlotsFor(consensus: Consensus): readonly ReadShareSlot[] | null {
+  if (consensus.promotingSeq === null) return null;
+  return EMPTY_READ_SHARE_SLOTS;
 }
 
-/**
- * Fold the reconfirmations after the promoting decision into the read-share
- * slots.
- *
- * Incentives / Money: "Reconfirming a stale entry ... rotates the reconfirmer
- * into one of the three validator read-share slots ... replacing the holder of
- * the oldest slot rather than adding to the pool. A reconfirmation by an
- * operator already holding a slot refreshes the entry but rotates nothing."
- *
- * So: a holder rotates nothing; an outsider takes an empty slot while the entry
- * holds fewer than SLOT_COUNT (a small pool verifies on two approvals and seats
- * two, and filling the third adds to the pool only until it is full); otherwise
- * the outsider replaces the oldest holder. The slots keep folding whatever the
- * entry's later status: refusing a reconfirmation on a non-verified entry is the
- * door's job (M6's reconfirmation check), and derivation trusts the sealed log
- * here exactly as it does for validations.
- */
-function readShareSlotsFor(
-  events: readonly Event[],
-  entryId: string,
-  consensus: Consensus,
-): readonly ReadShareSlot[] | null {
-  if (consensus.promotingSeq === null || consensus.seededSlots === null) {
-    return null;
-  }
-  const slots: ReadShareSlot[] = [...consensus.seededSlots];
-  for (const event of inSeqOrder(events)) {
-    if (!isType(event, "reconfirmation")) continue;
-    if (event.entry_id !== entryId) continue;
-    // Approvals arriving after verification take no slot, and neither does a
-    // reconfirmation sealed at or before the decision that seated the slots.
-    if (event.seq <= consensus.promotingSeq) continue;
-
-    const { operator } = event.payload.record;
-    if (slots.some((slot) => slot.operator === operator)) continue;
-
-    if (slots.length < SLOT_COUNT) {
-      slots.push({ operator, seq: event.seq });
-    } else {
-      // Sorted ascending, so the oldest slot is the first one.
-      slots.splice(0, 1, { operator, seq: event.seq });
-    }
-    slots.sort((left, right) => left.seq - right.seq);
-  }
-  return slots;
-}
+/** The one empty list every verified entry's read-share slots are. */
+const EMPTY_READ_SHARE_SLOTS: readonly ReadShareSlot[] = Object.freeze([]);
 
 /**
  * The entry an eligibility question is asked about: its id, its submitter's
@@ -1243,7 +1192,7 @@ export function deriveEntry(
     effective_tier: consensus.effectiveTier,
     test_verdict: consensus.testVerdict,
     trusted_count_at_decision: consensus.trustedCountAtDecision,
-    read_share_slots: readShareSlotsFor(events, entryId, consensus),
+    read_share_slots: readShareSlotsFor(consensus),
     revalidations: revalidationsFor(events, entryId),
     // Read off the signed core, the domain's published tables and where the
     // citation landed, so a legacy v0.6 core -- which names no domain and reads

@@ -19,7 +19,25 @@
  * included, so the mirrors table is the one the deploy will create.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+/**
+ * A window this file publishes for itself: thirty days, which is what the
+ * policy module published before D-127 zeroed it.
+ *
+ * D-127 made the record free — RELEASE_WINDOW_DAYS is 0 and everything is
+ * released the instant it is sealed — and left the window's code exactly as it
+ * was, dormant behind that zero. The withheld paths this file covers are part
+ * of that code, so the regression cover stays by publishing a window here
+ * instead: every rule below the mock is the kernel's own, read from the same
+ * one place, and only the number is this file's.
+ */
+vi.mock("../src/policy.js", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    "../src/policy.js",
+  );
+  return { ...actual, RELEASE_WINDOW_DAYS: 30 };
+});
 
 import {
   appendEvent,
@@ -1069,34 +1087,15 @@ describe("attestations, standing and the ledger", () => {
     // In log order: the challenge was filed before the day was published.
     const kinds = rows.map((row) => row.kind);
     expect(kinds).toContain("dispute_stake");
-    expect(kinds).toContain("read_share");
-    expect(kinds.indexOf("dispute_stake")).toBeLessThan(
-      kinds.indexOf("read_share"),
-    );
+    // And nothing is owed for a read: D-127 retired the share, so a published
+    // day writes its reconciliation and no holder's row beside it.
+    expect(kinds).not.toContain("read_share");
+    expect(kinds).not.toContain("bounty_pool");
+    expect(rows.filter((row) => row.kind === "read_share")).toEqual([]);
     // The reconciliation closes each day it reconciles.
     expect(kinds[kinds.length - 1]).toBe("reconciliation");
 
-    const shares = rows.filter((row) => row.kind === "read_share");
-    expect(shares.every((row) => row.entry_id === VERIFIED_ENTRY_ID)).toBe(true);
-    expect(shares.some((row) => row.role === "submitter")).toBe(true);
-
-    // The pre-M24 day carries no paid block at all, and every read it published
-    // was billed for: the whole of `reads` is what it meant when it was sealed,
-    // so that is what the mirror's fold prices — the same number the sweep's
-    // ledger step wrote, because both call src/ledger.ts's one function.
-    const plain = shares.filter((row) => row.date === READ_DAY);
-    expect(plain.length).toBeGreaterThan(0);
-    expect(plain.every((row) => row.reads === READS)).toBe(true);
-
-    // The M24 day carries the block, so the money follows `paid.reads` and not
-    // the free reads beside it: nobody was billed for those, so nobody earned
-    // anything from them.
-    const paid = shares.filter((row) => row.date === PAID_DAY);
-    expect(paid.length).toBe(plain.length);
-    expect(paid.every((row) => row.reads === PAID_DAY_PAID)).toBe(true);
-    expect(paid.some((row) => row.reads === PAID_DAY_READS)).toBe(false);
-
-    // And the reconciliation of each day closes over the same half it priced.
+    // And the reconciliation of each day closes over the same half it counted.
     const closes = rows.filter((row) => row.kind === "reconciliation");
     expect(
       closes.map((row) => [row.date, row.reads, row.ref["ok"]]),
@@ -1189,21 +1188,20 @@ describe("the ledger fold over an upheld dispute", () => {
     withShares = await upheld(day, "2026-09-10T12:00:00.000Z");
   }, 120_000);
 
-  it("prices the reward at what the entry's signers lost", () => {
+  it("prices the reward at what the entry's signers lost, which is nothing (D-127)", () => {
+    // A day of reads used to accrue shares an upheld dispute could claw back,
+    // and the reward was exactly what it clawed. Reads are free now, so the
+    // entry accrued nothing however often it was read, there is nothing to claw
+    // back, and the reward is zero — the same answer this fold gives for an
+    // entry nobody ever read. The rest of the row is untouched.
     const rows = rowsOf(withShares);
     const clawbacks = rows.filter((row) => row.kind === "clawback");
-    expect(clawbacks.length).toBeGreaterThan(0);
+    expect(clawbacks).toEqual([]);
 
     const reward = rows.find((row) => row.kind === "dispute_reward")!;
     expect(reward.unit).toBe("micros");
-    expect(reward.amount).toBe(
-      -clawbacks.reduce((sum, row) => sum + row.amount, 0),
-    );
-    expect(reward.amount).toBeGreaterThan(0);
-    // It leaves when the last clawed-back share would have.
-    expect(reward.available_at).toBe(
-      clawbacks.map((row) => row.available_at).sort().at(-1),
-    );
+    expect(reward.amount).toBe(0);
+    expect(reward.available_at).toBeNull();
     // The row the dispute door wrote, at the position it became owed, with the
     // record it was written as and the rows the price was read off under ref.
     const outcome = withShares.find((event) => event.type === "dispute_upheld")!;
@@ -1351,18 +1349,29 @@ describe("the ledger fold across a slot rotation", () => {
     );
   }, 120_000);
 
-  it("pays the first day the holders it had on the first day", () => {
-    const rows = shares(rotated, DAY_ONE);
-    expect(rows.length).toBeGreaterThan(0);
-    expect(validators(rows)).toEqual(seated);
-    expect(validators(rows)).not.toContain(newcomer);
-    expect(rows.every((row) => row.reads === READS)).toBe(true);
+  it("pays neither day, because a read is free (D-127)", () => {
+    // The rotation that used to matter here: a trusted operator that signed
+    // nothing of this entry reconfirms it between the two days. It still
+    // refreshes the entry — that is Freshness and decay's rule and it is
+    // untouched — and it no longer seats anybody, because there is no read
+    // share to seat them in. So neither day prices a holder, on either side of
+    // the rotation, and `validators` has nobody to name.
+    expect(shares(rotated, DAY_ONE)).toEqual([]);
+    expect(shares(rotated, DAY_TWO)).toEqual([]);
+    expect(validators(shares(rotated, DAY_TWO))).toEqual([]);
+    expect(seated.length).toBeGreaterThan(0);
+    expect(seated).not.toContain(newcomer);
   });
 
-  it("pays the second day the holder the rotation seated", () => {
-    const rows = shares(rotated, DAY_TWO);
-    expect(validators(rows)).toEqual([...seated, newcomer].sort());
-    expect(rows.every((row) => row.reads === READS)).toBe(true);
+  it("seats nobody in the sidecar's read-share slots, before or after", () => {
+    // The derived field keeps its shape and its emptiness: an entry that has
+    // verified carries a list, and the list is empty whatever reconfirms it.
+    for (const events of [throughDayOne, rotated]) {
+      const { sidecar } = deriveEntry(events, VERIFIED_ENTRY_ID, {
+        now: "2026-09-11T00:00:00.000Z",
+      });
+      expect(sidecar.read_share_slots).toEqual([]);
+    }
   });
 
   it("leaves the first day's rows exactly what they were before the log grew", () => {

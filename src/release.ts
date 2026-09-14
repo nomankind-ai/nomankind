@@ -1,19 +1,26 @@
 /**
  * The release window: when a sealed event's content becomes public.
  *
- * Decision D-100, and the whitepaper as it amends it — Section 8's "training on
- * the data itself is free" is free *on release*, Section 10's "free to read at
- * low volume, forever" is free to read at low volume *once released*, forever,
- * and the paid product is the window. One rule, written once, here: an event's
- * release date is its covering seal's `sealed_at` plus RELEASE_WINDOW_DAYS
- * (D-101, thirty days, the maintainer's published number), an entry's release
- * date is its `entry_submitted` event's, and an unsealed event is not released
- * at all. The same rule on every environment, with no override anywhere.
+ * Decision D-100, as decision D-127 amends it: the record is free. Section 8's
+ * "training on the data itself is free" and Section 10's "free to read at low
+ * volume, forever" are free from the seal, and there is no paid product here at
+ * all. One rule, written once, here: an event's release date is its covering
+ * seal's `sealed_at` plus RELEASE_WINDOW_DAYS, an entry's release date is its
+ * `entry_submitted` event's, and an unsealed event is not released at all. The
+ * same rule on every environment, with no override anywhere.
+ *
+ * RELEASE_WINDOW_DAYS is zero (D-127), so every sealed event and every sealed
+ * entry is public and CC0 from the instant of its seal. Everything below stays
+ * exactly as it was, dormant behind that zero rather than deleted: the window
+ * is arithmetic over the seal date and is never stored on a row, so a fork that
+ * publishes a window of its own changes the one constant and these paths — the
+ * hash lines, the nulled cores, the released head — come back whole. Each
+ * function takes the window as an optional trailing argument for that reason,
+ * defaulted to the published number and never passed by the kernel.
  *
  * One carve-out, and it is about the registry rather than about the window: the
  * six events that say who the operators are are released the moment they are
- * sealed (`REGISTRY_EVENT_TYPES`, `isEventReleased`). Everything about an entry
- * keeps the window exactly as it is.
+ * sealed (`REGISTRY_EVENT_TYPES`, `isEventReleased`), whatever the window is.
  *
  * What the window covers is content and only content. The proof is public from
  * the first minute and this module never touches it: every event keeps its seq,
@@ -83,14 +90,25 @@ const RECORD_ARRAYS: readonly string[] = Object.freeze([
  *
  * Computed rather than stored, exactly as the M24c disclosure date is, so that
  * changing the published window changes every release date at once and no row
- * anywhere carries a date the policy no longer agrees with.
+ * anywhere carries a date the policy no longer agrees with. At D-127's zero
+ * that instant is the seal itself, which is what "free from the seal" means
+ * arithmetically: nothing here special-cases it.
+ *
+ * `windowDays` defaults to the published RELEASE_WINDOW_DAYS and is never
+ * passed by the kernel: one rule, one number, no override. It exists so a fork
+ * that publishes a window of its own, and the tests that keep the withheld
+ * paths covered, can ask what this same arithmetic gives for another window
+ * without a second copy of it living anywhere.
  */
-export function releaseDateOf(sealedAt: string): string {
+export function releaseDateOf(
+  sealedAt: string,
+  windowDays: number = RELEASE_WINDOW_DAYS,
+): string {
   const at = Date.parse(sealedAt);
   if (Number.isNaN(at)) {
     throw new TypeError(`releaseDateOf: not an instant: ${sealedAt}`);
   }
-  return new Date(at + RELEASE_WINDOW_DAYS * MILLISECONDS_PER_DAY).toISOString();
+  return new Date(at + windowDays * MILLISECONDS_PER_DAY).toISOString();
 }
 
 /**
@@ -99,11 +117,17 @@ export function releaseDateOf(sealedAt: string): string {
  * Null is not released: an event the log has not sealed yet has no release date
  * to have reached, and the window starts at the seal rather than at the
  * submission. The boundary is inclusive — released exactly at the window — for
- * the same reason a cap resets at the start of a day rather than after it.
+ * the same reason a cap resets at the start of a day rather than after it. At
+ * D-127's zero the boundary is the seal, so a sealed event is released at the
+ * instant it was sealed and never before it.
  */
-export function isReleased(sealedAt: string | null, now: Date): boolean {
+export function isReleased(
+  sealedAt: string | null,
+  now: Date,
+  windowDays: number = RELEASE_WINDOW_DAYS,
+): boolean {
   if (sealedAt === null) return false;
-  return now.getTime() >= Date.parse(releaseDateOf(sealedAt));
+  return now.getTime() >= Date.parse(releaseDateOf(sealedAt, windowDays));
 }
 
 /**
@@ -148,10 +172,11 @@ export function isEventReleased(
   event: Pick<Event, "type">,
   sealedAt: string | null,
   now: Date,
+  windowDays: number = RELEASE_WINDOW_DAYS,
 ): boolean {
   if (sealedAt === null) return false;
   if (REGISTRY_EVENT_TYPES.includes(event.type)) return true;
-  return isReleased(sealedAt, now);
+  return isReleased(sealedAt, now, windowDays);
 }
 
 /** The fields of a seal this module needs: when it was made, and what it covers. */
@@ -175,10 +200,11 @@ export type ReleaseSeal = Pick<Seal, "last_seq" | "sealed_at">;
 export function releasedHead(
   seals: readonly ReleaseSeal[],
   now: Date,
+  windowDays: number = RELEASE_WINDOW_DAYS,
 ): number | null {
   let head: number | null = null;
   for (const seal of seals) {
-    if (!isReleased(seal.sealed_at, now)) continue;
+    if (!isReleased(seal.sealed_at, now, windowDays)) continue;
     if (head === null || seal.last_seq > head) head = seal.last_seq;
   }
   return head;

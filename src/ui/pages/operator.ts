@@ -11,13 +11,15 @@
  * shows (Section 6): entries this operator signed that an upheld dispute
  * overturned, counted once per entry.
  *
- * Two panels are the money and standing sides of Section 9. Standing shows the
- * number the published formula returned and the position it returned it at, and
- * says in the same breath that anyone can recompute it — with the endpoint that
- * serves it and the command that checks it, because a claim of recomputability
- * that does not say how is not one. The Ledger panel shows what the rows add up
- * to and the rows themselves; every amount is the integer the ledger stores,
- * with a dollar rendering beside it, and no amount is rounded on the way.
+ * One panel is Section 9, as decision D-127 left it: contribution, counted in
+ * standing and in nothing else. It shows the number the published formula
+ * returned and the position it returned it at, the counts of the acts behind it
+ * as the sweep folded them, and says in the same breath that anyone can
+ * recompute the number — with the endpoint that serves it and the command that
+ * checks it, because a claim of recomputability that does not say how is not
+ * one. There is no money panel and no amount in any currency: no read of this
+ * record is priced, so an operator is owed nothing and the only thing its work
+ * moves is standing.
  *
  * Section 8's drift attestation is the last panel, from both sides: what this
  * operator's own model was asked, and what this operator was drawn to score.
@@ -33,7 +35,6 @@
  * Pure: the route gathered all of it, the balance included.
  */
 
-import type { LedgerRow } from "../../ledger.js";
 import {
   badge,
   fmtDate,
@@ -52,36 +53,6 @@ import type {
 } from "../types.js";
 
 const EM_DASH = "—";
-
-/**
- * Micro-USD per dollar. A unit and not a policy number: the ledger counts in
- * millionths of a dollar (src/ledger.ts) and this is what a millionth means.
- */
-const MICROS_PER_DOLLAR = 1_000_000;
-
-/**
- * A micro-USD amount as dollars, by integer arithmetic only.
- *
- * Never a float: a share of a day's reads is exact in micros and a division that
- * went through a double would show a reader a number the ledger does not hold.
- * Six decimals, because that is how many the unit has, and a sign in front
- * rather than around, because a clawback is a negative row.
- */
-function dollars(micros: number): string {
-  const negative = micros < 0;
-  const magnitude = negative ? -micros : micros;
-  const whole = Math.trunc(magnitude / MICROS_PER_DOLLAR);
-  const fraction = magnitude % MICROS_PER_DOLLAR;
-  return `${negative ? "-" : ""}$${whole}.${String(fraction).padStart(6, "0")}`;
-}
-
-/** One amount, in the unit its own row was written in. */
-function amount(row: LedgerRow): Safe {
-  if (row.unit === "micros") {
-    return html`${row.amount} <span class="dim">${dollars(row.amount)}</span>`;
-  }
-  return html`${row.amount} <span class="dim">${row.unit}</span>`;
-}
 
 /**
  * The domains this operator is attested in, each with the version of the
@@ -226,21 +197,48 @@ function cosigners(data: OperatorData): Safe {
 }
 
 /**
- * Standing (Section 9), and how to check it.
+ * Contribution (Section 9, as decision D-127 left it): standing, and how to
+ * check it.
+ *
+ * One panel where the standing and the money were two. Nothing this operator
+ * has done is owed anything in a currency — no read of this record is priced —
+ * so what a page can honestly show is the work and what the published formula
+ * makes of it: the number, the position it was folded to, and the counts of the
+ * acts the fold was over.
  *
  * The number is the cache and the position is what makes it checkable: fold the
  * sealed events up to that position by the published formula and the same number
  * has to come back. The endpoint recomputes it over the log rather than reading
  * the column, and the command below asks the endpoint and folds the events
  * itself, so the two answers can be compared by anyone who has neither.
+ *
+ * Every count beside it is a stored reading the sweep folded — the registry
+ * row's own columns and the decisions this page already lists — so the panel
+ * adds nothing up and opens no statement of its own.
  */
-function standingPanel(ctx: PageContext, data: OperatorData): Safe {
+function contributionPanel(ctx: PageContext, data: OperatorData): Safe {
   const cached = data.row.standing;
-  const id = data.row.id;
+  const row = data.row;
+  const id = row.id;
+  const approvals = data.validations.filter(
+    (each) => each.decision === "approve",
+  ).length;
+  const rejections = data.validations.length - approvals;
+  const scored = data.attestations.asScorer.filter(
+    (each) => each.status === "scored",
+  ).length;
+  const counts: readonly { readonly name: string; readonly value: number }[] = [
+    { name: "decisions", value: row.validations },
+    { name: "approved", value: approvals },
+    { name: "rejected", value: rejections },
+    { name: "attestations scored", value: scored },
+    { name: "co-signers", value: row.cosigners },
+    { name: "overturned", value: row.overturned },
+  ];
   return html`<section class="panel">
     <div class="panel-head">
-      <h2>Standing</h2>
-      <span class="panel-label">recomputable by anyone</span>
+      <h2>Contribution</h2>
+      <span class="panel-label">standing, recomputable by anyone</span>
     </div>
     ${cached === null
       ? html`<div class="panel-empty">
@@ -256,12 +254,37 @@ function standingPanel(ctx: PageContext, data: OperatorData): Safe {
             <dd>position ${cached.seq}</dd>
           </dl>
         </div>`}
+    <div class="panel-body">
+      <div class="grid-4">
+        ${counts.map(
+          (count) => html`<div class="field">
+            <span class="field-name">${count.name}</span>
+            <span
+              class="field-value ${count.name === "overturned" &&
+              count.value > 0
+                ? "danger"
+                : ""}"
+              >${count.value}</span
+            >
+          </div>`,
+        )}
+      </div>
+    </div>
     <p class="note">
       Standing is not a score nomankind assigns. It is derived from the sealed
       public events by the formula published on the policy page, so anyone can
       recompute anyone's standing from the log and get the same number. The
       number above is a cache of that computation at the position beside it, and
-      the log is what decides if the two ever disagree.
+      the log is what decides if the two ever disagree. The counts under it are
+      the acts the fold was over, as the sweep last folded them.
+    </p>
+    <p class="note">
+      Contribution is the whole of what this record counts (decision D-127). The
+      log is free to read from the seal that covers an entry, no read of it is
+      priced, and nothing here is owed to this operator in money: a decision, a
+      reconfirmation, a measured record and an upheld challenge earn standing, a
+      missed assignment and a signature on an overturned entry burn it, and an
+      open stake locks it.
     </p>
     <p class="note">
       <span class="mono">GET /operators/${id}/standing</span> recomputes it over
@@ -270,108 +293,6 @@ function standingPanel(ctx: PageContext, data: OperatorData): Safe {
       names. The command folds the events itself and compares.
     </p>
     <pre class="block mono">npm run standing -- ${ctx.origin} ${id}</pre>
-  </section>`;
-}
-
-/** One ledger row's entry cell: a link when the row is about an entry. */
-function entryCell(row: LedgerRow): Safe {
-  if (row.entry_id === null) return html`<td class="dim">${EM_DASH}</td>`;
-  return html`<td class="break">
-      <a href="/entries/${row.entry_id}">${row.entry_id}</a>
-    </td>`;
-}
-
-/**
- * The money (Section 9), in the unit the ledger counts in.
- *
- * The balance is the route's, computed by `ledgerBalance` over exactly the rows
- * shown and at the route's own clock, so held and released mean what they mean
- * at the instant the page was answered and not at some later reading. `paid`
- * against a row is a fact off the payouts themselves: a payout names the row ids
- * it covered, so a row is paid when a payout says it is.
- */
-function ledgerPanel(data: OperatorData): Safe {
-  const paidRowIds = new Set<string>();
-  for (const payout of data.payouts) {
-    const covered = payout.ref["rows"];
-    if (!Array.isArray(covered)) continue;
-    for (const id of covered) {
-      if (typeof id === "string") paidRowIds.add(id);
-    }
-  }
-
-  const balance = data.balance;
-  const totals: readonly { readonly name: string; readonly value: number }[] = [
-    { name: "accrued", value: balance.accrued },
-    { name: "held", value: balance.held },
-    { name: "released", value: balance.released },
-    { name: "clawed_back", value: balance.clawed_back },
-    { name: "paid", value: balance.paid },
-    { name: "carried_forward", value: balance.carried_forward },
-  ];
-
-  return html`<section class="panel">
-    <div class="panel-head">
-      <h2>Ledger</h2>
-      <span class="panel-label">micro-USD, a millionth of a dollar</span>
-    </div>
-    ${data.ledger.length === 0
-      ? html`<div class="panel-empty">
-          Nothing has been recorded against this operator: no read share, no
-          bounty, no stake and no payout.
-        </div>`
-      : html`<div class="panel-body">
-            <div class="grid-4">
-              ${totals.map(
-                (total) => html`<div class="field">
-                  <span class="field-name">${total.name}</span>
-                  <span class="field-value"
-                    >${total.value}
-                    <span class="dim">${dollars(total.value)}</span></span
-                  >
-                </div>`,
-              )}
-            </div>
-          </div>
-          <div class="table-wrap">
-            <table class="dense">
-              <thead>
-                <tr>
-                  <th>kind</th>
-                  <th>entry</th>
-                  <th>role</th>
-                  <th>date</th>
-                  <th>amount</th>
-                  <th>available_at</th>
-                  <th>paid</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${data.ledger.map(
-                  (row) => html`<tr class="row">
-                    <td>${row.kind}</td>
-                    ${entryCell(row)}
-                    <td class="dim">${row.role ?? EM_DASH}</td>
-                    <td class="dim">${fmtDate(row.date)}</td>
-                    <td class="${row.amount < 0 ? "danger" : ""}">
-                      ${amount(row)}
-                    </td>
-                    <td class="dim">${fmtInstant(row.available_at)}</td>
-                    <td class="${paidRowIds.has(row.id) ? "accent" : "dim"}">
-                      ${paidRowIds.has(row.id) ? "paid" : EM_DASH}
-                    </td>
-                  </tr>`,
-                )}
-              </tbody>
-            </table>
-          </div>`}
-    <p class="note">
-      Every row but a payout is a function of the sealed log: the read counts the
-      log published, the split on the policy page, and the holdback the same page
-      names. A payout records money that left through a provider under its own
-      reference, which is the one thing replaying the log cannot reproduce, and
-      it names the rows it covered so both sides can be reconciled.
-    </p>
   </section>`;
 }
 
@@ -559,8 +480,7 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
             </div>`}
       </section>
 
-      ${standingPanel(ctx, data)} ${ledgerPanel(data)}
-      ${attestationsPanel(data)}
+      ${contributionPanel(ctx, data)} ${attestationsPanel(data)}
 
       <section class="panel">
         <div class="panel-head"><h2>Validations</h2></div>

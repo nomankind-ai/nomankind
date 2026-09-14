@@ -1,8 +1,12 @@
 /**
- * The release window, as a rule (decisions D-100 and D-101).
+ * The release window, as a rule (decisions D-100, D-101 and D-127).
  *
- * Whitepaper Section 8 as D-100 amends it: training on the data is free *on
- * release*, and the window is what the paid product is. The rule itself is a
+ * Whitepaper Section 8 as D-100 amends it and D-127 supersedes it: training on
+ * the data is free *on release*, and release is the seal — the published window
+ * is zero and there is no paid product. The window's code stays as it is,
+ * dormant behind that zero, and the tests below that used to stand inside the
+ * window now inject one of their own, so every withheld path stays covered for
+ * the fork that publishes a window. The rule itself is a
  * handful of functions and a clock somebody else supplies — an event's release
  * date is its covering seal's `sealed_at` plus the window, an entry's is its
  * submission event's, an unsealed event is not released, the six registry types
@@ -52,59 +56,103 @@ function seal(sealedAt: string, lastSeq: number): Pick<Seal, "last_seq" | "seale
   return { sealed_at: sealedAt, last_seq: lastSeq };
 }
 
+/**
+ * A window somebody else publishes: thirty days, which is what the published
+ * number was before D-127 zeroed it.
+ *
+ * The withheld paths are dormant rather than gone — the rule is arithmetic over
+ * the seal date and is never stored — so every test below that used to stand
+ * inside the window now injects this one instead, and the hash lines, the
+ * nulled cores and the held-back head stay covered for the fork that sets a
+ * window of its own.
+ */
+const FORK_WINDOW_DAYS = 30;
+
 describe("the release date", () => {
-  it("is the seal's own instant plus the published window", () => {
+  it("is the seal's own instant: the record is free from the seal (D-127)", () => {
+    // The window is policy's one number and is read from there, never typed
+    // beside the rule. It is zero, so the release date is the seal.
+    expect(RELEASE_WINDOW_DAYS).toBe(0);
     expect(releaseDateOf("2026-09-11T00:00:00.000Z")).toBe(
+      "2026-09-11T00:00:00.000Z",
+    );
+    expect(releaseDateOf("2026-09-11T18:43:07.250Z")).toBe(
+      "2026-09-11T18:43:07.250Z",
+    );
+  });
+
+  it("is the seal's instant plus a window a fork publishes", () => {
+    expect(
+      releaseDateOf("2026-09-11T00:00:00.000Z", FORK_WINDOW_DAYS),
+    ).toBe(
       new Date(
-        Date.parse("2026-09-11T00:00:00.000Z") + RELEASE_WINDOW_DAYS * DAY_MS,
+        Date.parse("2026-09-11T00:00:00.000Z") + FORK_WINDOW_DAYS * DAY_MS,
       ).toISOString(),
     );
-    // The window is policy's one number and is read from there, never typed
-    // beside the rule: thirty days, set by the maintainer (D-101).
-    expect(RELEASE_WINDOW_DAYS).toBe(30);
   });
 
   it("keeps the time of day the seal closed at", () => {
     // A window in days from the instant, not to a midnight: an evening seal
     // opens in the evening, exactly as the disclosure window does.
-    expect(releaseDateOf("2026-09-11T18:43:07.250Z")).toBe(
+    expect(releaseDateOf("2026-09-11T18:43:07.250Z", FORK_WINDOW_DAYS)).toBe(
       "2026-10-11T18:43:07.250Z",
     );
   });
 
   it("refuses something that is not an instant", () => {
     expect(() => releaseDateOf("not a date")).toThrow(TypeError);
+    expect(() => releaseDateOf("not a date", FORK_WINDOW_DAYS)).toThrow(
+      TypeError,
+    );
   });
 });
 
 describe("whether something is released", () => {
   const SEALED_AT = "2026-09-11T00:00:00.000Z";
-  const OPENS = releaseDateOf(SEALED_AT);
+  const OPENS = releaseDateOf(SEALED_AT, FORK_WINDOW_DAYS);
+
+  it("is released the instant it is sealed, at the published window", () => {
+    // D-127's zero, which is the rule this log actually runs: sealed is
+    // released, and a millisecond earlier is not sealed yet.
+    expect(isReleased(SEALED_AT, new Date(SEALED_AT))).toBe(true);
+    expect(isReleased(SEALED_AT, new Date(Date.parse(SEALED_AT) - 1))).toBe(
+      false,
+    );
+  });
 
   it("is released exactly at the window", () => {
-    expect(isReleased(SEALED_AT, new Date(OPENS))).toBe(true);
+    expect(isReleased(SEALED_AT, new Date(OPENS), FORK_WINDOW_DAYS)).toBe(true);
   });
 
   it("is not released a millisecond before it", () => {
-    expect(isReleased(SEALED_AT, new Date(Date.parse(OPENS) - 1))).toBe(false);
+    expect(
+      isReleased(SEALED_AT, new Date(Date.parse(OPENS) - 1), FORK_WINDOW_DAYS),
+    ).toBe(false);
   });
 
   it("stays released afterwards", () => {
-    expect(isReleased(SEALED_AT, new Date(Date.parse(OPENS) + DAY_MS))).toBe(
-      true,
-    );
+    expect(
+      isReleased(
+        SEALED_AT,
+        new Date(Date.parse(OPENS) + DAY_MS),
+        FORK_WINDOW_DAYS,
+      ),
+    ).toBe(true);
   });
 
   it("is not released when nothing has sealed it", () => {
     // The window starts at the seal, so an event the log has not committed to
-    // has no date to have reached — however old it is.
+    // has no date to have reached — however old it is, and whatever the window.
     expect(isReleased(null, new Date("2099-01-01T00:00:00.000Z"))).toBe(false);
+    expect(
+      isReleased(null, new Date("2099-01-01T00:00:00.000Z"), FORK_WINDOW_DAYS),
+    ).toBe(false);
   });
 });
 
 describe("whether one event is released", () => {
   const SEALED_AT = "2026-09-11T00:00:00.000Z";
-  const OPENS = releaseDateOf(SEALED_AT);
+  const OPENS = releaseDateOf(SEALED_AT, FORK_WINDOW_DAYS);
   const INSIDE = new Date(Date.parse(OPENS) - DAY_MS);
 
   /** One event of a type, which is all this rule reads of it. */
@@ -124,7 +172,23 @@ describe("whether one event is released", () => {
       "pool_snapshot",
     ]);
     for (const type of REGISTRY_EVENT_TYPES) {
-      expect(isEventReleased(of(type), SEALED_AT, INSIDE)).toBe(true);
+      expect(isEventReleased(of(type), SEALED_AT, INSIDE, FORK_WINDOW_DAYS)).toBe(
+        true,
+      );
+    }
+  });
+
+  it("releases everything about an entry at its seal, at the published window", () => {
+    // D-127: there is nothing left to wait for, registry or not.
+    for (const type of [
+      "entry_submitted",
+      "validation",
+      "reconfirmation",
+      "read_count",
+    ] as Event["type"][]) {
+      expect(isEventReleased(of(type), SEALED_AT, new Date(SEALED_AT))).toBe(
+        true,
+      );
     }
   });
 
@@ -141,8 +205,12 @@ describe("whether one event is released", () => {
       "attestation_scored",
     ] as Event["type"][]) {
       expect(REGISTRY_EVENT_TYPES.includes(type)).toBe(false);
-      expect(isEventReleased(of(type), SEALED_AT, INSIDE)).toBe(false);
-      expect(isEventReleased(of(type), SEALED_AT, new Date(OPENS))).toBe(true);
+      expect(
+        isEventReleased(of(type), SEALED_AT, INSIDE, FORK_WINDOW_DAYS),
+      ).toBe(false);
+      expect(
+        isEventReleased(of(type), SEALED_AT, new Date(OPENS), FORK_WINDOW_DAYS),
+      ).toBe(true);
     }
   });
 
@@ -157,22 +225,40 @@ describe("the released head", () => {
   const EARLY = "2026-08-01T00:00:00.000Z";
   const LATE = "2026-09-01T00:00:00.000Z";
 
+  it("is the largest last_seq of everything sealed, at the published window", () => {
+    // D-127: a seal releases what it covers, so the released head is the
+    // sealed head.
+    const seals = [seal(EARLY, 10), seal(EARLY, 25), seal(LATE, 40)];
+    expect(releasedHead(seals, new Date(LATE))).toBe(40);
+  });
+
   it("is null while nothing has released", () => {
-    expect(releasedHead([seal(LATE, 40)], new Date(LATE))).toBeNull();
+    expect(
+      releasedHead([seal(LATE, 40)], new Date(LATE), FORK_WINDOW_DAYS),
+    ).toBeNull();
     expect(releasedHead([], new Date("2099-01-01T00:00:00.000Z"))).toBeNull();
   });
 
   it("is the largest last_seq among the seals whose window has run out", () => {
     const seals = [seal(EARLY, 10), seal(EARLY, 25), seal(LATE, 40)];
-    const between = new Date(Date.parse(releaseDateOf(EARLY)) + DAY_MS);
-    expect(releasedHead(seals, between)).toBe(25);
-    expect(releasedHead(seals, new Date(releaseDateOf(LATE)))).toBe(40);
+    const opens = releaseDateOf(EARLY, FORK_WINDOW_DAYS);
+    const between = new Date(Date.parse(opens) + DAY_MS);
+    expect(releasedHead(seals, between, FORK_WINDOW_DAYS)).toBe(25);
+    expect(
+      releasedHead(
+        seals,
+        new Date(releaseDateOf(LATE, FORK_WINDOW_DAYS)),
+        FORK_WINDOW_DAYS,
+      ),
+    ).toBe(40);
   });
 
   it("does not depend on the order the seals were handed over in", () => {
     const seals = [seal(EARLY, 25), seal(LATE, 40), seal(EARLY, 10)];
-    const between = new Date(Date.parse(releaseDateOf(EARLY)) + DAY_MS);
-    expect(releasedHead(seals, between)).toBe(25);
+    const between = new Date(
+      Date.parse(releaseDateOf(EARLY, FORK_WINDOW_DAYS)) + DAY_MS,
+    );
+    expect(releasedHead(seals, between, FORK_WINDOW_DAYS)).toBe(25);
   });
 });
 
@@ -389,21 +475,19 @@ describe("the paper carries the release window (D-100)", () => {
 
   it("states the window in the abstract, as one piece", () => {
     const abstract = whitepaper.slice(0, whitepaper.indexOf("# Introduction"));
-    expect(abstract).toContain(
-      "its content is public and CC0 thirty days later",
-    );
-    expect(abstract).toContain("an API key or an operator's own signed request");
+    expect(abstract).toContain("its content is public and CC0");
   });
 
   it("makes the training path free on release (Section 8)", () => {
+    // The rule, and where the number lives — never the number itself. D-127
+    // set it to zero and supersedes the paper's Money section until v1.7
+    // rewrites it, so a test that pinned the paper's thirty days here would be
+    // pinning a sentence the decision has already replaced.
     const rule = whitepaper.indexOf(
       "Training on the data itself is free by license, on release.",
     );
     expect(rule).toBeGreaterThan(-1);
     expect(whitepaper).toContain("RELEASE_WINDOW_DAYS in the policy module");
-    expect(whitepaper).toContain(
-      "thirty days after the seal that covers its submission",
-    );
   });
 
   it("makes the free tier free once released, forever (the money section)", () => {
@@ -411,9 +495,6 @@ describe("the paper carries the release window (D-100)", () => {
       "The log is free to read at low volume, forever, once released.",
     );
     expect(rule).toBeGreaterThan(-1);
-    expect(whitepaper).toContain(
-      "the thirty-day window before release is part of the paid product",
-    );
   });
 
   it("says what the mirror publishes daily, and how the verifier reads it (Section 11)", () => {

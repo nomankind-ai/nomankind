@@ -1049,55 +1049,6 @@ export function isVersionStalenessCategory(
 export const HOLDBACK_DAYS = 30;
 
 /**
- * The two evidence tiers, named here rather than imported (decision D-087).
- *
- * src/evidence.ts owns `EvidenceTier` and it is the same pair of strings, but
- * evidence imports this module for REPRODUCTION_RUNS and the domain tables, and
- * policy must not import back: a policy number that depended on a rule would be
- * a rule. The two are checked against each other in test/policy.test.ts.
- */
-type SplitTier = "stated" | "observed";
-
-/**
- * Incentives / Money, per evidence tier (decision D-087).
- *
- * Of paid-read revenue, fifteen percent goes to the submitter of a stated entry
- * and five to each of its three validators — the paper's launch split. An
- * observed entry pays more, twenty and seven: Section 4, "A submitter who can
- * measure a fact may submit it as observed, and is paid more for it", and
- * Section 9, "observed entries take a larger read share than stated ones, by
- * published policy, so the operators who measure are paid more than the
- * operators who copy".
- *
- * The difference comes out of nomankind's own share and never out of the
- * reader's price, which stays one number per read
- * (READ_PRICE_MICROS_PER_READ). Not whitepaper numbers: the paper names the
- * rule and states no amount, so both splits are the maintainer's published
- * placeholders, moving only by a later decision.
- */
-export const READ_SHARE_SPLIT: Readonly<
-  Record<SplitTier, Readonly<{ submitter: number; validator: number }>>
-> = Object.freeze({
-  stated: Object.freeze({ submitter: 15, validator: 5 }),
-  observed: Object.freeze({ submitter: 20, validator: 7 }),
-});
-
-/**
- * The log / Incentives. An entry's read share is always split among exactly one
- * submitter and three current read-share slot holders.
- */
-export const SLOT_COUNT = 3;
-
-/**
- * Incentives / Money. What reaches the contributor pool, per tier: the
- * submitter's share plus SLOT_COUNT validators' — 30 on a stated entry
- * (15 + 3 x 5) and 41 on an observed one (20 + 3 x 7). Both at or above the
- * published floor, which is what "a floor that only rises" means.
- */
-export const CONTRIBUTOR_SHARE_PERCENT: Readonly<Record<SplitTier, number>> =
-  Object.freeze({ stated: 30, observed: 41 });
-
-/**
  * Lifecycle of an entry (Seal). Witnesses countersign the registry head at an
  * initial interval of five minutes set by policy.
  */
@@ -1159,20 +1110,21 @@ export const FAILURE_REPORT_THRESHOLD = 3;
 
 /**
  * Lifecycle of an entry, "Dispute": "Filing takes a stake, so burner keys cannot
- * dispute for free. A verified operator stakes standing, a bare key stakes a
- * refundable filing fee, and the amounts are published policy."
+ * dispute for free."
  *
- * The paper names the rule and states no amount, so both amounts below are the
- * maintainer's own placeholders (decision D-064): stakes are ledger rows and
- * nothing else until M21 builds the money side, so no money moves on either of
- * them. The maintainer sets the real amounts, and they move only by a later
- * decision.
+ * One stake, in standing, and no fee of any kind (decision D-127, "no money
+ * anywhere"). The paper's second half — "a bare key stakes a refundable filing
+ * fee" — is superseded: there is no money in this record to stake, so what a
+ * filing puts up is contribution, which is the only currency there is. A bare
+ * key has no standing to put up and therefore cannot file at all; the dispute
+ * door refuses it with the refusal it already had for an operator that cannot
+ * cover the stake, `insufficient_standing` (src/dispute.ts).
  *
- * `DISPUTE_STAKE_STANDING` is an operator's stake in standing units;
- * `DISPUTE_FILING_FEE_CENTS` is a bare key's refundable fee in cents.
+ * The paper names the rule and states no amount, so the amount below is the
+ * maintainer's own placeholder (decision D-064), in standing units. It moves
+ * only by a later decision.
  */
 export const DISPUTE_STAKE_STANDING = 10;
-export const DISPUTE_FILING_FEE_CENTS = 1000;
 
 /**
  * Lifecycle of an entry, "Revalidate": "Any operator can also request
@@ -1667,50 +1619,37 @@ export const STANDING_TRUSTED_STAY = 0;
 export const STANDING_DECAY_PAUSED = true;
 
 /**
- * Incentives / Money: "At $0.50 per thousand paid reads, an entry read ten
- * thousand times in a month earns its submitter 75 cents and each validator 25."
- *
- * That is the paper's own worked example, so the price is the paper's: fifty
- * cents per thousand reads is five hundred micro-USD per read. Micro-USD (a
- * millionth of a dollar) is the unit every read-revenue amount in the ledger is
- * counted in, because a single read's share is 75 micros — a fraction of a cent,
- * and a ledger that rounded it to cents would pay nobody anything.
- *
- * A price, not a rule, and the paper says the unit economics depend on API
- * pricing that does not exist yet: the maintainer's published policy, moving
- * only by a later decision.
- */
-export const READ_PRICE_MICROS_PER_READ = 500;
-
-/**
- * Incentives / Money, as D-100 amends it: the data is free on release, and this
- * is how long after its seal an event waits.
+ * The release window, and it is zero: the record is free (decision D-127).
  *
  * An event's release date is its covering seal's `sealed_at` plus this many
- * days; an entry's is its `entry_submitted` event's. Before it, the content is
- * served only to a paid key or to a signed request from an agent bound to a
- * registered operator; on it, the content is public, CC0, and in the mirror.
- * The proof -- every hash, seal, anchor, operator record, and every entry's id,
- * domain, subject, category, status, effective tier, entry hash, seal object,
- * signers and release date -- is public from the first minute either way.
+ * days, and an entry's is its `entry_submitted` event's — so at zero every
+ * event and every entry is released the moment it is sealed, its content public
+ * and CC0 from that instant, in the mirror and served to anyone who asks. The
+ * proof was always public from the first minute and still is: every hash, seal,
+ * anchor, operator record, and every entry's id, domain, subject, category,
+ * status, effective tier, entry hash, seal object, signers and release date.
  *
- * Thirty days, set by the maintainer in decision D-101 and not a placeholder:
- * it is the published window the paid product is sold against, and it moves
- * only by a later decision. One number, the same on every environment, with no
- * environment override anywhere.
+ * Zero and not gone. The window's code stays exactly as it is, dormant behind
+ * this number, and its tests stay as regression cover: the rule is computed
+ * from the seal date at read time and never stored on a row, so a fork that
+ * publishes a window of its own sets this one constant and the withheld paths
+ * come back whole. Nothing else anywhere may set or override it.
+ *
+ * This supersedes D-101's thirty days, and the whitepaper's Money section until
+ * v1.7 rewrites it. It moves only by a later decision.
  */
-export const RELEASE_WINDOW_DAYS = 30;
+export const RELEASE_WINDOW_DAYS = 0;
 
 /**
  * Incentives / Money: "The log is free to read at low volume, forever. Revenue
  * comes from high-rate API access, structured feeds and webhooks, change
  * alerts."
  *
- * A tier is a daily cap and nothing else. The free tier is the paper's "free to
- * read at low volume, forever", so it carries no key and is counted per client;
- * the paid tiers carry a key and are counted per key. Every paid read is priced
- * at READ_PRICE_MICROS_PER_READ, one number per read whatever tier bought it
- * (D-087), so a tier buys throughput and never a discount.
+ * A tier is a daily cap and nothing else, and since D-127 that is all it has
+ * ever been able to be: no read is priced anywhere in this record, so a tier
+ * buys nothing at all. The free tier is the paper's "free to read at low
+ * volume, forever", so it carries no key and is counted per client; the keyed
+ * tiers carry a key and are counted per key. A cap, never a charge.
  *
  * The paper names the free tier and states no cap and no ladder, so all three
  * rows are the maintainer's own placeholders (M24, the retrospective's M2 rule)
@@ -1788,44 +1727,6 @@ export function isPaidTier(slug: unknown): slug is string {
 }
 
 /**
- * Incentives / Money: "The contributor share is a floor that only rises."
- *
- * So the floor is a published number of its own rather than a comment on
- * CONTRIBUTOR_SHARE_PERCENT: a share that may only rise needs something to be
- * checked against, and test/policy.test.ts checks it — the share is at or above
- * the floor, and it is exactly the split it is made of.
- */
-export const CONTRIBUTOR_SHARE_FLOOR_PERCENT = 30;
-
-/**
- * Decision D-078: the paid loop runs over Stripe in test mode from the start,
- * spoken to over its REST API with `fetch` and signed webhooks, with no SDK.
- *
- * The provider's fixed strings, held here for the reason MIRROR and REGISTRY
- * are: an address the system depends on is a published choice, not an adapter's
- * private detail. No number here is a price and nothing here is a secret — the
- * key and the webhook signing secret are Worker secrets (D-016) and never
- * appear in this repository.
- */
-export const STRIPE: Readonly<{
-  api: "https://api.stripe.com";
-  meter_event_name: "nomankind_read";
-  price_lookup_prefix: "nomankind-";
-  currency: "usd";
-  webhook_tolerance_seconds: 300;
-  webhook_path: "/stripe/webhook";
-}> = Object.freeze({
-  api: "https://api.stripe.com",
-  meter_event_name: "nomankind_read",
-  /** A price's lookup_key is `${prefix}${environment}-${tier}`. */
-  price_lookup_prefix: "nomankind-",
-  currency: "usd",
-  /** How far a webhook's own timestamp may sit from now before it is stale. */
-  webhook_tolerance_seconds: 300,
-  webhook_path: "/stripe/webhook",
-} as const);
-
-/**
  * Incentives / Money: change alerts are a paid feature. How many endpoints one
  * key may hold, how long a delivery may take, and when a failed delivery is
  * tried again.
@@ -1881,28 +1782,6 @@ export const ALERT_KINDS = Object.freeze([
 ] as const);
 
 export type AlertKind = (typeof ALERT_KINDS)[number];
-
-/**
- * Incentives / Money, as amended by decision D-053: payouts are batched per
- * operator on a monthly cycle, and an operator whose released accruals sit below
- * the published minimum is not paid that cycle — the amount carries forward to
- * the next one.
- *
- * Five dollars, in the micro-USD the ledger counts in. Neither number is in the
- * paper: the paper says payouts happen and leaves the cadence and the floor to
- * published policy, so both are the maintainer's own (D-053) and move only by a
- * later decision. The minimum exists because a transfer costs more than a
- * long-tail entry earns in a month, and a payout that cost more than it paid
- * would take the difference out of the contributor pool.
- */
-export const PAYOUT_MINIMUM_MICROS = 5_000_000;
-
-/**
- * The payout cycle (D-053): one UTC calendar month. A name and not a number,
- * held here with every other published amount because it is the same kind of
- * thing — a published choice the ledger reads and nobody else may restate.
- */
-export const PAYOUT_CYCLE = "monthly";
 
 /**
  * Section 11, "Deployment and status": the sealed log is exported daily to a
@@ -2046,9 +1925,6 @@ export const POLICY = Object.freeze({
   REPRODUCTION_HOLDS,
   DOMAINS,
   HOLDBACK_DAYS,
-  READ_SHARE_SPLIT,
-  SLOT_COUNT,
-  CONTRIBUTOR_SHARE_PERCENT,
   SEAL_INTERVAL_MINUTES,
   SWEEP_INTERVAL_MINUTES,
   STATUS_ATTENTION_AFTER_INTERVALS,
@@ -2063,7 +1939,6 @@ export const POLICY = Object.freeze({
   ANCHOR_CALENDARS,
   FAILURE_REPORT_THRESHOLD,
   DISPUTE_STAKE_STANDING,
-  DISPUTE_FILING_FEE_CENTS,
   REVALIDATION_REQUEST_STAKE_STANDING,
   REVALIDATION_REQUESTS_PER_OPERATOR_PER_WINDOW,
   STANDING_VALIDATION_VOLUNTEERED,
@@ -2078,14 +1953,11 @@ export const POLICY = Object.freeze({
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
   STANDING_DECAY_PAUSED,
-  READ_PRICE_MICROS_PER_READ,
   RELEASE_WINDOW_DAYS,
   RATE_TIERS,
   FREE_TIER,
   FREE_READS_PER_DAY_GLOBAL,
   OPERATOR_READS_PER_DAY,
-  CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-  STRIPE,
   ALERT_ENDPOINTS_PER_KEY,
   ALERT_TIMEOUT_MS,
   ALERT_RETRY_MINUTES,
@@ -2093,8 +1965,6 @@ export const POLICY = Object.freeze({
   ALERT_DELIVERIES_PER_RUN,
   ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE,
   ALERT_KINDS,
-  PAYOUT_MINIMUM_MICROS,
-  PAYOUT_CYCLE,
   MIRROR,
   NORM_VERSION,
   SCHEMA_VERSION,

@@ -30,7 +30,6 @@ import {
   REJECTIONS_TO_REJECT,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
-  SLOT_COUNT,
   DEFAULT_DOMAIN,
   stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
@@ -358,11 +357,15 @@ describe("the pools and cores the freshness cases run in", () => {
     );
   });
 
-  it("seat fewer than the slots in the small pool, and exactly them in the large", () => {
-    // The two rotation rules the paper names both need a case: filling an empty
-    // slot, and replacing the oldest holder.
-    expect(APPROVALS_TO_VERIFY_SMALL_POOL).toBeLessThan(SLOT_COUNT);
-    expect(APPROVALS_TO_VERIFY_LARGE_POOL).toBe(SLOT_COUNT);
+  it("verify on fewer approvals in the small pool than in the large", () => {
+    // The two pool sizes the lifecycle rules need a case each of. The slot
+    // count they used to be measured against went with the read share (D-127),
+    // so what is pinned is the pair itself.
+    expect(APPROVALS_TO_VERIFY_SMALL_POOL).toBeLessThan(
+      APPROVALS_TO_VERIFY_LARGE_POOL,
+    );
+    expect(APPROVALS_TO_VERIFY_SMALL_POOL).toBe(2);
+    expect(APPROVALS_TO_VERIFY_LARGE_POOL).toBe(3);
   });
 });
 
@@ -532,7 +535,17 @@ describe("supersession", () => {
   });
 });
 
-describe("read-share slots", () => {
+describe("read-share slots, retired (D-127)", () => {
+  // The read share is gone with the rest of the money: no approval seats a
+  // slot and no reconfirmation rotates one. The field keeps its shape — null
+  // until the entry verifies, an empty list from the decision that promotes it
+  // — so every export, the mirror and the verifier read the document they
+  // always read, and "no read share yet" and "no read share ever" stay two
+  // different answers.
+  //
+  // What a reconfirmation still does is everything Freshness and decay asks of
+  // it, and that is what each test below keeps pinning beside the empty list.
+
   it("are null while the entry is draft", () => {
     const log = baseLog(LARGE_VALIDATORS);
     const core = statedCore();
@@ -556,17 +569,25 @@ describe("read-share slots", () => {
     expect(derived.sidecar.read_share_slots).toBeNull();
   });
 
-  it("seat the approvals that promoted the entry, in seq order", () => {
+  it("are an empty list once the entry verifies, seating no approval", () => {
     const { log, slots } = largeVerified(statedCore());
 
     const derived = derive(log, ENTRY, STALE_CLOCK);
     expect(derived.derived.status).toBe("verified");
-    expect(slots.length).toBe(SLOT_COUNT);
-    expect(derived.sidecar.read_share_slots).toEqual(slots);
+    expect(slots.length).toBe(APPROVALS_TO_VERIFY_LARGE_POOL);
+    expect(derived.sidecar.read_share_slots).toEqual([]);
+    for (const slot of slots) {
+      expect([
+        slot.operator,
+        derived.sidecar.read_share_slots?.some(
+          (seat) => seat.operator === slot.operator,
+        ),
+      ]).toEqual([slot.operator, false]);
+    }
   });
 
   it("seat no one for an approval that arrives after verification", () => {
-    const { log, slots } = largeVerified(statedCore());
+    const { log } = largeVerified(statedCore());
     const latecomer = LARGE_VALIDATORS[APPROVALS_TO_VERIFY_LARGE_POOL]!;
     validate(
       log,
@@ -575,7 +596,7 @@ describe("read-share slots", () => {
     );
 
     const derived = derive(log, ENTRY, STALE_CLOCK);
-    expect(derived.sidecar.read_share_slots).toEqual(slots);
+    expect(derived.sidecar.read_share_slots).toEqual([]);
     expect(
       derived.sidecar.read_share_slots?.some(
         (slot) => slot.operator === latecomer,
@@ -584,10 +605,9 @@ describe("read-share slots", () => {
   });
 
   it("seat no one for a reconfirmation sealed before the promoting approval", () => {
-    // The slots do not exist until the promoting decision seats them, so a
-    // reconfirmation at or below that decision's seq has nothing to rotate:
-    // it neither takes an empty slot nor replaces a holder. Without that gate
-    // the reconfirmer would land in the middle of the seated approvals.
+    // The list does not exist until the promoting decision, and it is empty
+    // from there: a reconfirmation at or below that decision's seq is neither
+    // seated nor counted, exactly as one after it is not.
     const core = statedCore();
     const log = baseLog(LARGE_VALIDATORS);
     submit(log, core);
@@ -607,7 +627,9 @@ describe("read-share slots", () => {
     for (let index = 0; index < APPROVALS_TO_VERIFY_LARGE_POOL - 1; index += 1) {
       seat(index);
     }
-    expect(derive(log, ENTRY, STALE_CLOCK).derived.status).toBe("draft");
+    const beforePromotion = derive(log, ENTRY, STALE_CLOCK);
+    expect(beforePromotion.derived.status).toBe("draft");
+    expect(beforePromotion.sidecar.read_share_slots).toBeNull();
 
     // A reconfirmation arrives here, before the approval that promotes.
     const early = LARGE_VALIDATORS[APPROVALS_TO_VERIFY_LARGE_POOL]!;
@@ -619,21 +641,10 @@ describe("read-share slots", () => {
 
     const derived = derive(log, ENTRY, STALE_CLOCK);
     expect(derived.derived.status).toBe("verified");
-    // Exactly the promoting approvals' operators, in their own seq order.
-    expect(derived.sidecar.read_share_slots).toEqual(seated);
-    expect(
-      derived.sidecar.read_share_slots?.map((slot) => slot.operator),
-    ).toEqual(seated.map((slot) => slot.operator));
-    // Nothing rotated: the earliest approval still holds the oldest slot.
-    expect(derived.sidecar.read_share_slots?.[0]).toEqual(seated[0]);
-    expect(
-      derived.sidecar.read_share_slots?.some(
-        (slot) => slot.operator === early || slot.seq === earlySeat.seq,
-      ),
-    ).toBe(false);
+    expect(derived.sidecar.read_share_slots).toEqual([]);
   });
 
-  it("clear the staleness and rotate the oldest slot on a reconfirmation", () => {
+  it("clear the staleness on a reconfirmation, and rotate nothing", () => {
     const core = statedCore();
     const { log, slots } = largeVerified(core);
     expect(derive(log, ENTRY, STALE_CLOCK).derived.stale).toBe(true);
@@ -642,27 +653,27 @@ describe("read-share slots", () => {
     const seated = reconfirm(log, core, reconfirmer);
 
     const derived = derive(log, ENTRY, STALE_CLOCK);
+    // The whole of the reconfirmation's job, untouched by D-127.
     expect(derived.derived.stale).toBe(false);
     expect(derived.derived.last_confirmed).toBe(RECONFIRMED_DATE);
     expect(derived.derived.expires_at).toBe(
       datePlus(RECONFIRMED_DATE, PRICING_WINDOW),
     );
 
-    // The oldest holder is replaced, not added to: still SLOT_COUNT slots.
-    expect(derived.sidecar.read_share_slots).toEqual([
-      slots[1],
-      slots[2],
-      seated,
-    ]);
-    expect(derived.sidecar.read_share_slots).toHaveLength(SLOT_COUNT);
-    expect(
-      derived.sidecar.read_share_slots?.some(
-        (slot) => slot.operator === slots[0]!.operator,
-      ),
-    ).toBe(false);
+    // And nothing rotates: neither the reconfirmer in nor the oldest holder
+    // out, because there is no holder and nothing to hold.
+    expect(derived.sidecar.read_share_slots).toEqual([]);
+    for (const operator of [seated.operator, slots[0]!.operator]) {
+      expect([
+        operator,
+        derived.sidecar.read_share_slots?.some(
+          (slot) => slot.operator === operator,
+        ),
+      ]).toEqual([operator, false]);
+    }
   });
 
-  it("rotate nothing when the reconfirmer already holds a slot", () => {
+  it("rotate nothing when the reconfirmer is one of the approvers either", () => {
     const core = statedCore();
     const { log, slots } = largeVerified(core);
     reconfirm(log, core, slots[0]!.operator);
@@ -670,83 +681,55 @@ describe("read-share slots", () => {
     const derived = derive(log, ENTRY, STALE_CLOCK);
     expect(derived.derived.stale).toBe(false);
     expect(derived.derived.last_confirmed).toBe(RECONFIRMED_DATE);
-    expect(derived.sidecar.read_share_slots).toEqual(slots);
+    expect(derived.sidecar.read_share_slots).toEqual([]);
   });
 
-  it("replace the next-oldest holder on a second rotation, not the just-seated one", () => {
-    const core = statedCore();
-    const { log, slots } = largeVerified(core);
-
-    const first = reconfirm(
-      log,
-      core,
-      LARGE_VALIDATORS[APPROVALS_TO_VERIFY_LARGE_POOL]!,
-    );
-    expect(derive(log, ENTRY, STALE_CLOCK).sidecar.read_share_slots).toEqual([
-      slots[1],
-      slots[2],
-      first,
-    ]);
-
-    const second = reconfirm(
-      log,
-      core,
-      LARGE_VALIDATORS[APPROVALS_TO_VERIFY_LARGE_POOL + 1]!,
-      "2026-10-20T09:00:00Z",
-    );
-    const derived = derive(log, ENTRY, STALE_CLOCK);
-    expect(derived.sidecar.read_share_slots).toEqual([
-      slots[2],
-      first,
-      second,
-    ]);
-    expect(derived.derived.last_confirmed).toBe("2026-10-20");
-  });
-
-  it("fill the empty slot a small pool leaves before replacing anyone", () => {
-    const core = statedCore();
-    const { log, slots } = smallVerified(core);
-    expect(slots).toHaveLength(APPROVALS_TO_VERIFY_SMALL_POOL);
-    expect(derive(log, ENTRY, STALE_CLOCK).sidecar.read_share_slots).toEqual(
-      slots,
-    );
-
-    const filler = reconfirm(
-      log,
-      core,
-      SMALL_VALIDATORS[APPROVALS_TO_VERIFY_SMALL_POOL]!,
-    );
-    const filled = derive(log, ENTRY, STALE_CLOCK);
-    expect(filled.sidecar.read_share_slots).toEqual([...slots, filler]);
-    expect(filled.sidecar.read_share_slots).toHaveLength(SLOT_COUNT);
-
-    // Full now, so the next outsider replaces the oldest holder.
-    const replacer = reconfirm(
-      log,
-      core,
-      SMALL_VALIDATORS[APPROVALS_TO_VERIFY_SMALL_POOL + 1]!,
-      "2026-10-20T09:00:00Z",
-    );
-    expect(derive(log, ENTRY, STALE_CLOCK).sidecar.read_share_slots).toEqual([
-      slots[1],
-      filler,
-      replacer,
-    ]);
-  });
-
-  it("stay sorted by seq ascending through every rotation", () => {
+  it("stay empty through a second reconfirmation, which still refreshes", () => {
     const core = statedCore();
     const { log } = largeVerified(core);
+
     reconfirm(log, core, LARGE_VALIDATORS[APPROVALS_TO_VERIFY_LARGE_POOL]!);
+    expect(derive(log, ENTRY, STALE_CLOCK).sidecar.read_share_slots).toEqual(
+      [],
+    );
+
     reconfirm(
       log,
       core,
       LARGE_VALIDATORS[APPROVALS_TO_VERIFY_LARGE_POOL + 1]!,
       "2026-10-20T09:00:00Z",
     );
+    const derived = derive(log, ENTRY, STALE_CLOCK);
+    expect(derived.sidecar.read_share_slots).toEqual([]);
+    // The later reconfirmation is still the one the freshness rule reads.
+    expect(derived.derived.last_confirmed).toBe("2026-10-20");
+    expect(derived.derived.stale).toBe(false);
+  });
 
-    const seats = derive(log, ENTRY, STALE_CLOCK).sidecar.read_share_slots ?? [];
-    const seqs = seats.map((slot) => slot.seq);
-    expect(seqs).toEqual([...seqs].sort((left, right) => left - right));
+  it("leave a small pool nothing to fill: two approvals seat nobody either", () => {
+    const core = statedCore();
+    const { log, slots } = smallVerified(core);
+    expect(slots).toHaveLength(APPROVALS_TO_VERIFY_SMALL_POOL);
+    expect(derive(log, ENTRY, STALE_CLOCK).sidecar.read_share_slots).toEqual(
+      [],
+    );
+
+    // A small pool used to leave an empty seat an outsider could fill. There
+    // is no seat to leave now, so an outsider's reconfirmation refreshes the
+    // entry and adds nobody.
+    reconfirm(log, core, SMALL_VALIDATORS[APPROVALS_TO_VERIFY_SMALL_POOL]!);
+    const filled = derive(log, ENTRY, STALE_CLOCK);
+    expect(filled.sidecar.read_share_slots).toEqual([]);
+    expect(filled.derived.stale).toBe(false);
+
+    reconfirm(
+      log,
+      core,
+      SMALL_VALIDATORS[APPROVALS_TO_VERIFY_SMALL_POOL + 1]!,
+      "2026-10-20T09:00:00Z",
+    );
+    expect(derive(log, ENTRY, STALE_CLOCK).sidecar.read_share_slots).toEqual(
+      [],
+    );
   });
 });

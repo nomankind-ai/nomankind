@@ -156,7 +156,7 @@ const PANELS: readonly { readonly id: string; readonly number: string; readonly 
       title: "Keep it true",
       label: "SECTIONS 6 AND 7 · RECONFIRM, SUPERSEDE, DISPUTE",
     },
-    { id: "s6", number: "06", title: "Standing and the ledger", label: "SECTION 9 · INCENTIVES" },
+    { id: "s6", number: "06", title: "Standing and contribution", label: "SECTION 9 · INCENTIVES" },
     { id: "s7", number: "07", title: "Attest a model", label: "SECTION 8 · DRIFT ATTESTATION" },
     { id: "s8", number: "08", title: "Verify offline", label: "GOAL 4 · TWO FILES AND ONE SCRIPT" },
     {
@@ -168,8 +168,8 @@ const PANELS: readonly { readonly id: string; readonly number: string; readonly 
     {
       id: "s10",
       number: "10",
-      title: "Paid access, metering, and alerts",
-      label: "SECTION 9 · MONEY",
+      title: "Free access, caps, and alerts",
+      label: "SECTION 9 · THE RECORD IS FREE",
     },
   ];
 
@@ -200,7 +200,7 @@ describe("renderHowItWorks", () => {
   it("names the release window in the read stage, from policy", () => {
     const squeezed = page.replace(/\s+/g, " ");
     expect(squeezed).toContain(
-      `for ${RELEASE_WINDOW_DAYS} days after the seal that covers it`,
+      `An entry is released ${RELEASE_WINDOW_DAYS} days after the seal that covers it`,
     );
     expect(squeezed).toContain(
       `RELEASE_WINDOW_DAYS ${RELEASE_WINDOW_DAYS}`,

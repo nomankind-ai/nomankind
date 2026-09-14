@@ -383,10 +383,11 @@ export function renderDomains(ctx: PageContext, data: DomainsData): string {
         tables: which categories exist, how long each stays fresh, which carry a
         transcript, who is too close to judge, and how a subject is named. Every
         entry names its domain in its signed core, so a fact can never be moved
-        from one domain to another, by anyone. The same window applies in every
-        domain too: an entry's proof is public from the first minute, and its
-        content is released ${RELEASE_WINDOW_DAYS} days after the seal that
-        covers it (decision D-100).
+        from one domain to another, by anyone. The record is free in every domain
+        alike: an entry's proof is public from the first minute, and its content
+        is released ${RELEASE_WINDOW_DAYS} days after the seal that covers it —
+        at zero, the moment it is sealed, public and CC0 from that instant, with
+        nothing to pay and no key to hold (decisions D-100 and D-127).
       </p>
 
       <div class="counters">

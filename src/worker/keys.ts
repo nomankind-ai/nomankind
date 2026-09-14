@@ -1,57 +1,49 @@
 /**
- * The key doors: what a reader who wants more than the free tier knocks on.
+ * The key doors: what a reader who wants a name of their own knocks on.
  *
- * Whitepaper Section 9, Money: "The log is free to read at low volume, forever.
- * Revenue comes from high-rate API access, structured feeds and webhooks,
- * change alerts." Six doors and nothing else — what the tiers are, start a
- * checkout, claim the key the checkout paid for, what my key is, what my key
- * read, and the receipts behind that. A seventh, the customer's own billing
- * portal, is the provider's page and not ours: we hand out the link and hold
- * no card, no address and no invoice.
+ * Decision D-127, "the record is free, no money anywhere": a key is not bought
+ * any more, it is asked for. Nothing about it is priced, nothing about it is
+ * sold, and the caps it carries are caps and never products — what a key buys
+ * is an identity the log can count under, so a reader can hold alerts, read
+ * their own receipts by counter, and see what they read day by day. Six doors:
+ * what the tiers allow, take a key, what my key is, what my key read, the
+ * receipts behind that, and the four retired ones that answer 410.
  *
- * The secret is shown exactly once, at the claim. There is no door that shows
- * it again, and there is no row anywhere that could: the table holds its hash
- * (src/keys.ts). A reader who loses a key cancels the subscription and buys
- * another, which is the honest consequence of not storing credentials.
+ * One key per client per UTC day, which is the whole of what stands between a
+ * free identity and an identity factory. The client is the same per-client
+ * identity the write doors count a submission under (src/keys.ts,
+ * `quotaScopeForClient`): the address, hashed, or the one anonymous bucket when
+ * the platform gave us no address. Nothing here records who asked — the hash is
+ * what the row carries, exactly as the read counters do.
  *
- * The claim answers HTML to a browser and JSON to everything else, because the
- * provider's success redirect lands a person on it and a person owed a
- * credential should not be shown a JSON blob they may close. The JSON is the
- * contract; the page is a courtesy, rendered through the same layout every other
- * page uses so it cannot drift into a second design.
+ * The secret is shown exactly once, at the door that mints it. There is no door
+ * that shows it again, and there is no row anywhere that could: the table holds
+ * its hash (src/keys.ts). A reader who loses a key comes back tomorrow, which is
+ * the honest consequence of not storing credentials.
  *
- * Nothing is decided here. What a tier costs and what it allows is
- * src/policy.ts's, what a key is and how one is minted is src/keys.ts's, the
- * provider is an injected adapter, and the store is query-shaped
+ * Nothing is decided here. What a tier allows is src/policy.ts's, what a key is
+ * and how one is minted is src/keys.ts's, and the store is query-shaped
  * (src/storage/keys.ts). No wall clock: `deps.now` is the instant the router
  * read once. No policy number lives here — the bare integers are HTTP status
  * codes, and the usage window's default and cap are the two named constants
  * below, which are page sizes of this door and not published amounts.
  */
 
-import type { PaymentsAdapter } from "../adapters/stripe.js";
 import {
   keyHash,
-  keyStatusFromSubscription,
   looksLikeKey,
   mintKey,
+  quotaScopeForClient,
   quotaScopeForKey,
   tierLimit,
   type KeyRecord,
 } from "../keys.js";
 import {
-  CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-  CONTRIBUTOR_SHARE_PERCENT,
-  FREE_TIER,
   LIST_PAGE_LIMIT,
   RATE_TIERS,
-  READ_PRICE_MICROS_PER_READ,
   USAGE_DAYS_DEFAULT,
   USAGE_DAYS_MAX,
-  isPaidTier,
 } from "../policy.js";
-import { html, htmlResponse, layout } from "../ui/html.js";
-import type { PageContext } from "../ui/types.js";
 import { utcDay } from "../anchor.js";
 import type { D1Like } from "../storage/d1.js";
 import {
@@ -65,7 +57,7 @@ import {
   receiptsForKey,
 } from "../storage/keys.js";
 import type { Env } from "./env.js";
-import { canonicalOriginFor, wantsHtml } from "./pages.js";
+import { retiredDoor } from "./stripe.js";
 import {
   guardDatabase,
   isRead,
@@ -77,36 +69,13 @@ import {
   StorageUnreachable,
 } from "./registry.js";
 
-/** What the deps this door takes: the instant, and the payment provider. */
+/** What the deps these doors take: the instant, and nothing else. */
 export interface KeysDeps {
   readonly now: Date;
-  readonly payments: PaymentsAdapter;
 }
 
 /** How many milliseconds a day is. Not a policy number: it is what a day is. */
 const MILLISECONDS_PER_DAY = 86_400_000;
-
-/**
- * What an adapter refusal answers with.
- *
- * `payments_unavailable` is 503 and not 502: the paid loop is not configured on
- * this deployment, which is our state rather than the provider's failure, and it
- * is exactly production's state until M25. Everything else is 502 with the
- * detail the adapter chose, which is a status and an error code and never a
- * message, a request header or a secret.
- */
-function fromAdapter(result: { refusal: string; detail?: string }): Response {
-  if (result.refusal === "payments_unavailable") {
-    return refuse(503, "payments_unavailable");
-  }
-  return json(
-    {
-      error: result.refusal,
-      ...(result.detail === undefined ? {} : { detail: result.detail }),
-    },
-    502,
-  );
-}
 
 /**
  * The key a request presented, or the refusal it earned.
@@ -149,17 +118,15 @@ async function keyOf(
 // The reads
 // ---------------------------------------------------------------------------
 
-/** What a tier costs and what it allows, straight out of policy. */
+/**
+ * What a tier allows, straight out of policy — and nothing else.
+ *
+ * A cap and a name per tier, with no price beside it and no share underneath
+ * it (D-127): the caps stay as caps, and a tier is what a reader may read in a
+ * day rather than something anyone is charged for.
+ */
 function tiers(): Response {
-  return json(
-    {
-      tiers: RATE_TIERS,
-      price_micros_per_read: READ_PRICE_MICROS_PER_READ,
-      contributor_share_percent: CONTRIBUTOR_SHARE_PERCENT,
-      contributor_share_floor_percent: CONTRIBUTOR_SHARE_FLOOR_PERCENT,
-    },
-    200,
-  );
+  return json({ tiers: RATE_TIERS }, 200);
 }
 
 /** One key, as its holder sees it: never the hash, never the secret. */
@@ -300,105 +267,116 @@ async function receipts(
 }
 
 // ---------------------------------------------------------------------------
-// Buying, claiming, and the provider's own page
+// The free key door, and the four that are gone
 // ---------------------------------------------------------------------------
 
-/** Start a checkout for one tier. */
-async function checkout(
-  request: Request,
-  env: Env,
-  deps: KeysDeps,
-  url: URL,
-): Promise<Response> {
-  // The cap before the read, and the read before the parse: this door takes a
-  // key rather than a signature, but a body is a body and no door parses one it
-  // has not bounded first.
-  const read = await readCappedBody(request);
-  if (!read.ok) return read.response;
-
-  let body: unknown;
-  try {
-    body = JSON.parse(read.text);
-  } catch {
-    return refuse(400, "bad_body");
+/**
+ * The tier a free key is issued at: the first tier in policy that carries a key.
+ *
+ * Read out of RATE_TIERS rather than written here, so the slug a key is issued
+ * under is policy's and not this door's. Null when policy registers no keyed
+ * tier at all, which is a refusal rather than a guess: a key minted at a tier
+ * that does not exist carries a cap of zero (src/keys.ts, `tierLimit`) and would
+ * be a credential that refuses every read it is presented at.
+ */
+function freeKeyTier(): string | null {
+  for (const [slug, tier] of Object.entries(RATE_TIERS)) {
+    if (tier.key) return slug;
   }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    return refuse(400, "bad_body");
-  }
-
-  const fields = body as Record<string, unknown>;
-  const tier = fields["tier"];
-  const email = fields["email"];
-  if (typeof tier !== "string") return refuse(400, "bad_body");
-  if (email !== undefined && typeof email !== "string") {
-    return refuse(400, "bad_body");
-  }
-  if (tier === FREE_TIER) return refuse(422, "free_tier_needs_no_key");
-  if (!isPaidTier(tier)) return refuse(422, "unknown_tier");
-
-  const price = await deps.payments.ensurePrice(env.ENVIRONMENT, tier);
-  if (!price.ok) return fromAdapter(price);
-
-  const session = await deps.payments.createCheckout({
-    price: price.value.price,
-    tier,
-    environment: env.ENVIRONMENT,
-    successUrl: `${url.origin}/keys/claim?session={CHECKOUT_SESSION_ID}`,
-    cancelUrl: `${url.origin}/api`,
-    ...(email === undefined ? {} : { email }),
-  });
-  if (!session.ok) return fromAdapter(session);
-
-  return json({ session: session.value.id, url: session.value.url }, 200);
+  return null;
 }
 
 /**
- * Claim the key a finished checkout paid for.
+ * The part of a client's quota scope that names the client: the hash, or the
+ * word every client without an address shares.
  *
- * Every check before the write, and the write is the only place the secret
- * exists: it is minted, hashed, stored as the hash and handed back once. The
- * 409 is the unique index on `checkout_session` and not a check that hoped
- * nobody raced — two tabs open on the success URL both see nothing and both
- * insert, and exactly one of them gets a key.
+ * `quotaScopeForClient` answers `client:<sha256>` or `client:anonymous`, and the
+ * prefix is that function's business rather than this column's, so it is taken
+ * off before the synthetic values below are built from what is left.
  */
-async function claim(
+function clientDigest(scope: string): string {
+  const PREFIX = "client:";
+  return scope.startsWith(PREFIX) ? scope.slice(PREFIX.length) : scope;
+}
+
+/**
+ * What one client's free key for one day is filed under.
+ *
+ * `api_keys` still has the three NOT NULL columns the paid loop put there —
+ * customer, subscription and checkout_session — and this milestone adds no
+ * migration (D-127), so they are filled with synthetic values rather than left
+ * out. They are not references to anything at any provider and are not meant to
+ * be: `free` says where they came from, the client digest says which client, and
+ * the day says which day.
+ *
+ * The unique index on `checkout_session` is what actually enforces one key per
+ * client per UTC day. The check below it is the courteous answer; this is the
+ * rule, and it holds when two requests race, exactly as it held for two tabs
+ * open on a claim.
+ */
+function syntheticColumns(
+  scope: string,
+  day: string,
+): { customer: string; subscription: string; checkoutSession: string } {
+  const digest = clientDigest(scope);
+  return {
+    // The client, across every day: one client is one "customer", which is what
+    // makes a second key today a duplicate of the first rather than a stranger.
+    customer: `free:client:${digest}`,
+    subscription: `free:sub:${digest}:${day}`,
+    checkoutSession: `free:day:${digest}:${day}`,
+  };
+}
+
+/**
+ * POST /keys/free: a key, free, one per client per UTC day.
+ *
+ * Decision D-127: the record is free and a key is an identity rather than a
+ * purchase. So there is nothing to pay, nothing to claim and no provider in the
+ * path — the door mints, hashes, stores the hash and hands the secret back once.
+ *
+ * No body is needed. An empty JSON object is accepted because a client that
+ * sends one is being polite rather than wrong, and anything else is `bad_body`:
+ * a door that quietly ignored fields would be a door people wrote fields for.
+ *
+ * The 429 is the one rule this door has. It is answered from the standing row
+ * first, for a caller who asks twice, and from the unique index second, for two
+ * callers who ask at the same instant — the same pair the claim door used, for
+ * the same reason.
+ */
+async function free(
   request: Request,
-  env: Env,
-  deps: KeysDeps,
   db: D1Like,
-  url: URL,
+  deps: KeysDeps,
 ): Promise<Response> {
-  const session = url.searchParams.get("session");
-  if (session === null || session === "") {
-    return answerClaim(request, env, url, refuse(400, "missing_session"), null);
+  // The read before the parse, exactly as every other door that takes a body:
+  // no door parses a body it has not bounded first.
+  const read = await readCappedBody(request);
+  if (!read.ok) return read.response;
+  if (read.text.trim() !== "") {
+    let body: unknown;
+    try {
+      body = JSON.parse(read.text);
+    } catch {
+      return refuse(400, "bad_body");
+    }
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return refuse(400, "bad_body");
+    }
+    if (Object.keys(body as Record<string, unknown>).length > 0) {
+      return refuse(400, "bad_body");
+    }
   }
 
-  const retrieved = await deps.payments.retrieveCheckout(session);
-  if (!retrieved.ok) {
-    return answerClaim(request, env, url, fromAdapter(retrieved), null);
-  }
-  const checkoutSession = retrieved.value;
+  const tier = freeKeyTier();
+  if (tier === null) return refuse(503, "no_keyed_tier");
 
-  if (checkoutSession.status === "expired") {
-    return answerClaim(request, env, url, refuse(404, "unknown_session"), null);
-  }
-  if (
-    checkoutSession.status !== "complete" ||
-    checkoutSession.subscription === null ||
-    checkoutSession.customer === null
-  ) {
-    return answerClaim(request, env, url, refuse(402, "not_paid"), null);
-  }
+  const day = utcDay(deps.now.toISOString());
+  const scope = await quotaScopeForClient(request.headers.get("cf-connecting-ip"));
+  const columns = syntheticColumns(scope, day);
 
-  const tier = checkoutSession.metadata["tier"];
-  if (tier === undefined || !isPaidTier(tier)) {
-    return answerClaim(request, env, url, refuse(422, "unknown_tier"), null);
-  }
-
-  const standing = await keyByCheckoutSession(db, session);
-  if (standing !== null) {
-    return answerClaim(request, env, url, refuse(409, "already_claimed"), null);
-  }
+  const standing = await keyByCheckoutSession(db, columns.checkoutSession);
+  if (standing !== null) return refuse(429, "key_today");
 
   const minted = mintKey();
   const at = deps.now.toISOString();
@@ -408,127 +386,33 @@ async function claim(
       id: minted.id,
       keyHash: await minted.hash,
       tier,
-      status: keyStatusFromSubscription(checkoutSession.subscription.status),
-      customer: checkoutSession.customer,
-      subscription: checkoutSession.subscription.id,
-      checkoutSession: session,
+      // Active from the minute it is minted: there is no bill behind it that
+      // could fall past due and no subscription behind it that could be
+      // canceled, so the only status a free key ever has is the working one.
+      status: "active",
+      customer: columns.customer,
+      subscription: columns.subscription,
+      checkoutSession: columns.checkoutSession,
       createdAt: at,
     });
   } catch (error) {
-    if (error instanceof KeyClaimConflictError) {
-      return answerClaim(request, env, url, refuse(409, "already_claimed"), null);
-    }
+    if (error instanceof KeyClaimConflictError) return refuse(429, "key_today");
     throw error;
   }
 
-  const body = {
-    key: minted.secret,
-    id: stored.id,
-    tier: stored.tier,
-    status: stored.status,
-    customer: stored.customer,
-    created_at: stored.created_at,
-  };
-  return answerClaim(request, env, url, json(body, 201), body);
-}
-
-/**
- * The claim's answer in the shape the caller asked for.
- *
- * The JSON is the contract and is what an agent gets. A browser — which is what
- * the provider's success redirect sends here — gets the same fields on a page,
- * through the layout every other page uses, with the one warning that matters:
- * the key is on this page and nowhere else, ever again.
- */
-function answerClaim(
-  request: Request,
-  env: Env,
-  url: URL,
-  response: Response,
-  granted: {
-    key: string;
-    id: string;
-    tier: string;
-    status: string;
-    customer: string;
-    created_at: string;
-  } | null,
-): Response {
-  if (!isRead(request) || !wantsHtml(request)) return response;
-
-  const ctx: PageContext = {
-    environment: env.ENVIRONMENT,
-    path: url.pathname,
-    origin: url.origin,
-    // The host this deployment calls its own, by the browsing route's one rule
-    // (D-114) rather than a second copy of it.
-    canonical_origin: canonicalOriginFor(env, url),
-  };
-
-  if (granted === null) {
-    const heading = response.status === 409 ? "Already claimed" : "No key";
-    return htmlResponse(
-      layout(ctx, {
-        title: heading,
-        body: html`<section class="panel">
-          <h1>${heading}</h1>
-          <p>
-            This checkout session did not hand over a key. The JSON at this same
-            address says why, in one word.
-          </p>
-        </section>`,
-      }),
-      response.status,
-    );
-  }
-
-  const rows = [
-    ["Key", granted.key],
-    ["Id", granted.id],
-    ["Tier", granted.tier],
-    ["Status", granted.status],
-    ["Customer", granted.customer],
-    ["Created", granted.created_at],
-  ].map(
-    ([name, value]) =>
-      html`<tr>
-        <th>${name}</th>
-        <td class="mono">${value}</td>
-      </tr>`,
-  );
-
-  return htmlResponse(
-    layout(ctx, {
-      title: "Your key",
-      body: html`<section class="panel">
-        <h1>Your key</h1>
-        <p>
-          <strong>This is the only time the key is shown.</strong> It is stored
-          here as a hash and cannot be shown again. Copy it now; if you lose it,
-          cancel the subscription and buy another.
-        </p>
-        <table class="table">
-          ${rows}
-        </table>
-        <p>Send it as <code>Authorization: Bearer &lt;key&gt;</code>.</p>
-      </section>`,
-    }),
+  return json(
+    {
+      // The only time it is shown. The table holds its hash and nothing here
+      // can show it again.
+      key: minted.secret,
+      id: stored.id,
+      tier: stored.tier,
+      status: stored.status,
+      limit: tierLimit(stored.tier),
+      created_at: stored.created_at,
+    },
     201,
   );
-}
-
-/** The provider's own billing page, for the customer behind one key. */
-async function portal(
-  key: KeyRecord,
-  deps: KeysDeps,
-  url: URL,
-): Promise<Response> {
-  const session = await deps.payments.createPortal(
-    key.customer,
-    `${url.origin}/api`,
-  );
-  if (!session.ok) return fromAdapter(session);
-  return json({ url: session.value.url }, 200);
 }
 
 // ---------------------------------------------------------------------------
@@ -537,7 +421,6 @@ async function portal(
 
 async function route(
   request: Request,
-  env: Env,
   db: D1Like,
   deps: KeysDeps,
 ): Promise<Response | null> {
@@ -549,14 +432,27 @@ async function route(
     return tiers();
   }
 
+  if (path === "/keys/free") {
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return free(request, db, deps);
+  }
+
+  // The three doors of the paid loop, retired (D-127). The method check stays
+  // in front of each, so what is answered about the method is still true; the
+  // door itself touches no storage and reads no secret on its way to the 410.
   if (path === "/keys/checkout") {
     if (request.method !== "POST") return methodNotAllowed("POST");
-    return checkout(request, env, deps, url);
+    return retiredDoor();
   }
 
   if (path === "/keys/claim") {
     if (!isRead(request)) return methodNotAllowed(READ_METHODS);
-    return claim(request, env, deps, db, url);
+    return retiredDoor();
+  }
+
+  if (path === "/keys/me/portal") {
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return retiredDoor();
   }
 
   if (path === "/keys/me") {
@@ -577,12 +473,6 @@ async function route(
     return held.ok ? receipts(db, held.key, url) : held.response;
   }
 
-  if (path === "/keys/me/portal") {
-    if (request.method !== "POST") return methodNotAllowed("POST");
-    const held = await keyOf(db, request);
-    return held.ok ? portal(held.key, deps, url) : held.response;
-  }
-
   // Every other /keys path belongs to somebody else — the webhook doors under
   // /keys/me/webhooks are the alert module's — or to nobody, and the Worker's
   // own not_found is the right answer for the second.
@@ -600,7 +490,7 @@ export async function handleKeys(
 ): Promise<Response | null> {
   const db = guardDatabase(env.DB);
   try {
-    return await route(request, env, db, deps);
+    return await route(request, db, deps);
   } catch (error) {
     if (error instanceof StorageUnreachable) {
       // The message only: no binding contents, no request data, no secret.

@@ -3,8 +3,7 @@
  * them.
  *
  * Whitepaper Section 6, "Dispute": "Filing takes a stake, so burner keys cannot
- * dispute for free. A verified operator stakes standing, a bare key stakes a
- * refundable filing fee, and the amounts are published policy. An upheld
+ * dispute for free. A verified operator stakes standing ... An upheld
  * challenge returns the stake, pays the challenger, overturns the entry ... A
  * failed challenge forfeits the stake and costs the challenger standing, so
  * disputes are for evidence."
@@ -34,7 +33,6 @@
 
 import type { Event } from "./events.js";
 import {
-  DISPUTE_FILING_FEE_CENTS,
   DISPUTE_STAKE_STANDING,
   REVALIDATION_REQUEST_STAKE_STANDING,
 } from "./policy.js";
@@ -72,8 +70,10 @@ export type StakeKind =
  * reward is a fact with no number attached until the ledger step reaches the
  * position it was owed at and prices it from the clawbacks, in `micros`. They
  * are never null on a stake, a refund or a forfeit, which are all the same
- * amount as what was put up, and are never `micros` on any of the three:
- * standing for an operator, cents for a bare key's filing fee.
+ * amount as what was put up, and on all three the unit is `standing`: since
+ * D-127 there is no fee and no second currency to put up. `cents` stays in the
+ * union because a row read back out of a mirror sealed before that decision
+ * still says so, and a reader has to be able to name what it says.
  *
  * `seq` and `at` are the position and instant of the event that produced the
  * row, so a reader can find the event a row came from without searching.
@@ -102,14 +102,23 @@ function targetOf(event: Event): string {
 }
 
 /**
- * What a challenger put up to file.
+ * What a challenger put up to file: standing, and only ever standing.
  *
- * Section 6: "A verified operator stakes standing, a bare key stakes a
- * refundable filing fee." The event's `operator` is what tells the two apart —
- * null is a bare key — so the unit is read out of the log and never guessed.
+ * Section 6 has a bare key stake "a refundable filing fee" instead, and D-127
+ * supersedes that half of the sentence: there is no money anywhere in this
+ * record, so there is no fee to stake and contribution is the only currency a
+ * filing can put up. A bare key holds none of it and so cannot file at all —
+ * the dispute door refuses the filing before it reaches here, with the refusal
+ * it already had for a challenger who cannot cover the stake,
+ * `insufficient_standing` (src/dispute.ts, `checkStakeCover`: available
+ * standing zero against a stake of DISPUTE_STAKE_STANDING).
+ *
+ * So the row is one shape now. `operator` is still read out of the log and
+ * still carried, because the log is what a row is derived from and a legacy
+ * filing must keep replaying to the same position it occupied; what it no
+ * longer does is choose a unit.
  */
 export function disputeStake(event: Event<"dispute_filed">): StakeRecord {
-  const bareKey = event.payload.operator === null;
   return {
     kind: "dispute_stake",
     entry_id: targetOf(event),
@@ -117,8 +126,8 @@ export function disputeStake(event: Event<"dispute_filed">): StakeRecord {
     request_seq: null,
     agent: event.payload.challenger,
     operator: event.payload.operator,
-    unit: bareKey ? "cents" : "standing",
-    amount: bareKey ? DISPUTE_FILING_FEE_CENTS : DISPUTE_STAKE_STANDING,
+    unit: "standing",
+    amount: DISPUTE_STAKE_STANDING,
     seq: event.seq,
     at: event.at,
   };

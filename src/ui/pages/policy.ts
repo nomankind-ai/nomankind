@@ -56,31 +56,6 @@ function group(title: string, items: readonly Row[]): Safe {
       </section>`;
 }
 
-/**
- * Micro-USD per dollar, and reads per thousand reads. Units and not policy
- * numbers: the first is what a millionth of a dollar means (src/ledger.ts) and
- * the second is what "per thousand" means. Every amount they are applied to is
- * read from POLICY.
- */
-const MICROS_PER_DOLLAR = 1_000_000;
-const READS_PER_THOUSAND = 1_000;
-
-/** A micro-USD amount as dollars, by integer arithmetic and never a float. */
-function dollars(micros: number): string {
-  const whole = Math.trunc(micros / MICROS_PER_DOLLAR);
-  const fraction = micros % MICROS_PER_DOLLAR;
-  const cents = Math.trunc(fraction / (MICROS_PER_DOLLAR / 100));
-  const remainder = fraction % (MICROS_PER_DOLLAR / 100);
-  return remainder === 0
-    ? `$${whole}.${String(cents).padStart(2, "0")}`
-    : `$${whole}.${String(fraction).padStart(6, "0")}`;
-}
-
-/** The paper's own worked figure, derived from the price rather than restated. */
-function dollarsPerThousandReads(microsPerRead: number): string {
-  return dollars(microsPerRead * READS_PER_THOUSAND);
-}
-
 /** A list-valued constant, one item per line, in order. */
 function listRows(name: string, values: readonly string[]): Safe[] {
   return values.map(
@@ -443,74 +418,23 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
     },
   ];
 
-  const money: Row[] = [
+  const release: Row[] = [
     {
       name: "RELEASE_WINDOW_DAYS",
       value: `${policy.RELEASE_WINDOW_DAYS} days`,
       means:
-        "The release window (decision D-100): how long after the seal that covers it an entry's content stays paid. An event's release date is its covering seal's sealed_at plus this many days, and an entry's is its submission event's; until then the proof — every hash, every seal, every anchor, and each entry's id, subject, category, status, tier and seal — is public and free as it always was, and the content is served to a paid key or to a signed request from a registered operator. On release it is public, CC0, and in the mirror. An unsealed event is not released at all.",
-    },
-    {
-      name: "HOLDBACK_DAYS",
-      value: `${policy.HOLDBACK_DAYS} days`,
-      means:
-        "How long accrued fees are held before payout, so an upheld dispute can claw them back before they leave.",
-    },
-    ...Object.entries(policy.READ_SHARE_SPLIT).map(([tier, split]) => ({
-      name: `READ_SHARE_SPLIT.${tier}`,
-      value: `submitter ${split.submitter} percent · validator ${split.validator} percent`,
-      means:
-        tier === "observed"
-          ? "Section 9, on an observed entry: the submitter's share and each read-share slot holder's share of paid-read revenue, both larger than the stated row above, so the operators who measure are paid more than the operators who copy (Section 4). A slot holder takes this validator rate only when its own signed record carried a passing measurement; one that accepted the test without running it takes the stated rate beside it. The difference between the two rows comes out of nomankind's share and never out of the reader's price, which is one number per read whatever tier the entry is."
-          : "Section 9's launch split, on a stated entry: the submitter's share and each read-share slot holder's share of paid-read revenue. The tier that prices an entry is the one fixed when it verified, so a split that moved by decision never reprices a read that was already published.",
-    })),
-    {
-      name: "SLOT_COUNT",
-      value: String(policy.SLOT_COUNT),
-      means:
-        "Read-share slots on an entry. A reconfirmation rotates the oldest holder out rather than adding one, so the share is always split among one submitter and at most this many slot holders: two while the trusted pool is under ten operators, this many after.",
-    },
-    {
-      name: "READ_PRICE_MICROS_PER_READ",
-      value: `${policy.READ_PRICE_MICROS_PER_READ} micro-USD per read`,
-      means:
-        `The price a paid read is charged at, and the number every read share is computed from: ${dollarsPerThousandReads(policy.READ_PRICE_MICROS_PER_READ)} per thousand reads. Micro-USD, a millionth of a dollar, because one read's submitter share is a fraction of a cent and a ledger that rounded it to cents would pay the long tail nothing.`,
-    },
-    {
-      name: "CONTRIBUTOR_SHARE_FLOOR_PERCENT",
-      value: `${policy.CONTRIBUTOR_SHARE_FLOOR_PERCENT} percent`,
-      means:
-        "Section 9: the contributor share is a floor that only rises. So the floor is published as a number of its own, and every tier's share beside it is checked against it — a share below this would be a broken promise rather than a smaller payment.",
-    },
-    ...Object.entries(policy.CONTRIBUTOR_SHARE_PERCENT).map(
-      ([tier, percent]) => ({
-        name: `CONTRIBUTOR_SHARE_PERCENT.${tier}`,
-        value: `${percent} percent`,
-        means: `The contributor pool's share of paid-read revenue on a ${tier} entry today: at or above the floor above, and exactly the split it is made of (one READ_SHARE_SPLIT.${tier}.submitter share and SLOT_COUNT READ_SHARE_SPLIT.${tier}.validator shares). It rises on published milestones and never falls.`,
-      }),
-    ),
-    {
-      name: "PAYOUT_MINIMUM_MICROS",
-      value: `${policy.PAYOUT_MINIMUM_MICROS} micro-USD`,
-      means:
-        `How small a released balance is carried forward instead of paid: ${dollars(policy.PAYOUT_MINIMUM_MICROS)}. Nothing is written off, because a transfer that cost more than it paid would take the difference out of the contributor pool (decision D-053).`,
-    },
-    {
-      name: "PAYOUT_CYCLE",
-      value: policy.PAYOUT_CYCLE,
-      means:
-        "How often payouts run: one UTC calendar month per cycle, per operator (decision D-053).",
+        "The release window (decision D-100, at this number since D-127): how long after the seal that covers it an event or an entry stays unreleased. An event's release date is its covering seal's sealed_at plus this many days, and an entry's is its submission event's, so at zero every entry and every event is released the moment it is sealed — its content public, CC0 and in the daily mirror from that instant, served to anyone who asks for it. The proof was public from the first minute either way: every hash, seal and anchor, every operator record, and each entry's id, domain, subject, category, status, effective tier, entry hash, seal object, signers and release date. An unsealed event is not released at all, whatever this number says. The window's code is dormant rather than gone, so a fork that wants one of its own moves this constant and nothing else.",
     },
   ];
 
-  const paid: Row[] = [
+  const access: Row[] = [
     ...Object.entries(policy.RATE_TIERS).map(([slug, tier]) => ({
       name: `RATE_TIERS.${slug}`,
       value: `${tier.name} · ${tier.reads_per_day} reads per day · ${
         tier.key ? "key" : "no key"
       }`,
       means: tier.key
-        ? `A paid tier: ${tier.reads_per_day} reads per UTC day, counted per key. A tier buys throughput and never a discount — every paid read is priced at READ_PRICE_MICROS_PER_READ whichever tier bought it.`
+        ? `A keyed tier: ${tier.reads_per_day} reads per UTC day, counted per key. A cap and nothing else — no read is priced anywhere in this record, so a key is a free identity a reader asks for at the free door and a tier buys nothing at all.`
         : `The tier a reader gets without asking for anything: ${tier.reads_per_day} reads per UTC day, counted per client and served with no key at all. Section 9's "free to read at low volume, forever".`,
     })),
     {
@@ -523,7 +447,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "FREE_READS_PER_DAY_GLOBAL",
       value: `${policy.FREE_READS_PER_DAY_GLOBAL} reads per day`,
       means:
-        "The free tier's ceiling across every client in one UTC day, counted in a scope of its own and checked before the per-client cap above. The per-client cap bounds one reader; this bounds all of them together, so a crowd of addresses each under their own cap cannot be the whole day's budget. It bounds the free tier only: a paid key and a registered operator are counted under their own caps and are never refused because strangers were reading. Past it the answer is 429 rate_limited with scope: global beside the usual fields.",
+        "The free tier's ceiling across every client in one UTC day, counted in a scope of its own and checked before the per-client cap above. The per-client cap bounds one reader; this bounds all of them together, so a crowd of addresses each under their own cap cannot be the whole day's budget. It bounds the free tier only: a key and a registered operator are counted under their own caps and are never refused because strangers were reading. Past it the answer is 429 rate_limited with scope: global beside the usual fields.",
     },
     {
       name: "OPERATOR_READS_PER_DAY",
@@ -573,41 +497,6 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       means:
         "The seven moments in an entry's life a subscriber can be told about. Every one of them is a fact already in the sealed log, so an alert is a notification of something public and never a fact of its own.",
     },
-    {
-      name: "STRIPE.api",
-      value: policy.STRIPE.api,
-      means:
-        "The payment provider's API host (decision D-078). Pinned here for the reason MIRROR and REGISTRY are: an address the system depends on is a published choice, not an adapter's private detail. No secret is here — the key and the webhook signing secret are Worker secrets and never appear in this repository.",
-    },
-    {
-      name: "STRIPE.meter_event_name",
-      value: policy.STRIPE.meter_event_name,
-      means:
-        "The provider's meter each day's published paid reads are reported under, one event per key per day.",
-    },
-    {
-      name: "STRIPE.price_lookup_prefix",
-      value: policy.STRIPE.price_lookup_prefix,
-      means:
-        "A price's lookup key is this prefix, the environment and the tier, so demo and production cannot buy each other's prices.",
-    },
-    {
-      name: "STRIPE.currency",
-      value: policy.STRIPE.currency,
-      means: "The currency every price is created in.",
-    },
-    {
-      name: "STRIPE.webhook_tolerance_seconds",
-      value: `${policy.STRIPE.webhook_tolerance_seconds} seconds`,
-      means:
-        "How far a provider webhook's own timestamp may sit from this Worker's clock before the message is refused as stale, so a captured message cannot be replayed later.",
-    },
-    {
-      name: "STRIPE.webhook_path",
-      value: policy.STRIPE.webhook_path,
-      means:
-        "The one path the provider knocks on. It trusts nothing it is sent until the signature over the raw body verifies, and it may change exactly one column: a key's status.",
-    },
   ];
 
   const standing: Row[] = [
@@ -627,7 +516,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "STANDING_VALIDATION_REPRODUCED",
       value: `${policy.STANDING_VALIDATION_REPRODUCED} standing`,
       means:
-        "Earned beside the amount above when the validation's own signed record carries a passing measurement, and likewise for a measured reconfirmation, so the trusted pool tilts toward the operators who run the test rather than accept it. The money side of the same rule is READ_SHARE_SPLIT.observed above.",
+        "Earned beside the amount above when the validation's own signed record carries a passing measurement, and likewise for a measured reconfirmation, so the trusted pool tilts toward the operators who run the test rather than accept it. Contribution is the whole of that tilt: nothing is paid for a measurement in anything but standing.",
     },
     {
       name: "STANDING_ATTESTATION_SCORED",
@@ -645,13 +534,13 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "STANDING_DISPUTE_UPHELD",
       value: `${policy.STANDING_DISPUTE_UPHELD} standing`,
       means:
-        "Earned by the challenger when a dispute is upheld, on top of the stake coming back.",
+        "Earned by the challenger when a dispute is upheld, on top of the staked standing coming back. Nothing else moves: an upheld challenge overturns the entry and claws back no money, because no read of it was ever priced.",
     },
     {
       name: "STANDING_REVALIDATION_CHANGED",
       value: `${policy.STANDING_REVALIDATION_CHANGED} standing`,
       means:
-        "Earned by the requester when a revalidation check finds the fact changed, on top of the stake coming back. Paid in standing because the stake was standing, and smaller than an upheld dispute because a request carries no citation — it only asks for a check.",
+        "Earned by the requester when a revalidation check finds the fact changed, on top of the staked standing coming back. Smaller than an upheld dispute because a request carries no citation — it only asks for a check.",
     },
     {
       name: "STANDING_OVERTURNED_SIGNER",
@@ -681,7 +570,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "STANDING_DECAY_PAUSED",
       value: policy.STANDING_DECAY_PAUSED ? "paused" : "active",
       means:
-        "Whether standing decays. Decay is paused until the paid loop starts, since before then there is nothing for it to decay against — so there is no decay term at all, rather than a rate of zero nobody published.",
+        "Whether standing decays. Decay is paused and there is no decay term at all, rather than a rate of zero nobody published: the paper hangs decay on work that stops being read, and the day a rate is published it moves by a decision of its own.",
     },
   ];
 
@@ -690,19 +579,13 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "FAILURE_REPORT_THRESHOLD",
       value: String(policy.FAILURE_REPORT_THRESHOLD),
       means:
-        "Reports from this many distinct verified operators auto-open a revalidation, at nomankind's expense rather than anyone's stake.",
+        "Reports from this many distinct verified operators auto-open a revalidation, on the log's own initiative rather than against anyone's stake.",
     },
     {
       name: "DISPUTE_STAKE_STANDING",
       value: `${policy.DISPUTE_STAKE_STANDING} standing`,
       means:
-        "What a registered operator puts up to file a dispute. An upheld challenge returns it and pays the challenger; a failed one forfeits it, so disputes are for evidence.",
-    },
-    {
-      name: "DISPUTE_FILING_FEE_CENTS",
-      value: `${policy.DISPUTE_FILING_FEE_CENTS} cents`,
-      means:
-        "What a bare key puts up instead: a refundable filing fee, so a burner key cannot dispute for free.",
+        "What an operator puts up to file a dispute, in standing, which is the only thing anyone stakes here. An upheld challenge returns it and pays the challenger STANDING_DISPUTE_UPHELD; a failed one forfeits it, so disputes are for evidence.",
     },
     {
       name: "REVALIDATION_REQUEST_STAKE_STANDING",
@@ -779,7 +662,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "LEDGER_ENTRIES_PER_RUN",
       value: String(policy.LEDGER_ENTRIES_PER_RUN),
       means:
-        "How many of a published day's entries one run of the ledger step prices. A longer day is not dropped: the next run resumes it where this one stopped, and the day's reconciliation is written only once every entry of it has been priced.",
+        "How many of a published day's entries one run of the ledger step walks. Nothing is priced there: the day's read counts are evidence of use and buy nobody anything. A longer day is not dropped — the next run resumes it where this one stopped, and the day's reconciliation is written only once every entry of it has been walked.",
     },
     {
       name: "DUPLICATE_BACKFILL_PER_RUN",
@@ -946,15 +829,17 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         ([slug, domain]) =>
           html`${domainPanel(slug, domain)}${sourcesPanel(slug, domain)}`,
       )}
-      ${group("Money and standing", money)} ${group("Paid access", paid)}
+      ${group("Release", release)} ${group("Access and alerts", access)}
 
       <p class="note">
-        Section 9: "The log is free to read at low volume, forever. Revenue
-        comes from high-rate API access, structured feeds and webhooks, change
-        alerts." The free row above is that sentence's first half and carries no
-        key at all; the paid rows are its second. A tier is a daily cap and
-        nothing else — the price per read is the same on every one of them, so a
-        tier buys throughput and never a discount.
+        The record is free (decision D-127). Every event and every entry is
+        released the moment it is sealed, its content public and CC0 from that
+        instant, and no read of it is priced: there is no paid tier, no key
+        purchase, no read-share slot, no payout and no fee anywhere in this
+        table. The rows above are caps and nothing else — a tier is a daily
+        count, a key is a free identity a reader asks for at the free door so
+        alerts, receipts by counter and usage listings have something to name,
+        and the caps are what keep one reader from being the whole day.
       </p>
 
       ${group("Standing", standing)} ${group("Disputes and reports", disputes)}
@@ -969,17 +854,11 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       </p>
 
       <p class="note">
-        Every stake above is a placeholder the maintainer set, and a stake is a
-        ledger record and nothing else until the money side is built: no money
-        moves on any of them, and the maintainer sets the real amounts by a later
-        recorded decision.
-      </p>
-
-      <p class="note">
-        There is no seed fee: contributors are paid only from read revenue
-        (decision D-052). The maintainer pays nothing from its own funds, and
-        validating before there is revenue earns standing and read-share slots
-        on the entries validated, which pay from the first paid read.
+        Every stake above is standing and every amount is a placeholder the
+        maintainer set, moving only by a later recorded decision. Nothing is
+        staked in money, because there is no money here to stake: a dispute and a
+        revalidation request both put up contribution, and that is what an
+        upheld challenge returns and a failed one forfeits.
       </p>
 
       ${group("Sealing and anchoring", sealing)}

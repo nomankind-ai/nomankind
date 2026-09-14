@@ -38,7 +38,6 @@ import { LocalAnchorAdapter } from "../src/adapters/anchor.js";
 import { DrandReader } from "../src/adapters/beacon.js";
 import { GitHubMirrorAdapter } from "../src/adapters/mirror.js";
 import { MockPayoutAdapter, MOCK_VERIFIED_PREFIX } from "../src/adapters/payout.js";
-import { StripeAdapter } from "../src/adapters/stripe.js";
 import { withDeadline } from "../src/adapters/timeout.js";
 import { MockWitnessAdapter, MOCK_WITNESSES } from "../src/adapters/witness.js";
 import { utcDay } from "../src/anchor.js";
@@ -50,7 +49,6 @@ import {
   DEFAULT_DOMAIN,
   FETCH_TIMEOUT_MS,
   NORM_VERSION,
-  PAYOUT_MINIMUM_MICROS,
 } from "../src/policy.js";
 import {
   putAlertDeliveries,
@@ -254,7 +252,10 @@ describe("a sweep with work in every step and a network that never answers", () 
         date: "2026-08-01",
         reads: 1,
         unit: "micros",
-        amount: PAYOUT_MINIMUM_MICROS,
+        // A historical row, from the months the record was sold: nothing is
+        // priced any more (D-127) and nothing is paid, so this is here only to
+        // show that a sweep walks past it without touching it.
+        amount: 1_000_000,
         available_at: "2026-09-01T00:00:00.000Z",
         seq: 0,
         at: AT,
@@ -294,11 +295,6 @@ describe("a sweep with work in every step and a network that never answers", () 
           fetch: fetchFn,
           timeoutMs: WINDOW_MS,
         }),
-        payments: new StripeAdapter({
-          secretKey: "sk_test_not_a_real_key",
-          fetch: fetchFn,
-          timeoutMs: WINDOW_MS,
-        }),
         alertFetch: fetchFn,
         alertTimeoutMs: WINDOW_MS,
       }),
@@ -310,34 +306,33 @@ describe("a sweep with work in every step and a network that never answers", () 
   });
 
   it("gets through every step, with work in each", () => {
-    // The steps that need nobody did their work: the batch is sealed, the seal
-    // is countersigned by the mock witnesses, and the operator was paid.
+    // The steps that need nobody did their work: the batch is sealed and the
+    // seal is countersigned by the mock witnesses. Nobody was paid, because
+    // there is no payout step to pay them (D-127), and the ledger walked the
+    // sealed head without pricing anything.
     expect(report.sealed).not.toBeNull();
     expect(report.witnessed).toHaveLength(1);
-    expect(report.payouts).toEqual([
-      {
-        operator: OPERATOR,
-        amount: PAYOUT_MINIMUM_MICROS,
-        transfer: expect.any(String),
-      },
-    ]);
+    expect(report).not.toHaveProperty("payouts");
     expect(report.ledger?.ok).toBe(true);
+    expect(report.ledger?.read_shares).toBe(0);
   });
 
   it("asks the network only where the step had a call to make", () => {
-    // The mirror push, the metering report and the alert delivery: three steps
-    // with outside work, and no fourth. The chain is not among them — no draft
-    // is owed a validator, and the draws step no longer asks for nothing.
+    // The mirror push and the alert delivery: two steps with outside work, and
+    // no third. The chain is not among them — no draft is owed a validator, and
+    // the draws step no longer asks for nothing. Neither is any payment
+    // provider: the metering step is retired, so nothing this sweep does can
+    // reach one (D-127).
     expect(asked.filter((url) => url.includes("drand"))).toEqual([]);
     expect(asked.some((url) => url.includes("github"))).toBe(true);
-    expect(asked.some((url) => url.includes("stripe"))).toBe(true);
+    expect(asked.filter((url) => url.includes("stripe"))).toEqual([]);
     expect(asked.some((url) => url.includes("hook.example.com"))).toBe(true);
   });
 
   it("counts the unavailable steps rather than pretending they worked", () => {
     // Each of the three says so in its own word, and none of them claims to
     // have done the thing the network never answered.
-    expect(report.metered).toEqual({ keys: 0, reads: 0 });
+    expect(report).not.toHaveProperty("metered");
     expect(report.mirror).toBeNull();
     // Two deliveries were posted and neither answered: the one that was already
     // due, and the one this run created from the entry it sealed. Both are on
@@ -348,12 +343,12 @@ describe("a sweep with work in every step and a network that never answers", () 
       failed: 0,
       retried: 2,
     });
-    // The whole account of the run, exactly: the two steps whose calls never
-    // answered say so, the day's counts are current, and the anchor is still
-    // waiting for a receipt its local adapter never posts for. Nothing else
-    // refused, and nothing pretended to have got through.
+    // The whole account of the run, exactly: the one step whose call never
+    // answered says so, the day's counts are current, and the anchor is still
+    // waiting for a receipt its local adapter never posts for. No
+    // `metering_failed` beside them, because there is no meter (D-127).
+    // Nothing else refused, and nothing pretended to have got through.
     expect(report.skipped).toEqual({
-      metering_failed: 1,
       mirror_failed: 1,
       read_counts_current: 1,
       anchor_pending: 1,

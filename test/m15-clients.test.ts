@@ -716,7 +716,7 @@ describe("reconfirm, by a trusted operator outside the submitter", () => {
     expect(run.record).toBeNull();
   });
 
-  it("refreshes the stale entry and seats the reconfirmer in a slot", async () => {
+  it("refreshes the stale entry, and seats the reconfirmer nowhere", async () => {
     const run = await runReconfirm({
       key: fixtures[2]!,
       baseUrl: TEST_ORIGIN,
@@ -741,12 +741,15 @@ describe("reconfirm, by a trusted operator outside the submitter", () => {
     expect(entry["last_confirmed"]).toBe(dayDate(WINDOW_DAYS + 1));
     expect(entry["reconfirmations"]).toHaveLength(1);
 
-    // Section 9: the reconfirmer rotates into the oldest read-share slot.
-    expect(await slotHolders(checkpointId)).toContain(CHECKPOINT_DOMAINS[2]);
-    expect(run.slots).toContain(CHECKPOINT_DOMAINS[2]);
-    expect(lines).toContain(
-      `read_share_slots ${(run.slots ?? []).join(" ")}`,
-    );
+    // Section 9's rotation is retired with the read share it divided (D-127):
+    // the reconfirmation refreshed the entry above and seated nobody, so the
+    // sidecar's list is empty and the command prints it empty. The line itself
+    // stays — a reader of the command's output should see the field it always
+    // saw, and see that there is nothing in it.
+    expect(await slotHolders(checkpointId)).toEqual([]);
+    expect(run.slots).toEqual([]);
+    expect(run.slots).not.toContain(CHECKPOINT_DOMAINS[2]);
+    expect(lines).toContain("read_share_slots none");
   });
 });
 
