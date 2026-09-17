@@ -138,6 +138,12 @@ const EXPECTED_POLICY_KEYS = [
   "STANDING_ATTESTATION_SCORED",
   "STANDING_REVALIDATION_CHANGED",
   "STANDING_TRUSTED_ENTRY",
+  // Standing is an asset, and the tiers it gates participation by (D-130,
+  // D-131 item 2): the three bands, the senior bar, and the window a newly
+  // registered domain is senior-only for.
+  "TIERS",
+  "STANDING_SENIOR",
+  "DOMAIN_EARLY_ACCESS_DAYS",
   "STANDING_TRUSTED_STAY",
   "STANDING_DECAY_PAUSED",
   "RELEASE_WINDOW_DAYS",
@@ -174,6 +180,8 @@ const EXPECTED_POLICY_KEYS = [
   "PAGE_CACHE_STALE_SECONDS",
   "BEACON",
   "WRITES_PER_AGENT_PER_DAY",
+  "WRITES_PER_AGENT_PER_DAY_PROBATION",
+  "WRITES_PER_AGENT_PER_DAY_SENIOR",
   "WRITES_PER_CLIENT_PER_DAY",
   "REQUEST_MAX_BODY_BYTES",
   "CORE_TEXT_MAX_CHARS",

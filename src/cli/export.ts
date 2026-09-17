@@ -51,6 +51,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { attributionOf, type Attribution } from "../attribution.js";
+import { operatorKindsAt } from "../derive.js";
 import { base64Encode } from "../encoding.js";
 import type { Event } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
@@ -76,6 +78,19 @@ const USAGE =
 /** The two file names the verifier is handed. */
 export const ENTRY_FILE = "entry.json";
 export const BUNDLE_FILE = "log.json";
+
+/**
+ * The sidecar beside them: who the entry is owed to (decision D-130).
+ *
+ * A third file rather than a field, because the entry is the entry: the
+ * published object is schema-validated with `additionalProperties: false`, so
+ * nothing new goes inside it, and a bundle that carried the block would be
+ * asking the verifier to check a field no signature covers. The sidecar is
+ * folded from the bundle's own events by `attributionOf`, so a reader who
+ * distrusts it can recompute it from the two files it sits beside — which is
+ * the same promise every other number in the export carries.
+ */
+export const ATTRIBUTION_FILE = "attribution.json";
 
 /** A read failed, naming what could not be read. */
 export class ExportFailure extends Error {
@@ -419,10 +434,12 @@ async function buildBoundedBundle(input: {
   };
 }
 
-/** The two files, built but not written. */
+/** The two files, built but not written, and the attribution sidecar. */
 export interface ExportResult {
   readonly entry: unknown;
   readonly bundle: LogBundle;
+  /** Who the entry is owed to, folded from the bundle's own events (D-130). */
+  readonly attribution: Attribution;
 }
 
 /**
@@ -487,25 +504,50 @@ export async function buildExport(input: {
     bundle = { ...bundle, captures: { ...bundle.captures, ...binding } };
   }
 
-  return { entry, bundle };
+  // Folded from the bundle that was just built and never fetched: the block is
+  // a function of the entry and its events, both of which are in the two files,
+  // so the sidecar cannot say anything the bundle does not already support. A
+  // bounded bundle carries the entry's events without the registry's, and a
+  // community validation still reads as one there because the event says so.
+  const head = bundle.events.reduce(
+    (highest, event) => (event.seq > highest ? event.seq : highest),
+    0,
+  );
+  const attribution = attributionOf(
+    isRecord(entry) ? entry : {},
+    bundle.events,
+    operatorKindsAt(bundle.events, head),
+  );
+
+  return { entry, bundle, attribution };
 }
 
-/** Write the two files into `outDir`, and answer the two paths. */
+/** Write the files into `outDir`, and answer their paths. */
 export async function writeExport(
   outDir: string,
   result: ExportResult,
-): Promise<{ entryPath: string; bundlePath: string }> {
+): Promise<{
+  entryPath: string;
+  bundlePath: string;
+  attributionPath: string;
+}> {
   const target = resolve(outDir);
   await mkdir(target, { recursive: true });
   const entryPath = join(target, ENTRY_FILE);
   const bundlePath = join(target, BUNDLE_FILE);
+  const attributionPath = join(target, ATTRIBUTION_FILE);
   await writeFile(entryPath, `${JSON.stringify(result.entry, null, 2)}\n`, "utf8");
   await writeFile(
     bundlePath,
     `${JSON.stringify(result.bundle, null, 2)}\n`,
     "utf8",
   );
-  return { entryPath, bundlePath };
+  await writeFile(
+    attributionPath,
+    `${JSON.stringify(result.attribution, null, 2)}\n`,
+    "utf8",
+  );
+  return { entryPath, bundlePath, attributionPath };
 }
 
 /** What one invocation asks for, or null when the arguments are not an export. */
@@ -608,6 +650,10 @@ export async function exportEntry(
   const written = await writeExport(outDir, result);
   io.stdout(written.entryPath);
   io.stdout(written.bundlePath);
+  // Third, and after the two the paper promises: "two files and one script"
+  // still holds — the verifier takes the first two and this one is the
+  // attribution a reader cites from (D-130).
+  io.stdout(written.attributionPath);
   return 0;
 }
 

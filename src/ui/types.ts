@@ -14,11 +14,13 @@
  * and the field names below are the schema's own — never an alias.
  */
 
+import type { attributionOf } from "../attribution.js";
 import type { DerivedAttestation } from "../attest.js";
 import type { ConfidenceInputs } from "../confidence.js";
 import type { Sidecar } from "../derive.js";
 import type { CommunityBinding, Event } from "../events.js";
-import type { OperatorKind, VerificationClass } from "../policy.js";
+import type { OperatorKind, Tier, VerificationClass } from "../policy.js";
+import type { RecordMarks, StandingCounts } from "../standing.js";
 import type { IndependenceReport } from "../independence.js";
 import type { LedgerBalance, LedgerRow } from "../ledger.js";
 import type { Seal } from "../seal.js";
@@ -206,6 +208,19 @@ export interface ApproverRow {
   seq: number | null;
 }
 
+/**
+ * Who an entry is owed to, exactly as `attributionOf` folded it (D-130).
+ *
+ * The alias is the function's own return type rather than a shape retyped
+ * here, so the block on the entry page and the fold that feeds it can never
+ * drift: a field that moves in src/attribution.ts moves here in the same
+ * commit. Whitepaper Incentives: attribution on every read is one of the
+ * non-monetary rewards, so it is carried whole — the author and its operator,
+ * every validator with the kind of operator it is and the decision it signed,
+ * the reconfirmers, and the one-line citation a reader pastes.
+ */
+export type EntryAttribution = Awaited<ReturnType<typeof attributionOf>>;
+
 export interface EntryData {
   /** The entry exactly as derivation left it; the schema's field names. */
   entry: Record<string, unknown>;
@@ -256,6 +271,12 @@ export interface EntryData {
    * computes it and this page never does.
    */
   confidenceInputs: ConfidenceInputs;
+  /**
+   * The attribution block (D-130), exactly as `attributionOf` folded it from
+   * this entry and its own events. Carried rather than assembled on the page
+   * for the reason every other derived field here is: the view adds nothing up.
+   */
+  attribution: EntryAttribution;
   /**
    * The capture of the provider statement this entry's evidence cites, null
    * when there is none (Section 4, Behavior and misbehavior; decision D-059).
@@ -357,6 +378,12 @@ export interface OperatorRow {
   trustedSeq: number | null;
   registeredSeq: number;
   agents: number;
+  /**
+   * The domains this operator is attested in, in the order the log put them in
+   * (decision D-071), read off the stored rows for exactly the ids on the page.
+   * Empty is a row that predates the join route, never a missing read.
+   */
+  domainSlugs: string[];
   validations: number;
   /**
    * Entries this operator signed, as submitter or as approver, that an upheld
@@ -371,6 +398,26 @@ export interface OperatorRow {
    * nothing has a standing of 0, and the two must not be shown the same way.
    */
   standing: StandingCache | null;
+  /**
+   * The acts the standing above was folded from, as the sweep's own
+   * accumulator holds them (Section 9, and D-130): the validations volunteered
+   * and assigned, the ones that carried a passing measurement, and the three
+   * marks — overturned, missed, forfeits. Null when the fold has never run for
+   * this operator, which is the same fact `standing` being null states and
+   * never a row of zeroes.
+   *
+   * Carried rather than added up here: the leaderboard shows what an operator
+   * did beside what it is worth, because a number with nothing behind it is a
+   * score and standing is not one.
+   */
+  counts: StandingCounts | null;
+  /**
+   * What this operator's standing lets it do (D-130), as `tierOf` answered for
+   * the number above. Computed by the route from the standing and the trust,
+   * never stored and never decided here: the page prints the word and the
+   * policy page prints what each word allows.
+   */
+  tier: Tier;
   /**
    * How many distinct operators this one has co-signed an entry with (D-119),
    * as the sweep folded it. Zero is a reading and not a missing number: an
@@ -389,8 +436,32 @@ export interface OperatorRow {
   perimeter: string | null;
 }
 
+/**
+ * One bare agent key's standing (D-130): a key that submits or validates under
+ * no operator at all.
+ *
+ * A separate table under the leaderboard rather than a row in it, because a
+ * bare key is not an operator and ranking the two together would say it was.
+ */
+export interface BareKeyRow {
+  agent: string;
+  standing: number;
+  /** The log position the number was folded to. */
+  seq: number;
+}
+
 export interface OperatorsData {
   rows: OperatorRow[];
+  /**
+   * The bare keys the route could read standing for, or null when this
+   * deployment holds none to read.
+   *
+   * Null and an empty list are different facts and the page says which it has:
+   * null is "no reading of bare-key standing exists here" and prints the
+   * sentence that says so, where an empty list is "nothing has been folded for
+   * any bare key yet".
+   */
+  bareKeys: BareKeyRow[] | null;
 }
 
 /**
@@ -436,6 +507,17 @@ export interface OperatorData {
   attestation: Record<string, unknown> | null;
   /** The agent that named this operator at genesis, null otherwise. */
   namedBy: string | null;
+  /**
+   * The Record (D-130): every mark against this operator, exactly as `marksOf`
+   * read them off the sealed events — the entries its agents signed that an
+   * upheld dispute overturned, the assignments it missed, and the disputes it
+   * filed and lost.
+   *
+   * Derived and never edited. A mark is a fact about the log and permanent:
+   * nothing on this page or behind it can clear one, and an empty Record is an
+   * empty fold rather than a cleared one.
+   */
+  marks: RecordMarks;
   validations: Array<{
     entryId: string;
     decision: string;

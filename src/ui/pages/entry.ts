@@ -780,6 +780,108 @@ function approvers(data: EntryData): Safe {
   </section>`;
 }
 
+/**
+ * Attribution (whitepaper Incentives, as decision D-130 amended it): every read
+ * of a verified entry names who made it.
+ *
+ * One of the non-monetary rewards, and the one a reader gives without being
+ * asked. The block is `attributionOf`'s own fold — the author and the operator
+ * it signed under, every validator with the kind of operator it is and the
+ * decision it signed, and the reconfirmers who have kept the entry true since —
+ * carried here whole and rendered, never assembled on the page.
+ *
+ * The citation line is the point of it. A reader who quotes this entry
+ * somewhere else is asked to cite the validator and not only the log, because
+ * the validators are the ones who did the checking, and the line is given as a
+ * block to copy rather than as prose to retype.
+ *
+ * A community validator keeps its venue and its handle (D-138): that is what a
+ * reader recognises it by, and dropping them would credit an id nobody knows.
+ */
+function attribution(data: EntryData): Safe {
+  const block = data.attribution;
+  const operatorLink = (operator: string): Safe =>
+    html`<a href="/operators/${encodeURIComponent(operator)}">${operator}</a>`;
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Attribution</h2>
+      <span class="panel-label">who made this, on every read</span>
+    </div>
+    <div class="panel-body">
+      <dl class="kv">
+        <dt>author</dt>
+        <dd class="break">
+          <span class="mono">${block.author.agent}</span> ·
+          ${block.author.operator === null
+            ? html`<span class="dim"
+                >a bare key · no operator behind it, and so no standing</span
+              >`
+            : operatorLink(block.author.operator)}
+        </dd>
+      </dl>
+    </div>
+    ${block.validators.length === 0
+      ? html`<div class="panel-empty">
+          No validator has signed this entry yet.
+        </div>`
+      : html`<div class="table-wrap">
+          <table class="dense">
+            <thead>
+              <tr>
+                <th>validator</th>
+                <th>operator</th>
+                <th>kind</th>
+                <th>decision</th>
+                <th>assigned</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${block.validators.map(
+                (each) => html`<tr class="row">
+                  <td class="mono break">${each.agent}</td>
+                  <td class="break">${operatorLink(each.operator)}</td>
+                  <td class="muted mono">${each.kind}</td>
+                  <td class="${each.decision === "approve" ? "accent" : "danger"}">
+                    ${each.decision}
+                  </td>
+                  <td>${each.assigned_random ? "drawn" : "volunteered"}</td>
+                </tr>`,
+              )}
+            </tbody>
+          </table>
+        </div>`}
+    ${block.reconfirmers.length === 0
+      ? raw("")
+      : html`<div class="panel-body">
+          <div class="field">
+            <span class="field-name">reconfirmed by</span>
+            ${block.reconfirmers.map(
+              (each) => html`<div class="break">
+                <span class="mono">${each.agent}</span> ·
+                ${operatorLink(each.operator)}
+                <span class="dim mono">${each.kind}</span>
+                <span class="dim">${fmtInstant(each.at)}</span>
+              </div>`,
+            )}
+          </div>
+        </div>`}
+    <div class="panel-body">
+      <div class="field">
+        <span class="field-name">cite the validator</span>
+        <pre class="block mono">${block.citation}</pre>
+      </div>
+      <p class="note">
+        Cite the validators, not only the log. They are the parties that went and
+        fetched the source themselves and signed what they found, and
+        attribution is one of the things this record pays in — there is no money
+        here, so credit on every read is not a courtesy but the reward. The line
+        above is derived from the entry and its own sealed events, so two readers
+        who copy it get the same line.
+      </p>
+    </div>
+  </section>`;
+}
+
 function reconfirmations(data: EntryData): Safe {
   if (data.reconfirmations.length === 0) {
     return html`<section class="panel">
@@ -1604,7 +1706,7 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
           : html` (${effective})`}; the core claims
         evidence_tier ${claimedTier ?? EM_DASH}.
       </p>
-      ${bootstrap(data)} ${verification(data)}
+      ${bootstrap(data)} ${verification(data)} ${attribution(data)}
 
       <div class="cols">${core(data)} ${derived(data)}</div>
       ${confidence(ctx, data)}

@@ -27,6 +27,12 @@
  */
 
 import type { DnsResolver } from "../adapters/dns.js";
+import { attributionOf } from "../attribution.js";
+import {
+  buildCertificate,
+  type CertificateSubject,
+} from "../certificate.js";
+import { operatorKindsAt } from "../derive.js";
 import { appendEvent, type Attestation, type Event } from "../events.js";
 import { publicKeyFromAgentId } from "../identity.js";
 import { utcDay } from "../anchor.js";
@@ -34,13 +40,20 @@ import { quotaScopeForClient } from "../keys.js";
 import { checkParameters, readLimit } from "../params.js";
 import {
   DEFAULT_DOMAIN,
+  DOMAIN_EARLY_ACCESS_DAYS,
   LIST_PAGE_LIMIT,
   REQUEST_CLOCK_SKEW_SECONDS,
   REQUEST_MAX_BODY_BYTES,
   WRITES_PER_AGENT_PER_DAY,
+  WRITES_PER_AGENT_PER_DAY_PROBATION,
+  WRITES_PER_AGENT_PER_DAY_SENIOR,
   WRITES_PER_CLIENT_PER_DAY,
+  domainPolicy,
+  isRegisteredDomain,
+  type Tier,
 } from "../policy.js";
 import {
+  perimeterOf,
   checkAgentBind,
   checkDomainJoin,
   checkGenesisNaming,
@@ -56,6 +69,14 @@ import {
   type JoinRefusal,
   type RegistrationRefusal,
 } from "../registry.js";
+import {
+  marksOf,
+  standingAt,
+  tierOf,
+  zeroStanding,
+  type RecordMarks,
+  type StandingCounts,
+} from "../standing.js";
 import { STRICT_TRANSPORT_SECURITY } from "../ui/html.js";
 import {
   HEADER_AGENT,
@@ -76,19 +97,31 @@ import {
   EventAppendError,
   agentsForOperator,
   eventBySeq,
+  eventsForEntry,
+  getEntry,
   getOperator,
+  latestSeal,
   headSeq,
   listOperators,
   operatorDomains,
   operatorForAgent,
+  operatorTier,
+  operatorTierForAgent,
+  standingByOperator,
+  standingForOperators,
+  storedStandings,
   recordAgentBind,
   recordDomainJoin,
   registerOperator,
   trustOperator,
   type AgentRecord,
   type OperatorRecord,
+  type OperatorStanding,
 } from "../storage/repository.js";
 import { maintainerAgentId } from "./config.js";
+import { signerFor } from "./read.js";
+import { sealedLog } from "./sweep.js";
+import { registryEvents } from "./world.js";
 import type { Env } from "./env.js";
 
 /**
@@ -593,6 +626,34 @@ function writeQuotaResetsAt(day: string): string {
 }
 
 /**
+ * The per-day write cap one signing agent writes under (decision D-130).
+ *
+ * D-130 gates participation by tier as published policy, and the write cap is
+ * the first gate a key meets: a probation operator "submits at a probationary
+ * write cap", an established one has the full cap, and a senior one a higher
+ * one. The three numbers are src/policy.ts's and the reading of them is
+ * src/standing.ts's `tierOf`; nothing is decided here.
+ *
+ * A bare key gets the probation cap. It has no operator, so it has no standing
+ * and no tier of its own, and the honest place to put a name nobody vouches for
+ * is the bottom band — which is also what keeps the key factory the client
+ * bucket exists to bound from buying anything by minting operators instead.
+ *
+ * One keyed read (`operatorTierForAgent`), on a path that already reads the
+ * nonce store and writes two counters.
+ */
+async function agentWriteCap(db: D1Like, agent: string): Promise<number> {
+  const row = await operatorTierForAgent(db, agent);
+  const tier =
+    row === null
+      ? "probation"
+      : tierOf(row.standing ?? 0, row.trusted);
+  if (tier === "probation") return WRITES_PER_AGENT_PER_DAY_PROBATION;
+  if (tier === "senior") return WRITES_PER_AGENT_PER_DAY_SENIOR;
+  return WRITES_PER_AGENT_PER_DAY;
+}
+
+/**
  * Charge one write against the two buckets that bound the free write path, or
  * refuse when either is spent.
  *
@@ -624,6 +685,12 @@ export async function chargeWrite(
   now: Date,
 ): Promise<{ ok: true } | { ok: false; response: Response }> {
   const day = utcDay(now.toISOString());
+  // Which cap this key writes under (decision D-130): the tier of the operator
+  // behind it at the moment of the request. One keyed read, before the counters,
+  // because the cap has to be known before it can be compared against — and a
+  // bare key reads as probation, which is what it is: nobody's established
+  // operator.
+  const agentCap = await agentWriteCap(db, agent);
   const agentScope = writeScopeForAgent(agent);
   const clientScope = await writeScopeForClient(request);
 
@@ -652,8 +719,8 @@ export async function chargeWrite(
     ),
   });
 
-  if (agentUsed >= WRITES_PER_AGENT_PER_DAY) {
-    return spent("agent", WRITES_PER_AGENT_PER_DAY, agentUsed);
+  if (agentUsed >= agentCap) {
+    return spent("agent", agentCap, agentUsed);
   }
   if (clientUsed >= WRITES_PER_CLIENT_PER_DAY) {
     return spent("client", WRITES_PER_CLIENT_PER_DAY, clientUsed);
@@ -969,6 +1036,20 @@ async function joinDomain(
   });
   if (!check.ok) return refuse(JOIN_STATUS[check.reason], check.reason);
 
+  // The tier gate (decision D-130), after the join's own rules and before
+  // anything is written: "established at trusted standing has ... domain
+  // joins", so a probation operator is refused `insufficient_tier`, and a
+  // domain still inside its early-access window is senior-only until it closes.
+  //
+  // Last of the refusals because it is the least specific: a domain nobody
+  // registered and a domain this operator already holds are answers about the
+  // join that was asked for, and a tier refusal in front of them would tell an
+  // operator it lacks the standing for something it could not have had anyway.
+  // Nothing has been written or fetched by here, so it still costs a refusal
+  // nothing but the rows this door already read.
+  const gate = await checkJoinTier(env.DB, operator, domain, deps.now);
+  if (gate !== null) return gate;
+
   // The event is the record and the row is the index into it, written in one
   // batch (recordDomainJoin), so a join is either fully in the log and visible
   // to the next draw or not there at all.
@@ -995,6 +1076,60 @@ async function joinDomain(
     },
     201,
   );
+}
+
+/**
+ * Whether this operator's tier lets it join this domain, or the refusal.
+ *
+ * Decision D-130 in its two words. `insufficient_tier` is a probation operator
+ * asking for something the tiers reserve for established ones: joining a second
+ * domain is taking on work in a field nobody has vouched for you in, and the
+ * bar for it is the trusted pool's own. `early_access` is an established
+ * operator asking for a domain that was registered less than
+ * DOMAIN_EARLY_ACCESS_DAYS ago: recognition in its one practical form, the
+ * senior operators that carried the record get first sight of a new domain, and
+ * after the window the domain is open to every established operator for good.
+ *
+ * 403 for both: the request is well formed and the operator is who it says it
+ * is; what it lacks is the standing, which is exactly what a 403 says.
+ *
+ * Null when the join may go on, so the caller reads it as a gate rather than as
+ * a verdict about the join itself — `checkDomainJoin` is still the authority on
+ * whether the attestation, the domain and the operator fit together.
+ */
+async function checkJoinTier(
+  db: D1Like,
+  operator: string,
+  domain: string,
+  now: Date,
+): Promise<Response | null> {
+  const row = await operatorTier(db, operator);
+  const tier = tierOf(row?.standing ?? 0, row?.trusted ?? false);
+  if (tier === "probation") return refuse(403, "insufficient_tier");
+  if (tier === "senior") return null;
+  return domainInEarlyAccess(domain, now)
+    ? refuse(403, "early_access")
+    : null;
+}
+
+/**
+ * Whether a registered domain is still inside its early-access window.
+ *
+ * The window runs forward from the domain's own published `registered_at`, for
+ * `DOMAIN_EARLY_ACCESS_DAYS`, and it is never reopened. A clock before that
+ * date is outside it rather than deep inside it: the window is the first
+ * fortnight of a registered domain's life, and a request made before the
+ * registration is not in that fortnight at all.
+ *
+ * A domain nobody registered has no window either — `checkDomainJoin` refuses
+ * it `unregistered_domain`, in its own words, a moment later.
+ */
+function domainInEarlyAccess(domain: string, now: Date): boolean {
+  if (!isRegisteredDomain(domain)) return false;
+  const registered = Date.parse(`${domainPolicy(domain).registered_at}T00:00:00.000Z`);
+  if (!Number.isFinite(registered)) return false;
+  const age = now.getTime() - registered;
+  return age >= 0 && age < DOMAIN_EARLY_ACCESS_DAYS * MILLISECONDS_IN_A_DAY;
 }
 
 // ---------------------------------------------------------------------------
@@ -1173,6 +1308,66 @@ async function genesis(
 // Reads
 // ---------------------------------------------------------------------------
 
+/**
+ * What an operator's standing says about it, in the words the HTML directory
+ * uses (decision D-130): where it ranks, which tier it is in, and the acts the
+ * fold counted.
+ *
+ * The JSON doors and the browsing UI answer one question, so they answer it
+ * with one set of numbers: the `standing` column the sweep caches — which is
+ * what src/worker/pages.ts reads — for the number and the tier, and the fold's
+ * own accumulator for the counts, which is the only place they live.
+ *
+ * The rank is the leaderboard's rule (src/ui/pages/operators.ts,
+ * `rankOperators`): by standing, highest first, and equal standings share a
+ * rank — so the rank is one plus the number of operators standing strictly
+ * above. An operator whose standing has never been computed has no rank, and
+ * neither has one ranked past a page of standings: both are null, which is "not
+ * placed" and never "last".
+ */
+interface StandingSummary {
+  readonly rank: number | null;
+  readonly tier: Tier;
+  readonly standing: OperatorStanding | null;
+  readonly counts: StandingCounts | null;
+}
+
+async function standingSummaries(
+  db: D1Like,
+  records: readonly OperatorRecord[],
+): Promise<Map<string, StandingSummary>> {
+  const ids = records.map((record) => record.id);
+  const standings = await standingForOperators(db, ids);
+  // The page of standings the rank is counted against, highest first. A
+  // registry longer than one page leaves the operators past it unplaced rather
+  // than placed by a number this door cannot see all of.
+  const leaders = await standingByOperator(db, LIST_PAGE_LIMIT);
+  const full = leaders.size >= LIST_PAGE_LIMIT;
+  const above = [...leaders.values()].map((row) => row.standing);
+  const folded = await storedStandings(db);
+
+  const summaries = new Map<string, StandingSummary>();
+  for (const record of records) {
+    const standing = standings.get(record.id) ?? null;
+    const placed =
+      standing === null
+        ? null
+        : full && !leaders.has(record.id)
+          ? null
+          : 1 + above.filter((other) => other > standing.standing).length;
+    summaries.set(record.id, {
+      rank: placed,
+      tier: tierOf(
+        standing?.standing ?? 0,
+        record.details["trusted"] === true,
+      ),
+      standing,
+      counts: folded.standings.get(record.id)?.counts ?? null,
+    });
+  }
+  return summaries;
+}
+
 /** The one parameter the operator listing takes, and nothing else. */
 const LIST_QUERY_PARAMETERS: readonly string[] = Object.freeze(["limit"]);
 
@@ -1201,8 +1396,18 @@ async function list(url: URL, env: Env): Promise<Response> {
   if (!checked.ok) return refuse(400, checked.reason);
   const limit = readLimit(url.searchParams, LIST_PAGE_LIMIT, LIST_QUERY_WORDS);
   if (!limit.ok) return refuse(400, limit.reason);
+  const records = await listOperators(env.DB, { limit: limit.value });
+  // The same three things the directory page shows beside each name (D-130), so
+  // an agent reading this door and a reader reading the page are told the same
+  // about the same operator.
+  const summaries = await standingSummaries(env.DB, records);
   return json(
-    { operators: await listOperators(env.DB, { limit: limit.value }) },
+    {
+      operators: records.map((record) => ({
+        ...record,
+        ...(summaries.get(record.id) ?? {}),
+      })),
+    },
     200,
   );
 }
@@ -1215,9 +1420,11 @@ async function operatorById(env: Env, id: string): Promise<Response> {
   // D-071). This is what the offline verifier's export reads to rerun the
   // eligibility check, so it is a field of the record and not of a side route.
   const domains = await operatorDomains(env.DB, id);
+  const summary = (await standingSummaries(env.DB, [record])).get(id);
   return json(
     {
       ...record,
+      ...(summary ?? {}),
       agents: agents.map((agent) => agent.agentId),
       domains: domains.map((row) => row.domain),
     },
@@ -1231,6 +1438,210 @@ async function agentById(env: Env, agentId: string): Promise<Response> {
   const record = await getOperator(env.DB, operatorId);
   if (record === null) return refuse(404, "not_found");
   return json({ agent: agentId, operator: record }, 200);
+}
+
+// ---------------------------------------------------------------------------
+// GET /operators/{id}/certificate, /agents/{agent}/certificate, /badge.svg
+// ---------------------------------------------------------------------------
+
+/**
+ * One subject's standing, its tier and its marks, folded from the sealed log.
+ *
+ * Folded here rather than read off the cached column, because a certificate is
+ * a document somebody keeps: it says which position it is the answer at, and a
+ * reader recomputing at that position must get the same numbers, marks
+ * included. The marks are not cached anywhere at all — they are derived from
+ * sealed events and never stored (D-130) — so the fold is what there is.
+ *
+ * Null when nothing has been sealed yet: there is no position to certify.
+ */
+async function certificateNumbers(
+  db: D1Like,
+  operator: string,
+): Promise<{
+  readonly standing: number;
+  readonly tier: Tier;
+  readonly counts: StandingCounts;
+  readonly marks: RecordMarks;
+  readonly position: number;
+} | null> {
+  const seal = await latestSeal(db);
+  if (seal === null) return null;
+  const position = seal.last_seq;
+  const events = await sealedLog(db, position);
+  const folded =
+    standingAt(events, position).get(operator) ??
+    zeroStanding(operator, position);
+  const row = await operatorTier(db, operator);
+  return {
+    standing: folded.standing,
+    tier: tierOf(folded.standing, row?.trusted ?? false),
+    counts: folded.counts,
+    marks: marksOf(events, operator),
+    position,
+  };
+}
+
+/**
+ * Sign one certificate and answer it, or say which input was missing.
+ *
+ * Uncached, like every signed answer: a certificate carries an `issued_at` and
+ * a position, and a shared cache handing the next reader somebody else's
+ * document would be handing out a signature over the wrong subject.
+ */
+async function certificateFor(
+  env: Env,
+  deps: RegistryDeps,
+  subject: CertificateSubject,
+  operator: string,
+): Promise<Response> {
+  const signer = await signerFor(env.SEALING_AGENT_KEY);
+  if (signer === null) return refuse(503, "certificates_not_configured");
+
+  const numbers = await certificateNumbers(env.DB, operator);
+  if (numbers === null) return refuse(503, "not_sealed");
+
+  const signed = await buildCertificate(
+    {
+      subject,
+      standing: numbers.standing,
+      tier: numbers.tier,
+      counts: numbers.counts,
+      marks: numbers.marks,
+      sealed_position: numbers.position,
+      folded_through_seq: numbers.position,
+      issued_at: deps.now.toISOString(),
+      issuer: signer.issuer,
+    },
+    signer.key,
+  );
+  return json(signed, 200);
+}
+
+/** GET /operators/{id}/certificate. */
+async function operatorCertificate(
+  env: Env,
+  deps: RegistryDeps,
+  operator: string,
+): Promise<Response> {
+  const record = await getOperator(env.DB, operator);
+  if (record === null) return refuse(404, "not_found");
+  return certificateFor(
+    env,
+    deps,
+    {
+      kind: "operator",
+      id: record.id,
+      operator_kind: record.kind,
+      perimeter: perimeterOf(record.details),
+    },
+    record.id,
+  );
+}
+
+/**
+ * GET /agents/{agent}/certificate.
+ *
+ * D-127 promises one "per operator and per agent key". An agent's certificate
+ * carries its operator's numbers, because standing is the operator's: what the
+ * agent's own document adds is the binding — this key answers for that
+ * operator — which is the half a reader holding the key needs.
+ */
+async function agentCertificate(
+  env: Env,
+  deps: RegistryDeps,
+  agent: string,
+): Promise<Response> {
+  const operator = await operatorForAgent(env.DB, agent);
+  if (operator === null) return refuse(404, "not_found");
+  return certificateFor(env, deps, { kind: "agent", agent, operator }, operator);
+}
+
+/** Every character XML gives a meaning to, escaped. */
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * GET /operators/{id}/badge.svg: the standing, in a picture.
+ *
+ * D-127's second non-monetary reward, and D-130's "public and named" in the
+ * form an operator can put on its own site: the id, the number and the tier,
+ * linked to the certificate door so anybody who sees the badge is one click
+ * from the signed document behind it. The picture is not evidence and does not
+ * pretend to be — it carries no signature — which is exactly why it links.
+ *
+ * Cached for an hour: the numbers move at most once a sweep, and a badge is
+ * fetched by every visitor to somebody else's page. Every string that reaches
+ * the document is escaped, including the operator id, which is a name a
+ * stranger chose.
+ */
+async function operatorBadge(env: Env, operator: string): Promise<Response> {
+  const record = await getOperator(env.DB, operator);
+  if (record === null) return refuse(404, "not_found");
+
+  const stored = await operatorTier(env.DB, record.id);
+  const standing = stored?.standing ?? 0;
+  const tier = tierOf(standing, stored?.trusted ?? false);
+  const id = escapeXml(record.id);
+  const label = escapeXml(`${standing} standing`);
+  const band = escapeXml(tier);
+  const href = escapeXml(
+    `/operators/${encodeURIComponent(record.id)}/certificate`,
+  );
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="40" viewBox="0 0 200 40" role="img" aria-label="nomankind: ${id}, ${label}, ${band}">
+  <title>nomankind: ${id}, ${label}, ${band}</title>
+  <a href="${href}">
+    <rect width="200" height="40" rx="4" fill="#111827" />
+    <rect x="0" y="0" width="6" height="40" fill="#22c55e" />
+    <text x="14" y="16" font-family="system-ui, sans-serif" font-size="11" fill="#e5e7eb">${id}</text>
+    <text x="14" y="31" font-family="system-ui, sans-serif" font-size="11" fill="#9ca3af">${label} · ${band}</text>
+  </a>
+</svg>
+`;
+
+  return new Response(svg, {
+    status: 200,
+    headers: {
+      "content-type": "image/svg+xml; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+      "strict-transport-security": STRICT_TRANSPORT_SECURITY,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// GET /entries/{id}/attribution
+// ---------------------------------------------------------------------------
+
+/**
+ * Who an entry is owed to, as JSON (decision D-130).
+ *
+ * The published entry object is closed to new keys — the schema validates it
+ * with `additionalProperties: false` — so the block cannot ride on the entry
+ * itself and gets a door of its own. The entry page renders the same function's
+ * answer (src/worker/pages.ts), so the page and the door can never disagree
+ * about who checked a fact.
+ *
+ * Cheap: the entry's own row, its own events, and the registry read once for
+ * the operator kinds.
+ */
+async function entryAttribution(env: Env, entryId: string): Promise<Response> {
+  const stored = await getEntry(env.DB, entryId);
+  if (stored === null) return refuse(404, "not_found");
+  const events = await eventsForEntry(env.DB, entryId);
+  const head = (await headSeq(env.DB)) ?? 0;
+  const kinds = operatorKindsAt(await registryEvents(env.DB), head);
+  return json(
+    attributionOf(stored.entry as Record<string, unknown>, events, kinds),
+    200,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,7 +1672,21 @@ function segmentAfter(path: string, prefix: string): string | null {
  * rather than a 404 that would claim the path does not exist at all.
  */
 function subresourceOperator(path: string, suffix: string): string | null {
-  const prefix = "/operators/";
+  return subresourceUnder(path, "/operators/", suffix);
+}
+
+/**
+ * The same shape under any prefix: `/{prefix}{id}{suffix}` with no further
+ * slash in the id. One reader, because `/operators/{id}/certificate`,
+ * `/agents/{agent}/certificate` and `/entries/{id}/attribution` are the same
+ * question about three collections, and three copies of it would be three
+ * chances to disagree about what an id may contain.
+ */
+function subresourceUnder(
+  path: string,
+  prefix: string,
+  suffix: string,
+): string | null {
   if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
   if (path.length <= prefix.length + suffix.length) return null;
   const middle = path.slice(prefix.length, -suffix.length);
@@ -1329,6 +1754,34 @@ async function route(
     if (binder === "") return refuse(400, "bad_id");
     if (request.method !== "POST") return methodNotAllowed("POST");
     return bindAgent(request, env, deps, path, binder);
+  }
+
+  const certified = subresourceOperator(path, "/certificate");
+  if (certified !== null) {
+    if (certified === "") return refuse(400, "bad_id");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
+    return operatorCertificate(env, deps, certified);
+  }
+
+  const badged = subresourceOperator(path, "/badge.svg");
+  if (badged !== null) {
+    if (badged === "") return refuse(400, "bad_id");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
+    return operatorBadge(env, badged);
+  }
+
+  const certifiedAgent = subresourceUnder(path, "/agents/", "/certificate");
+  if (certifiedAgent !== null) {
+    if (certifiedAgent === "") return refuse(400, "bad_id");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
+    return agentCertificate(env, deps, certifiedAgent);
+  }
+
+  const attributed = subresourceUnder(path, "/entries/", "/attribution");
+  if (attributed !== null) {
+    if (attributed === "") return refuse(400, "bad_id");
+    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
+    return entryAttribution(env, attributed);
   }
 
   const operatorId = segmentAfter(path, "/operators/");

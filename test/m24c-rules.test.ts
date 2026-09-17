@@ -18,7 +18,9 @@
  * document governs.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { clearWriteQuota } from "./helpers/quota.js";
 
 import {
   buildTranscriptArtifact,
@@ -33,6 +35,7 @@ import type { ApproverRecord, ReconfirmationRecord } from "../src/events.js";
 import { canonicalize, sha256Hex } from "../src/hash.js";
 import { archiveAddress } from "../src/normalize.js";
 import {
+  STANDING_TRUSTED_ENTRY,
   authorityHostsFor,
   disclosureWindowDays,
   isDisclosureCategory,
@@ -54,6 +57,7 @@ import {
   captureForHash,
   getEntry,
   headSeq,
+  setOperatorStanding,
 } from "../src/storage/repository.js";
 import { checkValidation } from "../src/validate.js";
 import { verifyOffline } from "../src/verify.js";
@@ -553,7 +557,16 @@ beforeAll(async () => {
 
     // The independence attestation is per domain (D-071), so every validator
     // here signs ai-safety's own sentence before it may judge an ai-safety
-    // entry at all.
+    // entry at all. A second domain is an established operator's to take on
+    // (decision D-130), so the joiner is stood at the trusted bar first —
+    // written into the column the door reads, exactly as the sweep's standing
+    // step writes it.
+    await setOperatorStanding(
+      store.db,
+      party.operator,
+      STANDING_TRUSTED_ENTRY,
+      0,
+    );
     const inSafety = await send(
       await signedPost(party.agent, {
         path: `/operators/${encodeURIComponent(party.operator)}/domains`,
@@ -579,6 +592,20 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await store?.dispose();
+});
+
+/**
+ * Each test starts the day's write counters fresh (decision D-130).
+ *
+ * Every signing key here is a bare one or a probation operator's, and both
+ * write under the probationary per-agent cap: a whole suite driving one door
+ * under one frozen clock is one caller writing all day, and without this the
+ * later cases would be answered by the quota rather than by the rule they are
+ * about. The caps themselves are pinned in test/write-quota.test.ts and
+ * test/standing-tiers.test.ts.
+ */
+beforeEach(async () => {
+  await clearWriteQuota(store.db);
 });
 
 /** The evidence of one observed refusal, redacted or whole. */

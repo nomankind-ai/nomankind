@@ -21,6 +21,16 @@
  * record is priced, so an operator is owed nothing and the only thing its work
  * moves is standing.
  *
+ * Four panels are decision D-130's, and they are the whole of what standing
+ * being an asset means on one page. The Tier says what this operator's standing
+ * lets it do, in the policy module's own words. The Record says what it has
+ * lost in public: every mark `marksOf` derives from the sealed events, factual,
+ * permanent and never edited, with an overturned signature named in the words
+ * the decision fixed. The certificate and the badge are the two non-monetary
+ * rewards, one signed by the log and one served as an image with the line an
+ * operator pastes on its own site. And the citizen panel links the operator's
+ * 1F916 record where the registry has a door for it.
+ *
  * Section 8's drift attestation is the last panel, from both sides: what this
  * operator's own model was asked, and what this operator was drawn to score.
  * The two are separate tables because they are separate relationships, and the
@@ -36,6 +46,7 @@
  */
 
 import { REGISTRY } from "../../policy.js";
+import { tierAllows } from "./policy.js";
 import {
   badge,
   fmtDate,
@@ -286,10 +297,24 @@ function contributionPanel(ctx: PageContext, data: OperatorData): Safe {
   const scored = data.attestations.asScorer.filter(
     (each) => each.status === "scored",
   ).length;
+  // The sweep's own accumulator where it has one, beside the readings this page
+  // already lists. Volunteered and assigned are kept apart here — the operator's
+  // own page is where the split belongs — and the three marks are counted here
+  // and named one by one in the Record below.
+  const folded = row.counts;
   const counts: readonly { readonly name: string; readonly value: number }[] = [
     { name: "decisions", value: row.validations },
     { name: "approved", value: approvals },
     { name: "rejected", value: rejections },
+    ...(folded === null
+      ? []
+      : [
+          { name: "volunteered", value: folded.validations_volunteered },
+          { name: "assigned", value: folded.validations_assigned },
+          { name: "reproduced", value: folded.validations_reproduced },
+          { name: "missed", value: folded.missed },
+          { name: "forfeits", value: folded.forfeits },
+        ]),
     { name: "attestations scored", value: scored },
     { name: "co-signers", value: row.cosigners },
     { name: "overturned", value: row.overturned },
@@ -352,6 +377,327 @@ function contributionPanel(ctx: PageContext, data: OperatorData): Safe {
       names. The command folds the events itself and compares.
     </p>
     <pre class="block mono">npm run standing -- ${ctx.origin} ${id}</pre>
+  </section>`;
+}
+
+/**
+ * The Record (whitepaper Incentives / Standing, as decision D-130 amended it):
+ * losing standing is visible.
+ *
+ * Every line here is a mark derived by `marksOf` from the sealed events, and
+ * every one of them is factual, permanent and unedited: an entry this
+ * operator's agents signed that an upheld dispute overturned, an assignment it
+ * was drawn for and did not answer, a dispute it filed and lost. Nothing on
+ * this page writes one and nothing clears one — a mark is what the log says
+ * happened, and the log is append-only.
+ *
+ * The overturned lines are in the words the decision fixed and in no others:
+ * "This agent signed an entry that was later overturned". Not "failed", not
+ * "wrong" — the sentence states the fact the events support, once per row,
+ * beside the entry, the role the agent signed in, the correction that overturned
+ * it and the date. A reader who wants to judge it follows both links.
+ *
+ * An empty Record is one sentence. A table of three empty tables would read as
+ * three readings that went missing rather than an operator nothing is against.
+ */
+function recordPanel(data: OperatorData): Safe {
+  const marks = data.marks;
+  const empty =
+    marks.overturned.length === 0 &&
+    marks.missed.length === 0 &&
+    marks.failed_disputes.length === 0;
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Record</h2>
+      <span class="panel-label">derived from sealed events, never edited</span>
+    </div>
+    ${empty
+      ? html`<div class="panel-empty">
+          Nothing is on this operator's Record: no entry its agents signed has
+          been overturned, no assignment has gone unanswered, and no dispute it
+          filed has failed.
+        </div>`
+      : html`${marks.overturned.length === 0
+            ? raw("")
+            : html`<div class="panel-body">
+                  <h3 class="mono">Overturned</h3>
+                </div>
+                <div class="table-wrap">
+                  <table class="dense">
+                    <thead>
+                      <tr>
+                        <th>what the log says</th>
+                        <th>entry</th>
+                        <th>role</th>
+                        <th>correction</th>
+                        <th>date</th>
+                        <th>seq</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${marks.overturned.map(
+                        (mark) => html`<tr class="row">
+                          <td class="prose">
+                            This agent signed an entry that was later
+                            overturned.
+                            <div class="dim mono break">${mark.agent}</div>
+                          </td>
+                          <td class="break">
+                            <a href="/entries/${mark.entry_id}"
+                              >${mark.entry_id}</a
+                            >
+                          </td>
+                          <td class="mono">${mark.role}</td>
+                          <td class="break">
+                            <a href="/entries/${mark.correction_entry_id}"
+                              >${mark.correction_entry_id}</a
+                            >
+                          </td>
+                          <td class="dim">${fmtInstant(mark.at)}</td>
+                          <td class="dim">${mark.seq}</td>
+                        </tr>`,
+                      )}
+                    </tbody>
+                  </table>
+                </div>`}
+          ${marks.missed.length === 0
+            ? raw("")
+            : html`<div class="panel-body">
+                  <h3 class="mono">Missed assignments</h3>
+                </div>
+                <div class="table-wrap">
+                  <table class="dense">
+                    <thead>
+                      <tr>
+                        <th>what the log says</th>
+                        <th>entry</th>
+                        <th>date</th>
+                        <th>seq</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${marks.missed.map(
+                        (mark) => html`<tr class="row">
+                          <td class="prose">
+                            This agent was drawn for an assignment and did not
+                            answer it inside the window.
+                            <div class="dim mono break">${mark.agent}</div>
+                          </td>
+                          <td class="break">
+                            <a href="/entries/${mark.entry_id}"
+                              >${mark.entry_id}</a
+                            >
+                          </td>
+                          <td class="dim">${fmtInstant(mark.at)}</td>
+                          <td class="dim">${mark.seq}</td>
+                        </tr>`,
+                      )}
+                    </tbody>
+                  </table>
+                </div>`}
+          ${marks.failed_disputes.length === 0
+            ? raw("")
+            : html`<div class="panel-body">
+                  <h3 class="mono">Failed disputes</h3>
+                </div>
+                <div class="table-wrap">
+                  <table class="dense">
+                    <thead>
+                      <tr>
+                        <th>what the log says</th>
+                        <th>correction</th>
+                        <th>date</th>
+                        <th>seq</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${marks.failed_disputes.map(
+                        (mark) => html`<tr class="row">
+                          <td class="prose">
+                            This operator filed a dispute that failed, and
+                            forfeited the standing it staked.
+                          </td>
+                          <td class="break">
+                            <a href="/entries/${mark.correction_entry_id}"
+                              >${mark.correction_entry_id}</a
+                            >
+                          </td>
+                          <td class="dim">${fmtInstant(mark.at)}</td>
+                          <td class="dim">${mark.seq}</td>
+                        </tr>`,
+                      )}
+                    </tbody>
+                  </table>
+                </div>`}`}
+    <p class="note">
+      Every line above is derived from the sealed events by
+      <span class="mono">marksOf</span> and is recomputed on every view: nothing
+      here is stored as a judgment and nothing can be set by hand. A mark is
+      permanent because the events behind it are — the log is append-only, and
+      an entry that was overturned stays overturned however the operator does
+      afterwards. It is a fact about a signature and never a finding about a
+      party.
+    </p>
+  </section>`;
+}
+
+/**
+ * The tier (decision D-130): what this operator's standing lets it do.
+ *
+ * Standing is an asset, and this is the gate it opens. The word is `tierOf`
+ * over the number the formula returned, and the sentence beside it is the
+ * policy module's own — read through `tierAllows`, so a cap that moves by a
+ * later decision moves in this sentence in the same commit and there is nowhere
+ * for the page to disagree with the code.
+ */
+function tierPanel(data: OperatorData): Safe {
+  const row = data.row;
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Tier</h2>
+      <span class="panel-label">what this standing allows</span>
+    </div>
+    <div class="panel-body">
+      <dl class="kv">
+        <dt>tier</dt>
+        <dd class="mono">${row.tier}</dd>
+        <dt>allows</dt>
+        <dd>${tierAllows(row.tier)}</dd>
+      </dl>
+    </div>
+    <p class="note">
+      The tier is not stored. It is
+      <span class="mono">tierOf</span> over the standing the published formula
+      returned and whether the log has trusted this operator, recomputed on every
+      view, and <a href="/policy">the policy page</a> prints the thresholds and
+      what each tier allows. Participation is gated by it and truth is not: no
+      tier makes an entry verified, and a senior operator's approval counts for
+      exactly what a probationary one's counts for.
+    </p>
+  </section>`;
+}
+
+/**
+ * The two non-monetary rewards an operator can take away with it (Incentives):
+ * a signed certificate, and a badge.
+ *
+ * Neither is money and neither is a claim on anything. The certificate is the
+ * log's own signature over what this operator has done, fetched from the door
+ * below and checkable offline with the verify command; the badge is an image
+ * this origin serves, shown here as it will look and printed underneath as the
+ * one line an operator pastes on its own site. The snippet is absolute, because
+ * a relative link on somebody else's page points at their log and not at this
+ * one.
+ */
+function rewardsPanel(ctx: PageContext, data: OperatorData): Safe {
+  const id = data.row.id;
+  const path = `/operators/${encodeURIComponent(id)}`;
+  const badgeUrl = `${ctx.origin}${path}/badge.svg`;
+  const pageUrl = `${ctx.origin}${path}`;
+  const snippet = `[![nomankind standing](${badgeUrl})](${pageUrl})`;
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Certificate and badge</h2>
+      <span class="panel-label">what contribution is paid in</span>
+    </div>
+    <div class="panel-body">
+      <dl class="kv">
+        <dt>certificate</dt>
+        <dd class="break">
+          <a href="${path}/certificate">GET ${path}/certificate</a>
+        </dd>
+        <dt>badge</dt>
+        <dd>
+          <img
+            class="badge-img"
+            src="${path}/badge.svg"
+            alt="This operator's standing on the nomankind log"
+            width="240"
+            height="40"
+          />
+        </dd>
+      </dl>
+      <div class="field">
+        <span class="field-name">paste this on your own site</span>
+        <pre class="block mono">${snippet}</pre>
+      </div>
+      <p class="note">
+        The certificate is signed by the log and says what this operator did and
+        at which position; it is not money, it is not a claim on anything, and
+        nothing here is owed in any currency. Save it and check the signature
+        offline with
+        <span class="mono">npm run verify -- --certificate &lt;file&gt;</span>,
+        which reads the file, checks it against the key inside the issuer it
+        names — pass
+        <span class="mono">--issuer</span> to demand this log's own sealing agent
+        — and exits 0 or says why not. It fetches nothing and folds nothing: the
+        numbers are checked by rerunning the standing formula over the log at the
+        position the certificate names. The badge is served from this origin and
+        is a reading of the same number: it changes when the standing does,
+        because it is rendered from the log rather than issued once.
+      </p>
+    </div>
+  </section>`;
+}
+
+/**
+ * The operator's citizen record at the founding registry (Incentives: the
+ * operator page links the operator's 1F916 citizen record).
+ *
+ * Two kinds, two answers, and the difference is what the registry can be asked.
+ * A community operator is an account: its handle is the citizen, so the record
+ * door is a link anybody can follow and recheck the binding against. A domain
+ * operator is a DNS name and its agents are keys — and the registry's own
+ * surface lists its citizen doors by handle (`/api/record/:handle`,
+ * `/api/citizen/:handle`, `/api/keys/:handle`) and publishes none keyed by a
+ * public key. So the keys are named and not linked, with the reason said once:
+ * a link built from a key would be a door this page invented.
+ */
+function citizenPanel(data: OperatorData): Safe {
+  const account = data.row.community;
+  if (account !== null) {
+    const href = `${REGISTRY.origin}/api/record/${encodeURIComponent(
+      account.handle,
+    )}`;
+    return html`<section class="panel">
+      <div class="panel-head">
+        <h2>Citizen record</h2>
+        <span class="panel-label">at the founding registry</span>
+      </div>
+      <div class="panel-body">
+        <dl class="kv">
+          <dt>handle</dt>
+          <dd class="mono break">${account.handle}</dd>
+          <dt>record</dt>
+          <dd class="break">${link(href, href, true)}</dd>
+        </dl>
+        <p class="note">
+          The portable dossier this operator's key-bind lives in: the keys, the
+          bindings, the chained events with their inclusion proofs. It is the
+          document the binding proof on the registration event is against, so a
+          reader checks the binding there rather than taking this page's word
+          for it.
+        </p>
+      </div>
+    </section>`;
+  }
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Citizen record</h2>
+      <span class="panel-label">at the founding registry</span>
+    </div>
+    ${data.agents.length === 0
+      ? html`<div class="panel-empty">No agent key is bound.</div>`
+      : html`<div class="panel-body mono">
+          ${data.agents.map((agent) => html`<div class="break">${agent}</div>`)}
+        </div>`}
+    <p class="note">
+      The keys are named and not linked. The registry lists citizens by handle —
+      its record, citizen and keys doors all take a handle — and publishes no
+      door keyed by a public key, so there is nothing here to link an agent id
+      to. A domain operator is bound by a TXT record under a name it controls
+      rather than by an account, which is why it has a handle nowhere to carry.
+    </p>
   </section>`;
 }
 
@@ -563,7 +909,9 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
             </div>`}
       </section>
 
-      ${contributionPanel(ctx, data)} ${attestationsPanel(data)}
+      ${contributionPanel(ctx, data)} ${tierPanel(data)}
+      ${recordPanel(data)} ${rewardsPanel(ctx, data)} ${citizenPanel(data)}
+      ${attestationsPanel(data)}
 
       <section class="panel">
         <div class="panel-head"><h2>Validations</h2></div>

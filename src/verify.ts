@@ -26,6 +26,7 @@
  * file beside it is an entry rather than a promise that one exists.
  */
 
+import { certificateIssuer, verifyCertificate } from "./certificate.js";
 import { openAssignment } from "./assign.js";
 import { buildTranscriptArtifact, transcriptArtifactHash } from "./artifact.js";
 import {
@@ -2146,5 +2147,99 @@ async function runAttestations(bundle: LogBundle): Promise<AttestationReport> {
   return {
     ok: attestations.every((one) => one.diffs.length === 0),
     attestations,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The certificate check (decision D-127, D-130)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a reader is told about one standing certificate.
+ *
+ * `ok` is the signature's verdict and nothing else. Everything beside it is
+ * read off the document so the reader can see what they just verified — above
+ * all `issuer`, which they compare against the record's own sealing agent: a
+ * certificate signs itself, and a document signed by a key nobody knows is a
+ * valid signature over a claim by a stranger.
+ */
+export interface CertificateReport {
+  readonly ok: boolean;
+  readonly issuer: string | null;
+  /** The subject in one line: the operator id, or the agent and its operator. */
+  readonly subject: string | null;
+  readonly standing: number | null;
+  readonly tier: string | null;
+  /** The sealed position the numbers are the answer at. */
+  readonly sealed_position: number | null;
+  readonly issued_at: string | null;
+  /** Why it failed, or null when it verified. */
+  readonly reason: string | null;
+}
+
+/** The subject line, or null when the document names no subject we can read. */
+function certificateSubjectLine(certificate: unknown): string | null {
+  if (typeof certificate !== "object" || certificate === null) return null;
+  const subject = (certificate as Record<string, unknown>)["subject"];
+  if (typeof subject !== "object" || subject === null) return null;
+  const fields = subject as Record<string, unknown>;
+  if (fields["kind"] === "operator" && typeof fields["id"] === "string") {
+    return fields["id"];
+  }
+  if (
+    fields["kind"] === "agent" &&
+    typeof fields["agent"] === "string" &&
+    typeof fields["operator"] === "string"
+  ) {
+    return `${fields["agent"]} (${fields["operator"]})`;
+  }
+  return null;
+}
+
+/** A field of the certificate, when it is of the type the document promises. */
+function certificateField(certificate: unknown, name: string): unknown {
+  if (typeof certificate !== "object" || certificate === null) return undefined;
+  return (certificate as Record<string, unknown>)[name];
+}
+
+/**
+ * Check one signed standing certificate, offline.
+ *
+ * Decision D-127's non-monetary reward, "verifiable offline": the whole check
+ * is the Ed25519 signature over the RFC 8785 form of the document under its own
+ * tag, against the key inside the issuer's 1F916 id — no log, no network, no
+ * clock. `issuer` is what the reader expects nomankind's sealing agent to be;
+ * without it the check answers that the document is internally consistent,
+ * which is a narrower sentence and is reported as such by printing the issuer
+ * the file names.
+ *
+ * Pure and total, exactly as `verifyOffline` is: a stranger's file gets a
+ * verdict and never a throw.
+ */
+export async function verifySignedCertificate(
+  signed: unknown,
+  issuer?: string,
+): Promise<CertificateReport> {
+  const certificate = certificateField(signed, "certificate");
+  const standing = certificateField(certificate, "standing");
+  const tier = certificateField(certificate, "tier");
+  const position = certificateField(certificate, "sealed_position");
+  const issuedAt = certificateField(certificate, "issued_at");
+  const named = certificateIssuer(signed);
+
+  const ok = await verifyCertificate(signed, issuer);
+  return {
+    ok,
+    issuer: named,
+    subject: certificateSubjectLine(certificate),
+    standing: typeof standing === "number" ? standing : null,
+    tier: typeof tier === "string" ? tier : null,
+    sealed_position: typeof position === "number" ? position : null,
+    issued_at: typeof issuedAt === "string" ? issuedAt : null,
+    reason: ok
+      ? null
+      : issuer !== undefined && named !== null && named !== issuer
+        ? "issuer_mismatch"
+        : "bad_signature",
   };
 }

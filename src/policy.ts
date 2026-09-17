@@ -271,6 +271,17 @@ export type Category =
  */
 export interface DomainPolicy {
   readonly name: string;
+  /**
+   * The UTC date this domain was registered, as the registry document states it
+   * (schema/nomankind-domain-registry-v1.md).
+   *
+   * Here because senior standing buys early access to a newly registered domain
+   * for `DOMAIN_EARLY_ACCESS_DAYS` (D-130, D-131 item 2), and "newly" is a
+   * question about a date the table did not carry. A published date and not a
+   * derived one: the registration of a domain is a decision the maintainer
+   * publishes, not an event in the log, so the table is where it lives.
+   */
+  readonly registered_at: string;
   readonly categories: readonly Category[];
   /**
    * One row per category this domain admits, and no row for any other: the
@@ -387,6 +398,9 @@ export interface DomainSourcePolicy {
  */
 const AI_ECOSYSTEM: DomainPolicy = Object.freeze({
   name: "The AI ecosystem",
+  // The record's own date: the first domain was registered with the record
+  // itself, and there was no other until D-096.
+  registered_at: "2026-09-02",
   categories: Object.freeze([
     "release",
     "deprecation",
@@ -656,6 +670,8 @@ const EXAMPLE_AUTHORITY: AuthoritySources =
  */
 const AI_GOVERNANCE: DomainPolicy = Object.freeze({
   name: "AI governance",
+  // Decision D-096, 2026-09-11, exactly as the registry document states it.
+  registered_at: "2026-09-11",
   categories: Object.freeze([
     "in_force",
     "amended",
@@ -787,6 +803,8 @@ const AI_GOVERNANCE: DomainPolicy = Object.freeze({
  */
 const AI_SAFETY: DomainPolicy = Object.freeze({
   name: "AI safety",
+  // Decision D-096, 2026-09-11, exactly as the registry document states it.
+  registered_at: "2026-09-11",
   categories: Object.freeze([
     "commitment_published",
     "commitment_changed",
@@ -2029,6 +2047,54 @@ export const STANDING_TRUSTED_ENTRY = 10;
 export const STANDING_TRUSTED_STAY = 0;
 
 /**
+ * The three tiers standing gates participation by, weakest first (D-130).
+ *
+ * "Standing is an asset": public, named, and what it buys is said out loud
+ * rather than left to whoever is reading the table. `probation` is every
+ * operator below `STANDING_TRUSTED_ENTRY` and every bare key — it may volunteer
+ * validations and submit at the probationary write cap, and it is not in the
+ * draw, files no disputes and asks for no revalidations. `established` is a
+ * trusted operator at or above that bar: the full write cap, the draw, disputes,
+ * revalidation requests, domain joins. `senior` is a trusted operator at or
+ * above `STANDING_SENIOR`: a higher write cap, early access to a newly
+ * registered domain, and the vote.
+ *
+ * Derived and never stored, exactly as standing itself is (src/standing.ts,
+ * `tierOf`): a tier is a reading of a number the log produces, so standing that
+ * falls drops the tier in the same run that recomputed it.
+ */
+export const TIERS = Object.freeze([
+  "probation",
+  "established",
+  "senior",
+] as const);
+
+export type Tier = (typeof TIERS)[number];
+
+/**
+ * The standing a trusted operator reaches to be senior (decision D-131 item 2).
+ *
+ * Five times `STANDING_TRUSTED_ENTRY`: far enough above the trusted bar that a
+ * senior operator has a body of work behind it rather than one good week, and
+ * near enough that the tier is reachable by validating. Not a whitepaper
+ * number — Section 9 gates "everything discretionary" on standing and names no
+ * amount — so this is the maintainer's published policy, moving only by a later
+ * decision, like every other standing number above it.
+ */
+export const STANDING_SENIOR = 50;
+
+/**
+ * How long a newly registered domain is open to senior operators alone
+ * (decision D-131 item 2).
+ *
+ * D-130's recognition in its one practical form: the operators that carried the
+ * record get first sight of a domain nobody has entries in yet. Fourteen days
+ * from the domain's `registered_at`, after which the domain is open to every
+ * established operator and the window is never reopened.
+ */
+export const DOMAIN_EARLY_ACCESS_DAYS = 14;
+
+/**
  * Incentives / Standing: standing "decays when the work it came from stops being
  * read or was never used ... Decay is paused until the paid loop starts (below),
  * since before then there is nothing for it to decay against."
@@ -2258,6 +2324,29 @@ export const MIRROR: Readonly<{
 export const WRITES_PER_AGENT_PER_DAY = 100;
 
 /**
+ * The same cap for an agent of a probation operator, and for a bare key
+ * (decision D-131 item 2).
+ *
+ * D-130: a probation operator "submits at a probationary write cap". The number
+ * is a tenth of the established one — enough to file a day's honest work while
+ * the operator earns its way to the trusted pool, and small enough that a key
+ * factory buys almost nothing by minting operators instead of keys. A bare key
+ * is charged here too: it is nobody's operator, so it is nobody's established
+ * one either.
+ */
+export const WRITES_PER_AGENT_PER_DAY_PROBATION = 10;
+
+/**
+ * And for an agent of a senior operator (decision D-131 item 2).
+ *
+ * D-130: senior standing carries "a higher write cap". Three times the
+ * established one, which is `WRITES_PER_CLIENT_PER_DAY` — so the ceiling a
+ * senior operator actually meets is the client bucket's, and the agent bucket
+ * stops being the thing that holds back the operators the record trusts most.
+ */
+export const WRITES_PER_AGENT_PER_DAY_SENIOR = 300;
+
+/**
  * How many writes one client address may make in a UTC day, across every agent
  * it signs as.
  *
@@ -2394,6 +2483,10 @@ export const POLICY = Object.freeze({
   STANDING_REVALIDATION_CHANGED,
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
+  // Standing is an asset, and what each tier of it buys (D-130, D-131 item 2).
+  TIERS,
+  STANDING_SENIOR,
+  DOMAIN_EARLY_ACCESS_DAYS,
   STANDING_DECAY_PAUSED,
   RELEASE_WINDOW_DAYS,
   RATE_TIERS,
@@ -2430,6 +2523,8 @@ export const POLICY = Object.freeze({
   BEACON,
   // What a write costs at the door.
   WRITES_PER_AGENT_PER_DAY,
+  WRITES_PER_AGENT_PER_DAY_PROBATION,
+  WRITES_PER_AGENT_PER_DAY_SENIOR,
   WRITES_PER_CLIENT_PER_DAY,
   REQUEST_MAX_BODY_BYTES,
   CORE_TEXT_MAX_CHARS,

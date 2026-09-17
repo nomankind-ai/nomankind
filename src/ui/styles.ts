@@ -427,6 +427,9 @@ dl.dl dd { font-family: var(--sans); font-size: 13px; color: var(--muted); }
 .field { display: flex; flex-direction: column; gap: 2px; }
 .field-name { font-family: var(--mono); font-size: 11px; color: var(--dim); }
 .field-value { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+/* The standing badge (D-130): an image this origin serves, shown at the size it
+   is drawn at and never stretched past the column it sits in. */
+.badge-img { display: block; height: auto; max-width: 240px; }
 
 /* --- copyable blocks -------------------------------------------------- */
 pre.block {

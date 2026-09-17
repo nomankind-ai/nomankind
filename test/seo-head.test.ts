@@ -23,6 +23,7 @@
 import { describe, expect, it } from "vitest";
 import { SITE_DESCRIPTION } from "../src/ui/html.js";
 import type { Entry } from "../src/schema.js";
+import { attributionOf } from "../src/attribution.js";
 import { confidenceInputs } from "../src/confidence.js";
 import type { Sidecar } from "../src/derive.js";
 import { renderDocs } from "../src/ui/pages/docs.js";
@@ -151,6 +152,7 @@ const sidecar: Sidecar = {
 const entryData: EntryData = {
   entry: entryRecord,
   sidecar,
+  attribution: attributionOf(entryRecord as unknown as Entry, [], new Map()),
   confidenceInputs: confidenceInputs({
     entry: entryRecord as unknown as Entry,
     sidecar,

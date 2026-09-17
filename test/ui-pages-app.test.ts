@@ -17,7 +17,9 @@
 
 import { beforeAll, describe, expect, it } from "vitest";
 
+import { attributionOf } from "../src/attribution.js";
 import { confidenceInputs } from "../src/confidence.js";
+import { tierOf } from "../src/standing.js";
 import { CORE_KEYS } from "../src/core.js";
 import { entryHash } from "../src/hash.js";
 import type { Sidecar } from "../src/derive.js";
@@ -477,6 +479,9 @@ const entryData: EntryData = {
   entry: entryRecord,
   sidecar,
   confidenceInputs: confidence,
+  // The attribution block (D-130), folded by the kernel over the entry's own
+  // events exactly as the route folds it.
+  attribution: attributionOf(entryRecord as unknown as Entry, events, new Map()),
   position: 12,
   events,
   seal,
@@ -562,11 +567,29 @@ const operatorRow: OperatorRow = {
   trustedSeq: 5,
   registeredSeq: 2,
   agents: 2,
+  domainSlugs: ["ai-models"],
   validations: 7,
   overturned: 2,
   standing: { standing: 14, seq: 61 },
+  // The acts the fold was over (D-130); null where the fold has never run.
+  counts: {
+    validations_volunteered: 3,
+    validations_assigned: 4,
+    validations_reproduced: 2,
+    attestations_scored: 1,
+    submissions_verified: 2,
+    disputes_upheld: 1,
+    revalidations_changed: 0,
+    overturned: 2,
+    missed: 1,
+    forfeits: 1,
+  },
+  tier: tierOf(14, true),
   cosigners: 2,
 };
+
+/** Nothing on the Record: the page's one-sentence empty state. */
+const NO_MARKS = { overturned: [], missed: [], failed_disputes: [] };
 
 /**
  * Who this operator has signed beside (D-119).
@@ -717,8 +740,10 @@ function everyPage(): Record<string, string> {
     entry: renderEntry(ctx, entryData),
     operators: renderOperators(ctx, {
       rows: [operatorRow, { ...operatorRow, id: "maintainer.example", maintainer: true, trusted: false, trustedSeq: null }],
+      bareKeys: null,
     }),
     operator: renderOperator(ctx, {
+      marks: NO_MARKS,
       cosigners: operatorCosigners,
       row: operatorRow,
       agents: ["1F916:k1", "1F916:k1b"],
@@ -1847,10 +1872,12 @@ describe("the operator pages", () => {
         standing: null,
       },
     ],
+    bareKeys: null,
   });
 
   /** An operator nothing has happened to yet: every panel's empty state at once. */
   const quiet = renderOperator(ctx, {
+    marks: NO_MARKS,
     cosigners: [],
     row: {
       ...operatorRow,
@@ -1897,7 +1924,7 @@ describe("the operator pages", () => {
       standing: { standing: LIST_PAGE_LIMIT + 1 - index, seq: 61 },
     }));
 
-    const page = renderOperators(ctx, { rows: many });
+    const page = renderOperators(ctx, { rows: many, bareKeys: null });
 
     expect(page).toContain('<a href="/operators/op-100.example">');
     expect(page).toContain(
@@ -1914,20 +1941,23 @@ describe("the operator pages", () => {
     expect(directory).toContain("a dash means the");
   });
 
-  it("fills the overturned column with a count, and a zero with a zero", () => {
-    // The column is a reading of the log now that the dispute door exists, so
-    // the milestone placeholder is gone and an operator nothing was overturned
-    // for shows 0 rather than a sentence about a milestone.
+  it("carries the three marks as counters, and a zero as a zero", () => {
+    // The standalone overturned column is a marks counter now (decision D-130):
+    // overturned, missed and forfeits together, each a count of sealed events
+    // with no word of judgment around it, and a zero shown as a reading.
     expect(directory).not.toContain("not yet published (M20)");
-    expect(directory).toContain(`<td class="danger">\n      2\n    </td>`);
-    expect(directory).toContain(`<td class="dim">\n      0\n    </td>`);
+    expect(directory).toContain("<th>marks</th>");
+    expect(directory).toContain("overturned 2");
+    expect(directory).toContain("missed 1");
+    expect(directory).toContain("forfeits 1");
     expect(directory).toContain(
-      "entries this operator signed, as submitter or as approver, that an\n        upheld dispute overturned",
+      "entries this operator\n        signed, as submitter or as approver, that an upheld dispute overturned",
     );
   });
 
   it("shows one operator's record, agents, attestation and validations", () => {
     const one = renderOperator(ctx, {
+      marks: NO_MARKS,
       cosigners: [],
       row: operatorRow,
       agents: ["1F916:k1"],
@@ -1962,6 +1992,7 @@ describe("the operator pages", () => {
 
   it("lists the domains an operator is attested in, each with its version", () => {
     const one = renderOperator(ctx, {
+      marks: NO_MARKS,
       cosigners: [],
       row: operatorRow,
       agents: ["1F916:k1"],
@@ -2003,6 +2034,7 @@ describe("the operator pages", () => {
    */
   it("shows the stored standing, its position, the counts, and how to recompute it", () => {
     const one = renderOperator(ctx, {
+      marks: NO_MARKS,
       cosigners: [],
       row: operatorRow,
       agents: ["1F916:k1"],
@@ -2051,6 +2083,7 @@ describe("the operator pages", () => {
 
   it("shows no money panel and no amount in any currency (D-127)", () => {
     const one = renderOperator(ctx, {
+      marks: NO_MARKS,
       cosigners: [],
       row: operatorRow,
       agents: [],
@@ -2102,6 +2135,7 @@ describe("the operator page's attestations", () => {
     ledger: operatorLedger,
     balance: operatorBalance,
     cosigners: [],
+    marks: NO_MARKS,
   } satisfies Omit<OperatorData, "attestations">;
 
   const document = renderOperator(ctx, { ...base, attestations });

@@ -22,7 +22,9 @@
  * and the bare integers are HTTP status codes.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { clearWriteQuota } from "./helpers/quota.js";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { buildTranscriptArtifact, transcriptArtifactHash } from "../src/artifact.js";
@@ -37,9 +39,11 @@ import {
   DEFAULT_DOMAIN,
   DOMAIN_SLUGS,
   LIST_PAGE_LIMIT,
+  STANDING_TRUSTED_ENTRY,
   domainPolicy,
 } from "../src/policy.js";
 import { signRecord } from "../src/records.js";
+import { setOperatorStanding } from "../src/storage/repository.js";
 import { signCore } from "../src/sign.js";
 import { entryIdFor } from "../src/submit.js";
 import type { ApproverRecord } from "../src/events.js";
@@ -256,6 +260,17 @@ async function register(
 
 /** One operator taking on a later domain, by signing that domain's own sentence. */
 async function join(party: Party, domain: string): Promise<void> {
+  // A second domain is an established operator's to take on (decision D-130),
+  // so the joiner stands at the trusted bar before it knocks. Written straight
+  // into the column the door reads, exactly as the sweep's standing step writes
+  // it and as the M20 fixture funds a challenger: a fixture world earns almost
+  // none of it, and the gate is not weakened to let one through.
+  await setOperatorStanding(
+    store.db,
+    party.operator,
+    STANDING_TRUSTED_ENTRY,
+    0,
+  );
   const answer = await post(
     party.agent,
     `/operators/${encodeURIComponent(party.operator)}/domains`,
@@ -563,6 +578,20 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await store?.dispose();
+});
+
+/**
+ * Each test starts the day's write counters fresh (decision D-130).
+ *
+ * Every signing key here is a bare one or a probation operator's, and both
+ * write under the probationary per-agent cap: a whole suite driving one door
+ * under one frozen clock is one caller writing all day, and without this the
+ * later cases would be answered by the quota rather than by the rule they are
+ * about. The caps themselves are pinned in test/write-quota.test.ts and
+ * test/standing-tiers.test.ts.
+ */
+beforeEach(async () => {
+  await clearWriteQuota(store.db);
 });
 
 // ---------------------------------------------------------------------------

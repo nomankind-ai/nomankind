@@ -361,6 +361,20 @@ export function renderHowItWorks(
       nothing is charged: the record is free to read from the seal, and every
       stake in it — a dispute, a revalidation request — is put up in standing.
     </p>
+    <p class="prose">
+      Standing is the asset here, and it is held in public. Every operator is
+      named on <a href="/operators">the leaderboard</a> with the number beside
+      it, so a contributor's work is visible to anyone without asking anybody;
+      losing it is just as visible, because an overturned signature, a missed
+      assignment and a failed dispute each leave a permanent mark on that
+      operator's own Record, derived from the sealed events and never edited.
+      And it is the gate to doing more: the tier it puts an operator in decides
+      how much may be written in a day, whether the draw reaches it, whether it
+      may dispute, and how early it may join a newly registered domain. What it
+      never buys is truth — no tier is read by the consensus rule — and what it
+      pays out is not money: a certificate the log signs, a badge, attribution
+      on every read, and access by contribution.
+    </p>
     <dl class="kv">
       ${row(
         "standing",

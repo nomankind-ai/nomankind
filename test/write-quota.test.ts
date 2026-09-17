@@ -14,8 +14,13 @@
  * archive write or derivation — which is what the counting fetcher here is for:
  * a refused write must reach the network no more than a refused signature does.
  *
- * No policy number lives here: the caps are WRITES_PER_AGENT_PER_DAY's and
- * WRITES_PER_CLIENT_PER_DAY's, and the bare integers are HTTP status codes.
+ * Every key here is a bare one, and decision D-130 charges a bare key at the
+ * probationary per-agent cap: it is nobody's operator, so it is nobody's
+ * established one. The per-agent numbers below are that cap's, and
+ * test/standing-tiers.test.ts is where the three tiers are told apart.
+ *
+ * No policy number lives here: the caps are WRITES_PER_AGENT_PER_DAY_PROBATION's
+ * and WRITES_PER_CLIENT_PER_DAY's, and the bare integers are HTTP status codes.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -23,7 +28,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { utcDay } from "../src/anchor.js";
 import {
   DEFAULT_DOMAIN,
-  WRITES_PER_AGENT_PER_DAY,
+  WRITES_PER_AGENT_PER_DAY_PROBATION,
   WRITES_PER_CLIENT_PER_DAY,
 } from "../src/policy.js";
 import { addQuota, quotaOn } from "../src/storage/keys.js";
@@ -184,7 +189,7 @@ describe("the per-agent cap", () => {
       store.db,
       agentScope,
       DAY,
-      WRITES_PER_AGENT_PER_DAY - used - 1,
+      WRITES_PER_AGENT_PER_DAY_PROBATION - used - 1,
     );
 
     const last = await submit("Kestrel-2 seat pricing rose, the last allowed");
@@ -197,10 +202,10 @@ describe("the per-agent cap", () => {
     expect(await over.json()).toMatchObject({
       error: "write_quota",
       bucket: "agent",
-      limit: WRITES_PER_AGENT_PER_DAY,
+      limit: WRITES_PER_AGENT_PER_DAY_PROBATION,
     });
     expect(over.headers.get("x-nomankind-write-limit")).toBe(
-      String(WRITES_PER_AGENT_PER_DAY),
+      String(WRITES_PER_AGENT_PER_DAY_PROBATION),
     );
     expect(over.headers.get("x-nomankind-write-remaining")).toBe("0");
 

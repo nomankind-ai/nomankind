@@ -72,8 +72,15 @@ import {
   POLICY,
   SITEMAP_MAX_ENTRIES,
   WITNESS_PIN,
+  type OperatorKind,
 } from "../policy.js";
 import type { Seal } from "../seal.js";
+// The two readings decision D-130 added to the kernel, and the fold that names
+// who an entry is owed to. Called here so the pages stay what they are: the
+// tier, the marks and the attribution are derived on the way to a page and
+// never stored, and no renderer reaches for a rule of its own.
+import { MARK_EVENT_TYPES, marksOf, tierOf } from "../standing.js";
+import { attributionOf } from "../attribution.js";
 import { exercisedStages, stageStates, statusCounters } from "../status.js";
 import type { D1Like } from "../storage/d1.js";
 import {
@@ -91,6 +98,7 @@ import {
   entryIdsNewestFirst,
   entryLedgerRows,
   eventsForEntry,
+  eventsOfType,
   getEntry,
   getOperator,
   latestAnchor,
@@ -114,6 +122,8 @@ import {
   sealsBetween,
   standingByOperator,
   standingForOperators,
+  storedStandingOf,
+  storedStandings,
   supersedersOf,
   validationCountersForOperators,
   validationsByOperator,
@@ -181,6 +191,7 @@ import type {
   PageContext,
   StatusData,
 } from "../ui/types.js";
+import type { StandingCounts } from "../standing.js";
 import {
   readerAccess,
   unmeteredFreeReader,
@@ -404,12 +415,15 @@ function communityOf(record: OperatorRecord): CommunityOperator | null {
 function toOperatorRow(
   record: OperatorRecord,
   agents: number,
+  domainSlugs: string[],
   validations: number,
   overturned: number,
   standing: OperatorStanding | undefined,
+  counts: StandingCounts | null,
   cosigners: number,
 ): OperatorRow {
   const trustedSeq = record.details["trusted_seq"];
+  const trusted = record.details["trusted"] === true;
   return {
     id: record.id,
     // The kind the registry row carries (decision D-138), and the account
@@ -420,7 +434,7 @@ function toOperatorRow(
     community: communityOf(record),
     maintainer: record.maintainer,
     provider: record.provider,
-    trusted: record.details["trusted"] === true,
+    trusted,
     trustedSeq: typeof trustedSeq === "number" ? trustedSeq : null,
     // The perimeter the genesis naming disclosed beside the trust it granted
     // (decision D-128). Null on every operator named before the decision and
@@ -428,9 +442,22 @@ function toOperatorRow(
     perimeter: perimeterOf(record.details),
     registeredSeq: record.registeredSeq,
     agents,
+    domainSlugs,
     validations,
     overturned,
     standing: standing === undefined ? null : { ...standing },
+    // The acts the fold was over, as the sweep's accumulator holds them, and
+    // null where it has never run for this operator (decision D-130). Never
+    // assembled from the rows above: a count this page added up itself would be
+    // a second standing formula.
+    counts,
+    // What the standing lets this operator do, recomputed here by the kernel's
+    // own reading rather than stored: an operator whose standing moved this
+    // second is at the tier its number puts it at, and nothing caches the word.
+    // A standing the formula has never been run for is read as zero for this,
+    // which is the lowest tier and the honest answer for an operator nothing is
+    // known about yet.
+    tier: tierOf(standing === undefined ? 0 : standing.standing, trusted),
     cosigners,
   };
 }
@@ -856,6 +883,24 @@ async function entry(
     });
   }
 
+  // Which kind of operator each party to this entry is (decision D-138), off
+  // the ids' own shape through the registry's parser — the same reading the
+  // approver rows above did, so the attribution block and the table can never
+  // disagree. `operatorKindsAt` is the other way to this map and is a fold over
+  // the whole log's registration events; this page has one entry's events, and
+  // a community operator's id is `<venue>:<handle>` by construction, so the
+  // parser answers it without a second read.
+  const operatorKinds = new Map<string, OperatorKind>();
+  for (const each of approvers) operatorKinds.set(each.operator, each.operatorKind);
+  for (const each of reconfirmations) {
+    const operator = each.record["operator"];
+    if (typeof operator !== "string") continue;
+    operatorKinds.set(
+      operator,
+      isCommunityOperatorId(operator) ? "community" : "domain",
+    );
+  }
+
   const window = record["staleness_window_days"];
   return htmlResponse(
     renderEntry(ctx, {
@@ -880,6 +925,12 @@ async function entry(
         sidecar: stored.sidecar,
         now: now.toISOString(),
       }),
+      // Who this entry is owed to (decision D-130), folded by the kernel from
+      // the entry and its own sealed events. The kinds are the ids' own shape,
+      // read by the registry's parser exactly as the approver rows above read
+      // them, so the block and the table cannot disagree about which operator
+      // is a community one.
+      attribution: attributionOf(shown, events, operatorKinds),
       statement:
         statementCapture === null
           ? null
@@ -943,21 +994,45 @@ async function operatorRows(db: D1Like): Promise<OperatorRow[]> {
     db,
     records.map((record) => record.id),
   );
+  // The domains each operator is attested in (decision D-071), one grouped read
+  // over exactly the ids on this page, like every other count here.
+  const domains = await domainsForOperators(
+    db,
+    records.map((record) => record.id),
+  );
+  // The acts behind each standing (decision D-130): the sweep's own
+  // accumulators, read whole rather than one statement per operator. Operators
+  // are the small dimension — this is the read the incremental fold itself does
+  // every run — and an operator absent from it has never been folded, which is
+  // a null and never a row of zeroes.
+  const folded = await storedStandings(db);
 
   return records.map((record) =>
     toOperatorRow(
       record,
       agentsByOperator.get(record.id) ?? 0,
+      domains.get(record.id) ?? [],
       byOperator.get(record.id)?.count ?? 0,
       overturnedByOperator.get(record.id) ?? 0,
       standings.get(record.id),
+      folded.standings.get(record.id)?.counts ?? null,
       cosigners.get(record.id) ?? 0,
     ),
   );
 }
 
 async function operators(db: D1Like, ctx: PageContext): Promise<Response> {
-  return htmlResponse(renderOperators(ctx, { rows: await operatorRows(db) }));
+  return htmlResponse(
+    renderOperators(ctx, {
+      rows: await operatorRows(db),
+      // No bare-key standing exists to list. Standing is folded per operator
+      // (src/standing.ts) and a bare key has no operator, so there is nothing
+      // stored for one and nothing for this route to read; the page says so in
+      // a sentence rather than printing an empty table that would read as a
+      // reading that went missing.
+      bareKeys: null,
+    }),
+  );
 }
 
 async function operator(
@@ -996,6 +1071,42 @@ async function operator(
   // signed attestation, so the version beside each domain is that attestation's
   // and never the environment's default.
   const domains = await operatorDomains(db, id);
+  // The sweep's own accumulator for this one operator, for the counts behind the
+  // standing (decision D-130). Null when the fold has never run for it, which
+  // the page shows as nothing computed rather than as nothing earned.
+  const folded = await storedStandingOf(db, id);
+  // The events the Record is derived from (decision D-130), gathered by type
+  // rather than by walking the log — and by exactly the list the fold reads,
+  // `MARK_EVENT_TYPES`, so the page and `marksOf` cannot drift apart. A page
+  // that guessed the list showed no failed challenge at all: an outcome is
+  // attributed to its challenger through the `dispute_filed` that opened it, and
+  // a list without that event answered nobody.
+  //
+  // An upheld dispute names the entry it overturned, so that entry's own events
+  // — the submission and the decisions under it — are read beside them: they are
+  // what says who signed it and in which role. Bounded by the page size on each
+  // read, like every other panel on this page, and the entry reads are one per
+  // upheld dispute rather than a scan: the marks are rare where the decisions
+  // are not. `marksOf` folds them; nothing here decides what a mark is.
+  const markEvents: Event[] = [];
+  const overturnedEntryIds = new Set<string>();
+  for (const type of MARK_EVENT_TYPES) {
+    const page = await eventsOfType(db, type, -1, LIST_PAGE_LIMIT);
+    markEvents.push(...page);
+    if (type !== "dispute_upheld") continue;
+    for (const event of page) {
+      if (event.entry_id !== null) overturnedEntryIds.add(event.entry_id);
+    }
+  }
+  for (const entryId of overturnedEntryIds) {
+    markEvents.push(...(await eventsForEntry(db, entryId)));
+  }
+  // One event per seq, in log order: `eventsForEntry` returns the dispute events
+  // of its own entry too, so the lists overlap and the fold must see each event
+  // once.
+  const marksInput = [
+    ...new Map(markEvents.map((event) => [event.seq, event])).values(),
+  ].sort((left, right) => left.seq - right.seq);
   const balance = ledgerBalance(ledger, now.toISOString());
   const attestation = record.details["attestation"];
   const namedBy = record.details["named_by"];
@@ -1005,11 +1116,14 @@ async function operator(
       row: toOperatorRow(
         record,
         agents.length,
+        domains.map((each) => each.domain),
         validations.length,
         overturned.find((each) => each.operator === id)?.count ?? 0,
         standing ?? undefined,
+        folded === null ? null : folded.counts,
         cosigners.length,
       ),
+      marks: marksOf(marksInput, id),
       ledger,
       balance,
       agents: agents.map((each) => each.agentId),

@@ -17,6 +17,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { attributionOf } from "../src/attribution.js";
 import { confidenceInputs } from "../src/confidence.js";
 import type { Sidecar } from "../src/derive.js";
 import type { CommunityBinding } from "../src/events.js";
@@ -31,6 +32,7 @@ import {
   VERIFICATION_CLASSES,
 } from "../src/policy.js";
 import { communityOperatorId } from "../src/registry.js";
+import { tierOf } from "../src/standing.js";
 import type { Entry } from "../src/schema.js";
 import { renderApi } from "../src/ui/pages/api.js";
 import { renderEntries } from "../src/ui/pages/entries.js";
@@ -203,6 +205,9 @@ function entryData(sidecar: Sidecar, status = "verified"): EntryData {
     position: 12,
     events: [],
     seal: null,
+    // The block the entry page renders (D-130), folded by the kernel over the
+    // entry's own events exactly as the route folds it.
+    attribution: attributionOf(entry as unknown as Entry, [], new Map()),
     approvers: [communityApprover],
     reconfirmations: [],
     superseders: [],
@@ -386,9 +391,12 @@ function operatorRow(overrides: Partial<OperatorRow> = {}): OperatorRow {
     trustedSeq: 4,
     registeredSeq: 2,
     agents: 1,
+    domainSlugs: [DEFAULT_DOMAIN],
     validations: 3,
     overturned: 0,
     standing: { standing: 12, seq: 40 },
+    counts: null,
+    tier: tierOf(12, true),
     cosigners: 1,
     perimeter: "kestrel-labs",
     ...overrides,
@@ -413,6 +421,7 @@ describe("the operators directory", () => {
   it("has a kind column naming both kinds", () => {
     const html = renderOperators(ctx, {
       rows: [operatorRow(), communityRow],
+      bareKeys: null,
     });
     expect(html).toContain("<th>kind</th>");
     for (const kind of POLICY.OPERATOR_KINDS) expect(html).toContain(kind);
@@ -445,6 +454,8 @@ describe("a community operator's page", () => {
     ledger: [],
     balance: ledgerBalance([], NOW),
     attestations: { asModel: [], asScorer: [] },
+    // Nothing is on this operator's Record, which the page says in a sentence.
+    marks: { overturned: [], missed: [], failed_disputes: [] },
   };
 
   it("shows the account, the key, the binding and its reference", () => {

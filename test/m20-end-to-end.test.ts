@@ -25,7 +25,9 @@
  * five verified entries, one per thing this milestone has to prove.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { clearWriteQuota } from "./helpers/quota.js";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { buildExport } from "../src/cli/export.js";
@@ -597,6 +599,20 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await world?.store.dispose();
+});
+
+/**
+ * Each test starts the day's write counters fresh (decision D-130).
+ *
+ * Every signing key here is a bare one or a probation operator's, and both
+ * write under the probationary per-agent cap: a whole suite driving one door
+ * under one frozen clock is one caller writing all day, and without this the
+ * later cases would be answered by the quota rather than by the rule they are
+ * about. The caps themselves are pinned in test/write-quota.test.ts and
+ * test/standing-tiers.test.ts.
+ */
+beforeEach(async () => {
+  await clearWriteQuota(world.store.db);
 });
 
 // ---------------------------------------------------------------------------
@@ -1339,6 +1355,10 @@ describe("a filing the filer cannot cover", () => {
       k3.operator,
     );
     const refused = await file(k3.agent, target, poor);
+    // The tier gate (D-130) lets this one through and the stake gate answers
+    // it: k3 was named at genesis, so it is established whatever its number,
+    // and what it cannot do is cover the stake. A probation operator is refused
+    // in the tier's own word one door earlier (test/m25h-end-to-end.test.ts).
     expect([refused.status, refused.body["error"]]).toEqual([
       422,
       "insufficient_standing",
@@ -1357,6 +1377,9 @@ describe("a filing the filer cannot cover", () => {
       "Kestrel-3 seat pricing is $44 per seat per month, not $40, says a reader",
     );
     const filed = await file(readers[0]!, target, bare);
+    // A bare key names no operator at all, so there is no tier to read and the
+    // stake gate answers it, in the word Section 6's "burner keys cannot
+    // dispute for free" has always been answered in.
     expect([filed.status, filed.body["error"]]).toEqual([
       422,
       "insufficient_standing",
@@ -1377,6 +1400,8 @@ describe("a filing the filer cannot cover", () => {
       0,
     );
     const refused = await post(k4.agent, `/entries/${id}/revalidate`, {});
+    // Named at genesis, so established by the naming (D-130): the tier gate
+    // passes it and the stake gate is what refuses it.
     expect([refused.status, refused.body["error"]]).toEqual([
       422,
       "insufficient_standing",

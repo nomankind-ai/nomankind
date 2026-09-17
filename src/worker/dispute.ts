@@ -64,6 +64,7 @@ import type { Event, EventInput } from "../events.js";
 import { DISPUTE_STAKE_STANDING, LIST_PAGE_LIMIT } from "../policy.js";
 import { validateEntry, type ValidationError } from "../schema.js";
 import { checkSource } from "../sources.js";
+import { tierOf } from "../standing.js";
 import { disputeStake, revalidationOutcomeStakes } from "../stake.js";
 import {
   getEntry,
@@ -71,6 +72,7 @@ import {
   openRevalidationAssignment,
   openStakeRowsForOperator,
   operatorStanding,
+  operatorTier,
   recordDisputeFiling,
   type StoredEntryInput,
 } from "../storage/repository.js";
@@ -298,6 +300,27 @@ async function file(
     return refuse(403, "author_mismatch");
   }
 
+  // The tier gate (decision D-130), right after the identity is settled and
+  // before the standing gate below: "probation ... cannot file disputes or
+  // revalidation requests". A tier is about who may file at all and the stake
+  // is about whether this filing can be covered, so the tier is asked first and
+  // neither answers for the other. Before any fetch, like everything else on
+  // this side of the pipeline.
+  //
+  // Only an operator is asked. A bare key is nobody's operator, has no standing
+  // at all and is refused `insufficient_standing` by the gate below, in the
+  // word Section 6's "burner keys cannot dispute for free" has always been
+  // answered in.
+  const claimedOperator = body.entry["author_operator"];
+  const challengerOperator =
+    typeof claimedOperator === "string" ? claimedOperator : null;
+  if (challengerOperator !== null) {
+    const row = await operatorTier(env.DB, challengerOperator);
+    if (tierOf(row?.standing ?? 0, row?.trusted ?? false) === "probation") {
+      return refuse(403, "insufficient_tier");
+    }
+  }
+
   // Section 9: standing "gates everything discretionary, from entry to and stay
   // in the trusted pool to revalidation-request caps and dispute stakes". So a
   // filer has to be able to cover what it is about to stake, and available means
@@ -321,9 +344,6 @@ async function file(
   // and therefore no standing at all, so it covers nothing and is refused
   // `insufficient_standing`, which is the same word an operator too thin to file
   // is refused in.
-  const claimedOperator = body.entry["author_operator"];
-  const challengerOperator =
-    typeof claimedOperator === "string" ? claimedOperator : null;
   const challengerStanding =
     challengerOperator === null
       ? null
