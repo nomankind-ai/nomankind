@@ -87,13 +87,16 @@ import {
   getEntry,
   putEntry,
   readConfirmationCursor,
+  sweepSteps,
 } from "../src/storage/repository.js";
 import { verifyOffline, type LogBundle } from "../src/verify.js";
 import type { Env } from "../src/worker/env.js";
 import { handlePages } from "../src/worker/pages.js";
 import { handleRead } from "../src/worker/read.js";
+import { handleSubmit } from "../src/worker/submit.js";
 import { runSweep } from "../src/worker/sweep.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
+import { FixtureFetcher } from "./helpers/submit.js";
 import { leafOf, pathOf, rootOf } from "./helpers/registry-tree.js";
 
 const examplePath = fileURLToPath(
@@ -979,6 +982,12 @@ describe("the verifier and a confirmation's proof", () => {
  */
 const DB_ENTRY_ID = `nmk_${"a1".repeat(16)}`;
 
+/**
+ * A second bootstrapped entry nobody confirms: the one that still carries the
+ * label while the first one has lost it.
+ */
+const LABELLED_ID = `nmk_${"b2".repeat(16)}`;
+
 const THREAD = 5212;
 /** Sealed the line's fingerprint, and the seal proves: counted. */
 const GOOD_HANDLE = "morty-synctzn";
@@ -1147,12 +1156,27 @@ describe("the sweep's confirmations step", () => {
         payload: event.payload,
       });
     }
+    // The second entry: the same two validators, no confirmation ever, so its
+    // label is the one the page has to keep printing.
+    for (const event of bootstrappedFor(LABELLED_ID).events) {
+      if (event.entry_id !== LABELLED_ID) continue;
+      events = await appendEvent(events, {
+        at: event.at,
+        type: event.type,
+        entry_id: event.entry_id,
+        payload: event.payload,
+      });
+    }
     await appendEvents(db, events);
-    const submitted = events.find((event) => event.type === "entry_submitted")!;
-    const derived = deriveEntry(events, DB_ENTRY_ID, { now: NOW.toISOString() });
-    expect(derived.entry["status"]).toBe("verified");
-    expect(derived.sidecar.bootstrap).toEqual({ perimeter: PERIMETER });
-    await putEntry(db, derived.entry, derived.sidecar, submitted.seq);
+    for (const id of [DB_ENTRY_ID, LABELLED_ID]) {
+      const submitted = events.find(
+        (event) => event.type === "entry_submitted" && event.entry_id === id,
+      )!;
+      const derived = deriveEntry(events, id, { now: NOW.toISOString() });
+      expect(derived.entry["status"]).toBe("verified");
+      expect(derived.sidecar.bootstrap).toEqual({ perimeter: PERIMETER });
+      await putEntry(db, derived.entry, derived.sidecar, submitted.seq);
+    }
   }, 600_000);
 
   afterAll(async () => {
@@ -1310,6 +1334,46 @@ describe("the sweep's confirmations step", () => {
     expect(await eventsOfType(db, "public_confirmation", -1, 100)).toHaveLength(5);
   }, 600_000);
 
+  it("says on the status board what it read, not only what it sealed", async () => {
+    // The demo run of 2026-09-17: the door was working and its row said
+    // {"sealed":0,...}, which reads exactly like a door that reached no
+    // board at all. A quiet run and a dead one have to be different rows.
+    const report = await runSweep(envOf(), {
+      now: new Date(NOW.getTime() + 1_500_000),
+      beacon: new FixtureBeacon("confirmations"),
+      board: await board({ sealTheUnsealed: true }),
+      confirmationTrust: fixed.trust,
+    });
+    expect(report.confirmations).toEqual([]);
+    // The shape the demo run had: the thread was reached, and there was
+    // nothing past its cursor to take.
+    expect(report.confirmations_read.threads).toBe(1);
+    expect(report.confirmations_read.comments).toBe(0);
+
+    const row = (await sweepSteps(db)).find(
+      (one) => one.step === "confirmations",
+    )!;
+    expect(row.detail).toMatchObject({ sealed: 0, threads_read: 1 });
+    // `last_skip_reason` is not the field to read this off: the board row
+    // keeps the last refusal it ever made (D-117), so a healthy run leaves
+    // yesterday's reason standing. The detail is what moves every run.
+
+    // And a run with no board at all is the other row: nothing read, and a
+    // reason that says why.
+    const blind = await runSweep(envOf(), {
+      now: new Date(NOW.getTime() + 1_800_000),
+      beacon: new FixtureBeacon("confirmations"),
+      board: new UnavailableBoardAdapter(),
+      confirmationTrust: fixed.trust,
+    });
+    expect(blind.confirmations_read).toEqual({ threads: 0, comments: 0 });
+    const blindRow = (await sweepSteps(db)).find(
+      (one) => one.step === "confirmations",
+    )!;
+    expect(blindRow.detail).toMatchObject({ threads_read: 0 });
+    expect(blindRow.last_skip_reason).toBe("board_unavailable");
+  }, 600_000);
+
   it("shows it on the entry page, escaped, and says it changes no status", async () => {
     const response = await handlePages(
       new Request(`https://app.nomankind.ai/entries/${DB_ENTRY_ID}`, {
@@ -1332,6 +1396,36 @@ describe("the sweep's confirmations step", () => {
     expect(page).not.toContain("<script>alert(1)</script>");
   }, 600_000);
 
+  it("prints the bootstrap label on the page while one entry still has it", async () => {
+    // The label is a sentence on the page and nothing else surfaces it in
+    // HTML (D-128). Nothing pinned that until the demo run of 2026-09-17,
+    // when a page was read for it and grepped for the wrong word.
+    const labelled = await handlePages(
+      new Request(`https://app.nomankind.ai/entries/${LABELLED_ID}`, {
+        headers: { accept: "text/html" },
+      }),
+      envOf(),
+      { now: NOW },
+    );
+    expect(labelled!.status).toBe(200);
+    const page = await labelled!.text();
+    expect(page).toContain(
+      "Bootstrap: every validator of this entry is inside the disclosed",
+    );
+    expect(page).toContain(PERIMETER);
+    // And the confirmed entry has lost it, on the same page rule.
+    const cleared = await handlePages(
+      new Request(`https://app.nomankind.ai/entries/${DB_ENTRY_ID}`, {
+        headers: { accept: "text/html" },
+      }),
+      envOf(),
+      { now: NOW },
+    );
+    expect(await cleared!.text()).not.toContain(
+      "Bootstrap: every validator of this entry is inside the disclosed",
+    );
+  }, 600_000);
+
   it("carries the sidecar field on the entry JSON", async () => {
     const response = await handleRead(
       new Request(`https://app.nomankind.ai/read/${DB_ENTRY_ID}`),
@@ -1347,6 +1441,27 @@ describe("the sweep's confirmations step", () => {
     expect(rows[0]!["counted"]).toBe(true);
     // The entry itself is unchanged by any of it.
     expect((body["entry"] as Record<string, unknown>)["status"]).toBe("verified");
+  }, 600_000);
+
+  it("keeps the sidecar to the doors that carry it by design", async () => {
+    // `GET /read/{id}` answers `{entry, sidecar, ...}`; `GET /entries/{id}`
+    // answers the entry object itself and always has (src/worker/submit.ts,
+    // `entryById`). Looking for the sidecar on the second one is what made
+    // the demo run of 2026-09-17 look broken, so the boundary is pinned here
+    // rather than left to be rediscovered.
+    const entryDoor = await handleSubmit(
+      new Request(`https://app.nomankind.ai/entries/${DB_ENTRY_ID}`, {
+        headers: { accept: "application/json" },
+      }),
+      envOf(),
+      // The read door fetches nothing; the fetcher is the write path's.
+      { now: NOW, fetcher: new FixtureFetcher({}) },
+    );
+    expect(entryDoor!.status).toBe(200);
+    const entry = (await entryDoor!.json()) as Record<string, unknown>;
+    expect(entry["id"]).toBe(DB_ENTRY_ID);
+    expect(entry["sidecar"]).toBeUndefined();
+    expect(entry["bootstrap"]).toBeUndefined();
   }, 600_000);
 });
 

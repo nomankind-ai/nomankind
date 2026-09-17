@@ -476,6 +476,19 @@ export interface SweepRevalidationDraw {
 }
 
 /**
+ * What one run of the confirmations step did: what it sealed, and what it read
+ * to find it.
+ *
+ * The second half is the half a reader of the status board needs. A run that
+ * read the pinned thread and found nothing new and a run that read no board at
+ * all both seal nothing, and only `threads` and `comments` tell them apart.
+ */
+interface ConfirmationsRead {
+  readonly sealed: SweepConfirmation[];
+  readonly read: { threads: number; comments: number };
+}
+
+/**
  * One public confirmation this run sealed (decision D-136).
  *
  * The comment and the line it was read from travel beside the entry, because
@@ -604,6 +617,16 @@ export interface SweepReport {
    * hold, and `board_unavailable` for a board that did not answer.
    */
   readonly confirmations: readonly SweepConfirmation[];
+  /**
+   * What the door read to find them: how many batch threads it reached, and how
+   * many comments past their cursors it took. Zero threads with no skip reason
+   * is a door that found no thread to read; one thread and no seals is a door
+   * that read and found nothing new.
+   */
+  readonly confirmations_read: {
+    readonly threads: number;
+    readonly comments: number;
+  };
   /**
    * The days whose read count this run published, oldest first, and empty when
    * nothing was owed. One `read_count` event each.
@@ -1127,19 +1150,20 @@ async function confirmationsStep(
   at: string,
   cache: WorldCache,
   skip: Skip,
-): Promise<SweepConfirmation[]> {
+): Promise<ConfirmationsRead> {
   const sealed: SweepConfirmation[] = [];
+  const read = { threads: 0, comments: 0 };
   if (board === undefined) {
     skip("board_unavailable");
-    return sealed;
+    return { sealed, read };
   }
 
   const threads = await board.threads();
   if (threads === null) {
     skip("board_unavailable");
-    return sealed;
+    return { sealed, read };
   }
-  if (threads.length === 0) return sealed;
+  if (threads.length === 0) return { sealed, read };
 
   // What the log already holds, keyed by the comment and the line, and whether
   // that line has been counted yet. Read once per run.
@@ -1170,6 +1194,12 @@ async function confirmationsStep(
       skip("board_unavailable");
       continue;
     }
+    // Counted whatever came of them: this is the step saying it reached the
+    // board at all, which a count of what it sealed cannot say. A thread read
+    // and found unchanged and a thread never read look identical in a detail
+    // that reports only seals, and on 2026-09-17 they did.
+    read.threads += 1;
+    read.comments += comments.length;
 
     let through = cursor;
     for (const comment of comments) {
@@ -1201,7 +1231,7 @@ async function confirmationsStep(
     }
   }
 
-  return sealed;
+  return { sealed, read };
 }
 
 /**
@@ -3721,7 +3751,7 @@ export async function runSweep(
     // row this run rewrote is the row a confirmation is added to, and before
     // the seal, so a confirmation sealed here is committed to by this same
     // run's seal rather than a cycle later.
-    const confirmations = await confirmationsStep(
+    const confirmed = await confirmationsStep(
       db,
       deps.board,
       deps.confirmationTrust ?? pinnedConfirmationTrust(),
@@ -3730,6 +3760,7 @@ export async function runSweep(
       cache,
       skip,
     );
+    const confirmations = confirmed.sealed;
 
     enter("publish");
     // (e) The day's read counts. Before the seal on purpose: the count this run
@@ -3881,6 +3912,7 @@ export async function runSweep(
       staled,
       rederived,
       confirmations,
+      confirmations_read: confirmed.read,
       published,
       attestations,
       sealed,
@@ -3976,6 +4008,7 @@ function nothingSwept(
     staled: [],
     rederived: [],
     confirmations: [],
+    confirmations_read: { threads: 0, comments: 0 },
     published: [],
     attestations: { expired: [] },
     sealed: null,
@@ -4112,10 +4145,13 @@ function stepRows(
           // What the door took, and off how many threads (D-136). The refusals
           // — an unverifiable proof, a line naming no known entry, a board that
           // did not answer — are counted in `skipped` like every other rule's.
+          // What it sealed, and what it read to find it. The read counts are
+          // what make a quiet door and a dead one different rows.
           confirmations: {
             sealed: report.confirmations.length,
             counted: report.confirmations.filter((one) => one.counted).length,
-            threads: new Set(report.confirmations.map((one) => one.thread)).size,
+            threads_read: report.confirmations_read.threads,
+            comments_read: report.confirmations_read.comments,
           },
           publish: {
             published: report.published.length,
