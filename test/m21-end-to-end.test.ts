@@ -34,7 +34,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import type { Core } from "../src/core.js";
 import { base64urlEncode } from "../src/encoding.js";
 import type {
@@ -67,10 +66,8 @@ import {
   eventsAfter,
   getOperator,
   latestSeal,
-  payoutRows,
   putLedgerRows,
   putOperator,
-  releasedUnpaidRows,
   setOperatorStanding,
 } from "../src/storage/repository.js";
 import type { Env } from "../src/worker/env.js";
@@ -195,7 +192,6 @@ let releasedEntry: Core;
  * One payment provider for the whole run, so the transfer numbers it hands back
  * are a sequence rather than the same number every time.
  */
-const payout = new MockPayoutAdapter();
 
 function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, world.env, { ...world.deps, now });
@@ -263,7 +259,6 @@ async function register(party: Party): Promise<void> {
   const answer = await post(party.agent, "/operators", {
     operator: party.operator,
     attestation: await attestFor(party.agent, party.operator, AT),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -470,7 +465,7 @@ async function sweep(at: Date, sealing = true): Promise<SweepReport> {
   const beacon = new FixtureBeacon("m21");
   await beacon.advance(at.toISOString());
   if (!sealing) {
-    return runSweep(world.env, { now: at, beacon, payout });
+    return runSweep(world.env, { now: at, beacon });
   }
   return runSweep(world.env, {
     now: at,
@@ -479,7 +474,6 @@ async function sweep(at: Date, sealing = true): Promise<SweepReport> {
     pinned: pinnedSet([]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout,
   });
 }
 
@@ -543,9 +537,7 @@ beforeAll(async () => {
     keyHash: await minted.hash,
     tier: "standard",
     status: "active",
-    customer: "cus_m21",
-    subscription: "sub_m21",
-    checkoutSession: "cs_m21",
+    clientDay: "cs_m21",
     createdAt: AT,
   });
 
@@ -579,7 +571,6 @@ beforeAll(async () => {
     deps: {
       now: NOW,
       dns: new FixtureResolver(records),
-      payout,
       fetcher: new FixtureFetcher(PAGES),
     },
     maintainer,
@@ -683,9 +674,9 @@ describe("after a sweep, standing", () => {
     const ledger = await read("/ledger");
     expect(ledger.status).toBe(200);
     expect(ledger.body["reconciliations"]).toEqual([]);
-    expect(ledger.body["payouts"]).toEqual([]);
+    expect(ledger.body).not.toHaveProperty("payouts");
     // One number, and it is the one that still reads an old row: no price of a
-    // read, no payout floor, no cycle.
+    // read, and nothing that leaves.
     expect(ledger.body["policy"]).toEqual({ HOLDBACK_DAYS });
   }, 600_000);
 });
@@ -712,10 +703,7 @@ describe("an operator whose entries were read", () => {
       held: 0,
       released: 0,
       clawed_back: 0,
-      paid: 0,
-      carried_forward: 0,
     });
-    expect(await payoutRows(world.store.db, LIST_PAGE_LIMIT)).toEqual([]);
   }, 600_000);
 });
 

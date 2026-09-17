@@ -1,8 +1,8 @@
 /**
  * The registry routes: joining, genesis naming, and the reads that show both.
  *
- * Whitepaper Section 11 names three joining steps — publish a DNS TXT record
- * carrying your 1F916 agent id, complete payout onboarding, sign the
+ * Whitepaper Section 11's joining steps, less the money one (D-127): publish a
+ * DNS TXT record carrying your 1F916 agent id, and sign the
  * provider-independence attestation from Section 10 with your 1F916 key — and
  * then: "The binding is then sealed into nomankind's log and you can validate."
  * This module is the door those steps knock on. It gathers the facts and writes
@@ -27,7 +27,6 @@
  */
 
 import type { DnsResolver } from "../adapters/dns.js";
-import type { PayoutAdapter } from "../adapters/payout.js";
 import { appendEvent, type Attestation, type Event } from "../events.js";
 import { publicKeyFromAgentId } from "../identity.js";
 import { utcDay } from "../anchor.js";
@@ -94,15 +93,13 @@ import type { Env } from "./env.js";
 
 /**
  * What a request handler is given besides its bindings: the instant this
- * request is being served at, and the two ways out of the process. All three
- * are injected so a test drives a real router with a fake clock, a fixture
- * resolver and a mock payment provider, and so nothing under src/ reads a
- * clock of its own.
+ * request is being served at, and the one way out of the process. Both are
+ * injected so a test drives a real router with a fake clock and a fixture
+ * resolver, and so nothing under src/ reads a clock of its own.
  */
 export interface RegistryDeps {
   readonly now: Date;
   readonly dns: DnsResolver;
-  readonly payout: PayoutAdapter;
 }
 
 // ---------------------------------------------------------------------------
@@ -807,7 +804,7 @@ async function register(
 
   const parsed = parseRegistrationBody(auth.body);
   if (!parsed.ok) return refuse(400, parsed.reason);
-  const { operator, domain, attestation, payout } = parsed.value;
+  const { operator, domain, attestation } = parsed.value;
   const agent = auth.agent;
 
   const check = await checkRegistration({
@@ -835,16 +832,6 @@ async function register(
   }
   if (!txtMatches(lookup.values, agent)) {
     return refuse(422, "dns_mismatch");
-  }
-
-  // Step two: payout onboarding. "unavailable" is our side being unable to ask
-  // and is a 503; pending and failed are the operator's own state and are 422.
-  const payoutStatus = await deps.payout.status(payout.reference);
-  if (payoutStatus === "unavailable") {
-    return refuse(503, "payout_unavailable");
-  }
-  if (payoutStatus !== "verified") {
-    return refuse(422, "payout_not_verified");
   }
 
   // Every check has passed, so now the binding is sealed into the log. The two
@@ -908,13 +895,6 @@ async function register(
         // maintainer's own operator (Section 11).
         trusted: false,
         trusted_seq: null,
-        payout_status: payoutStatus,
-        // The connected account id the body carried, and nothing else about the
-        // account (D-053): a payout cycle has to know where an operator's money
-        // leaves through, and without it the payout step has no reference to
-        // transfer against and skips the operator entirely. The `agent_bound`
-        // event is unchanged — this is the Worker's index, not the public log.
-        payout_reference: payout.reference,
       },
     };
     const agentRecord: AgentRecord = {

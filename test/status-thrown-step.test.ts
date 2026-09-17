@@ -123,7 +123,6 @@ async function join(
     body: {
       operator,
       attestation: await attestFor(agent, operator, at.toISOString()),
-      payout: { reference: "mock-verified-thrown" },
     },
     timestamp: at.toISOString(),
   });

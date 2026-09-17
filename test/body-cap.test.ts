@@ -30,7 +30,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { REQUEST_MAX_BODY_BYTES } from "../src/policy.js";
 import type { Env } from "../src/worker/env.js";
 import { handleRequest, type RequestDeps } from "../src/worker/index.js";
@@ -79,7 +78,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver({}),
-    payout: new MockPayoutAdapter(),
     fetcher,
   };
 });

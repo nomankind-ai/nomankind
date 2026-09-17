@@ -140,7 +140,6 @@ const sidecar: Sidecar = {
 const entryData: EntryData = {
   entry: entryRecord,
   sidecar,
-  withheld: null,
   confidenceInputs: confidenceInputs({
     entry: entryRecord as unknown as Entry,
     sidecar,

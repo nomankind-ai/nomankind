@@ -32,7 +32,7 @@ import {
 } from "../policy.js";
 import type { DerivedAttestation } from "../attest.js";
 import type { BountyAccrual } from "../bounty.js";
-import type { Sidecar } from "../derive.js";
+import { DERIVATION_VERSION, type Sidecar } from "../derive.js";
 import type { LedgerRow } from "../ledger.js";
 import type { ProbeAnswer } from "../probe.js";
 import {
@@ -350,6 +350,15 @@ export interface StoredEntry {
   readonly sidecar: Sidecar;
   readonly submittedSeq: number;
   readonly derivedThroughSeq: number;
+  /**
+   * Which derivation wrote this row (0024, decision D-135), or null for a row
+   * written before the column existed.
+   *
+   * Never a field of the entry and never exported: the sweep's `rederive` step
+   * is the only reader, and it asks one question of it — is this row the
+   * current kernel's answer, or an older one's?
+   */
+  readonly derivedKernel: string | null;
 }
 
 /**
@@ -404,10 +413,11 @@ function toStoredEntry(row: Row): StoredEntry {
     sidecar: toSidecar(row, entry),
     submittedSeq: readInteger(row, "submitted_seq"),
     derivedThroughSeq: readInteger(row, "derived_through_seq"),
+    derivedKernel: readNullableText(row, "derived_kernel"),
   };
 }
 
-const ENTRY_COLUMNS = `entry_json, sidecar_json, submitted_seq, derived_through_seq`;
+const ENTRY_COLUMNS = `entry_json, sidecar_json, submitted_seq, derived_through_seq, derived_kernel`;
 
 /** A required string field on the entry, read by the schema's own field name. */
 function entryField(entry: Entry, field: string): string {
@@ -500,8 +510,9 @@ async function entryStatement(
       `INSERT INTO entries (
          id, subject, category, domain, status, submitted_at, submitted_seq,
          author, stale, expires_at, supersedes,
-         entry_json, sidecar_json, derived_through_seq, duplicate_key
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         entry_json, sidecar_json, derived_through_seq, duplicate_key,
+         derived_kernel
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          subject = excluded.subject,
          category = excluded.category,
@@ -516,7 +527,8 @@ async function entryStatement(
          entry_json = excluded.entry_json,
          sidecar_json = excluded.sidecar_json,
          derived_through_seq = excluded.derived_through_seq,
-         duplicate_key = excluded.duplicate_key`,
+         duplicate_key = excluded.duplicate_key,
+         derived_kernel = excluded.derived_kernel`,
     )
     .bind(
       entryField(entry, "id"),
@@ -538,6 +550,13 @@ async function entryStatement(
       // The derived entry carries the signed core's own fields, so the key the
       // index holds is the key the door computes from the core it is checking.
       await duplicateKeyHash(entry as unknown as Core),
+      // 0024, decision D-135: which derivation made the row beside it. Stamped
+      // on every write — a submission, a validation, a rewrite under a seal, a
+      // staleness rewrite, an import — because a row is only ever this code's
+      // answer, and there is exactly one derivation running in a build. A row
+      // written here is therefore never due a rederivation, which is what keeps
+      // the sweep's step from finding the same rows again next run.
+      DERIVATION_VERSION,
     );
 }
 
@@ -859,6 +878,65 @@ export async function staleDue(
     id: readText(row, "id"),
     expires_at: readText(row, "expires_at"),
   }));
+}
+
+/** Where a rederivation sweep looks, and where it resumes. */
+export interface RederiveDueQuery {
+  /**
+   * The derivation this build runs: src/derive.ts's DERIVATION_VERSION. Taken
+   * as an argument rather than read here so a test can ask the question about
+   * any version, and so this file keeps knowing nothing about derivation's
+   * rules.
+   */
+  readonly kernel: string;
+  /** The caller's own page size. There is no default. */
+  readonly limit: number;
+  /** Resume strictly after this id; omit it for the first page. */
+  readonly afterId?: string;
+}
+
+/**
+ * The entries whose stored row was written by a derivation other than this one.
+ *
+ * Decision D-135. A stored row is a copy of what deriving the entry's events
+ * would give (Section 3: the log is the record), and D-107 publishes exactly
+ * those rows — so the day derivation's rules move, every row written before the
+ * move is a copy of an answer this build no longer gives, and the export says
+ * one thing while `verify-mirror` derives another. Nothing in the events marks
+ * such a row, because nothing about it is a fact about the world; the stamp
+ * beside it is (0024), and this is the read over it.
+ *
+ * `IS NOT` and not `<>`: a row written before the column existed carries null,
+ * and null is exactly the case that matters most — "written by an unknown older
+ * derivation" — which `<>` would silently drop.
+ *
+ * Keyset by id, not offset, for the reason every other sweep read is: a page is
+ * an index seek whose cost does not grow with how far in it is, and a row
+ * rewritten between two pages cannot shift another row across the boundary. A
+ * rewritten row leaves this query altogether — `putEntry` stamps the current
+ * version — so the cursor is what keeps a row the step refused from coming back
+ * forever inside one run. Served by `entries_derived_kernel` (0024).
+ */
+export async function rederiveDue(
+  db: D1Like,
+  query: RederiveDueQuery,
+): Promise<string[]> {
+  const bindings: unknown[] = [query.kernel];
+  let cursor = "";
+  if (query.afterId !== undefined) {
+    cursor = "AND id > ? ";
+    bindings.push(query.afterId);
+  }
+  bindings.push(query.limit);
+
+  const rows = await db
+    .prepare(
+      `SELECT id FROM entries
+       WHERE derived_kernel IS NOT ? ${cursor}ORDER BY id LIMIT ?`,
+    )
+    .bind(...bindings)
+    .all<Row>();
+  return rows.results.map((row) => readText(row, "id"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2867,18 +2945,6 @@ const LEDGER_ROW_COLUMNS =
   `amount, unit, role, "date", available_at`;
 
 /**
- * The kinds that carry money to or from an operator and wait out the holdback:
- * the accruals, the clawbacks that negate them, and the reward an upheld
- * challenge is paid. A clawback carries the release instant of the share it
- * cancels and a reward the latest of those, so all four are read by one
- * `available_at` test — and an unpriced reward, which has no release instant at
- * all until the ledger step prices it, fails that test and is never selected.
- * src/ledger.ts's `isBalanceKind` is the same list.
- */
-const BALANCE_KINDS =
-  `('read_share', 'bounty_accrual', 'clawback', 'dispute_reward')`;
-
-/**
  * A kind no door writes any more: a revalidation check that found the fact
  * changed used to pay a reward of its own, and D-095 pays the requester in
  * standing instead — the currency the stake was in — leaving the money reward to
@@ -2976,71 +3042,10 @@ export async function putLedgerRows(
 }
 
 /**
- * Which entries of one published day the ledger has already priced: the
- * distinct entries its `read_share` rows name, at that day's own position.
- *
- * The one read the day's reconciliation needs that a single run cannot answer
- * for itself. A day is priced LEDGER_ENTRIES_PER_RUN entries at a time, so by
- * the run that finishes it, the runs before it wrote rows this one never saw —
- * and the reconciliation is about the whole day. Every share row of an entry
- * carries that entry's own published count, so which entries accrued is all the
- * reconciliation needs from the rows; what each accrued is the event's own
- * number, which the caller already holds.
- *
- * Keyed on `seq`, which is the day's `read_count` event, so a day replayed at a
- * different position cannot be mistaken for this one.
- */
-export async function pricedEntriesOfDay(
-  db: D1Like,
-  seq: number,
-): Promise<Set<string>> {
-  const rows = await db
-    .prepare(
-      `SELECT DISTINCT entry_id FROM ledger
-       WHERE kind = 'read_share' AND seq = ? AND entry_id IS NOT NULL`,
-    )
-    .bind(seq)
-    .all<Row>();
-  return new Set(rows.results.map((row) => readText(row, "entry_id")));
-}
-
-/**
- * Replace an unpriced row with the priced one, atomically.
- *
- * Two rows are written by a door with no amount and priced by the sweep's
- * ledger step afterwards: M15's bounty accrual, and the `dispute_reward` an
- * upheld challenge is owed, whose price is the clawbacks of its own event. Both
- * are priced under exactly the same id the door wrote — so one of the two has to
- * go or the insert is ignored and the row stays unpriced forever. Two
- * statements would leave a window where the sweep has deleted the unpriced row
- * and not yet written the price: a crash there loses it, because the deleted
- * row is the only record that anything was ever owed. One batch makes that
- * window impossible.
- *
- * The `amount IS NULL` clause is what keeps a replayed cursor safe: a row that
- * has already been priced is never deleted, and the insert that follows is
- * ignored by id, so a rerun reprices nothing and removes nothing. A reward
- * priced at zero is priced: zero is not null, and the row is left alone.
- */
-export async function priceLedgerRow(
-  db: D1Like,
-  unpricedId: string,
-  row: LedgerRow,
-): Promise<void> {
-  await db.batch([
-    db
-      .prepare(`DELETE FROM ledger WHERE id = ? AND amount IS NULL`)
-      .bind(unpricedId),
-    ledgerRowStatement(db, row),
-  ]);
-}
-
-/**
  * One operator's ledger, newest first, resuming strictly before `beforeSeq`.
  *
- * Newest first because that is the question an operator page asks — what
- * happened to my money lately — and because a payout cycle reads through
- * `releasedUnpaidRows` and not through this.
+ * Newest first because that is the question an operator page asks: what the
+ * ledger holds about this operator, latest first.
  *
  * The legacy `revalidation_reward` kind is skipped (`LEGACY_KIND_SKIPPED`), so
  * the operator page's ledger panel shows what the mirror can recompute and
@@ -3106,193 +3111,6 @@ export async function ledgerRowsOn(
   return rows.results.map(toLedgerRow);
 }
 
-/**
- * One entry's read shares that are still inside the holdback at `at`, unpaid.
- *
- * Section 9: an upheld dispute "can claw them back before they leave", and the
- * rows that have already left are not this query's business. src/ledger.ts's
- * `clawbackRows` applies the same test again to what comes back.
- */
-export async function heldReadShareRows(
-  db: D1Like,
-  entryId: string,
-  at: string,
-): Promise<LedgerRow[]> {
-  const rows = await db
-    .prepare(
-      `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
-       WHERE entry_id = ? AND kind = 'read_share' AND paid_by IS NULL
-         AND available_at > ? ORDER BY seq`,
-    )
-    .bind(entryId, at)
-    .all<Row>();
-  return rows.results.map(toLedgerRow);
-}
-
-/**
- * One entry's withheld halves over a window of days, oldest first: what a
- * reconfirmation collects (Section 7's reconfirmation bounty). Both bounds are
- * inclusive, because the window runs from the day the entry went stale to the
- * day it was made fresh again and both of those days withheld.
- */
-export async function bountyPoolRows(
-  db: D1Like,
-  entryId: string,
-  fromDate: string,
-  toDate: string,
-): Promise<LedgerRow[]> {
-  const rows = await db
-    .prepare(
-      `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
-       WHERE entry_id = ? AND kind = 'bounty_pool'
-         AND "date" >= ? AND "date" <= ? ORDER BY "date", seq`,
-    )
-    .bind(entryId, fromDate, toDate)
-    .all<Row>();
-  return rows.results.map(toLedgerRow);
-}
-
-/**
- * What one operator has coming at `now`: unpaid accruals past the holdback, and
- * the unpaid clawbacks that are past it too.
- *
- * A clawback carries the `available_at` of the read share it negates
- * (src/ledger.ts, `clawbackRows`), so it is read by the same test as everything
- * else: the two are released in the same instant, and a share can never be paid
- * out from under a clawback that is still held. src/ledger.ts's `payoutPlan`
- * applies the same rule again to what comes back.
- *
- * A priced `dispute_reward` comes back here too, at its own release. Selected by
- * `operator_id`, so a bare key's reward — a row with no operator — is never
- * selected by anyone and can never be paid: Section 6 has it accrue to the key
- * and hold, and "turning it into dollars means verifying as an operator". An
- * unpriced reward has no `available_at` yet and fails the release test.
- */
-export async function releasedUnpaidRows(
-  db: D1Like,
-  operator: string,
-  now: string,
-): Promise<LedgerRow[]> {
-  const rows = await db
-    .prepare(
-      `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
-       WHERE operator_id = ? AND paid_by IS NULL
-         AND kind IN ${BALANCE_KINDS} AND available_at <= ?
-       ORDER BY seq`,
-    )
-    .bind(operator, now)
-    .all<Row>();
-  return rows.results.map(toLedgerRow);
-}
-
-/**
- * One operator with something released and unpaid, and whether this cycle has
- * already paid it.
- */
-export interface OperatorDue {
-  readonly operator: string;
-  /** A payout row of this operator's, dated inside the cycle asked about. */
-  readonly paidInCycle: boolean;
-}
-
-/**
- * Every operator that has something released and unpaid at `now`, in id order,
- * each carrying whether it has already been paid inside `cycle`.
- *
- * The one query a payout cycle needs before it asks anybody anything. D-053
- * pays per operator per calendar month — "at most one payout batch per operator
- * per cycle" — so whether a cycle is closed is a question about an operator and
- * never about the log: an operator that crosses the minimum on the twentieth is
- * owed its cycle's payout even though another operator was paid on the second.
- * Asking it globally, which is what a single `paidInCycle` gate did, made the
- * first operator paid each month close the month for everybody else.
- *
- * The outer read asks the `ledger_operator_unpaid` index — partial on the
- * unpaid rows, ordered by (operator_id, available_at) — so the answer is one
- * seek over exactly the rows that could be due, and a log where nothing is due
- * answers it empty. The EXISTS beside it seeks 0010's (kind, "date") index for
- * that operator's payouts inside the month's own bounds, which are the first
- * and last day a month can carry.
- *
- * A row with no operator is not here and can never be paid: that is Section 6's
- * bare-key reward holding until the key verifies as an operator.
- */
-export async function operatorsDue(
-  db: D1Like,
-  now: string,
-  cycle: string,
-): Promise<OperatorDue[]> {
-  const rows = await db
-    .prepare(
-      `SELECT due.operator_id AS operator_id,
-              EXISTS (
-                SELECT 1 FROM ledger paid
-                 WHERE paid.kind = 'payout'
-                   AND paid.operator_id = due.operator_id
-                   AND paid."date" >= ? AND paid."date" <= ?
-              ) AS paid_in_cycle
-         FROM ledger due
-        WHERE due.paid_by IS NULL AND due.operator_id IS NOT NULL
-          AND due.kind IN ${BALANCE_KINDS} AND due.available_at <= ?
-        GROUP BY due.operator_id
-        ORDER BY due.operator_id`,
-    )
-    .bind(`${cycle}-01`, `${cycle}-31`, now)
-    .all<Row>();
-  return rows.results.map((row) => ({
-    operator: readText(row, "operator_id"),
-    paidInCycle: readBoolean(row, "paid_in_cycle"),
-  }));
-}
-
-/** The updates that stamp a payout onto the rows it covers. */
-function ledgerPaidStatements(
-  db: D1Like,
-  rowIds: readonly string[],
-  payoutId: string,
-): D1LikeStatement[] {
-  return rowIds.map((id) =>
-    db
-      .prepare(`UPDATE ledger SET paid_by = ? WHERE id = ? AND paid_by IS NULL`)
-      .bind(payoutId, id),
-  );
-}
-
-/**
- * Stamp a payout onto the rows it paid.
- *
- * `AND paid_by IS NULL` is the whole safety of it: a row already claimed by an
- * earlier payout is left where it is rather than being quietly reassigned, so
- * two cycles racing cannot both pay the same accrual.
- */
-export async function markLedgerPaid(
-  db: D1Like,
-  rowIds: readonly string[],
-  payoutId: string,
-): Promise<void> {
-  if (rowIds.length === 0) return;
-  await db.batch(ledgerPaidStatements(db, rowIds, payoutId));
-}
-
-/**
- * Record a payout: write the payout row and stamp the rows it covers, in one
- * batch.
- *
- * The one write in this module that is not derivable from the log, so it is also
- * the one that must be atomic against itself: a payout row without its stamps
- * would pay the same accruals again next cycle, and stamps without their row
- * would lose the money's trail.
- */
-export async function recordPayout(
-  db: D1Like,
-  row: LedgerRow,
-  rowIds: readonly string[],
-): Promise<void> {
-  const statements = [ledgerRowStatement(db, row)];
-  statements.push(...ledgerPaidStatements(db, rowIds, row.id));
-  await db.batch(statements);
-}
-
 /** How far a ledger step has read, or null when it has never run. */
 export async function ledgerCursor(
   db: D1Like,
@@ -3332,31 +3150,6 @@ export async function reconciliationRows(
     )
     .bind(limit)
     .all<Row>();
-  return rows.results.map(toLedgerRow);
-}
-
-/** The payouts, newest first, for one operator or for everyone. */
-export async function payoutRows(
-  db: D1Like,
-  limit: number,
-  operator?: string,
-): Promise<LedgerRow[]> {
-  const rows =
-    operator === undefined
-      ? await db
-          .prepare(
-            `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
-             WHERE kind = 'payout' ORDER BY seq DESC LIMIT ?`,
-          )
-          .bind(limit)
-          .all<Row>()
-      : await db
-          .prepare(
-            `SELECT ${LEDGER_ROW_COLUMNS} FROM ledger
-             WHERE kind = 'payout' AND operator_id = ? ORDER BY seq DESC LIMIT ?`,
-          )
-          .bind(operator, limit)
-          .all<Row>();
   return rows.results.map(toLedgerRow);
 }
 
@@ -5047,110 +4840,6 @@ export async function readCountsByKeyOn(
 // ---------------------------------------------------------------------------
 // What the provider has already been told (M24, decision D-078)
 // ---------------------------------------------------------------------------
-
-/** One key-day already reported to the payment provider, as the table holds it. */
-export interface MeterReportRow {
-  readonly key_id: string;
-  readonly date: string;
-  /** The `read_count` event the number was taken from. */
-  readonly event_seq: number;
-  readonly reads: number;
-  /** The idempotency identifier the provider was sent. */
-  readonly identifier: string;
-  readonly reported_at: string;
-}
-
-/**
- * Whether this key-day has already been reported.
- *
- * The primary key is the pair, so this is one lookup and the row's existence is
- * the whole answer: a key-day reported once is never reported again, however
- * many times a sweep passes over the event that named it. Section 9's published
- * count is the number of record, and a meter event sent twice would bill a
- * reader twice for a day the log says they read once.
- */
-export async function meterReported(
-  db: D1Like,
-  keyId: string,
-  date: string,
-): Promise<boolean> {
-  const row = await db
-    .prepare(
-      `SELECT key_id FROM meter_reports WHERE key_id = ? AND date = ? ${ONE_ROW}`,
-    )
-    .bind(keyId, date)
-    .first<Row>();
-  return row !== null;
-}
-
-/** Record one key-day as reported. Written only after the provider said yes. */
-export async function putMeterReport(
-  db: D1Like,
-  row: MeterReportRow,
-): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO meter_reports (key_id, date, event_seq, reads, identifier, reported_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT (key_id, date) DO NOTHING`,
-    )
-    .bind(
-      row.key_id,
-      row.date,
-      row.event_seq,
-      row.reads,
-      row.identifier,
-      row.reported_at,
-    )
-    .run();
-}
-
-/** How many key-days have been reported, ever. What the status stage counts. */
-export async function countMeterReports(db: D1Like): Promise<number> {
-  const row = await db
-    .prepare(`SELECT COUNT(*) AS total FROM meter_reports`)
-    .first<Row>();
-  return row === null ? 0 : readInteger(row, "total");
-}
-
-/**
- * How many published key-days past the metering cursor have no report yet.
- *
- * The status stage's one question, asked of the two tables rather than of a
- * fold in an isolate: the key-days a `read_count` event named, left-joined
- * against what has been reported. Bounded by the caller's own limit, because
- * the stage only needs to know whether the number is zero and a log that fell a
- * month behind must not turn its status page into a scan.
- *
- * `json_each` over `$.paid.keys` returns nothing for a payload with no paid
- * block, which is exactly right: an event that named no paid read owes no
- * meter event.
- */
-export async function owedMeterReports(
-  db: D1Like,
-  afterSeq: number,
-  throughSeq: number,
-  limit: number,
-): Promise<number> {
-  const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS owed FROM (
-         SELECT day.key_id AS key_id, day.date AS date FROM (
-           SELECT json_extract(events.payload, '$.date') AS date,
-                  keys.key AS key_id
-           FROM events, json_each(events.payload, '$.paid.keys') AS keys
-           WHERE events.type = ? AND events.seq > ? AND events.seq <= ?
-           LIMIT ?
-         ) AS day
-         LEFT JOIN meter_reports ON meter_reports.key_id = day.key_id
-                                AND meter_reports.date = day.date
-         WHERE meter_reports.key_id IS NULL
-       )`,
-    )
-    .bind(READ_COUNT_TYPE, afterSeq, throughSeq, limit)
-    .first<Row>();
-  return row === null ? 0 : readInteger(row, "owed");
-}
 
 /**
  * The day's total and the counters that bound it: the smallest and largest

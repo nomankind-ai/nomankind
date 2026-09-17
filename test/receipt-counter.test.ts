@@ -29,7 +29,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import type { Core } from "../src/core.js";
 import { base64urlEncode } from "../src/encoding.js";
 import type { ApproverRecord } from "../src/events.js";
@@ -135,7 +134,6 @@ async function register(party: Party): Promise<void> {
       body: {
         operator: party.operator,
         attestation: await attestFor(party.agent, party.operator, AT),
-        payout: { reference: VERIFIED_REFERENCE },
       },
       timestamp: AT,
     }),
@@ -229,7 +227,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout: new MockPayoutAdapter(),
     fetcher: new FixtureFetcher(PAGES),
   };
 
@@ -466,6 +463,8 @@ describe("the counter migration on a log that has already served reads", () => {
         "0020_duplicate_key_effective_at.sql",
         "0021_version_stale_seq.sql",
         "0022_cosign.sql",
+        "0023_money_removed.sql",
+        "0024_derived_kernel.sql",
       ]);
 
       // The row stands at the largest counter already issued, so the next
@@ -498,6 +497,8 @@ describe("the counter migration on a log that has already served reads", () => {
         "0020_duplicate_key_effective_at.sql",
         "0021_version_stale_seq.sql",
         "0022_cosign.sql",
+        "0023_money_removed.sql",
+        "0024_derived_kernel.sql",
       ]);
       expect(await nextReadCounter(migrated.db)).toBe(1);
       expect(await allocateReadCounter(migrated.db)).toBe(1);

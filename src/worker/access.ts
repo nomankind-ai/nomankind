@@ -80,9 +80,14 @@ export interface Access {
   readonly used: number;
 }
 
-/** A refusal from the gate, in the status and the word the door answers with. */
+/**
+ * A refusal from the gate, in the status and the word the door answers with.
+ *
+ * Two statuses, not three: the 402 went with the two key statuses it was for
+ * (D-127 item 2), so what is left is who you are and how much you have read.
+ */
 export type AccessRefusal = {
-  readonly status: 401 | 402 | 429;
+  readonly status: 401 | 429;
   readonly reason: (typeof KEY_REFUSALS)[number];
   readonly body: Record<string, unknown>;
   /** Seconds until the cap resets, on a rate refusal only. */
@@ -90,7 +95,7 @@ export type AccessRefusal = {
 };
 
 function refusal(
-  status: 401 | 402,
+  status: 401,
   reason: (typeof KEY_REFUSALS)[number],
 ): { ok: false; refusal: AccessRefusal } {
   return { ok: false, refusal: { status, reason, body: { error: reason } } };
@@ -130,9 +135,10 @@ function bearer(request: Request): string | null | "bad_scheme" {
  *
  * In order, and the order is the contract: no header at all is the free tier, a
  * header that is not a well-formed key is refused before the database is
- * touched, an unknown key is refused before the quota is read, and a key whose
- * subscription is not paid is refused before anything is counted. A reader who
- * mistyped their key is told which rule refused them rather than "unauthorized".
+ * touched, and an unknown key is refused before the quota is read. There is no
+ * status left to refuse on (D-127): a key is free, so nothing about it can fall
+ * due or be cancelled. A reader who mistyped their key is told which rule
+ * refused them rather than "unauthorized".
  */
 export async function resolveAccess(
   db: D1Like,
@@ -149,8 +155,6 @@ export async function resolveAccess(
     if (!looksLikeKey(presented)) return refusal(401, "bad_key");
     key = await keyByHash(db, await keyHash(presented));
     if (key === null) return refusal(401, "unknown_key");
-    if (key.status === "canceled") return refusal(402, "key_canceled");
-    if (key.status === "past_due") return refusal(402, "key_past_due");
     tier = key.tier;
   }
 

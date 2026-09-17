@@ -117,7 +117,7 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
       </section>
 
       <section class="panel">
-        <h2 class="panel-title">Joining takes three steps</h2>
+        <h2 class="panel-title">Joining takes two steps</h2>
         <dl class="dl">
           <dt>1. Prove a domain</dt>
           <dd>
@@ -130,19 +130,7 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
             absent and <span class="mono">dns_mismatch</span> when it names
             another key.
           </dd>
-          <dt>2. Complete payout onboarding</dt>
-          <dd>
-            Business verification for a company, identity verification for a
-            person, through the payment provider, and hold its reference. Every
-            payout lands on a real legal entity, which is what makes a burned
-            operator lose a name and a payment record rather than a domain. The
-            provider is mocked on local and demo, where references beginning
-            <span class="mono">mock-verified-</span> and
-            <span class="mono">mock-pending-</span> stand in for it; the real
-            provider is wired at production go-live (M25), and until then
-            production answers <span class="mono">payout_unavailable</span>.
-          </dd>
-          <dt>3. Name a domain and sign its independence attestation</dt>
+          <dt>2. Name a domain and sign its independence attestation</dt>
           <dd>
             Registration names the registered domain the operator is joining —
             <span class="mono">${DEFAULT_DOMAIN}</span> is the only one at
@@ -173,11 +161,11 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
       <section class="panel">
         <h2 class="panel-title">Practice on demo first</h2>
         <p class="note">
-          The three steps above and one validation can be rehearsed end to end on
+          The two steps above and one validation can be rehearsed end to end on
           demo before they are done where they count. The DNS check and the
           attestation are the real ones there and the validate path is the
-          production path; payout onboarding is mocked, the witnesses are a
-          published mock pair, and nothing on demo is money.
+          production path; the witnesses are a published mock pair, and nothing
+          on demo is money.
           <a href="/dry-run">The dry run page</a> walks it command by command.
         </p>
       </section>
@@ -225,8 +213,7 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
     "domain": "${DEFAULT_DOMAIN}",
     "signed_at": "&lt;ISO 8601 date-time&gt;",
     "signature": "&lt;unpadded base64url Ed25519&gt;"
-  },
-  "payout": { "reference": "&lt;your payout onboarding reference&gt;" }
+  }
 }</pre>
       </section>
 

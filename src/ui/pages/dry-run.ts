@@ -21,7 +21,6 @@
 import {
   ASSIGNMENT_WINDOW_HOURS,
   DEFAULT_DOMAIN,
-  RELEASE_WINDOW_DAYS,
   SEAL_INTERVAL_MINUTES,
 } from "../../policy.js";
 import { TXT_RECORD_PREFIX } from "../../registry.js";
@@ -74,8 +73,8 @@ export function renderDryRun(ctx: PageContext): string {
         publish; the attestation you sign is the real sentence, verbatim, under
         its own version; and the validate path is the production path, the same
         fetch, the same hash, the same signed record. What is not real is said
-        so on this page — payout onboarding runs through a mock adapter here,
-        the witnesses are a published mock pair, and nothing on demo is money.
+        so on this page: the witnesses are a published mock pair,
+        and nothing on demo is money.
         Practice until the commands are boring, then do it once where it counts.
       </p>
 
@@ -183,12 +182,7 @@ export function renderDryRun(ctx: PageContext): string {
           </p>
           <p class="note">
             The attestation is the domain's own sentence, signed verbatim under
-            its own version, and a false one burns the operator in public. The
-            payout half is the part demo mocks: the command sends a mock
-            reference, which demo accepts as onboarding it cannot really do, and
-            which production refuses with
-            <span class="mono">payout_unavailable</span> until the real provider
-            is wired. That difference is the point of practicing here.
+            its own version, and a false one burns the operator in public.
           </p>
           <p class="note">
             Check the result where anyone else can: your record at
@@ -269,15 +263,6 @@ export function renderDryRun(ctx: PageContext): string {
             debug.
           </p>
           <dl class="dl">
-            <dt><span class="mono">entry_withheld</span></dt>
-            <dd>
-              The content of an entry was not served to this reader. You will
-              not meet it here: this log releases every entry the moment it is
-              sealed, so a reader with no key at all reads an entry submitted a
-              minute ago. It is what a fork that publishes a release window of
-              its own stops on, and the command prints the date that fork
-              handed it rather than guessing at one.
-            </dd>
             <dt><span class="mono">unregistered_operator</span></dt>
             <dd>
               The key is bound to no registered operator. Registration is step 3,
@@ -367,13 +352,11 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
           <p class="note">
             <span class="mono">--sign</span> signs the export's reads with the
             key you registered in step 3. It is not what reaches the content:
-            an entry is released ${RELEASE_WINDOW_DAYS} days after the seal that
-            covers it (decision D-100, at zero since D-127), so the entry you
-            submitted minutes ago is exported whole with no flag at all, by
-            anybody. What the flag buys is the bucket the reads are counted in —
-            a signed read is metered under your operator rather than under the
-            address you came from — and, against a fork that publishes a window
-            of its own, the content that fork withholds.
+            the record is free from the seal (decisions D-100 and D-127), so the
+            entry you submitted minutes ago is exported whole with no flag at
+            all, by anybody. What the flag buys is the bucket the reads are
+            counted in — a signed read is metered under your operator rather
+            than under the address you came from.
           </p>
           <p class="note">
             Exit 0 means the entry you were handed is the entry that was signed
@@ -392,12 +375,6 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
             teaches the wrong thing.
           </p>
           <dl class="dl">
-            <dt>Payout onboarding is mocked</dt>
-            <dd>
-              A mock adapter stands in for the payment provider, so no legal
-              entity is verified and no account is opened. Production runs the
-              real one, and until it is wired it refuses rather than pretending.
-            </dd>
             <dt>The witnesses are a mock pair, and the anchor is local</dt>
             <dd>
               Seals here are countersigned by a published mock pair and the daily

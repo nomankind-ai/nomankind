@@ -270,9 +270,7 @@ beforeAll(async () => {
     keyHash: await minted.hash,
     tier: "standard",
     status: "active",
-    customer: "cus_sync_fast_path",
-    subscription: "sub_sync_fast_path",
-    checkoutSession: "cs_sync_fast_path",
+    clientDay: "cs_sync_fast_path",
     createdAt: DAY0.toISOString(),
   });
 

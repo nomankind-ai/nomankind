@@ -26,7 +26,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { LocalAnchorAdapter } from "../src/adapters/anchor.js";
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { MockWitnessAdapter, MOCK_WITNESSES } from "../src/adapters/witness.js";
 import { appendEvent, type Event } from "../src/events.js";
 import { LIST_PAGE_LIMIT } from "../src/policy.js";
@@ -74,7 +73,6 @@ async function sweep(): Promise<Date> {
     pinned: { witnesses: [...MOCK_WITNESSES], registry: null },
     ineligibleAgents: new Set<string>(),
     anchor: new LocalAnchorAdapter(),
-    payout: new MockPayoutAdapter(),
   });
   return now;
 }

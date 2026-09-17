@@ -286,14 +286,6 @@ export async function runRead(
   if (answer.status !== 200) {
     const error = errorOf(answer.body) ?? "unknown";
     let line = `refused ${answer.status} ${error}`;
-    // The release window's own refusal (decision D-100) carries the day the
-    // entry opens, and a reader who is told to come back is told when.
-    if (answer.status === 402 && error === "unreleased" && isRecord(answer.body)) {
-      const releaseDate = answer.body["release_date"];
-      line += ` release_date ${
-        typeof releaseDate === "string" ? releaseDate : "unsealed"
-      }`;
-    }
     if (answer.status === 409 && isRecord(answer.body)) {
       const status = answer.body["status"];
       const superseded = answer.body["superseded_by"];

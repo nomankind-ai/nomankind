@@ -20,7 +20,6 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { confidenceInputs } from "../src/confidence.js";
 import { CORE_KEYS } from "../src/core.js";
 import { entryHash } from "../src/hash.js";
-import { CONTENT_CORE_KEYS, releaseDateOf, withholdEntry } from "../src/release.js";
 import type { Sidecar } from "../src/derive.js";
 import type { Entry } from "../src/schema.js";
 import type { Event } from "../src/events.js";
@@ -114,9 +113,6 @@ const row: EntryRow = {
   // home table both print it, so the fixture carries one.
   domain: "ai-safety",
   claim: `The model refuses this prompt ${HOSTILE}`,
-  // Released: the ordinary row, whose content this reader may read. The
-  // withheld shape is exercised on its own below (decision D-100).
-  withheld: null,
   tier: "stated",
   last_confirmed: "2026-09-08",
   expires_at: "2026-10-08",
@@ -459,10 +455,6 @@ const confidence = confidenceInputs({
 const entryData: EntryData = {
   entry: entryRecord,
   sidecar,
-  // Released, like the row above: the whole page, for a reader the window is
-  // done with or who paid not to wait. The withheld view is built from this one
-  // below, so the two shapes can never drift apart (decision D-100).
-  withheld: null,
   confidenceInputs: confidence,
   position: 12,
   events,
@@ -576,29 +568,13 @@ const operatorCosigners: CosignerRow[] = [
  * A fake clock, as everywhere else time matters: held and released are questions
  * about an instant, so the fixture names one and `ledgerBalance` answers at it
  * rather than at whenever the suite happens to run. One share is still inside
- * the holdback, one is out and has been paid, and the payout names the row it
- * covered — which is the only thing that makes the paid column a fact.
+ * the holdback and one is out.
  */
 const LEDGER_NOW = "2026-09-09T00:00:00.000Z";
 const HELD_SHARE_ID = `read_share:30:${ENTRY_ID}:submitter:k1.example`;
-const PAID_SHARE_ID = `read_share:20:${ENTRY_ID}:validator:k1.example`;
+const RELEASED_SHARE_ID = `read_share:20:${ENTRY_ID}:validator:k1.example`;
 
 const operatorLedger: LedgerRow[] = [
-  {
-    id: `payout:k1.example:2026-09-01`,
-    kind: "payout",
-    entry_id: null,
-    operator: "k1.example",
-    role: null,
-    date: "2026-09-01",
-    reads: null,
-    unit: "micros",
-    amount: 250_000,
-    available_at: null,
-    seq: 40,
-    at: "2026-09-01T00:00:00.000Z",
-    ref: { reference: "provider-ref-1", rows: [PAID_SHARE_ID] },
-  },
   {
     id: HELD_SHARE_ID,
     kind: "read_share",
@@ -615,7 +591,7 @@ const operatorLedger: LedgerRow[] = [
     ref: { price_micros_per_read: 500, share_percent: 15, stale: false },
   },
   {
-    id: PAID_SHARE_ID,
+    id: RELEASED_SHARE_ID,
     kind: "read_share",
     entry_id: ENTRY_ID,
     operator: "k1.example",
@@ -631,9 +607,6 @@ const operatorLedger: LedgerRow[] = [
   },
 ];
 
-const operatorPayouts: LedgerRow[] = operatorLedger.filter(
-  (row) => row.kind === "payout",
-);
 const operatorBalance = ledgerBalance(operatorLedger, LEDGER_NOW);
 
 /**
@@ -723,7 +696,6 @@ function everyPage(): Record<string, string> {
         signature: "YXR0ZXN0",
       },
       namedBy: "1F916:maintainer",
-      payoutStatus: "onboarded",
       validations: [
         {
           entryId: ENTRY_ID,
@@ -733,7 +705,6 @@ function everyPage(): Record<string, string> {
         },
       ],
       ledger: operatorLedger,
-      payouts: operatorPayouts,
       balance: operatorBalance,
       attestations,
     }),
@@ -1854,10 +1825,8 @@ describe("the operator pages", () => {
     domains: [],
     attestation: null,
     namedBy: null,
-    payoutStatus: null,
     validations: [],
     ledger: [],
-    payouts: [],
     balance: ledgerBalance([], LEDGER_NOW),
     attestations: NO_ATTESTATIONS,
   });
@@ -1931,7 +1900,6 @@ describe("the operator pages", () => {
         signature: "YXR0ZXN0",
       },
       namedBy: "1F916:maintainer",
-      payoutStatus: "onboarded",
       validations: [
         {
           entryId: ENTRY_ID,
@@ -1941,14 +1909,13 @@ describe("the operator pages", () => {
         },
       ],
       ledger: operatorLedger,
-      payouts: operatorPayouts,
       balance: operatorBalance,
       attestations: NO_ATTESTATIONS,
     });
     expect(one).toContain("nomankind-independence-v1");
     expect(one).toContain("YXR0ZXN0");
     expect(one).toContain("1F916:maintainer");
-    expect(one).toContain("onboarded");
+    expect(one).not.toContain("payout");
     expect(one).toContain(`<a href="/entries/${ENTRY_ID}">`);
     expect(one).toContain("<dt>registered seq</dt>");
     expect(one).toContain("<dt>overturned</dt>");
@@ -1967,10 +1934,8 @@ describe("the operator pages", () => {
       ],
       attestation: null,
       namedBy: null,
-      payoutStatus: null,
       validations: [],
       ledger: [],
-      payouts: [],
       balance: ledgerBalance([], LEDGER_NOW),
       attestations: NO_ATTESTATIONS,
     });
@@ -2006,7 +1971,6 @@ describe("the operator pages", () => {
       domains: OPERATOR_DOMAINS,
       attestation: null,
       namedBy: null,
-      payoutStatus: null,
       validations: [
         {
           entryId: ENTRY_ID,
@@ -2022,7 +1986,6 @@ describe("the operator pages", () => {
         },
       ],
       ledger: operatorLedger,
-      payouts: operatorPayouts,
       balance: operatorBalance,
       attestations: NO_ATTESTATIONS,
     });
@@ -2056,10 +2019,8 @@ describe("the operator pages", () => {
       domains: OPERATOR_DOMAINS,
       attestation: null,
       namedBy: null,
-      payoutStatus: null,
       validations: [],
       ledger: operatorLedger,
-      payouts: operatorPayouts,
       balance: operatorBalance,
       attestations: NO_ATTESTATIONS,
     });
@@ -2099,10 +2060,8 @@ describe("the operator page's attestations", () => {
     domains: OPERATOR_DOMAINS,
     attestation: null,
     namedBy: null,
-    payoutStatus: null,
     validations: [],
     ledger: operatorLedger,
-    payouts: operatorPayouts,
     balance: operatorBalance,
     cosigners: [],
   } satisfies Omit<OperatorData, "attestations">;
@@ -2331,224 +2290,6 @@ describe("the Domains route and its place in the nav", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// The release window on the app pages (decision D-100)
-// ---------------------------------------------------------------------------
-
-/**
- * The withheld view, as the route builds it: the record is `withholdEntry`'s
- * proof and the page carries the date the rest of it opens. Built from the same
- * fixtures the released page above is built from, so what the window takes away
- * is exactly the difference between the two documents and nothing else.
- */
-describe("an entry whose content has not been released", () => {
-  const SEALED_AT = "2026-09-08T12:05:00.000Z";
-  const RELEASE_DATE = releaseDateOf(SEALED_AT);
-  const RELEASE_DAY = fmtDate(RELEASE_DATE);
-
-  // Built the way the route builds it: `withholdEntry` over the whole entry,
-  // the proof it returns as the page's record, and the hash it took before it
-  // nulled anything carried on the withheld view beside the date.
-  let withheldData: EntryData;
-  let page = "";
-  let hash = "";
-
-  beforeAll(async () => {
-    const held = await withholdEntry(
-      entryRecord as unknown as Entry,
-      sidecar,
-      RELEASE_DATE,
-    );
-    hash = held.entry_hash;
-    withheldData = {
-      ...entryData,
-      entry: held.proof as unknown as Record<string, unknown>,
-      withheld: { releaseDate: RELEASE_DATE, entryHash: held.entry_hash },
-    };
-    page = renderEntry(ctx, withheldData);
-  });
-
-  it("keeps every proof field of the core, and the signature", () => {
-    for (const key of CORE_KEYS) {
-      if (CONTENT_CORE_KEYS.includes(key)) continue;
-      expect([key, page.includes(`<dt>${key}</dt>`)]).toEqual([key, true]);
-    }
-    expect(page).toContain(ENTRY_ID);
-    expect(page).toContain(escapeHtml(row.subject));
-    expect(page).toContain(HASH);
-    expect(page).toContain("1F916:author");
-    expect(page).toContain("c2lnbmF0dXJl");
-  });
-
-  it("shows no content field at all, not even as a dash", () => {
-    for (const key of CONTENT_CORE_KEYS) {
-      expect([key, page.includes(`<dt>${key}</dt>`)]).toEqual([key, false]);
-    }
-    expect(page).not.toContain(escapeHtml(row.claim));
-    expect(page).not.toContain("https://kestrel.example/transcript");
-    expect(page).not.toContain("I cannot help with that.");
-    // What a dispute or a failure report says is not the core's content and is
-    // not withheld with it: `withholdEntry` nulls the seven content keys and
-    // the approvers' and reconfirmers' reasons, and this page shows exactly what
-    // the door serves under `proof`.
-  });
-
-  // The one piece of proof a keyless reader cannot take for themselves: they
-  // are handed a nulled core, so the hash of the whole core has to be printed
-  // or the proof around it names a record they cannot pin down. It is the
-  // released entry's own hash, which is what makes it worth printing.
-  it("shows the entry hash the log sealed, in full", async () => {
-    expect(hash).toBe(await entryHash(entryRecord));
-    expect(page).toContain("entry_hash");
-    expect(page).toContain(hash);
-  });
-
-  it("says the content was not served, and names no key and no window", () => {
-    // Decision D-127: the withheld view stays in the code for a fork that
-    // publishes a window of its own, and the window sentences are gone with the
-    // money — there is no key to buy and nothing to wait for on this log.
-    expect(page).toContain(
-      "The content of this entry is not served to this reader.",
-    );
-    expect(page).toContain(`It is served from ${RELEASE_DAY}.`);
-    expect(page).not.toContain(`href="/api#keys"`);
-    expect(page).not.toContain("Read it now with");
-  });
-
-  it("reads every decision's reason as withheld until release", () => {
-    expect(page).toContain("withheld until release");
-    expect(page).not.toContain(escapeHtml("the source says otherwise"));
-    // The decision itself is proof and is shown: who signed, for whom, and what
-    // they decided, with the snapshot hash they fetched.
-    expect(page).toContain("1F916:k2");
-    expect(page).toContain(OTHER_HASH);
-  });
-
-  it("keeps every hash, the seal, the proof and the offline commands", () => {
-    for (const event of events) {
-      expect([event.seq, page.includes(event.hash)]).toEqual([event.seq, true]);
-      expect([
-        event.seq,
-        page.includes(`href="/events/${event.seq}/proof"`),
-      ]).toEqual([event.seq, true]);
-    }
-    expect(page).toContain(seal.root);
-    expect(page).toContain(`npm run export -- ${ctx.origin} ${ENTRY_ID} ./out`);
-    expect(page).toContain("npm run verify -- ./out/entry.json ./out/log.json");
-  });
-
-  it("names no date at all when nothing seals it yet", () => {
-    const unsealed = renderEntry(ctx, {
-      ...withheldData,
-      withheld: { releaseDate: null },
-    });
-    expect(unsealed).toContain(
-      "The content of this entry is not served to this reader.",
-    );
-    expect(unsealed).not.toContain("It is served from");
-  });
-
-  it("is the whole entry again for a reader the window is done with", () => {
-    // The same function and the same data with `withheld` null: what an
-    // operator or a keyed reader is served today, and what everybody is served
-    // once the window is up.
-    const whole = renderEntry(ctx, entryData);
-    expect(whole).toContain(escapeHtml(row.claim));
-    expect(whole).toContain("https://kestrel.example/transcript");
-    expect(whole).toContain(escapeHtml("the source says otherwise"));
-    expect(whole).not.toContain("withheld until release");
-    expect(whole).not.toContain("is not served to this reader");
-    for (const key of CORE_KEYS) {
-      expect([key, whole.includes(`<dt>${key}</dt>`)]).toEqual([key, true]);
-    }
-  });
-
-  it("carries no script and no style attribute either way", () => {
-    for (const document of [page, renderEntry(ctx, entryData)]) {
-      expect(document).not.toContain("<script");
-      expect(document).not.toContain(" style=");
-    }
-  });
-
-  /** The same entry as a row of the listing and of the home page. */
-  const withheldRow: EntryRow = {
-    ...row,
-    claim: "",
-    withheld: { releaseDate: RELEASE_DATE },
-  };
-
-  it("shows the content-not-served cell where the listing's claim would be", () => {
-    const listing = renderEntries(ctx, {
-      filter: {
-        category: null,
-        status: null,
-        domain: null,
-        source: null,
-        tier: null,
-        fresh: null,
-      },
-      rows: [withheldRow],
-      total: 1,
-      nextBefore: null,
-    });
-    expect(listing).toContain(`content served from ${RELEASE_DAY}`);
-    expect(listing).not.toContain(escapeHtml(row.claim));
-    // Subject, category, status, tier and position are proof and stay.
-    expect(listing).toContain(escapeHtml(row.subject));
-    expect(listing).toContain("behavior");
-    expect(listing).toContain("stated");
-    expect(listing).toContain(`<a href="/entries/${ENTRY_ID}">12</a>`);
-  });
-
-  it("shows the same cell on the home page's latest rows too", () => {
-    const home = renderHome(ctx, {
-      domain: null,
-      counters: {
-        verified: 1,
-        stale: 0,
-        trusted: 3,
-        sealedHead: 12,
-        sealedAt: SEALED_AT,
-        witnesses: 2,
-        seals: 4,
-      },
-      latest: [withheldRow],
-    });
-    expect(home).toContain(`content served from ${RELEASE_DAY}`);
-    expect(home).not.toContain(escapeHtml(row.claim));
-    expect(home).toContain(escapeHtml(row.subject));
-    // The counters are untouched: the window holds back content, never a count.
-    expect(home).toContain(`<div class="counter-value">1</div>`);
-  });
-
-  it("names no date on a row nothing covers yet", () => {
-    const listing = renderEntries(ctx, {
-      filter: {
-        category: null,
-        status: null,
-        domain: null,
-        source: null,
-        tier: null,
-        fresh: null,
-      },
-      rows: [{ ...unsealedRow, claim: "", withheld: { releaseDate: null } }],
-      total: 1,
-      nextBefore: null,
-    });
-    expect(listing).toContain("content not served to this reader");
-    expect(listing).toContain("unsealed");
-  });
-});
-
-/**
- * The docs hub and the three documents it serves, as routes (D-104).
- *
- * Documentation pages like /api and /dry-run: HTML to any GET, because there is
- * no JSON twin of a whitepaper for a request to have meant instead, and a HEAD
- * that answers the GET's own headers with no body. Nothing here touches the
- * database — the documents are constants compiled into the Worker — so a store
- * that refused every query would not change one of these answers.
- */
 describe("the Docs routes", () => {
   /** A database nothing on these routes reads, and that would fail if they did. */
   function refusingDatabase(): D1Like {

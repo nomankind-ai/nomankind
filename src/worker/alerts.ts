@@ -241,12 +241,10 @@ async function silenced(db: D1Like, endpointId: string): Promise<boolean> {
  * The key a request presented, or the refusal it earned.
  *
  * The identity checks only, exactly as the account doors in src/worker/keys.ts
- * make them, and for the same reason: these are a holder's own subscription
- * pages, not reading doors. A key at its daily cap must still be able to see
- * and remove its endpoints, and a key whose bill did not clear must be able to
- * turn off the alerts it is no longer paying for — a door that refused
- * `key_past_due` here would hold somebody to a subscription they cannot cancel.
- * A canceled key is refused, because the subscription is over.
+ * make them, and for the same reason: these are a holder's own pages, not
+ * reading doors. A key at its daily cap must still be able to see and remove
+ * its endpoints. There is no status to refuse on either (D-127): a key is free,
+ * so nothing about it can fall due or be cancelled.
  *
  * The quota is never charged by these doors: an endpoint is not a read.
  */
@@ -272,9 +270,6 @@ async function keyOf(
   const key = await keyByHash(db, await keyHash(presented));
   if (key === null) {
     return { ok: false, response: refuse(401, "unknown_key") };
-  }
-  if (key.status === "canceled") {
-    return { ok: false, response: refuse(402, "key_canceled") };
   }
   return { ok: true, key };
 }

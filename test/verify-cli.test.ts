@@ -155,7 +155,6 @@ describe("verify (the one script)", () => {
       ok: false,
       entry_id: "nmk_0",
       diffs,
-      withheld: 0,
       bounded: false,
       not_run: [],
     });

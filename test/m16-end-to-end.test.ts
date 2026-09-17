@@ -35,7 +35,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import {
   utcDay,
   verifyAnchor,
@@ -216,7 +215,6 @@ async function register(party: Party): Promise<void> {
     body: {
       operator: party.operator,
       attestation: await attestFor(party.agent, party.operator, AT),
-      payout: { reference: VERIFIED_REFERENCE },
     },
     timestamp: AT,
   });
@@ -386,7 +384,6 @@ beforeAll(async () => {
     deps: {
       now: NOW,
       dns: new FixtureResolver(records),
-      payout: new MockPayoutAdapter(),
       fetcher: new FixtureFetcher(PAGES),
     },
     maintainer,

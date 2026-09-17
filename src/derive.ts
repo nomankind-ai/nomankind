@@ -53,6 +53,31 @@ export interface Clock {
   readonly now: string;
 }
 
+/**
+ * Which derivation a stored row was written by (decision D-135).
+ *
+ * Not a version of the record and not a policy number: nothing signed, sealed,
+ * exported or published carries it. It is one string this module stamps on
+ * every row it produces (src/storage/repository.ts, `entryStatement`) so the
+ * sweep can find the rows an older derivation wrote and rewrite them
+ * (src/worker/sweep.ts, the `rederive` step). Null in the column means the row
+ * predates the stamp and is therefore due once.
+ *
+ * Bump it whenever a rule in this file moves — a consensus rule, a precondition,
+ * an eligibility input, a derived field's shape — because that is exactly when a
+ * stored row and a fresh derivation of the same events can disagree. Bumping it
+ * when nothing moved costs one rewrite per row and changes no answer; forgetting
+ * to bump it leaves the export publishing what the verifier will not confirm,
+ * which is the failure D-135 found: the QA of 2026-09-13 (D-111) moved the
+ * verification precondition to count only operators that could actually sign,
+ * and three demo rows decided before it went on saying `verified` while the
+ * kernel derived `draft`.
+ *
+ * The value is the date the rules last moved and the decision that moved them,
+ * which is the only thing a reader of a row ever has to compare.
+ */
+export const DERIVATION_VERSION = "2026-09-13-d111";
+
 /** The schema's status enum. */
 export type EntryStatus =
   | "draft"

@@ -47,7 +47,6 @@ import {
   witnessAdapterFor,
   type EnvironmentWitnessAdapter,
 } from "../adapters/witness.js";
-import type { PayoutAdapter } from "../adapters/payout.js";
 import type { AnchorAdapter } from "../anchor.js";
 import { SWEEP_INTERVAL_MINUTES } from "../policy.js";
 import { maintainerAgentId } from "./config.js";
@@ -111,13 +110,6 @@ export interface SweeperDeps {
   readonly pinned?: PinnedWitnesses;
   readonly ineligibleAgents?: ReadonlySet<string>;
   readonly anchor?: AnchorAdapter;
-  /**
-   * Accepted and ignored (D-127): the payout step is retired, so nothing in a
-   * sweep pays anybody and no adapter is built for it. The field stays so a
-   * caller that still names one is not a compile error rather than because it
-   * does anything.
-   */
-  readonly payout?: PayoutAdapter;
   readonly mirror?: MirrorAdapter;
 }
 
@@ -153,18 +145,13 @@ export async function sweepDepsFor(
     anchor:
       deps?.anchor ??
       anchorAdapterFor(env.ENVIRONMENT, () => new Date(nowMs())),
-    // No payout adapter is built: the payout step is retired (D-127), so a
-    // sweep moves no money and there is no cycle for one to pay.
-    ...(deps?.payout === undefined ? {} : { payout: deps.payout }),
-    // Where the day's export goes (M23). Built here for the reason the payout
+    // Where the day's export goes (M23). Built here for the reason the anchor
     // adapter is: an environment that mirrored through `/run` and skipped
     // `mirror_unavailable` through the alarm would be two different sweeps. The
     // secret decides the track, so an environment without one says so rather
     // than failing a call a day.
     mirror: deps?.mirror ?? mirrorAdapterFor(env),
-    // No payments adapter: the metering step is retired (D-127), so there is
-    // nothing to report to a provider and nothing for one to be built for.
-    // No alertFetch either: the deployed step delivers through the platform's own.
+    // No alertFetch: the deployed step delivers through the platform's own.
   };
 }
 

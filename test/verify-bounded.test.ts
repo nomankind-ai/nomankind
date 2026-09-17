@@ -31,8 +31,6 @@ import {
   type Event,
   type Seal,
 } from "../src/index.js";
-import type { Sidecar } from "../src/derive.js";
-import { withholdEntry } from "../src/release.js";
 import { buildExport, exportPlan } from "../src/cli/export.js";
 import type { HttpClient } from "../src/cli/validator.js";
 import { decodeProof, encodeProof, inclusionProof } from "../src/merkle.js";
@@ -583,35 +581,6 @@ describe("a bounded bundle somebody edited", () => {
           diff.reason === "wrong_seal",
       ),
     ).toBe(true);
-  }, 120_000);
-});
-
-describe("a bounded export inside the release window", () => {
-  it("answers entry_withheld, exactly as the full one does", async () => {
-    const built = await small();
-    const files = await exported(built.bundle, built.entry, true);
-
-    // The entry file `npm run export` writes for a reader with no entitlement,
-    // built out of src/release.ts's own function so nothing about its shape is
-    // this test's invention. A bounded bundle changes nothing about the window:
-    // the file is still not an entry to check but a promise that one exists, and
-    // the honest answer is still the day it opens and nothing else.
-    const held = await withholdEntry(built.entry, {} as unknown as Sidecar, "");
-
-    const report = await verifyOffline(held.proof, files.bundle);
-    expect(report.ok).toBe(false);
-    expect(report.entry_id).toBe(built.world.entryId);
-    expect(report.diffs.map((diff) => diff.reason)).toEqual(["entry_withheld"]);
-    expect(report.diffs[0]!.check).toBe("window");
-    // And the bounded marker is still on the report, because what the reader
-    // holds is still a bounded bundle whatever the window did to the entry.
-    expect(report.bounded).toBe(true);
-    expect(report.not_run).toEqual([
-      "chain",
-      "exclusions",
-      "derived",
-      "attestations",
-    ]);
   }, 120_000);
 });
 

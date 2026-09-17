@@ -31,7 +31,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { CORE_KEYS, coreVersion, extractCore, type Core } from "../src/core.js";
 import { deriveEntry } from "../src/derive.js";
 import { appendEvent, type ApproverRecord, type Event } from "../src/events.js";
@@ -139,7 +138,6 @@ let entryId = "";
 let legacyId = "";
 
 const beacon = new FixtureBeacon("m22b");
-const payout = new MockPayoutAdapter();
 
 function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, env, { ...deps, now, beacon });
@@ -204,7 +202,6 @@ async function register(party: Party): Promise<void> {
       AT,
       DEFAULT_DOMAIN,
     ),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -331,7 +328,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout,
     fetcher: new FixtureFetcher({ [PAGE_URL]: PAGE }),
     beacon,
   };
@@ -372,7 +368,6 @@ beforeAll(async () => {
     pinned: pinnedSet([]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout,
   });
 }, 600_000);
 
@@ -858,7 +853,6 @@ function sweep(at: Date, witness: FakeWitness | null): Promise<SweepReport> {
     pinned: pinnedSet(witness === null ? [] : [witness]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout,
   });
 }
 

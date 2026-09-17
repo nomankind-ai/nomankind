@@ -150,8 +150,7 @@ export interface RevalidateRun {
   readonly error: string | null;
   /**
    * The short phrase behind the word, or null when the word is all there is
-   * (decision D-124): the release date on `entry_withheld`, the agent on
-   * `unregistered_operator`.
+   * (decision D-124): the agent on `unregistered_operator`.
    */
   readonly detail: string | null;
   /** The `errors` array a 422 carried, or null when the answer had none. */
@@ -173,8 +172,7 @@ async function readCore(
 ): Promise<
   { ok: true; core: Core } | { ok: false; reason: string; detail: string | null }
 > {
-  // Read with this run's own key, and the two 200s told apart (D-124): the
-  // entry, or the withheld view the window serves a reader it does not know.
+  // Read with this run's own key: a 200 is the entry (D-127).
   const read = await readEntry({
     http: deps.http,
     baseUrl,
@@ -262,9 +260,8 @@ async function resolve_(input: {
     input.baseUrl,
     input.key.agentId,
   );
-  // The same condition the withheld read answers for, so the same word and
-  // the same sentence (D-124): the entry having released only changes which
-  // line notices that the registry puts nobody behind this key.
+  // The registry is the only answer that can be right about which operator is
+  // behind this key (D-124).
   if (operator === null) {
     return stopped(
       UNREGISTERED_OPERATOR,

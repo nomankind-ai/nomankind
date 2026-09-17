@@ -32,7 +32,6 @@ import {
   NORM_VERSION,
   PROBE_SET_SIZE,
   RATE_TIERS,
-  RELEASE_WINDOW_DAYS,
   REPRODUCTION_HOLDS,
   REPRODUCTION_RUNS,
   SCHEMA_VERSION,
@@ -252,11 +251,10 @@ export function renderHowItWorks(
       sealed, with one signed sync receipt covering every entry delivered; an
       overturned entry travels as an explicit unlearn signal. Read counts are
       published to the log once a day, so receipts can be checked against them
-      and so the record can show that it is used. An entry is released
-      ${RELEASE_WINDOW_DAYS} days after the seal that covers it — at zero, the
-      moment it is sealed — and from that instant its content is public, CC0,
-      in the mirror and served to anybody who asks, with no key and no
-      signature. The proof was public from the first minute either way.
+      and so the record can show that it is used. An entry is released by the
+      seal that covers it, and from that instant its content is public, CC0, in
+      the mirror and served to anybody who asks, with no key and no signature.
+      The proof was public from the first minute either way.
     </p>
     <dl class="kv">
       ${row(
@@ -292,7 +290,6 @@ export function renderHowItWorks(
                     )} · counters ${data.readCount.counterFirst} to ${data.readCount.counterLast}`,
               )}`,
       )}
-      ${row("the rule", rule(`RELEASE_WINDOW_DAYS ${RELEASE_WINDOW_DAYS}`))}
     </dl>`;
 
   const keep = html`<p class="prose">
@@ -487,7 +484,7 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
   const free = html`<p class="prose">
       The record is free, from the seal (decision D-127). The data is CC0 the
       moment a seal covers it and nothing about it is sold: no paid tier, no key
-      to buy, no read share, no payout. A key is still worth having and costs
+      to buy and no read share. A key is still worth having and costs
       nothing — one is issued at
       <span class="mono">POST /keys/free</span>, one per client a day — because
       alerts, receipts by their own counter and a usage listing all need
@@ -512,7 +509,7 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
       ${row(
         "the rule",
         rule(
-          `RATE_TIERS ${Object.keys(RATE_TIERS).join("/")} · RELEASE_WINDOW_DAYS ${RELEASE_WINDOW_DAYS} · ALERT_KINDS ${ALERT_KINDS.length}`,
+          `RATE_TIERS ${Object.keys(RATE_TIERS).join("/")} · ALERT_KINDS ${ALERT_KINDS.length}`,
         ),
       )}
     </dl>`;

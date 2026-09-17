@@ -1,18 +1,18 @@
 /**
  * M12 end to end: joining, from the outside, through the Worker.
  *
- * Whitepaper Section 11's three joining steps, walked by a real key against a
- * real migrated database: publish a DNS TXT record carrying your 1F916 agent
- * id, complete payout onboarding, sign the provider-independence attestation,
+ * Whitepaper Section 11's joining steps, less the money one (D-127), walked by
+ * a real key against a real migrated database: publish a DNS TXT record
+ * carrying your 1F916 agent id, sign the provider-independence attestation,
  * and the binding is sealed into the log. Then the genesis naming, which only
  * the maintainer may do and never over its own operator.
  *
  * Everything is real except the network. The requests are signed with generated
  * Ed25519 keys and verified by the Worker, the database is miniflare's D1 with
  * the migrations applied, the nonce store is that database, and the events are
- * the events. Only the resolver and the payment provider are injected, because
- * only they are not ours to run in a test, and the clock is injected because
- * nothing under src/ is allowed to read one.
+ * the events. Only the resolver is injected, because only it is not ours to run
+ * in a test, and the clock is injected because nothing under src/ is allowed to
+ * read one.
  *
  * Every refusal below asserts the log's head is exactly where it was. That is
  * the property that matters most in this milestone: a door that refuses must
@@ -22,10 +22,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import {
-  MockPayoutAdapter,
-  UnavailablePayoutAdapter,
-} from "../src/adapters/payout.js";
 import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "../src/policy.js";
 import { txtRecordName } from "../src/registry.js";
 import { eventBySeq, headSeq } from "../src/storage/repository.js";
@@ -44,10 +40,6 @@ import {
 /** The instant every request in this file is served at. No wall clock anywhere. */
 const NOW = new Date("2026-09-07T12:00:00.000Z");
 const AT = NOW.toISOString();
-
-/** A reference the mock payment provider calls onboarded, and one it does not. */
-const VERIFIED_REFERENCE = "mock-verified-m12";
-const PENDING_REFERENCE = "mock-pending-m12";
 
 /** The operator the outside agent joins as, and the maintainer's own. */
 const OUTSIDE = "example.org";
@@ -72,7 +64,6 @@ async function registration(
   options: {
     attestedOperator?: string;
     attestation?: unknown;
-    reference?: string;
     timestamp?: string;
     nonce?: string;
   } = {},
@@ -82,11 +73,7 @@ async function registration(
     (await attestFor(agent, options.attestedOperator ?? operator, AT));
   return signedPost(agent, {
     path: "/operators",
-    body: {
-      operator,
-      attestation,
-      payout: { reference: options.reference ?? VERIFIED_REFERENCE },
-    },
+    body: { operator, attestation },
     timestamp: options.timestamp ?? AT,
     nonce: options.nonce,
   });
@@ -146,7 +133,6 @@ beforeAll(async () => {
       // A resolver that could not answer, which is our outage and not theirs.
       [txtRecordName("unavailable.example")]: null,
     }),
-    payout: new MockPayoutAdapter(),
   };
 }, 60_000);
 
@@ -184,7 +170,7 @@ describe("the door refuses before it writes", () => {
     await refused(
       await signedPost(alice, {
         path: "/operators",
-        body: { operator: OUTSIDE, payout: { reference: VERIFIED_REFERENCE } },
+        body: { operator: OUTSIDE },
         timestamp: AT,
       }),
       422,
@@ -242,25 +228,6 @@ describe("the door refuses before it writes", () => {
     );
   });
 
-  it("refuses payout onboarding that has not cleared", async () => {
-    await refused(
-      await registration(alice, "pending.example", {
-        reference: PENDING_REFERENCE,
-      }),
-      422,
-      "payout_not_verified",
-    );
-  });
-
-  it("answers 503 where no payment provider is wired (production, D-013)", async () => {
-    await refused(
-      await registration(alice, "pending.example"),
-      503,
-      "payout_unavailable",
-      { payout: new UnavailablePayoutAdapter() },
-    );
-  });
-
   it("refuses a signature made too long ago", async () => {
     await refused(
       await registration(alice, OUTSIDE, {
@@ -292,12 +259,6 @@ describe("joining", () => {
       registered_by: alice.agentId,
       trusted: false,
       trusted_seq: null,
-      payout_status: "verified",
-      // The connected account id the body carried, and nothing else about the
-      // account (D-053). Without it a payout cycle has no reference to transfer
-      // against and skips the operator, so an operator that onboarded is stored
-      // with the answer to "where does this one's money leave through".
-      payout_reference: VERIFIED_REFERENCE,
     });
 
     const bound = await eventBySeq(store.db, (await head()) as number);
@@ -316,10 +277,6 @@ describe("joining", () => {
     expect(body.registeredSeq).toBe(registered?.seq);
     expect(registered?.at).toBe(AT);
 
-    // The log is unchanged by it: the reference is the Worker's own index into
-    // a payment provider, and never a public event anyone replays.
-    expect(bound?.payload).not.toHaveProperty("payout_reference");
-    expect(registered?.payload).not.toHaveProperty("payout_reference");
   });
 
   it("answers GET /agents/{id} with the operator behind the key", async () => {

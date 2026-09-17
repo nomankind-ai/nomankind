@@ -20,10 +20,9 @@
  * src/mirror.ts's own functions, and the only rows this module builds are the
  * registry's — the operator, its agents and its domains — which it folds out of
  * the events and then holds against `operators.json` rather than copying that
- * file into a table. Two things the mirror deliberately does not carry cannot be
- * rebuilt and are left off the row rather than invented: the payout reference
- * and status, which are the payment provider's business and not the log's, and
- * the agent that exercised a genesis naming, which the event does not name.
+ * file into a table. One thing the mirror does not carry cannot be rebuilt and
+ * is left off the row rather than invented: the agent that exercised a genesis
+ * naming, which the event does not name.
  *
  * Both layouts are read. A `nomankind-mirror-v2` directory is the current one;
  * a `nomankind-mirror-v1` one — pulled before the attestations, the standing,
@@ -531,9 +530,6 @@ export function operatorRows(
         maintainer: fold.maintainer,
         provider: providers.get(operator) === true,
         registeredSeq: fold.registeredSeq,
-        // The payout reference and status are not in this: the mirror is CC0
-        // and a payment provider's name for an operator is not the log's to
-        // publish, so a fork onboards its own operators before it pays any.
         details: {
           registered_by: fold.registeredBy,
           attestation: fold.attestation,

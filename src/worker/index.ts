@@ -75,14 +75,13 @@
  * binding and echoed back. What is asked of it, above everything else in this
  * file, is only that it is one of the three names this code knows
  * (src/worker/config.ts) — an unknown one is 503 `environment_misconfigured` on
- * every door, health included, because the name silently chooses the payout,
- * payment and witness adapters and a typo would have chosen the mocks.
+ * every door, health included, because the name silently chooses the witness
+ * and anchor adapters and a typo would have chosen the mocks.
  */
 
 import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
 import { DohResolver, type DnsResolver } from "../adapters/dns.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
-import { payoutAdapterFor, type PayoutAdapter } from "../adapters/payout.js";
 import { PAGE_CACHE_SECONDS, PAGE_CACHE_STALE_SECONDS } from "../policy.js";
 import { HEADER_AGENT } from "../request.js";
 import { APP_CSS_HREF, htmlResponse } from "../ui/html.js";
@@ -112,7 +111,6 @@ import { handleRevalidate } from "./revalidate.js";
 import { handleSeals } from "./seals.js";
 import { handleStanding } from "./standing.js";
 import { handleStatus } from "./status.js";
-import { handleStripeWebhook } from "./stripe.js";
 import { handleSubmit } from "./submit.js";
 import {
   armSweeper,
@@ -160,15 +158,13 @@ async function health(env: Env): Promise<Response> {
 
 /**
  * What a caller may supply in place of the real world: the instant, the
- * resolver, the payment provider, the fetcher that takes a capture. A test
- * passes all four; the deployed Worker passes none and gets the wall clock,
- * real DNS-over-HTTPS, whichever payout adapter this environment runs (decision
- * D-013 as amended), and the norm rule's own fetch over the real network.
+ * resolver, the fetcher that takes a capture. A test passes all three; the
+ * deployed Worker passes none and gets the wall clock, real DNS-over-HTTPS, and
+ * the norm rule's own fetch over the real network.
  */
 export interface RequestDeps {
   readonly now?: Date;
   readonly dns?: DnsResolver;
-  readonly payout?: PayoutAdapter;
   readonly fetcher?: SnapshotFetcher;
   /**
    * Where the attestation door reads public randomness (M22). The deployed
@@ -309,9 +305,9 @@ const NEGOTIATED_PATHS: ReadonlySet<string> = new Set([
   "/independence",
   "/status",
   "/mirror/latest",
-  // Both answer JSON only now — the claim is retired (D-127) and the free door
-  // never rendered a page — but they stay named here for the reason the header
-  // exists at all: a shared cache that had ever keyed one of these paths without
+  // Neither renders a page now — the claim is gone (D-127) and the free door
+  // never had one — but they stay named here for the reason the header exists
+  // at all: a shared cache that had ever keyed one of these paths without
   // `vary: Accept` would go on handing an agent whatever a browser asked for.
   "/keys/claim",
   "/keys/free",
@@ -507,7 +503,7 @@ export async function handleRequest(
   // deployment whose `ENVIRONMENT` is not one of the three names this code
   // knows is misconfigured, and every door says so (the QA of 2026-09-12). It
   // is checked here rather than where the name is used because the name picks
-  // the payout, payment and witness adapters, and every one of them chooses its
+  // the witness and anchor adapters, and each of them chooses its
   // mock by asking whether the name is `production` — so a var misspelt
   // `prodcution` would have run a real deployment on mocks, silently. A cached
   // page is not served past it either: an answer stored before the var was
@@ -581,7 +577,6 @@ async function dispatch(
   const registry = await handleRegistry(request, env, {
     now,
     dns: deps?.dns ?? new DohResolver(),
-    payout: deps?.payout ?? payoutAdapterFor(env.ENVIRONMENT),
   });
   if (registry !== null) return registry;
 
@@ -619,16 +614,10 @@ async function dispatch(
   if (synced !== null) return synced;
 
   // The key doors (D-127): the tiers, the free door that hands a key over once,
-  // what one key is and what it read — and the checkout, the claim and the
-  // portal, which answer 410. No payment provider is constructed: nothing here
-  // is bought, so there is nothing for one to do.
+  // what one key is and what it read. Nothing here is bought, so there is no
+  // payment provider to construct and no door for one to post to.
   const keys = await handleKeys(request, env, { now });
   if (keys !== null) return keys;
-
-  // The address the provider's event destination used to post to, retired with
-  // the rest of the paid loop. It reads no body, no secret and no storage.
-  const webhook = handleStripeWebhook(request, env);
-  if (webhook !== null) return webhook;
 
   // M24's change alerts, Section 9's "structured feeds and webhooks, change
   // alerts": the endpoints one key subscribes, under /keys/me/webhooks.

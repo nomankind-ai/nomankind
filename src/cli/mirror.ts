@@ -30,17 +30,11 @@
  * standing. `mirror.json`'s `captures_base` says where they are served from,
  * and `npm run verify-mirror` fetches them from there or from a local archive.
  *
- * Two views, since the release window (decision D-100). With no credential the
- * command reads the public doors as a stranger does and builds the released
- * view: the same directory the Worker builds, with the unreleased seals as hash
- * lines and no entry file for an entry whose submission has not opened yet. With
- * `--key <api key>` or `--sign <key.json>` — a paid key, or an operator's own
- * agent key — it reads the content the fork is entitled to and builds the same
- * directory with those seals and those entries written in full. Either way the
- * window is judged at the injected clock and at nothing else, so the released
- * view is the Worker's export byte for byte for the same sealed head and the
- * same instant, and the full view is that directory plus the content — the same
- * `released_head` and the same `standing_position`, with more files under them.
+ * One view, since the record is free from the seal (decision D-127): a stranger
+ * reading the public doors builds the Worker's own export byte for byte for the
+ * same sealed head. `--key <api key>` and `--sign <key.json>` are still
+ * accepted — they raise the read cap a large clone needs — and change nothing
+ * about the directory that comes out.
  *
  * A signed read is the M2 signature the disclosure gate already verifies: GET,
  * the path with no query string, a null body, and the four headers (D-014).
@@ -243,10 +237,8 @@ export async function readMirrorOperators(
  * A page that reports a different sealed head than the one pinned from the seal
  * chain stops the run: two moments in one directory would be a mirror nobody
  * could reproduce. The page's `as_of` is held to being the same on every page
- * rather than to being the sealed head's, because it is not always the sealed
- * head's: a keyless reader is served to the released head and every entry as it
- * stood there (decision D-100), and that boundary is this view's own instant.
- * The two coincide the moment the reader is entitled to the whole log.
+ * rather than to being the sealed head's, so a run that straddled two heads is
+ * refused rather than written.
  */
 export async function readMirrorEntries(
   http: HttpClient,
@@ -308,60 +300,7 @@ export async function readMirrorEntries(
     from = pageHead + 1;
   }
 
-  // And the entries the stream could not hand over (decision D-100).
-  //
-  // A keyless reader is served `/sync` only to the released head, so an entry
-  // whose submission is still inside its window never appears on a page — and
-  // the export it is left out of would be a directory whose index is short two
-  // rows the Worker's own export writes. The submissions are all in the hash
-  // lines `GET /events` serves, which name the event's `entry_id` with a null
-  // payload beside it, and the free `GET /entries/{id}` answers every one of
-  // them with the proof, the sidecar, the entry hash and the release date. That
-  // is exactly the triple the index row is written from, so the row the fork
-  // writes is byte for byte the row the Worker wrote.
-  //
-  // Trimmed to the pinned head for the same reason the events are: anything
-  // past it is not the sealed record this directory is of. An id the stream
-  // already delivered is left alone — the stream is the derivation, and a
-  // second read of the same entry would be a second moment.
-  for (const event of events) {
-    if (event.type !== "entry_submitted") continue;
-    if (event.seq > head) continue;
-    const id = event.entry_id;
-    if (typeof id !== "string" || byId.has(id)) continue;
-    const record = await readWithheldEntry(http, baseUrl, id);
-    if (record !== null) byId.set(id, record);
-  }
   return [...byId.values()];
-}
-
-/**
- * One unreleased entry, off the free entry door: its proof, its sidecar and the
- * hash of its whole core.
- *
- * Null when the door answered with the entry itself, which is what an entitled
- * reader is served — and an entitled reader was already handed that entry by
- * `GET /sync`, so there is nothing here to take from the second read. The
- * withheld envelope is told apart by the key it arrives under (`proof`, never
- * `entry`), exactly as the export command tells the two apart.
- */
-async function readWithheldEntry(
-  http: HttpClient,
-  baseUrl: string,
-  id: string,
-): Promise<MirrorEntryRecord | null> {
-  const body = await read(http, baseUrl, `/entries/${encodeURIComponent(id)}`);
-  if (!isRecord(body)) return null;
-  const proof = body["proof"];
-  const sidecar = body["sidecar"];
-  const entryHash = body["entry_hash"];
-  if (!isRecord(proof) || !isRecord(sidecar)) return null;
-  if (typeof entryHash !== "string") return null;
-  return {
-    entry: proof as unknown as MirrorEntryRecord["entry"],
-    sidecar: sidecar as unknown as MirrorEntryRecord["sidecar"],
-    entry_hash: entryHash,
-  };
 }
 
 /**
@@ -554,19 +493,6 @@ export async function buildMirrorFromApi(input: {
   readonly baseUrl: string;
   readonly http: HttpClient;
   readonly now: Date;
-  /**
-   * Which of the two directories to build (decision D-100).
-   *
-   * `released` is the published layout, judged at this run's own instant: the
-   * seals inside their window as hash lines, and no file for an entry nobody
-   * may read yet. `full` is the copy an entitled fork takes with `--key` or
-   * `--sign`: the same layout, judged as of the day the newest seal opens, so
-   * every payload this reader was served is written out and the manifest's
-   * `released_head` says so rather than claiming a public head the files do not
-   * match. A reader with no credential cannot build it, because the doors do
-   * not hand them the payloads it is made of.
-   */
-  readonly view?: "released" | "full";
 }): Promise<MirrorBuild> {
   const environment = await readEnvironment(input.http, input.baseUrl);
   const seals = await readSeals(input.http, input.baseUrl);
@@ -582,19 +508,13 @@ export async function buildMirrorFromApi(input: {
     (event: Event) => event.seq <= head,
   );
 
-  // The instant the window is judged at is this run's own, in both views. A
-  // fork that was served the whole log writes the whole log, and says so with
-  // its files; it does not get to say that more of the log is public than is.
-  // `released_head` and `standing_position` are therefore the same numbers the
-  // Worker's export of the same head carries at the same clock, and the full
-  // directory is a superset of the published one rather than a rival reading of
-  // it.
+  // `released_head` and `standing_position` are the same numbers the Worker's
+  // export of the same sealed head carries, because there is one head.
   const mirrorInput: MirrorInput = {
     environment,
     exported_at: input.now.toISOString(),
     now: input.now.toISOString(),
     release_window_days: RELEASE_WINDOW_DAYS,
-    view: input.view ?? "released",
     seals,
     anchors: await readAnchors(input.http, input.baseUrl),
     events,
@@ -657,8 +577,8 @@ export async function runMirror(
     return BAD_ARGUMENTS;
   }
 
-  // The released view is what a stranger gets and what the line says they got:
-  // a fork that is entitled to more has to say so with a key or a signature.
+  // A key or an operator signature raises the read cap a large clone needs; the
+  // directory it builds is the one a stranger builds (D-127).
   let reader = http;
   if (plan.key !== null) reader = new KeyedHttp(http, plan.key);
   if (plan.signPath !== null) {
@@ -671,15 +591,12 @@ export async function runMirror(
       return FAILED;
     }
   }
-  const view = plan.key === null && plan.signPath === null ? "released" : "full";
-
   let build: MirrorBuild;
   try {
     build = await buildMirrorFromApi({
       baseUrl: plan.baseUrl,
       http: reader,
       now,
-      view,
     });
   } catch (error) {
     if (error instanceof MirrorFailure) {
@@ -699,7 +616,7 @@ export async function runMirror(
 
   const target = await writeMirror(plan.outDir, build);
   io.stdout(
-    `mirror ${build.environment} head ${build.head} seal ${build.sealSeq} files ${build.files.length} view ${view}`,
+    `mirror ${build.environment} head ${build.head} seal ${build.sealSeq} files ${build.files.length}`,
   );
   io.stdout(target);
   return OK;

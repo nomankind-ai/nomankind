@@ -51,23 +51,27 @@ const ID_BYTES = 8;
 const SECRET_BODY_LENGTH = 43;
 
 /**
- * What the subscription behind a key says about it.
+ * What the gate says about a key: one word, and it is `active`.
  *
- * Three words and not the provider's dozen: the gate has exactly three answers
- * — serve, refuse because the bill did not clear, refuse because it is over —
- * and mapping the provider's vocabulary to ours once, here, is what stops a
- * status nobody anticipated being read as "active" by accident.
+ * `past_due` and `canceled` went with the bill they were about (D-127 item 2).
+ * Nothing writes a status now — the free door mints `active` and there is no
+ * other writer — and nothing reads one to refuse with, so the two words are not
+ * in the type and the two 402s are not at any door.
+ *
+ * The column is still `TEXT` and is still read verbatim (src/storage/keys.ts,
+ * `toKeyRecord`): a deployment that sold keys before D-127 can hold a row that
+ * says one of the old words, and a reader of that row gets the word rather
+ * than an error. No mirror or export carries a key row at all — `api_keys` is
+ * a credential table and has never been in the layout — so there is nothing on
+ * the v1-to-v3 import path that has to stay tolerant of them.
  */
-export type KeyStatus = "active" | "past_due" | "canceled";
+export type KeyStatus = "active";
 
 /** One key, exactly as the table holds it. Never the hash and never the secret. */
 export interface KeyRecord {
   id: string;
   tier: string;
   status: KeyStatus;
-  customer: string;
-  subscription: string;
-  checkout_session: string;
   /** The key's own receipt counter: the last number it was issued. */
   counter: number;
   created_at: string;
@@ -122,22 +126,6 @@ export function looksLikeKey(value: unknown): value is string {
   if (!value.startsWith(KEY_PREFIX)) return false;
   const body = value.slice(KEY_PREFIX.length);
   return body.length === SECRET_BODY_LENGTH && /^[A-Za-z0-9_-]+$/.test(body);
-}
-
-/**
- * The provider's subscription status, in our three words.
- *
- * `trialing` is active because a trial that could not read would not be a
- * trial. `unpaid` joins `past_due` because both mean the same thing to a
- * reader: the key is theirs and the bill is not settled. Everything else —
- * `canceled`, `incomplete`, `incomplete_expired`, `paused`, and whatever the
- * provider adds next — is canceled, because the safe reading of a word we do
- * not know is the one that refuses.
- */
-export function keyStatusFromSubscription(status: string): KeyStatus {
-  if (status === "active" || status === "trialing") return "active";
-  if (status === "past_due" || status === "unpaid") return "past_due";
-  return "canceled";
 }
 
 /** The quota scope a key is counted under. */
@@ -222,7 +210,5 @@ export const KEY_REFUSALS = [
   "missing_key",
   "bad_key",
   "unknown_key",
-  "key_canceled",
-  "key_past_due",
   "rate_limited",
 ] as const;

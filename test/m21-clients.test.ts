@@ -20,7 +20,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { runStanding } from "../src/cli/standing.js";
 import type { HttpClient, ValidatorIo } from "../src/cli/validator.js";
 import type { Core } from "../src/core.js";
@@ -163,7 +162,6 @@ async function register(party: Party): Promise<void> {
   const answer = await post(party.agent, "/operators", {
     operator: party.operator,
     attestation: await attestFor(party.agent, party.operator, AT),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -245,7 +243,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout: new MockPayoutAdapter(),
     fetcher: new FixtureFetcher({ [PAGE_URL]: PAGE }),
   };
 
@@ -273,7 +270,6 @@ beforeAll(async () => {
     pinned: pinnedSet([]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout: new MockPayoutAdapter(),
   });
   expect(report.standing).not.toBeNull();
 }, 240_000);

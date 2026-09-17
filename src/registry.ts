@@ -2,16 +2,16 @@
  * The operator registry: joining, and the two doors that refuse.
  *
  * Whitepaper Section 5, Identity and operators: "To register, an operator
- * proves control of a domain through a DNS record, completes payout onboarding
- * through the payment provider ... and binds both to a 1F916 identity so the
- * attestation travels with them." Section 11 names the same three joining
- * steps: publish a DNS TXT record carrying your 1F916 agent id, complete payout
- * onboarding, and sign the provider-independence attestation from Section 10.
+ * proves control of a domain through a DNS record ... and binds it to a 1F916
+ * identity so the attestation travels with them." Section 11 names the same
+ * joining steps, less the money one (D-127): publish a DNS TXT record carrying
+ * your 1F916 agent id, and sign the provider-independence attestation from
+ * Section 10.
  *
  * This module is pure: no I/O, no clock, no network. It builds and checks the
  * attestation, says what a TXT record and an operator domain have to look like,
  * and decides a registration or a genesis naming from facts the caller has
- * already gathered. The DNS lookup and the payout call are the Worker's, and
+ * already gathered. The DNS lookup is the Worker's, and
  * the time a signature was made is the caller's to supply.
  *
  * Ed25519 and SHA-256 run through globalThis.crypto.subtle only, never
@@ -351,7 +351,6 @@ export interface RegistrationBody {
    */
   readonly domain: string | null;
   readonly attestation: unknown;
-  readonly payout: { readonly reference: string };
 }
 
 /** What a domain join carries: the domain, and the attestation signed for it. */
@@ -428,7 +427,7 @@ export function parseRegistrationBody(
   const refused = { ok: false, reason: "bad_body" } as const;
   const object = asObject(body);
   if (object === null) return refused;
-  if (!hasKeys(object, ["operator", "payout"], ["attestation", "domain"])) {
+  if (!hasKeys(object, ["operator"], ["attestation", "domain"])) {
     return refused;
   }
   const operator = object["operator"];
@@ -444,14 +443,7 @@ export function parseRegistrationBody(
     attestation = asObject(supplied);
     if (attestation === null) return refused;
   }
-  const payout = asObject(object["payout"]);
-  if (payout === null) return refused;
-  const reference = payout["reference"];
-  if (typeof reference !== "string" || reference.length === 0) return refused;
-  return {
-    ok: true,
-    value: { operator, domain, attestation, payout: { reference } },
-  };
+  return { ok: true, value: { operator, domain, attestation } };
 }
 
 /**
@@ -560,10 +552,10 @@ export type RegistrationCheck =
 /**
  * Decide a registration from facts alone.
  *
- * Section 5 and Section 11 name three joining steps. Two of them reach outside
- * this process — the DNS TXT lookup and payout onboarding — and the Worker
- * checks those after this passes; nothing here does I/O, so nothing here can
- * check them. What is decided here is the rest: the operator id is a domain,
+ * Section 5 and Section 11's joining steps. One of them reaches outside this
+ * process — the DNS TXT lookup — and the Worker checks it after this passes;
+ * nothing here does I/O, so nothing here can check it. What is decided here is
+ * the rest: the operator id is a domain,
  * it is not a model provider's (Section 10), the independence attestation is
  * present and really signed by this agent's key, the operator is new, and the
  * agent is not already answering for someone else.
@@ -774,9 +766,8 @@ export type AgentBindCheck =
  * key is the ordinary case, and the second key has to arrive the way the first
  * did: by a signed act in the log that an offline reader can recheck.
  *
- * Registration's own three steps are not rerun. The DNS TXT record proves
- * control of the domain and was checked when the operator's first agent was
- * bound; payout onboarding is the operator's and was checked then too. What is
+ * Registration's own steps are not rerun. The DNS TXT record proves control of
+ * the domain and was checked when the operator's first agent was bound. What is
  * new here is the key, and the operator vouches for it by signing the request
  * with a key it already has while the new key signs the independence
  * attestation for the domain the operator registered under. Both signatures are

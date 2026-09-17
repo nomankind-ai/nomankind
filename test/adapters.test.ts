@@ -28,11 +28,6 @@ import {
   SNAPSHOT_REQUEST_HEADERS,
   WebFetcher,
 } from "../src/adapters/fetch.js";
-import {
-  MockPayoutAdapter,
-  UnavailablePayoutAdapter,
-  payoutAdapterFor,
-} from "../src/adapters/payout.js";
 import { sha256Hex } from "../src/hash.js";
 import { BEACON, CAPTURE_MAX_BYTES, FETCH_MAX_REDIRECTS } from "../src/policy.js";
 
@@ -180,55 +175,6 @@ describe("DohResolver", () => {
   });
 });
 
-describe("payout adapters", () => {
-  it("reads the mock's three prefixes", async () => {
-    const mock = new MockPayoutAdapter();
-    expect(await mock.status("mock-verified-abc")).toBe("verified");
-    expect(await mock.status("mock-pending-abc")).toBe("pending");
-    expect(await mock.status("anything-else")).toBe("failed");
-  });
-
-  it("refuses rather than passes when no provider is wired", async () => {
-    expect(await new UnavailablePayoutAdapter().status("mock-verified-abc")).toBe(
-      "unavailable",
-    );
-  });
-
-  it("transfers only for a reference it would also call verified", async () => {
-    const mock = new MockPayoutAdapter();
-    const first = await mock.transfer("mock-verified-abc", 5_000_000);
-    expect(first).toEqual({ ok: true, transfer: "mock-transfer-1" });
-    // A counter, so a demo can tell two transfers apart.
-    expect(await mock.transfer("mock-verified-abc", 1)).toEqual({
-      ok: true,
-      transfer: "mock-transfer-2",
-    });
-    // Pending onboarding is not payable: the mock must not pay an operator it
-    // has just said the provider is still checking.
-    expect(await mock.transfer("mock-pending-abc", 1)).toEqual({
-      ok: false,
-      reason: "failed",
-    });
-    expect(await mock.transfer("anything-else", 1)).toEqual({
-      ok: false,
-      reason: "failed",
-    });
-  });
-
-  it("says nothing left rather than that it failed, when nothing was wired", async () => {
-    // "unavailable" and never "failed": the cycle that meets this carries the
-    // accrual forward untouched, where a failure would say it was refused.
-    expect(
-      await new UnavailablePayoutAdapter().transfer("mock-verified-abc", 5_000_000),
-    ).toEqual({ ok: false, reason: "unavailable" });
-  });
-
-  it("gives production the unavailable stub and everything else the mock", () => {
-    expect(payoutAdapterFor("production")).toBeInstanceOf(UnavailablePayoutAdapter);
-    expect(payoutAdapterFor("demo")).toBeInstanceOf(MockPayoutAdapter);
-    expect(payoutAdapterFor("local")).toBeInstanceOf(MockPayoutAdapter);
-  });
-});
 
 /**
  * The capture fetch, step 1 of the norm rule.

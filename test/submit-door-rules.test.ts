@@ -32,7 +32,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import {
   buildTranscriptArtifact,
   transcriptArtifactHash,
@@ -122,7 +121,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver({}),
-    payout: new MockPayoutAdapter(),
     fetcher: new FixtureFetcher(PAGES),
   };
 });

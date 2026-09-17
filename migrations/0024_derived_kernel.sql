@@ -1,0 +1,49 @@
+-- 0024_derived_kernel: which derivation wrote each stored entry row, so the
+-- sweep can find the rows an older one wrote and rewrite them (decision D-135,
+-- whitepaper Section 3 -- the log is the record, and a stored row is only ever
+-- a copy of what deriving it again would give).
+--
+-- Decision D-022 and the PoC retrospective's DEPLOY-1: migrations are numbered,
+-- forward-only, applied by the deploy workflow with wrangler before the Worker
+-- goes live, and never edited after merge. 0001 through 0023 are closed; this
+-- file adds and never reshapes.
+--
+-- No IF NOT EXISTS anywhere: idempotence belongs to the d1_migrations tracking
+-- table, not to the SQL. A migration that ran twice is a bug in the runner, and
+-- IF NOT EXISTS would hide it.
+--
+-- Nothing here is a source of truth. The column holds no fact about the world:
+-- drop it and every row still says exactly what it says, and the next export
+-- publishes the same bytes. It answers one question, and only for the sweep --
+-- "was this row written by the derivation this build runs?" -- because the
+-- events cannot answer it. A stored row carries no mark of the code that made
+-- it, so a kernel whose rules move leaves rows behind that no reader can tell
+-- from fresh ones, and D-107 publishes exactly those rows.
+--
+-- What went wrong without it. The QA of 2026-09-13 (D-111) moved the
+-- verification precondition to count only the operators that could actually
+-- sign an entry. Three demo rows decided before that change went on saying
+-- `verified` in the export while `npm run verify-mirror` re-derived them as
+-- `draft` from the same events -- the mirror disagreeing with its own verifier,
+-- which is the one thing the export may never do.
+--
+-- Null means one thing only: the row was written before this column existed, so
+-- which derivation made it is unknown and it is due a rewrite once. Every write
+-- since stamps src/derive.ts's DERIVATION_VERSION (src/storage/repository.ts,
+-- `entryStatement`), so a freshly derived row is never due, and a row the sweep
+-- has rewritten leaves the query on its own.
+--
+-- Filled by the sweep and never by SQL, exactly as 0019's key and 0021's
+-- position were: the answer is a fold over the log that SQLite cannot run, so
+-- the `rederive` step (src/worker/sweep.ts) rewrites one bounded page of rows a
+-- run and the next run continues, until a migrated log has caught up.
+ALTER TABLE entries ADD COLUMN derived_kernel TEXT;
+
+-- The index the due-query reads (src/storage/repository.ts, `rederiveDue`).
+--
+-- Once a log has caught up, every row carries the current version and the step's
+-- read finds nothing -- and that empty answer is the one it will give on every
+-- run for the rest of the log's life. Without an index that is a full table scan
+-- with the entry JSON on every page; with it, it is a scan of one narrow index
+-- whose second column is the keyset the step pages by.
+CREATE INDEX entries_derived_kernel ON entries (derived_kernel, id);

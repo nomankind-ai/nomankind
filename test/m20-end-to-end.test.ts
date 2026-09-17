@@ -28,7 +28,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { buildExport } from "../src/cli/export.js";
 import type { HttpClient } from "../src/cli/validator.js";
 import type { Core } from "../src/core.js";
@@ -61,7 +60,6 @@ import {
   headSeq,
   ledgerRowsForEntry,
   ledgerRowsForOperator,
-  releasedUnpaidRows,
   setOperatorStanding,
 } from "../src/storage/repository.js";
 import type { SubmissionProposal } from "../src/submit.js";
@@ -278,7 +276,6 @@ async function register(party: Party): Promise<void> {
   const answer = await post(party.agent, "/operators", {
     operator: party.operator,
     attestation: await attestFor(party.agent, party.operator, AT),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -560,7 +557,6 @@ beforeAll(async () => {
     deps: {
       now: NOW,
       dns: new FixtureResolver(records),
-      payout: new MockPayoutAdapter(),
       fetcher,
     },
     maintainer,
@@ -1277,16 +1273,7 @@ describe("the overturned entry", () => {
     expect(reward.operator).toBe(challengerParty.operator);
 
     // The row is the challenger's on the ledger page, and payable to nobody:
-    // an unpriced reward carries no amount, so no cycle can ever claim it — and
-    // there is no cycle left to try (D-127).
-    const late = hour(24 * 60).toISOString();
-    for (const party of [...parties, challengerParty]) {
-      expect(
-        (await releasedUnpaidRows(world.store.db, party.operator, late)).map(
-          (row) => row.id,
-        ),
-      ).not.toContain(reward.id);
-    }
+    // an unpriced reward carries no amount, and nothing pays anybody (D-127).
     for (const party of parties) {
       expect(
         (

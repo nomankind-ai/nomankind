@@ -121,9 +121,7 @@ beforeAll(async () => {
     keyHash: await minted.hash,
     tier: "standard",
     status: "active",
-    customer: "cus_door",
-    subscription: "sub_door",
-    checkoutSession: "cs_door",
+    clientDay: "cs_door",
     createdAt: AT_OLD,
   });
 
@@ -243,20 +241,15 @@ describe("the entry's own events", () => {
   }, 120_000);
 });
 
-describe("the release window, on this door as on the paged one", () => {
-  it("hands a free reader hash lines, with the proofs beside them", async () => {
+describe("the payloads, served to everybody (D-127)", () => {
+  it("serves a free reader the payloads whole, with the proofs beside them", async () => {
     const body = await answered(`/entries/${ENTRY}/events`);
-
-    // The seal is a day old and the window is thirty, so nothing has released.
     for (const event of body.events) {
-      expect(event["payload"]).toBeNull();
-      expect(event["withheld"]).toBe(true);
-      // Everything that is proof stays: the position, the links and the hash.
+      expect(event["payload"]).not.toBeNull();
+      expect(event["withheld"]).toBeUndefined();
       expect(typeof event["hash"]).toBe("string");
       expect(event["entry_id"]).toBe(ENTRY);
     }
-
-    // Proof is public from the first minute, whoever is asking.
     expect(body.proofs.map((proof) => proof.seq)).toEqual([1, 3]);
     for (const proof of body.proofs) {
       const decoded = decodeProof(proof.inclusion_proof);

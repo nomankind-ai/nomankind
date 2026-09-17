@@ -21,7 +21,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import {
   registerPlan,
   runJoin,
@@ -109,7 +108,6 @@ let pageHashValue = "";
 let entryId = "";
 
 const beacon = new FixtureBeacon("m22b-clients");
-const payout = new MockPayoutAdapter();
 
 function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, env, { ...deps, now, beacon });
@@ -168,7 +166,6 @@ async function register(party: Party): Promise<void> {
       AT,
       DEFAULT_DOMAIN,
     ),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -255,7 +252,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout,
     fetcher: new FixtureFetcher({ [PAGE_URL]: PAGE }),
     beacon,
   };
@@ -297,7 +293,6 @@ beforeAll(async () => {
     pinned: pinnedSet([]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout,
   });
 });
 

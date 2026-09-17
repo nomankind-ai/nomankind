@@ -34,7 +34,6 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { buildExport } from "../src/cli/export.js";
 import { CHECKPOINT_DOMAINS, runCheckpoint } from "../src/cli/checkpoint.js";
 import type { HttpClient, ValidatorIo } from "../src/cli/validator.js";
@@ -127,7 +126,6 @@ describe("the checkpoint example (generation)", () => {
         const deps: RequestDeps = {
           now: SUBMIT_NOW,
           dns: new FixtureResolver(records),
-          payout: new MockPayoutAdapter(),
           fetcher: new FixtureFetcher(pages),
         };
         const http: HttpClient = {

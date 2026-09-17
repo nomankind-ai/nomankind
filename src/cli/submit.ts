@@ -271,10 +271,9 @@ export function checkFields(fields: unknown): FieldsVerdict {
 /**
  * The operator the registry puts behind one key, or null when it has none.
  *
- * The validator asks the same question of the same route, and since D-124 it
- * asks it to tell an unregistered key from a withheld entry, so the one
- * implementation moved beside that read (./validator.ts) and this is the name
- * the commands of M15 have always imported it under.
+ * The validator asks the same question of the same route (decision D-124), so
+ * the one implementation lives beside that read (./validator.ts) and this is
+ * the name the commands of M15 have always imported it under.
  */
 export { operatorFor } from "./validator.js";
 

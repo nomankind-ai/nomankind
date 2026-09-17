@@ -21,9 +21,8 @@
  * timer is cleared the moment the call is done.
  *
  * So the world here is a working one: sealed events to seal and witness, an
- * anchor still waiting for its receipt, a published day with a paid key on it
- * for the metering step to report, a due alert delivery, a mirror that has not
- * exported today, and released rows above the floor for the payout step to pay.
+ * anchor still waiting for its receipt, a published day with a key on it, a due
+ * alert delivery, and a mirror that has not exported today.
  * Every step has work, and every adapter that reaches the network is the class
  * the deployment runs, wired to a fetch that accepts every call and answers
  * none. The windows are the tests' own small ones — the hook the adapters carry
@@ -37,7 +36,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { LocalAnchorAdapter } from "../src/adapters/anchor.js";
 import { DrandReader } from "../src/adapters/beacon.js";
 import { GitHubMirrorAdapter } from "../src/adapters/mirror.js";
-import { MockPayoutAdapter, MOCK_VERIFIED_PREFIX } from "../src/adapters/payout.js";
 import { withDeadline } from "../src/adapters/timeout.js";
 import { MockWitnessAdapter, MOCK_WITNESSES } from "../src/adapters/witness.js";
 import { utcDay } from "../src/anchor.js";
@@ -202,9 +200,7 @@ describe("a sweep with work in every step and a network that never answers", () 
       keyHash: await keyHash("nmk_live_sweep_demo_secret"),
       tier: "startup",
       status: "active",
-      customer: "cus_sweep_demo",
-      subscription: "sub_sweep_demo",
-      checkoutSession: "cs_sweep_demo",
+      clientDay: "cs_sweep_demo",
       createdAt: AT,
     });
 
@@ -233,14 +229,14 @@ describe("a sweep with work in every step and a network that never answers", () 
       },
     ]);
 
-    // The operator that is owed money, onboarded, with a released accrual at
-    // the floor: the payout step has a transfer to make.
+    // An operator with a released accrual on the ledger: history the ledger
+    // doors still serve, and nothing for the sweep to do about it.
     await putOperator(store.db, {
       id: OPERATOR,
       maintainer: false,
       provider: false,
       registeredSeq: 0,
-      details: { payout_reference: `${MOCK_VERIFIED_PREFIX}${OPERATOR}` },
+      details: {},
     });
     await putLedgerRows(store.db, [
       {
@@ -289,7 +285,6 @@ describe("a sweep with work in every step and a network that never answers", () 
         pinned: { witnesses: [...MOCK_WITNESSES], registry: null },
         ineligibleAgents: new Set<string>(),
         anchor: new LocalAnchorAdapter(),
-        payout: new MockPayoutAdapter(),
         mirror: new GitHubMirrorAdapter({
           token: "not-a-real-token",
           fetch: fetchFn,
@@ -307,9 +302,8 @@ describe("a sweep with work in every step and a network that never answers", () 
 
   it("gets through every step, with work in each", () => {
     // The steps that need nobody did their work: the batch is sealed and the
-    // seal is countersigned by the mock witnesses. Nobody was paid, because
-    // there is no payout step to pay them (D-127), and the ledger walked the
-    // sealed head without pricing anything.
+    // seal is countersigned by the mock witnesses, and the ledger walked the
+    // sealed head without pricing anything (D-127).
     expect(report.sealed).not.toBeNull();
     expect(report.witnessed).toHaveLength(1);
     expect(report).not.toHaveProperty("payouts");

@@ -25,6 +25,13 @@
  * their own events, because a window closing is a fact about the calendar and
  * the log rather than an event anyone signs.
  *
+ * Beside it, and appending nothing either, is decision D-135's: the rows a
+ * derivation older than this build's wrote, rewritten from their own events a
+ * bounded page at a time. A stored row is a copy of derivation's answer and
+ * D-107 publishes exactly those rows, so a rule that moves in src/derive.ts
+ * leaves the export publishing answers the kernel no longer gives. It runs
+ * before the mirror step below it, which is the whole point of where it sits.
+ *
  * The fifth is Section 9's, the accounting paragraph of Money: "Read counts are
  * published to the sealed log daily ... Each day's published count is the number
  * the seal commits to." So each finished day's count goes in as an ordinary
@@ -57,8 +64,8 @@
  * three read SEALED events only — through the latest seal's last_seq, this
  * run's own seal included — because a number computed off an event the log has
  * not committed to could be recomputed differently later, and Section 9's
- * promise that anyone can recompute standing and reconcile a payout against the
- * log would be worth nothing. Before the first seal they refuse with `unsealed`.
+ * promise that anyone can recompute standing and reconcile the ledger against
+ * the log would be worth nothing. Before the first seal they refuse with `unsealed`.
  *
  * The last one is not the paper's at all: it is the index's. Migration 0019
  * made the duplicate rule a column, and the rows written before it carry none,
@@ -85,7 +92,6 @@
 
 import type { BeaconReader } from "../adapters/beacon.js";
 import type { MirrorAdapter } from "../adapters/mirror.js";
-import type { PayoutAdapter } from "../adapters/payout.js";
 import type { EnvironmentWitnessAdapter } from "../adapters/witness.js";
 import {
   buildAnchor,
@@ -113,6 +119,7 @@ import { attestationDue, deriveAttestation } from "../attest.js";
 import { coreVersion, domainOf, extractCore } from "../core.js";
 import type { BountyAccrual } from "../bounty.js";
 import {
+  DERIVATION_VERSION,
   deriveEntry,
   mayValidateEntry,
   operatorDomainsAt,
@@ -177,7 +184,6 @@ import {
   appendEvents,
   backfillDuplicateKeys,
   bountiesForEntry,
-  bountyPoolRows,
   addCosignPairs,
   completeSealRewrites,
   cosignaturesForEntry,
@@ -211,7 +217,6 @@ import {
   getEntry,
   getOperator,
   headSeq,
-  heldReadShareRows,
   latestAnchor,
   latestEventOfType,
   latestSeal,
@@ -223,9 +228,6 @@ import {
   mirrorClaimOn,
   openRevalidationAssignment,
   operatorDomains,
-  operatorsDue,
-  pricedEntriesOfDay,
-  priceLedgerRow,
   pendingAnchorsAfter,
   putAnchor,
   putEntry,
@@ -236,18 +238,15 @@ import {
   countReceiptsOn,
   readCounterRangeOn,
   readCountsByKeyOn,
-  meterReported,
   recordAssignment,
   recordAssignmentMissed,
   recordAttestationExpired,
-  recordPayout,
   recordPoolSnapshot,
   recordRevalidationAssignment,
   recordRevalidationMissed,
   recordSeal,
   recordTrustChange,
   recordVersionStale,
-  releasedUnpaidRows,
   sealsAfter,
   sealsSealedOn,
   setAnchorExternal,
@@ -261,6 +260,7 @@ import {
   writeChainCheckState,
   writeCounters,
   writeOperatorValidationCounters,
+  rederiveDue,
   setSealRegistry,
   setSealWitnesses,
   staleDue,
@@ -299,6 +299,7 @@ import {
   worldCache,
   type WorldCache,
 } from "./world.js";
+import type { DerivedEntry } from "../derive.js";
 
 /**
  * The pinned witness set an environment judges countersignatures against:
@@ -329,15 +330,8 @@ export interface SweepDeps {
   readonly ineligibleAgents?: ReadonlySet<string>;
   readonly anchor?: AnchorAdapter;
   /**
-   * Accepted and ignored (D-127). The payout step is retired — the record is
-   * free, so a cycle has nothing to pay — and no run reads this. It stays in
-   * the shape so a caller that still names an adapter is passing something
-   * dead rather than failing to compile.
-   */
-  readonly payout?: PayoutAdapter;
-  /**
    * Where the day's export goes (M23, Section 11's daily log mirror). Optional
-   * like the payout adapter and for the same reason: a caller that asks for the
+   * like the anchor adapter and for the same reason: a caller that asks for the
    * sweep without one gets every other step and a mirror step that counts
    * `mirror_unavailable` rather than one that pretends to have exported.
    */
@@ -385,6 +379,7 @@ export const SWEEP_STEPS: readonly string[] = Object.freeze([
   "draws",
   "revalidation",
   "staleness",
+  "rederive",
   "publish",
   "seal",
   "witness",
@@ -542,6 +537,12 @@ export interface SweepReport {
    * Ids only: no event is appended, so there is no position to report.
    */
   readonly staled: readonly string[];
+  /**
+   * The entries this run rewrote because an older derivation had written them
+   * (decision D-135). Ids only, for the same reason `staled` is: no event is
+   * appended, so there is no position to report.
+   */
+  readonly rederived: readonly string[];
   /**
    * The days whose read count this run published, oldest first, and empty when
    * nothing was owed. One `read_count` event each.
@@ -759,6 +760,104 @@ function outsideDomain(
 function passesSchemaForRewrite(entry: Entry): boolean {
   if (coreVersion(entry) === "v0.7") return validateEntry(entry).ok;
   return validateEntry({ ...entry, domain: DEFAULT_DOMAIN }).ok;
+}
+
+// ---------------------------------------------------------------------------
+// (d2): the rows an older derivation wrote
+// ---------------------------------------------------------------------------
+
+/**
+ * Rewrite the entries whose stored row a derivation other than this one made.
+ *
+ * Decision D-135. Section 3: the log is the record, and a stored row is only a
+ * copy of what deriving the entry's events again would give. D-107 publishes
+ * exactly those rows, and `npm run verify-mirror` re-derives every one of them
+ * from the sealed events with whatever kernel the clone has -- so the day a rule
+ * in src/derive.ts moves, every row written before the move becomes a copy of an
+ * answer this build no longer gives, and the export says one thing while its own
+ * verifier says another. That is what happened: the QA of 2026-09-13 (D-111)
+ * moved the verification precondition to count only the operators that could
+ * actually sign an entry, and three demo rows decided before it kept saying
+ * `verified` while the kernel derived `draft`.
+ *
+ * Nothing about that is visible in the events, because it is not a fact about
+ * the world -- it is a fact about which code wrote a row -- so the stamp beside
+ * the row answers it (0024, `derived_kernel`) and this step acts on it. It
+ * appends nothing, exactly like the staleness step above, and for the same
+ * reason: no event happened. It only makes the stored copy agree with what a
+ * reader deriving for themselves would get.
+ *
+ * The whole world and not the entry's own events (src/worker/world.ts), again
+ * like the staleness step: a superseded entry read without its superseders would
+ * lose the `superseded_by` the log says is there.
+ *
+ * Bounded twice over. At most LIST_PAGE_LIMIT rows are rewritten in a run, which
+ * is the page every other sweep read uses, so a thousand-entry log catches up
+ * over a handful of runs rather than spending one run's whole subrequest budget
+ * on a backfill; and the keyset carries past a row this step refused, so a row
+ * that can never be rewritten cannot starve the rows behind it. Once a log has
+ * caught up this is one bounded index read that finds nothing, because
+ * `putEntry` stamps the current version on every write -- including the ones
+ * this step makes.
+ *
+ * A row that will not derive is counted and left alone rather than thrown: this
+ * step is the one that touches every row in the table eventually, so a single
+ * unreadable row must not be able to stop the clockwork on every run forever.
+ * Its reason shows on /status like any other refusal, and its stamp stays as it
+ * was, so the row is asked about again next run.
+ */
+async function rederiveStep(
+  db: D1Like,
+  cache: WorldCache,
+  now: Date,
+  skip: Skip,
+): Promise<string[]> {
+  const rewritten: string[] = [];
+  let afterId: string | undefined;
+  while (rewritten.length < LIST_PAGE_LIMIT) {
+    const page = await rederiveDue(
+      db,
+      afterId === undefined
+        ? { kernel: DERIVATION_VERSION, limit: LIST_PAGE_LIMIT }
+        : { kernel: DERIVATION_VERSION, limit: LIST_PAGE_LIMIT, afterId },
+    );
+    if (page.length === 0) break;
+
+    for (const id of page) {
+      if (rewritten.length >= LIST_PAGE_LIMIT) break;
+      const world = await entryWorld(db, id, cache);
+      let derived: DerivedEntry;
+      try {
+        derived = rederive(world, id, now);
+      } catch {
+        skip("underivable_on_rederive");
+        continue;
+      }
+      // A rewrite is a write, so the whole derived entry goes past the published
+      // schema first, exactly as the two write doors and the staleness step do
+      // it. A refusal is counted like any other rule rather than thrown.
+      if (!passesSchemaForRewrite(derived.entry)) {
+        skip("schema_invalid");
+        continue;
+      }
+      // Stored at the position it was already derived through: no event was
+      // appended, so the log has not moved.
+      const stored = await getEntry(db, id);
+      await putEntry(
+        db,
+        derived.entry,
+        derived.sidecar,
+        stored?.derivedThroughSeq ?? headPosition(world.entryEvents),
+      );
+      rewritten.push(id);
+    }
+
+    // Past the page just read, always. A row this run rewrote leaves the query
+    // on its own -- it now carries the current version -- so the cursor is what
+    // keeps a row this run refused from being read again inside the same run.
+    afterId = page[page.length - 1];
+  }
+  return rewritten;
 }
 
 /** A unit constant, not a policy number: a day, stated in milliseconds. */
@@ -2060,7 +2159,7 @@ export async function mirrorStep(
 }
 
 // ---------------------------------------------------------------------------
-// (i), (j), (k): the ledger, standing, and the payout cycle
+// (i), (j): the ledger and standing
 // ---------------------------------------------------------------------------
 
 /**
@@ -2078,9 +2177,9 @@ export const LEDGER_CURSOR = "ledger";
  *
  * Decision D-127, "the record is free, no money anywhere". There is no read
  * price, no contributor share, no holdback money, no bounty, no dispute reward
- * and no payout, so there is nothing for this step to compute: it writes no
- * `read_share`, `clawback`, `bounty`, `dispute_reward`, `payout` or
- * `reconciliation` row, and it reports ok with a zero count. The rows the ledger
+ * and nothing leaves, so there is nothing for this step to compute: it writes
+ * no `read_share`, `clawback`, `bounty`, `dispute_reward` or `reconciliation`
+ * row, and it reports ok with a zero count. The rows the ledger
  * already holds are not touched — they are the log's own history of the months
  * the record was sold, and the ledger doors go on serving them.
  *
@@ -2787,11 +2886,10 @@ export async function runSweep(
   try {
     // Before anything is read, and before any adapter is asked for anything: a
     // deployment whose `ENVIRONMENT` is not one of the names this code knows
-    // must not sweep (the QA of 2026-09-12). The name chooses the payout, the
-    // payment and the witness adapters, and each picks its mock by asking
-    // whether the name is `production` — so a var misspelt `prodcution` would
-    // have countersigned real seals with a published test key and paid nobody,
-    // quietly. The run does nothing at all and records the reason on every
+    // must not sweep (the QA of 2026-09-12). The name chooses the witness and
+    // anchor adapters, and each picks its mock by asking whether the name is
+    // `production` — so a var misspelt `prodcution` would have countersigned
+    // real seals with a published test key, quietly. The run does nothing at all and records the reason on every
     // step, which is how /status shows it rather than showing a clockwork that
     // looks like it is running.
     if (!environmentConfigured(env)) {
@@ -3292,6 +3390,16 @@ export async function runSweep(
       afterId = page[page.length - 1]!.id;
     }
 
+    enter("rederive");
+    // (d2) The rows an older derivation wrote (decision D-135). Beside the
+    // staleness step because the two are the same kind of work — a rewrite that
+    // appends nothing, making the stored copy say what deriving the events again
+    // says — and before the mirror step below, which is what publishes those
+    // rows (D-107). Their order in the run is the guarantee: a row this step
+    // rewrites is rewritten before the same run exports it, so a clone can never
+    // be handed a row the kernel that built the clone disagrees with.
+    const rederived = await rederiveStep(db, cache, deps.now, skip);
+
     enter("publish");
     // (e) The day's read counts. Before the seal on purpose: the count this run
     // publishes is sealed by this same run, which is what Section 9's "each day's
@@ -3374,9 +3482,9 @@ export async function runSweep(
     if (sealedHead === null) {
       skip("unsealed");
       skip("unsealed");
-      // The same refusals the report counts, told apart by step. The metering
-      // and payout steps used to stand behind this same wall and are retired
-      // (D-127), so the count is two rather than the three it was since M21.
+      // The same refusals the report counts, told apart by step. Two money
+      // steps used to stand behind this same wall and are gone (D-127), so the
+      // count is two rather than the three it was since M21.
       noteSkip("standing", "unsealed");
       noteSkip("alerts", "unsealed");
     } else {
@@ -3440,6 +3548,7 @@ export async function runSweep(
       revalidation_drawn: revalidationDrawn,
       revalidation_missed: revalidationMissed,
       staled,
+      rederived,
       published,
       attestations,
       sealed,
@@ -3533,6 +3642,7 @@ function nothingSwept(
     revalidation_drawn: [],
     revalidation_missed: [],
     staled: [],
+    rederived: [],
     published: [],
     attestations: { expired: [] },
     sealed: null,
@@ -3665,6 +3775,7 @@ function stepRows(
             missed: report.revalidation_missed.length,
           },
           staleness: { staled: report.staled.length },
+          rederive: { rederived: report.rederived.length },
           publish: {
             published: report.published.length,
             date:

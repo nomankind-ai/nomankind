@@ -29,7 +29,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { buildExport } from "../src/cli/export.js";
 import type { Core } from "../src/core.js";
 import { extractCore } from "../src/core.js";
@@ -280,7 +279,6 @@ async function register(party: Party): Promise<void> {
     body: {
       operator: party.operator,
       attestation: await attestFor(party.agent, party.operator, AT),
-      payout: { reference: VERIFIED_REFERENCE },
     },
     timestamp: AT,
   });
@@ -418,7 +416,6 @@ beforeAll(async () => {
     deps: {
       now: NOW,
       dns: new FixtureResolver(records),
-      payout: new MockPayoutAdapter(),
       fetcher: new FixtureFetcher(PAGES),
     },
     maintainer,

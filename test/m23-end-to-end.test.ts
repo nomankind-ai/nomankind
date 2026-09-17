@@ -22,25 +22,7 @@
  * off the same rows.
  */
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-
-/**
- * A window this file publishes for itself: thirty days, which is what the
- * policy module published before D-127 zeroed it.
- *
- * D-127 made the record free — RELEASE_WINDOW_DAYS is 0 and everything is
- * released the instant it is sealed — and left the window's code exactly as it
- * was, dormant behind that zero. The withheld paths this file covers are part
- * of that code, so the regression cover stays by publishing a window here
- * instead: every rule below the mock is the kernel's own, read from the same
- * one place, and only the number is this file's.
- */
-vi.mock("../src/policy.js", async () => {
-  const actual = await vi.importActual<Record<string, unknown>>(
-    "../src/policy.js",
-  );
-  return { ...actual, RELEASE_WINDOW_DAYS: 30 };
-});
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import {
@@ -50,13 +32,11 @@ import {
   type MirrorPush,
   type MirrorPushInput,
 } from "../src/adapters/mirror.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import type { ApproverRecord, Event, EventType } from "../src/events.js";
-import { REGISTRY_EVENT_TYPES } from "../src/release.js";
+import { REGISTRY_EVENT_TYPES } from "../src/worker/world.js";
 import {
   DEFAULT_DOMAIN,
   MIRROR,
-  RELEASE_WINDOW_DAYS,
   STATUS_FAILING_AFTER_MINUTES,
 } from "../src/policy.js";
 import { signRecord } from "../src/records.js";
@@ -148,13 +128,12 @@ let witness: FakeWitness;
 let entryId = "";
 
 const beacon = new FixtureBeacon("m23");
-const payout = new MockPayoutAdapter();
 
 /** The mirror every sweep below pushes to, unless a test names another. */
 let mirror: MockMirrorAdapter;
 
 function send(request: Request, now: Date): Promise<Response> {
-  return handleRequest(request, env, { now, dns, payout, beacon, fetcher });
+  return handleRequest(request, env, { now, dns, beacon, fetcher });
 }
 
 let fetcher: FixtureFetcher;
@@ -180,7 +159,6 @@ async function register(party: Party, now: Date): Promise<void> {
     {
       operator: party.operator,
       attestation: await attestFor(party.agent, party.operator, now.toISOString()),
-      payout: { reference: VERIFIED_REFERENCE },
     },
     now,
   );
@@ -210,7 +188,6 @@ async function sweep(
   return runSweep(env, {
     now: at,
     beacon,
-    payout,
     trigger: "alarm",
     ...(over.mirror === undefined ? {} : { mirror: over.mirror }),
     ...(sealing
@@ -391,10 +368,9 @@ describe("the day's export", () => {
       tree: "mock-tree-1",
       head: first.sealed!.last_seq,
       seal_seq: first.sealed!.seq,
-      // No entry file yet: this export was made the minute its seal was, and
-      // the row counts the entry files the export actually wrote (D-100). The
-      // entry is in `index.json` with its proof and its release date.
-      entries: 0,
+      // One entry file: the record is free from the seal (D-127), so an entry
+      // whose submission a seal covers is exported whole in that same run.
+      entries: 1,
       files_changed: first.mirror!.changed,
       url: `${MIRROR.web}/${MIRROR.repository}/tree/mock-commit-1/${ENVIRONMENT}`,
       raw_url: `${MIRROR.raw}/${MIRROR.repository}/mock-commit-1/${ENVIRONMENT}/mirror.json`,
@@ -405,6 +381,7 @@ describe("the day's export", () => {
     const paths = [...mirror.files.keys()].sort();
     expect(paths).toEqual([
       `${ENVIRONMENT}/anchors.jsonl`,
+      `${ENVIRONMENT}/entries/${entryId}.json`,
       `${ENVIRONMENT}/events/00000000.jsonl`,
       `${ENVIRONMENT}/index.json`,
       `${ENVIRONMENT}/ledger.jsonl`,
@@ -419,23 +396,20 @@ describe("the day's export", () => {
       environment: ENVIRONMENT,
       exported_at: EXPORT_AT.toISOString(),
       head: first.sealed!.last_seq,
-      // One index row per entry from the first minute; the entry's own file
-      // arrives on its release date, and `released_head` says nothing of this
-      // log is public yet (D-100).
+      // One index row per entry, and its own file beside it: the record is
+      // free from the seal, so the released head is the sealed head (D-127).
       entries: 1,
-      release_window_days: RELEASE_WINDOW_DAYS,
-      released_head: null,
+      release_window_days: 0,
+      released_head: first.sealed!.last_seq,
       captures_base: "https://demo.nomankind.ai/captures/",
       license: MIRROR.license,
     });
   }, 240_000);
 
-  it("carries the entry the door took as proof, and its release date", async () => {
-    // Inside the window the export carries the row and not the file: every
-    // column of the row is proof, and `release_date` is the day the file
-    // appears (D-100). The events of the seal it was submitted in are hash
-    // lines, so the claim itself is nowhere in this directory.
-    expect(fileAt(`entries/${entryId}.json`)).toBeUndefined();
+  it("carries the entry the door took, its row and its release date", async () => {
+    // The export carries the file and the row: `release_date` is the seal date
+    // the content opened on (D-127).
+    expect(fileAt(`entries/${entryId}.json`)).toBeDefined();
 
     const index = JSON.parse(fileAt("index.json")!) as Record<string, unknown>[];
     expect(index).toHaveLength(1);
@@ -444,10 +418,9 @@ describe("the day's export", () => {
       status: "draft",
       tier: "stated",
       seal_seq: first.sealed!.seq,
-      release_date: new Date(
-        Date.parse(EXPORT_AT.toISOString()) + RELEASE_WINDOW_DAYS * DAY_MS,
-      ).toISOString(),
     });
+    // The seal date the content opened on (D-127), which is this export's own.
+    expect(index[0]!["release_date"]).toBe(EXPORT_AT.toISOString());
     expect(index[0]!["entry_hash"]).toMatch(/^sha256:[0-9a-f]{64}$/);
 
     const events = fileAt("events/00000000.jsonl")!
@@ -455,43 +428,28 @@ describe("the day's export", () => {
       .filter((line) => line.length > 0)
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(events.length).toBeGreaterThan(0);
-    let held = 0;
     for (const event of events) {
-      // The registry is never withheld: `GET /operators` publishes the same
-      // facts from the first minute, so the seal file carries them whole and
-      // everything about an entry waits for the window (D-100).
-      if (REGISTRY_EVENT_TYPES.includes(event["type"] as EventType)) {
-        expect(event["payload"]).not.toBeNull();
-        continue;
-      }
-      held += 1;
-      expect(event["payload"]).toBeNull();
-      expect(event["withheld"]).toBe(true);
+      // Every line in full, registry or not (D-127).
+      expect(event["payload"]).not.toBeNull();
+      expect(event["withheld"]).toBeUndefined();
     }
-    expect(held).toBeGreaterThan(0);
   }, 240_000);
 
-  it("recomputes standing and the ledger at the released head", async () => {
+  it("recomputes standing and the ledger at the sealed head", async () => {
     // Neither file is read from a table: standing is `standingAt` over the
     // events and the ledger is the rows the log itself proves. Both are folds
-    // over payloads, so both are folded over the events this export made
-    // public — and nothing of this log has released yet, so standing stands at
-    // the position before the first event and names nobody (D-100). They catch
-    // up with the sealed head one seal at a time, as the windows run out.
+    // over payloads, and every sealed payload is in this directory (D-127), so
+    // both stand at the sealed head.
     const standing = JSON.parse(fileAt("standing.json")!) as {
       position: number;
       formula: string[];
       operators: { operator: string }[];
     };
-    expect(standing.position).toBe(-1);
+    expect(standing.position).toBe(first.sealed!.last_seq);
     expect(standing.formula.length).toBeGreaterThan(0);
-    expect(standing.operators).toEqual([]);
 
-    expect(fileAt("ledger.jsonl")).toBe("");
     const manifest = JSON.parse(fileAt("mirror.json")!) as Record<string, unknown>;
-    expect(manifest["attestations"]).toBe(0);
-    expect(manifest["ledger_rows"]).toBe(0);
-    expect(manifest["standing_position"]).toBe(-1);
+    expect(manifest["standing_position"]).toBe(first.sealed!.last_seq);
   }, 240_000);
 
   it("carries every operator the registry knows, with its agents", async () => {
@@ -617,6 +575,9 @@ describe("the step's place in the run", () => {
       "draws",
       "revalidation",
       "staleness",
+      // D-135: the rows an older derivation wrote, rewritten beside the
+      // staleness rewrites and before the mirror step that publishes them.
+      "rederive",
       "publish",
       "seal",
       "witness",
@@ -683,7 +644,7 @@ describe("GET /mirror/latest", () => {
           headers: { accept: "application/json" },
         }),
         bare,
-        { now: DAY_TWO, dns, payout, beacon },
+        { now: DAY_TWO, dns, beacon },
       );
       expect(response.status).toBe(404);
       expect(await response.json()).toEqual({
@@ -703,7 +664,7 @@ describe("GET /mirror/latest", () => {
           headers: { accept: "application/json" },
         }),
         configured,
-        { now: DAY_TWO, dns, payout, beacon },
+        { now: DAY_TWO, dns, beacon },
       );
       expect(second.status).toBe(404);
       expect(await second.json()).toMatchObject({
@@ -757,7 +718,7 @@ describe("the thirteenth stage", () => {
         headers: { accept: "application/json" },
       }),
       configured,
-      { now: DAY_TWO, dns, payout, beacon },
+      { now: DAY_TWO, dns, beacon },
     );
     const body = (await response.json()) as Record<string, unknown>;
     const stage = (body["stages"] as Stage[]).find(
@@ -783,7 +744,7 @@ describe("the thirteenth stage", () => {
         headers: { accept: "application/json" },
       }),
       configured,
-      { now: justAfterMidnight, dns, payout, beacon },
+      { now: justAfterMidnight, dns, beacon },
     );
     const stage = ((await response.json()) as Record<string, unknown>)["stages"] as Stage[];
     const mirrorRow = stage.find((one) => one.stage === "mirror export")!;
@@ -803,7 +764,7 @@ describe("the thirteenth stage", () => {
         headers: { accept: "application/json" },
       }),
       configured,
-      { now: wellIntoTheDay, dns, payout, beacon },
+      { now: wellIntoTheDay, dns, beacon },
     );
     const stage = ((await response.json()) as Record<string, unknown>)["stages"] as Stage[];
     const mirrorRow = stage.find((one) => one.stage === "mirror export")!;
@@ -816,16 +777,9 @@ describe("the thirteenth stage", () => {
 describe("nothing unsealed is exported", () => {
   /**
    * Days on from the last export, so the day is owed one of its own — and a
-   * window on, so that what this export carries it carries in full (D-100).
-   *
-   * The release window and the sealed head are two different rules and this
-   * block is about the second one: an export made inside the window would be
-   * hash lines whatever the seals covered, and the question here is what the
-   * seals covered.
+   * month on, so the question here is only what the seals covered.
    */
-  const DAY_FIVE = new Date(
-    DAY_TWO.getTime() + (RELEASE_WINDOW_DAYS + 3) * DAY_MS,
-  );
+  const DAY_FIVE = new Date(DAY_TWO.getTime() + 33 * DAY_MS);
 
   /** The mirror this one export is pushed to, so its files are only its own. */
   let tail: MockMirrorAdapter;

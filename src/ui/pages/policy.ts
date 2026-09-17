@@ -423,7 +423,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "RELEASE_WINDOW_DAYS",
       value: `${policy.RELEASE_WINDOW_DAYS} days`,
       means:
-        "The release window (decision D-100, at this number since D-127): how long after the seal that covers it an event or an entry stays unreleased. An event's release date is its covering seal's sealed_at plus this many days, and an entry's is its submission event's, so at zero every entry and every event is released the moment it is sealed — its content public, CC0 and in the daily mirror from that instant, served to anyone who asks for it. The proof was public from the first minute either way: every hash, seal and anchor, every operator record, and each entry's id, domain, subject, category, status, effective tier, entry hash, seal object, signers and release date. An unsealed event is not released at all, whatever this number says. The window's code is dormant rather than gone, so a fork that wants one of its own moves this constant and nothing else.",
+        "Zero, and there is no code behind it any more (decisions D-100 and D-127): the record is free from the seal. Every entry and every event is released the moment it is sealed — its content public, CC0 and in the daily mirror from that instant, served to anyone who asks for it. The proof was public from the first minute either way: every hash, seal and anchor, every operator record, and each entry's id, domain, subject, category, status, effective tier, entry hash, seal object, signers and release date. An unsealed event is not released at all. The number is still published here and still written into every mirror manifest, because a clone carries the window it was made under and readers of v1, v2 and v3 clones read that column.",
     },
   ];
 
@@ -835,8 +835,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         The record is free (decision D-127). Every event and every entry is
         released the moment it is sealed, its content public and CC0 from that
         instant, and no read of it is priced: there is no paid tier, no key
-        purchase, no read-share slot, no payout and no fee anywhere in this
-        table. The rows above are caps and nothing else — a tier is a daily
+        purchase, no read-share slot and no fee anywhere in this table. The rows above are caps and nothing else — a tier is a daily
         count, a key is a free identity a reader asks for at the free door so
         alerts, receipts by counter and usage listings have something to name,
         and the caps are what keep one reader from being the whole day.

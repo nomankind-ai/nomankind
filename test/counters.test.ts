@@ -688,6 +688,8 @@ describe("the 0018 backfill on a database written before it", () => {
         "0020_duplicate_key_effective_at.sql",
         "0021_version_stale_seq.sql",
         "0022_cosign.sql",
+        "0023_money_removed.sql",
+        "0024_derived_kernel.sql",
       ]);
 
       // The column says exactly what the JSON beside it has always said.

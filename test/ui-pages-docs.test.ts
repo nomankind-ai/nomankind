@@ -288,7 +288,7 @@ describe("renderPolicy", () => {
     // went with the money they were about: what a contributor earns is standing,
     // and a stake is contribution rather than a payment.
     expect(page).toContain("The record is free (decision D-127).");
-    expect(page).toContain("no read-share slot, no payout");
+    expect(page).toContain("no read-share slot and no fee");
     expect(page).toContain("staked in money");
     expect(page).not.toContain("seed fee");
     expect(page).not.toContain("read revenue");
@@ -604,7 +604,6 @@ describe("renderApi", () => {
     const panel = page.slice(opens, page.indexOf("</section>", opens)).replace(/\s+/g, " ");
     expect(panel).toContain("carries an <span class=\"mono\">errors</span> array");
     for (const reason of [
-      "entry_withheld",
       "unregistered_operator",
       "legacy_entry",
       "schema_invalid",
@@ -614,6 +613,7 @@ describe("renderApi", () => {
         `<dt class="mono">${reason}</dt>`,
       );
     }
+    expect(panel).not.toContain("entry_withheld");
     // The validate row itself says the 422 carries the array, beside the word.
     const row = page.slice(
       page.indexOf("/entries/{id}/validate"),
@@ -725,7 +725,7 @@ describe("renderApi", () => {
     // rows written for them.
     expect(page).toContain("Nothing here is money and nothing is owed");
     expect(page).toContain("reconciliations");
-    expect(page).toContain("no share and no payout to reconcile against");
+    expect(page).toContain("no price and no share to reconcile against");
     for (const gone of [
       "READ_PRICE_MICROS_PER_READ",
       "PAYOUT_MINIMUM_MICROS",
@@ -793,26 +793,24 @@ describe("renderApi", () => {
     ]) {
       expect(page, `${door} is not documented`).toContain(door);
     }
-    for (const retired of [
+    // The four doors of the paid loop are gone, addresses and all (D-127 item
+    // 2): a removed route answers 404 like any unknown path, so the page names
+    // none of them.
+    for (const gone of [
       "POST /keys/checkout",
       "GET /keys/claim",
       "POST /keys/me/portal",
       "POST /stripe/webhook",
+      "410 retired",
     ]) {
-      expect(page, `${retired} is not named as retired`).toContain(retired);
+      expect([gone, page.includes(gone)]).toEqual([gone, false]);
     }
-    expect(page).toContain("410 retired");
-    expect(page).toContain(
-      "Four doors of the paid loop are retired and answer 410",
-    );
 
     // Every word the gate and the doors refuse in.
     for (const refusal of [
       "missing_key",
       "bad_key",
       "unknown_key",
-      "key_canceled",
-      "key_past_due",
       "rate_limited",
       "key_today",
       "no_keyed_tier",
@@ -820,6 +818,10 @@ describe("renderApi", () => {
     ]) {
       expect(page, `${refusal} is not named`).toContain(refusal);
     }
+    // And the two that are not refusals any more (D-127 item 2): the page names
+    // them once, to say they are gone, and nowhere as a thing a door answers.
+    expect(page).toContain("went with the bill they were");
+    expect(page).not.toContain("402");
     // And nothing about buying one.
     for (const gone of [
       "free_tier_needs_no_key",
@@ -904,16 +906,6 @@ describe("renderApi", () => {
     expect(page).toContain(POLICY.ALERT_RETRY_MINUTES.join(", "));
     expect(page).toContain(`${POLICY.ALERT_TIMEOUT_MS} ms`);
     expect(page).toContain(String(POLICY.ALERT_ENDPOINTS_PER_KEY));
-  });
-
-  it("names the provider's own webhook as a retired door and nothing else", () => {
-    // Decision D-127: there is no provider and no subscription to report on, so
-    // the door keeps its address, answers 410, and the page says only that.
-    expect(page).toContain("POST /stripe/webhook");
-    expect(page).toContain("410 retired");
-    expect(page).toContain("the payment provider&#39;s own webhook");
-    expect(page).not.toContain("payments_unavailable");
-    expect(page).not.toContain("webhook_tolerance");
   });
 
   it("names the one unit there is, and says there is no other", () => {
@@ -1576,7 +1568,7 @@ describe("renderHowItWorks: free access, caps, and alerts", () => {
   it("names the policy numbers it runs under, through the link to /policy", () => {
     const tiers = Object.keys(POLICY.RATE_TIERS).join("/");
     expect(page).toContain(
-      `<a href="/policy">RATE_TIERS ${tiers} · RELEASE_WINDOW_DAYS ${POLICY.RELEASE_WINDOW_DAYS} · ALERT_KINDS ${POLICY.ALERT_KINDS.length}</a>`,
+      `<a href="/policy">RATE_TIERS ${tiers} · ALERT_KINDS ${POLICY.ALERT_KINDS.length}</a>`,
     );
   });
 
@@ -1597,9 +1589,7 @@ describe("renderHowItWorks: free access, caps, and alerts", () => {
     // is looked for.
     const prose = page.replace(/\s+/g, " ");
     expect(prose).toContain("The record is free, from the seal (decision D-127)");
-    expect(prose).toContain(
-      "no paid tier, no key to buy, no read share, no payout",
-    );
+    expect(prose).toContain("no paid tier, no key to buy and no read share");
     expect(prose).toContain("POST /keys/free");
     expect(prose).toContain("A tier is that daily cap and nothing else");
     expect(prose).toContain(
@@ -1655,11 +1645,11 @@ describe("renderGenesis", () => {
     expect(page).not.toContain("three verified operators");
   });
 
-  it("names all three joining steps", () => {
+  it("names both joining steps, and no money one (D-127)", () => {
     expect(page).toContain("Prove a domain");
-    expect(page).toContain("Complete payout onboarding");
     expect(page).toContain("Name a domain and sign its independence attestation");
-    expect(page).toContain("mock-verified-");
+    expect(page).toContain("Joining takes two steps");
+    expect(page).not.toContain("payout");
   });
 
   it("shows every registered domain's attestation sentence and version", () => {
@@ -1965,7 +1955,6 @@ describe("renderDryRun", () => {
     const step = page.indexOf("Step 4. Judge one entry");
     const panel = squeeze(page.slice(step, page.indexOf("Step 5.", step)));
     for (const reason of [
-      "entry_withheld",
       "unregistered_operator",
       "legacy_entry",
       "schema_invalid",
@@ -1975,7 +1964,7 @@ describe("renderDryRun", () => {
         `<span class="mono">${reason}</span>`,
       );
     }
-    expect(panel).toContain("You will not meet it here");
+    expect(panel).not.toContain("entry_withheld");
     expect(panel).toContain("Registration is step 3");
     expect(panel).toContain("cannot be judged under today's rules");
     expect(panel).toContain("errors</span> array is printed");
@@ -1992,7 +1981,7 @@ describe("renderDryRun", () => {
   });
 
   it("says what demo is not, and what the dry run that counts is", () => {
-    expect(page).toContain("payout_unavailable");
+    expect(page).not.toContain("payout");
     expect(page).toContain("mock");
     expect(page).toContain("nothing on demo is money");
     expect(squeeze(page)).toContain("Nothing here is the record");
@@ -2743,9 +2732,8 @@ describe("the release window, as the pages publish it", () => {
     const keys = api.indexOf(`id="keys"`);
     const rule = api.indexOf("The record is free (decision D-127).");
     expect(rule).toBeGreaterThan(keys);
-    expect(api).toContain("the release window is one number in");
-    expect(api).toContain('<a href="/policy">policy</a>');
-    expect(api).toContain("at zero, with its code dormant behind it");
+    expect(api).toContain("answer the same record to");
+    expect(api).toContain("the record is free from the seal");
   });
 
   it("names the flag that reaches unreleased content from a command", () => {
@@ -2755,12 +2743,9 @@ describe("the release window, as the pages publish it", () => {
     );
   });
 
-  it("names the window in the Domains lede, from policy", () => {
+  it("says in the Domains lede that the record is free from the seal", () => {
     expect(domains.replace(/\s+/g, " ")).toContain(
-      `its content is released ${POLICY.RELEASE_WINDOW_DAYS} days after the seal that covers it`,
-    );
-    expect(domains.replace(/\s+/g, " ")).toContain(
-      "at zero, the moment it is sealed, public and CC0 from that instant, with nothing to pay and no key to hold (decisions D-100 and D-127)",
+      "its content is public and CC0 the moment it is sealed, with nothing to pay and no key to hold (decisions D-100 and D-127)",
     );
   });
 
@@ -2849,7 +2834,7 @@ describe("renderDocs", () => {
       [
         "/api",
         "API",
-        "Every door: reading with receipts, syncing the delta, keys and tiers, the refusals, the release window.",
+        "Every door: reading with receipts, syncing the delta, keys and tiers, and the refusals.",
       ],
       [
         "/independence",
@@ -2874,7 +2859,7 @@ describe("renderDocs", () => {
       [
         "/docs/fork",
         "Fork guide",
-        "What to clone, how to verify a mirror, how to keep going without nomankind, and the release window.",
+        "What to clone, how to verify a mirror, and how to keep going without nomankind.",
       ],
       [
         "/mirror/latest",

@@ -481,3 +481,88 @@ describe("the consensus policy numbers", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// D-111's precondition, and the stored rows it moved (D-135)
+// ---------------------------------------------------------------------------
+
+/**
+ * The QA of 2026-09-13 (D-111) moved the verification precondition: "three
+ * verified operators outside the submitter's own" counts the operators that
+ * could actually sign this entry, not every registered non-maintainer. In a
+ * domain only two operators have attested in, that is two, and two is not three
+ * however many of them approve.
+ *
+ * Pinned here because it is the rule that moved the derivation under three
+ * stored demo rows (D-135): rows written before it said `verified`, the kernel
+ * derived `draft`, and the export published the rows while its own verifier
+ * derived the events. The sweep's `rederive` step is what closes that gap, and
+ * this is the rule that opens it.
+ */
+describe("a domain two operators have attested in", () => {
+  const GOVERNANCE = "ai-governance";
+  const GOVERNANCE_ID = "nmk_governance01";
+
+  /** The two approvals, from the only two operators attested in the domain. */
+  function governanceLog(joined: readonly string[]): Log {
+    const log = baseLog();
+    for (const operator of joined) {
+      log.add("operator_joined_domain", null, {
+        operator,
+        agent: `1F916:agent-${operator}`,
+        domain: GOVERNANCE,
+        attestation: {
+          version: "nomankind-independence-v1",
+          domain: GOVERNANCE,
+          signed_at: "2026-09-01T12:00:00Z",
+          signature: SIGNATURE,
+        },
+      } as never);
+    }
+    submit(log, GOVERNANCE_ID, {
+      domain: GOVERNANCE,
+      subject: "eu/ai-act",
+      category: "in_force",
+      evidence_tier: "stated",
+      evidence: null,
+      observation: null,
+    });
+    for (const [index, operator] of [joined[0], joined[1]].entries()) {
+      log.add("validation", GOVERNANCE_ID, {
+        record: approval(operator as string, `2026-09-02T0${index + 1}:00:00Z`, {
+          test_accepted: null,
+          observation: null,
+        }),
+        signature: SIGNATURE,
+      });
+    }
+    return log;
+  }
+
+  const clock: Clock = { now: "2026-09-10T00:00:00Z" };
+
+  it("cannot verify an entry in it, whoever approves", () => {
+    const log = governanceLog([VALIDATORS[0] as string, VALIDATORS[1] as string]);
+    const { entry, derived } = deriveEntry(log.events, GOVERNANCE_ID, clock);
+
+    // Two approvals, both from operators the entry's own rules admit — and
+    // still a draft, because the precondition counts who could have signed.
+    expect(derived.status).toBe("draft");
+    expect(derived.verified_at).toBeNull();
+    expect(entry.approvers).toHaveLength(2);
+  });
+
+  it("verifies once a third operator has attested in it", () => {
+    const log = governanceLog([
+      VALIDATORS[0] as string,
+      VALIDATORS[1] as string,
+      VALIDATORS[2] as string,
+    ]);
+    const { derived } = deriveEntry(log.events, GOVERNANCE_ID, clock);
+
+    // Nothing about the approvals changed. What changed is how many operators
+    // could have made them, which is what the sentence promises a reader.
+    expect(derived.status).toBe("verified");
+    expect(derived.verified_at).not.toBeNull();
+  });
+});

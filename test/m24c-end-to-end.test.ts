@@ -25,7 +25,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { buildTranscriptArtifact, transcriptArtifactHash } from "../src/artifact.js";
 import { type Core } from "../src/core.js";
 import { base64urlEncode } from "../src/encoding.js";
@@ -175,7 +174,6 @@ const hashes: Record<string, string> = {};
 const ids: Record<string, string> = {};
 
 const beacon = new FixtureBeacon("m24c");
-const payout = new MockPayoutAdapter();
 
 function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, env, { ...deps, now, beacon });
@@ -252,7 +250,6 @@ async function register(
     operator: party.operator,
     domain,
     attestation: await attestFor(party.agent, party.operator, AT, domain),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -420,7 +417,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout,
     fetcher: new FixtureFetcher(PAGES),
     beacon,
   };
@@ -529,7 +525,6 @@ beforeAll(async () => {
     pinned: pinnedSet([]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout,
   });
 
   // The redacted transcript, built last because its hashes are what the
@@ -844,7 +839,6 @@ describe("a redacted transcript payload is archived and disclosed on a window", 
       pinned: pinnedSet([]),
       ineligibleAgents: new Set<string>(),
       anchor: new FakeAnchorAdapter(null),
-      payout,
     });
   }, 600_000);
 

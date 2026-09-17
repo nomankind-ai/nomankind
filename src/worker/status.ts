@@ -67,7 +67,6 @@ import {
   latestSeal,
   ledgerCursor,
   newestUpgradedAnchor,
-  payoutRows,
   readCounters,
   reconciliationRows,
   sweepSteps,
@@ -161,9 +160,9 @@ function detailNumber(
  * The numbers the sweep counts once a run so the board does not count them once
  * a view.
  *
- * Named here rather than imported from src/worker/sweep.ts for the same reason
- * `METERING_CURSOR` is: that module is the whole sweep, and this one only reads
- * a row it wrote. The keys are the counters step's own, and `countedNow` below
+ * Named here rather than imported from src/worker/sweep.ts: that module is the
+ * whole sweep, and this one only reads a row it wrote. The keys are the
+ * counters step's own, and `countedNow` below
  * is the same twelve questions asked live, for a deployment whose counters step
  * has not run yet.
  */
@@ -311,7 +310,6 @@ export async function statusInput(
   const registeredEvent = newest["operator_registered"] ?? null;
 
   const reconciliation = await reconciliationRows(db, 1);
-  const payouts = await payoutRows(db, 1);
   const anchor = await getAnchor(db, yesterday);
   const mirror = await latestMirror(db);
 
@@ -335,7 +333,6 @@ export async function statusInput(
       ? null
       : (registeredEvent.payload as EventPayloads["operator_registered"]);
   const priced = reconciliation[0] ?? null;
-  const paid = payouts[0] ?? null;
 
   return {
     environment: env.ENVIRONMENT,

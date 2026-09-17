@@ -2,8 +2,9 @@
  * The key doors end to end, under decision D-127: a key is free.
  *
  * "The record is free, no money anywhere." Nothing is bought, so the checkout,
- * the claim, the portal and the provider's webhook answer 410 and touch no
- * storage on the way; what replaces them is one door, `POST /keys/free`, which
+ * the claim, the portal and the provider's webhook are gone, addresses and all,
+ * and answer the 404 any unknown path answers without touching storage on the
+ * way; what replaces them is one door, `POST /keys/free`, which
  * hands a client one key per UTC day. A key is still an identity the log counts
  * under, so the three things a holder could always do — see the key, see what it
  * read day by day, and page its own receipts by counter — go on working exactly
@@ -16,8 +17,8 @@
  * The three things it holds hardest. A key is handed over exactly once and
  * stored as a hash, so a secret appears in exactly one response body, ever. One
  * client gets one key a day and the second ask is 429, which is the whole of
- * what stands between a free identity and an identity factory. And every retired
- * door says the same word, `retired`, rather than four different ones.
+ * what stands between a free identity and an identity factory. And a removed
+ * door is a removed door: 404, and not one read of the database on the way.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -77,9 +78,9 @@ function get(path: string, headers: Record<string, string> = {}): Request {
 /**
  * The same database, with every statement it is asked to prepare counted.
  *
- * A retired door must cost the log nothing at all: not a row, and not a read
- * either. Counting rows written would pass a door that read `api_keys` and then
- * answered 410, so what is counted is what reaches D1 in the first place.
+ * A removed door must cost the log nothing at all: not a row, and not a read
+ * either. Counting rows written would pass a route that read `api_keys` and
+ * then answered 404, so what is counted is what reaches D1 in the first place.
  */
 function counting(db: TestDatabase["db"]): {
   db: TestDatabase["db"];
@@ -177,22 +178,15 @@ describe("POST /keys/free", () => {
     expect(stored?.id).toBe(keyId);
     expect(stored?.counter).toBe(0);
     const raw = await store.db
-      .prepare(
-        `SELECT key_hash, customer, subscription, checkout_session
-           FROM api_keys WHERE id = ?`,
-      )
+      .prepare(`SELECT key_hash, client_day FROM api_keys WHERE id = ?`)
       .bind(keyId)
       .first<Record<string, string>>();
     expect(raw?.["key_hash"]).toBe(await keyHash(secret));
     expect(raw?.["key_hash"]).not.toBe(secret);
-    // The three NOT NULL columns the paid loop left behind carry synthetic
-    // values and no provider reference: no migration in this milestone.
-    expect(raw?.["customer"]).toMatch(/^free:client:[0-9a-f]{64}$/);
-    expect(raw?.["subscription"]).toMatch(/^free:sub:[0-9a-f]{64}:2026-09-11$/);
-    expect(raw?.["checkout_session"]).toMatch(
-      /^free:day:[0-9a-f]{64}:2026-09-11$/,
-    );
-    // And the address itself is nowhere in any of them.
+    // The provider's three columns are gone (migration 0023) and what carries
+    // the daily rule is the client digest and the UTC day.
+    expect(raw?.["client_day"]).toMatch(/^[0-9a-f]{64}:2026-09-11$/);
+    // And the address itself is nowhere in it.
     expect(JSON.stringify(raw)).not.toContain(CLIENT);
   }, 600_000);
 
@@ -252,12 +246,15 @@ describe("POST /keys/free", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The doors of the paid loop, retired
+// The doors of the paid loop, gone
 // ---------------------------------------------------------------------------
 
-describe("the retired money doors", () => {
-  it("answers 410 retired at all four, in the standard envelope", async () => {
-    const retired = [
+describe("the doors of the paid loop", () => {
+  it("answers 404 at all four: a removed route is an unknown path", async () => {
+    // D-127 item 2 took the checkout, the claim, the portal and the webhook
+    // out with the money they were for. A removed route is not a special case:
+    // it answers what any path nobody has ever heard of answers.
+    const gone = [
       await send(post("/keys/checkout", { tier: "standard" })),
       await send(get("/keys/claim?session=cs_anything")),
       await send(
@@ -265,16 +262,12 @@ describe("the retired money doors", () => {
       ),
       await send(post("/stripe/webhook", { id: "evt_1" })),
     ];
-    for (const response of retired) {
-      expect(response.status).toBe(410);
-      expect(await response.json()).toEqual({ error: "retired" });
+    for (const response of gone) {
+      expect(response.status).toBe(404);
     }
   }, 600_000);
 
-  it("asks the database nothing at all on the way to the 410", async () => {
-    // The reviewer's mutation: a door that read `api_keys` before answering 410
-    // would still answer 410 and still write nothing, and every assertion below
-    // would have passed. This is the one that catches it.
+  it("asks the database nothing at all on the way to the 404", async () => {
     const watched = counting(store.db);
     const watchedEnv = { ...env, DB: watched.db };
     const calls: Request[] = [
@@ -285,12 +278,12 @@ describe("the retired money doors", () => {
     ];
     for (const request of calls) {
       const response = await handleRequest(request, watchedEnv, deps);
-      expect([request.url, response.status]).toEqual([request.url, 410]);
+      expect([request.url, response.status]).toEqual([request.url, 404]);
     }
     expect(watched.statements()).toBe(0);
   }, 600_000);
 
-  it("writes nothing: no key, no stripe event, no row of any kind", async () => {
+  it("writes nothing, and the provider's own table is not there to write to", async () => {
     const before = await store.db
       .prepare(`SELECT COUNT(*) AS n FROM api_keys`)
       .first<{ n: number }>();
@@ -301,20 +294,9 @@ describe("the retired money doors", () => {
       .prepare(`SELECT COUNT(*) AS n FROM api_keys`)
       .first<{ n: number }>();
     expect(after?.n).toBe(before?.n);
-    const events = await store.db
-      .prepare(`SELECT COUNT(*) AS n FROM stripe_events`)
-      .first<{ n: number }>();
-    expect(events?.n).toBe(0);
-  }, 600_000);
-
-  it("still says what the method is, before it says the door is gone", async () => {
-    const checkout = await send(get("/keys/checkout"));
-    expect(checkout.status).toBe(405);
-    expect(checkout.headers.get("allow")).toBe("POST");
-
-    const webhook = await send(get("/stripe/webhook"));
-    expect(webhook.status).toBe(405);
-    expect(webhook.headers.get("allow")).toBe("POST");
+    await expect(
+      store.db.prepare(`SELECT COUNT(*) AS n FROM stripe_events`).first(),
+    ).rejects.toThrow();
   }, 600_000);
 });
 

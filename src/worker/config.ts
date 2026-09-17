@@ -16,18 +16,16 @@
  * genesis door told the maintainer 403 `not_maintainer` rather than 503
  * `maintainer_not_configured` (the QA of 2026-09-12).
  *
- * The second is that `ENVIRONMENT` is a closed set. It chooses the payout, the
- * payment and the witness adapters, and every one of those chooses its mock by
- * asking whether the name is `production` — so a var misspelt `prodcution`
- * selected the mocks silently and a deployment would have paid nobody, minted
- * free keys and countersigned its own seals with a published test key. The
- * names are written down here so an unknown one can be refused at the door
- * rather than fallen through further in.
+ * The second is that `ENVIRONMENT` is a closed set. It chooses the witness and
+ * anchor adapters, and each of those chooses its mock by asking whether the
+ * name is `production` — so a var misspelt `prodcution` selected the mocks
+ * silently and a deployment would have countersigned its own seals with a
+ * published test key. The names are written down here so an unknown one can be
+ * refused at the door rather than fallen through further in.
  *
  * Pure: no I/O, no clock, no storage.
  */
 
-import { PRODUCTION } from "../adapters/payout.js";
 import type { Env } from "./env.js";
 
 /**
@@ -66,16 +64,21 @@ export function fetcherAgentId(env: Env): string | null {
 }
 
 /**
+ * The one environment name the adapters choose on, written down once.
+ *
+ * The witness and anchor adapters import it from here rather than spelling it
+ * again, so the refusal that rests on the name cannot drift from the adapter
+ * selection that rests on it too. It is not the only place in src/ that spells
+ * the word — the status board and the landing page each compare against their
+ * own literal (the QA of 2026-09-13).
+ */
+export const PRODUCTION = "production";
+
+/**
  * The environment names this code knows, and the only ones.
  *
- * They are written down here rather than nowhere on purpose, and this is the
- * one list of them: `PRODUCTION` is imported from src/adapters/payout.ts rather
- * than spelt again, so the refusal that rests on the name cannot drift from the
- * adapter selection that rests on it too. It is not the only place in src/ that
- * spells the word — the payments adapter, the status board and the landing page
- * each compare against their own literal (the QA of 2026-09-13) — so this says
- * what it can honestly say: one list of the environments, and this refusal and
- * the payout adapter reading the same constant.
+ * One list of them, so an unknown name is refused at the door rather than
+ * quietly selecting a mock.
  */
 export const ENVIRONMENTS: readonly string[] = Object.freeze([
   "local",

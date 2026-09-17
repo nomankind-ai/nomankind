@@ -26,7 +26,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { buildExport, type ExportResult } from "../src/cli/export.js";
 import {
   CHECKPOINT_CITATION,
@@ -321,7 +320,6 @@ describe("the demo checkpoint, end to end", () => {
     deps = {
       now: NOW,
       dns: new FixtureResolver(records),
-      payout: new MockPayoutAdapter(),
       fetcher: new FixtureFetcher(PAGES),
     };
     // Signed with a fixture operator's key, which is what `--sign <key.json>`

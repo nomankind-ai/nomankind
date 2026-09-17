@@ -197,19 +197,13 @@ describe("renderHowItWorks", () => {
     );
   });
 
-  it("names the release window in the read stage, from policy", () => {
+  it("says in the read stage that an entry is released by its seal", () => {
     const squeezed = page.replace(/\s+/g, " ");
     expect(squeezed).toContain(
-      `An entry is released ${RELEASE_WINDOW_DAYS} days after the seal that covers it`,
+      "An entry is released by the seal that covers it",
     );
-    expect(squeezed).toContain(
-      `RELEASE_WINDOW_DAYS ${RELEASE_WINDOW_DAYS}`,
-    );
-    // In the read stage and not somewhere else on the page.
-    const read = page.indexOf(`id="s4"`);
-    const next = page.indexOf(`id="s5"`);
-    expect(page.indexOf("RELEASE_WINDOW_DAYS")).toBeGreaterThan(read);
-    expect(page.indexOf("RELEASE_WINDOW_DAYS")).toBeLessThan(next);
+    // The window is gone with the code behind it (D-127 item 1).
+    expect(page).not.toContain("RELEASE_WINDOW_DAYS");
     expect(page).not.toContain("<script");
     expect(page).not.toContain(' style="');
   });

@@ -176,9 +176,7 @@ describe("the free tier's global ceiling", () => {
       keyHash: await minted.hash,
       tier: "standard",
       status: "active",
-      customer: "cus_ceiling",
-      subscription: "sub_ceiling",
-      checkoutSession: "cs_ceiling",
+      clientDay: "cs_ceiling",
       createdAt: NOW.toISOString(),
     });
 

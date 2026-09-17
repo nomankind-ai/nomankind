@@ -33,14 +33,12 @@ import { runDispute } from "../src/cli/dispute.js";
 import { runReconfirm } from "../src/cli/reconfirm.js";
 import { runRevalidate } from "../src/cli/revalidate.js";
 import {
-  ENTRY_WITHHELD,
   UNREGISTERED_OPERATOR,
   errorsOf,
   refusalLines,
   runValidator,
   stopLine,
   unregisteredOperatorDetail,
-  withheldRelease,
   type HttpClient,
   type ValidatorIo,
   type ValidatorKey,
@@ -51,25 +49,6 @@ import { makeAgent } from "./helpers/registry.js";
 const BASE = "https://nomankind.test";
 const NOW = new Date("2026-09-13T12:00:00.000Z");
 const ENTRY_ID = `nmk_${"8".repeat(32)}`;
-const RELEASE_DATE = "2026-10-08T09:00:00.000Z";
-
-/** The withheld view `GET /entries/{id}` serves a reader inside the window. */
-function withheldBody(releaseDate: string | null): Record<string, unknown> {
-  return {
-    proof: {
-      id: ENTRY_ID,
-      subject: "example/kestrel-1",
-      claim: null,
-      citation: null,
-      evidence: null,
-      observation: null,
-    },
-    sidecar: { effective_tier: "stated" },
-    entry_hash: `sha256:${"c".repeat(64)}`,
-    release_date: releaseDate,
-  };
-}
-
 /** A released entry: the door hands the whole thing over, core keys and all. */
 function releasedEntry(): Record<string, unknown> {
   return {
@@ -159,68 +138,10 @@ async function keyOf(): Promise<ValidatorKey> {
   return { agentId: agent.agentId, privateKey: agent.privateKey };
 }
 
-describe("the withheld view is not a malformed entry", () => {
-  it("reads the envelope the window serves, and nothing else as one", () => {
-    expect(withheldRelease(withheldBody(RELEASE_DATE))).toEqual({
-      released_at: RELEASE_DATE,
-    });
-    // Nothing has sealed the submission yet: there is no date to name, and the
-    // honest answer is null rather than an invented instant.
-    expect(withheldRelease(withheldBody(null))).toEqual({ released_at: null });
-    // An entry is an entry: it carries neither `proof` nor `entry_hash`.
-    expect(withheldRelease({ id: ENTRY_ID, claim: "x" })).toBeNull();
-    expect(withheldRelease(null)).toBeNull();
-    expect(withheldRelease([])).toBeNull();
-  });
-});
-
 describe("validate stops on the answer the door actually gave", () => {
-  it("says entry_withheld, with the release date, for a registered key", async () => {
-    const http = new StubDoor({
-      entry: { status: 200, body: withheldBody(RELEASE_DATE) },
-      operator: "k1.example",
-    });
-    const io = recorder();
-    const run = await runValidator({
-      baseUrl: BASE,
-      entryId: ENTRY_ID,
-      io: io.io,
-      deps: { http, fetcher: NEVER_FETCHED, now: NOW, key: await keyOf() },
-    });
-    expect([run.ok, run.error]).toEqual([false, ENTRY_WITHHELD]);
-    expect(run.detail).toBe(`released_at ${RELEASE_DATE}`);
-    expect(stopLine(ENTRY_ID, run)).toBe(
-      `${ENTRY_ID}: ${ENTRY_WITHHELD} released_at ${RELEASE_DATE}`,
-    );
-    // The run stopped at the read: nothing was signed and nothing was posted.
-    expect(run.record).toBeNull();
-    expect(http.paths.some((call) => call.startsWith("POST"))).toBe(false);
-  });
-
   it("says unregistered_operator when the registry puts nobody behind the key", async () => {
-    const http = new StubDoor({
-      entry: { status: 200, body: withheldBody(RELEASE_DATE) },
-      operator: null,
-    });
-    const run = await runValidator({
-      baseUrl: BASE,
-      entryId: ENTRY_ID,
-      io: recorder().io,
-      deps: { http, fetcher: NEVER_FETCHED, now: NOW, key: await keyOf() },
-    });
-    expect([run.ok, run.error]).toEqual([false, UNREGISTERED_OPERATOR]);
-    expect(run.detail).toContain("bound to no registered operator");
-    // The two stops are told apart by the registry door and by nothing else:
-    // the entry body was byte-identical in both runs.
-    expect(http.paths.filter((call) => call.startsWith("GET /agents/"))).toHaveLength(1);
-  });
-
-  it("says unregistered_operator on a released entry too, in the same words", async () => {
-    // The entry has released, so the door hands the whole thing over and the
-    // withheld view never appears: the key is found out one line later, at the
-    // run's own registry read. Same condition, same word, same sentence -- it
-    // used to answer `unregistered_agent` here and `unregistered_operator`
-    // inside the window, and only one of the two was ever documented.
+    // The door hands the whole entry over to everybody (D-127), so the key is
+    // found out at the run's own registry read and nowhere else.
     const http = new StubDoor({
       entry: { status: 200, body: releasedEntry() },
       operator: null,
@@ -257,34 +178,14 @@ describe("validate stops on the answer the door actually gave", () => {
 });
 
 describe("the other three commands read the same answer the same way", () => {
-  it("stops reconfirm at entry_withheld and unregistered_operator", async () => {
-    const key = await keyOf();
-    const withheld = await runReconfirm({
-      key,
-      baseUrl: BASE,
-      entryId: ENTRY_ID,
-      deps: {
-        http: new StubDoor({
-          entry: { status: 200, body: withheldBody(RELEASE_DATE) },
-          operator: "k1.example",
-        }),
-        fetcher: NEVER_FETCHED,
-        now: NOW,
-        io: recorder().io,
-      },
-    });
-    expect([withheld.error, withheld.detail]).toEqual([
-      ENTRY_WITHHELD,
-      `released_at ${RELEASE_DATE}`,
-    ]);
-
+  it("stops reconfirm at unregistered_operator", async () => {
     const bare = await runReconfirm({
-      key,
+      key: await keyOf(),
       baseUrl: BASE,
       entryId: ENTRY_ID,
       deps: {
         http: new StubDoor({
-          entry: { status: 200, body: withheldBody(null) },
+          entry: { status: 200, body: releasedEntry() },
           operator: null,
         }),
         fetcher: NEVER_FETCHED,
@@ -295,7 +196,7 @@ describe("the other three commands read the same answer the same way", () => {
     expect(bare.error).toBe(UNREGISTERED_OPERATOR);
   });
 
-  it("stops revalidate --resolve at entry_withheld, with the unsealed date named", async () => {
+  it("stops revalidate --resolve at unregistered_operator", async () => {
     const run = await runRevalidate({
       key: await keyOf(),
       baseUrl: BASE,
@@ -303,31 +204,7 @@ describe("the other three commands read the same answer the same way", () => {
       resolve: "held",
       deps: {
         http: new StubDoor({
-          entry: { status: 200, body: withheldBody(null) },
-          operator: "k1.example",
-        }),
-        fetcher: NEVER_FETCHED,
-        now: NOW,
-        io: recorder().io,
-      },
-    });
-    // Nothing has sealed the submission, so there is no date to give and the
-    // line says so rather than printing an empty one.
-    expect([run.error, run.detail]).toEqual([
-      ENTRY_WITHHELD,
-      "released_at unsealed",
-    ]);
-  });
-
-  it("stops dispute before it reads the fields file", async () => {
-    const run = await runDispute({
-      key: await keyOf(),
-      baseUrl: BASE,
-      targetId: ENTRY_ID,
-      fields: { nonsense: true },
-      deps: {
-        http: new StubDoor({
-          entry: { status: 200, body: withheldBody(RELEASE_DATE) },
+          entry: { status: 200, body: releasedEntry() },
           operator: null,
         }),
         fetcher: NEVER_FETCHED,
@@ -335,7 +212,26 @@ describe("the other three commands read the same answer the same way", () => {
         io: recorder().io,
       },
     });
-    expect([run.error, run.correctionId]).toEqual([UNREGISTERED_OPERATOR, null]);
+    expect(run.error).toBe(UNREGISTERED_OPERATOR);
+  });
+
+  it("stops dispute on the fields it was handed, and files nothing", async () => {
+    const run = await runDispute({
+      key: await keyOf(),
+      baseUrl: BASE,
+      targetId: ENTRY_ID,
+      fields: { nonsense: true },
+      deps: {
+        http: new StubDoor({
+          entry: { status: 200, body: releasedEntry() },
+          operator: null,
+        }),
+        fetcher: NEVER_FETCHED,
+        now: NOW,
+        io: recorder().io,
+      },
+    });
+    expect([run.error, run.correctionId]).toEqual(["bad_fields", null]);
   });
 });
 
@@ -414,7 +310,12 @@ describe("the stop line", () => {
     );
     expect(stopLine("dispute", { error: null })).toBe("dispute: unknown error");
     expect(
-      stopLine("nmk_x", { error: ENTRY_WITHHELD, detail: "released_at 2026-10-08" }),
-    ).toBe("nmk_x: entry_withheld released_at 2026-10-08");
+      stopLine("nmk_x", {
+        error: UNREGISTERED_OPERATOR,
+        detail: "agent nmk_agent_x is bound to no registered operator",
+      }),
+    ).toBe(
+      "nmk_x: unregistered_operator agent nmk_agent_x is bound to no registered operator",
+    );
   });
 });

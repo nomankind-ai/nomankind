@@ -60,7 +60,7 @@ export const DOC_GROUPS: readonly Group[] = Object.freeze([
       Object.freeze({
         href: "/api",
         title: "API",
-        line: "Every door: reading with receipts, syncing the delta, keys and tiers, the refusals, the release window.",
+        line: "Every door: reading with receipts, syncing the delta, keys and tiers, and the refusals.",
       }),
       Object.freeze({
         href: "/independence",
@@ -99,7 +99,7 @@ export const DOC_GROUPS: readonly Group[] = Object.freeze([
       Object.freeze({
         href: "/docs/fork",
         title: "Fork guide",
-        line: "What to clone, how to verify a mirror, how to keep going without nomankind, and the release window.",
+        line: "What to clone, how to verify a mirror, and how to keep going without nomankind.",
       }),
       Object.freeze({
         // The mockup writes this card's href as /mirror; the page itself is
