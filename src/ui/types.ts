@@ -21,6 +21,8 @@ import type { Sidecar } from "../derive.js";
 import type { CommunityBinding, Event } from "../events.js";
 import type { OperatorKind, Tier, VerificationClass } from "../policy.js";
 import type { RecordMarks, StandingCounts } from "../standing.js";
+import type { VOTE_QUESTIONS } from "../policy.js";
+import type { tallyOf } from "../vote.js";
 import type { IndependenceReport } from "../independence.js";
 import type { LedgerBalance, LedgerRow } from "../ledger.js";
 import type { Seal } from "../seal.js";
@@ -839,4 +841,40 @@ export interface MirrorData {
  */
 export interface IndependenceData {
   readonly report: IndependenceReport;
+}
+
+/**
+ * One question the governance vote is open on (decision D-130 item 4, D-131
+ * item 2), and what the log makes of it.
+ *
+ * Two halves and neither is the other's. The question is policy — its id, its
+ * text, its options and what it is about all move only by a recorded decision —
+ * and the tally is a fold over the sealed `vote_cast` events at the route's own
+ * instant. Nothing here is stored as a result: a vote is a signed event like
+ * every other, and the counts are recomputed on every view, so a reader who
+ * folds the same events gets the same numbers.
+ */
+export interface VoteQuestionView {
+  /** The question exactly as src/policy.ts publishes it. */
+  readonly question: (typeof VOTE_QUESTIONS)[number];
+  /**
+   * The state, the window, the counts and the voters, exactly as `tallyOf`
+   * returned them. `advisory` is on it and is always true: the tally advises
+   * the maintainer and binds nobody until the record's hosting decentralizes.
+   */
+  readonly tally: Awaited<ReturnType<typeof tallyOf>>;
+}
+
+/**
+ * What the votes page is handed.
+ *
+ * `only` is the question the reader asked for at `/votes/{id}`, or null at
+ * `/votes`, which lists every question policy publishes. One renderer for both
+ * because they are one document at two widths: the same rows, the same
+ * eligibility and the same advisory sentence, and a second renderer would be a
+ * second chance for the two to disagree about what a vote is.
+ */
+export interface VotesData {
+  readonly questions: readonly VoteQuestionView[];
+  readonly only: string | null;
 }

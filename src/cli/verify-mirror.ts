@@ -101,6 +101,7 @@ import { verifyEntrySignature } from "../sign.js";
 import {
   verifyAttestations,
   verifyOffline,
+  verifyVotes,
   type Capture,
   type LogBundle,
   type Registry,
@@ -1115,6 +1116,40 @@ async function checkAttestations(
   }
 }
 
+/**
+ * Every vote in the clone, through `verifyVotes` (decision D-130 item 4).
+ *
+ * One question and one answer: do the sealed votes hold up on their own terms —
+ * the signature, the voter's tier at the vote's own position, and the one vote
+ * per operator and per perimeter. Nothing is compared against a file, because
+ * the tally is a fold and the mirror publishes no result to disagree with: a
+ * forker recomputes it from the events they hold, which is what this does.
+ */
+async function checkVotes(
+  io: ValidatorIo,
+  tally: Tally,
+  mirror: Mirror,
+): Promise<void> {
+  const { asOf } = headOf(mirror);
+  const report = await verifyVotes({
+    as_of: asOf,
+    events: mirror.full,
+    registry: mirror.registry,
+    seals: mirror.seals,
+    // No vote names a capture: the check is signatures, standing and counting.
+    captures: {},
+  });
+  if (report.ok) {
+    io.stdout(`ok votes ${report.questions.length}`);
+    return;
+  }
+  for (const one of report.questions) {
+    for (const diff of one.diffs) {
+      fail(io, tally, `vote/${one.question_id}`, diff.check, diff.field, diff.reason);
+    }
+  }
+}
+
 /** `standing.json`, recomputed through `standingAt` over the clone's events. */
 async function checkStanding(
   io: ValidatorIo,
@@ -1234,6 +1269,13 @@ export async function verifyMirror(
     await checkSeals(io, tally, mirror);
     await checkAnchors(io, tally, mirror);
     await checkEntries(io, tally, mirror, dir, plan, http);
+    // The votes (D-130 item 4): every layout carries them, because they are
+    // events and every layout carries the events. A clone that holds a vote
+    // nobody signed, a vote by an operator that was not senior when it was
+    // cast, or a second vote by one operator or one perimeter is a clone whose
+    // governance does not add up, and the check is a fold over the clone's own
+    // events — there is no votes file to compare against, by design.
+    await checkVotes(io, tally, mirror);
     // The three families a v1 directory does not carry are not asked of one:
     // the layout it claims is the layout it is checked as.
     if (!isV1(mirror)) {

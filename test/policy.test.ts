@@ -144,6 +144,11 @@ const EXPECTED_POLICY_KEYS = [
   "TIERS",
   "STANDING_SENIOR",
   "DOMAIN_EARLY_ACCESS_DAYS",
+  // The governance vote (D-130 item 4, D-131 item 2): how long a question is
+  // open, how many are open at once, and the questions themselves.
+  "VOTE_WINDOW_DAYS",
+  "VOTE_QUESTIONS_OPEN_MAX",
+  "VOTE_QUESTIONS",
   "STANDING_TRUSTED_STAY",
   "STANDING_DECAY_PAUSED",
   "RELEASE_WINDOW_DAYS",

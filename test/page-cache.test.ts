@@ -589,6 +589,8 @@ const NOT_CACHED: Readonly<Record<string, string>> = Object.freeze({
     "the landing stylesheet, cached the same way for the same reason",
   "/mirror":
     "a permanent redirect to /mirror/latest, and never a 200 for a cache to hold",
+  "/votes":
+    "a tally that moves with every vote cast and a window that closes on a clock (D-130 item 4), so it is served from the log each time: a page held for a minute could tell a reader a question is still open after it has closed",
 });
 
 describe("every page the route serves", () => {

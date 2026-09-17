@@ -26,6 +26,12 @@
  * is one compact document per line in seq order with a trailing newline; and
  * every list is sorted by a key the log itself fixes.
  *
+ * The governance vote (D-130 item 4) needs no family of its own and has none:
+ * a `vote_cast` is an event, the events files carry every sealed event with its
+ * payload, and the tally is a fold (`tallyOf`) that a forker runs over the
+ * clone's own events. A `votes.json` would be this Worker's word for a count
+ * anybody can recompute, which is exactly what the mirror exists not to be.
+ *
  * Nothing unsealed is ever exported. The mirror is the sealed record: the events
  * are the ones the seals cover, the entries are derived at the sealed head, and
  * an event the log has not committed to has no business in an archive somebody

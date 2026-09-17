@@ -582,6 +582,9 @@ async function page(
     const inclusion = await buildInclusionProof(event, cover.seal, cover.batch);
     if (inclusion === null) return refuse(500, "bad_proof");
 
+    // Which of the three this event is (src/sync.ts). A `vote_cast` is about a
+    // published question and not about an entry, so it rides as an "event"
+    // item beside the registry's own, with its proof and no entry state.
     const kind = syncItemKind(event);
     const state =
       kind === "event" || event.entry_id === null
