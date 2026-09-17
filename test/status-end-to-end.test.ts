@@ -23,7 +23,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon, type BeaconReader } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import {
   FETCH_TIMEOUT_MS,
   STATUS_ATTENTION_AFTER_INTERVALS,
@@ -92,12 +91,11 @@ let latecomer: Party;
 let settled = NOW;
 
 const beacon = new FixtureBeacon("status");
-const payout = new MockPayoutAdapter();
 /** One witness nomankind does not control, with a real key behind it. */
 let witness: FakeWitness;
 
 function send(request: Request, now: Date, on: Env = env): Promise<Response> {
-  return handleRequest(request, on, { now, dns, payout, beacon });
+  return handleRequest(request, on, { now, dns, beacon });
 }
 
 async function post(
@@ -165,7 +163,6 @@ async function sweep(at: Date): Promise<void> {
     pinned: pinnedSet([witness]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout,
     trigger: "alarm",
   });
 }
@@ -177,7 +174,6 @@ async function register(party: Party, now: Date): Promise<void> {
     {
       operator: party.operator,
       attestation: await attestFor(party.agent, party.operator, now.toISOString()),
-      payout: { reference: VERIFIED_REFERENCE },
     },
     now,
   );
@@ -387,7 +383,7 @@ describe("a healthy world", () => {
     });
   }, 240_000);
 
-  it("gathers the whole board in fourteen statements", async () => {
+  it("gathers the whole board in thirteen statements", async () => {
     const { db: watched, statements } = counting(store.db);
     const at = settled.toISOString();
     const input = await statusInput(watched, { ...env, DB: watched }, at);
@@ -404,11 +400,12 @@ describe("a healthy world", () => {
     // serialized statements on a page built to be hammered: eleven of them were
     // numbers the sweep can count once a run and now does, and four were the
     // same newest-of-a-type seek asked four times and now grouped into one. The
-    // fourteenth is the log's head, which stayed live so the sealing light
-    // reads it at the same instant as the unsealed count beside it. A read
-    // added back to this path has to be argued for, in the open, against this
-    // line.
-    expect(statements()).toBe(14);
+    // thirteenth is the log's head, which stayed live so the sealing light
+    // reads it at the same instant as the unsealed count beside it. The
+    // fourteenth was the newest payout, and it went with the payouts (D-127).
+    // A read added back to this path has to be argued for, in the open,
+    // against this line.
+    expect(statements()).toBe(13);
   }, 120_000);
 
   it("sees an event appended since the last sweep, on both halves of the seal rule", async () => {

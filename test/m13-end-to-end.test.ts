@@ -23,7 +23,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import {
   buildTranscriptArtifact,
   receiptArtifactHash,
@@ -178,7 +177,6 @@ beforeAll(async () => {
       [txtRecordName(OPERATOR)]: [carol.agentId],
       [txtRecordName(READER_OPERATOR)]: [reader.agentId],
     }),
-    payout: new MockPayoutAdapter(),
   };
 
   htmlHash = await pageHash(HTML);
@@ -195,7 +193,6 @@ beforeAll(async () => {
     body: {
       operator: READER_OPERATOR,
       attestation: await attestFor(reader, READER_OPERATOR, AT),
-      payout: { reference: VERIFIED_REFERENCE },
     },
     timestamp: AT,
   });
@@ -662,7 +659,6 @@ describe("the operator behind the key", () => {
       body: {
         operator: OPERATOR,
         attestation: await attestFor(carol, OPERATOR, AT),
-        payout: { reference: VERIFIED_REFERENCE },
       },
       timestamp: AT,
     });

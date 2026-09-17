@@ -24,7 +24,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import type { Core } from "../src/core.js";
 import type { ApproverRecord } from "../src/events.js";
 import { archiveAddress } from "../src/normalize.js";
@@ -133,7 +132,6 @@ beforeAll(async () => {
     now: NOW,
     fetcher,
     dns: new FixtureResolver(records),
-    payout: new MockPayoutAdapter(),
   };
 
   for (const party of parties) {
@@ -143,7 +141,6 @@ beforeAll(async () => {
         body: {
           operator: party.operator,
           attestation: await attestFor(party.agent, party.operator, AT),
-          payout: { reference: VERIFIED_REFERENCE },
         },
         timestamp: AT,
       }),
@@ -168,7 +165,6 @@ beforeAll(async () => {
       body: {
         operator: BOB_OPERATOR,
         attestation: await attestFor(bob, BOB_OPERATOR, AT),
-        payout: { reference: VERIFIED_REFERENCE },
       },
       timestamp: AT,
     }),

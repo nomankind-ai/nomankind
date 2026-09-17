@@ -17,11 +17,10 @@
  *
  * Decision D-127, the record is free: every entry is released the moment it is
  * sealed, so a keyless reader reads a just-sealed entry's claim here exactly as
- * a keyed one does and the claim column is the claim on every row. The withheld
- * cell stays in the code, dormant, for a fork that publishes a release window of
- * its own; every other column — the position, the status, the subject, the
- * category, the domain, the tier, the dates — is proof or derived from proof and
- * is shown as it always is.
+ * a keyed one does and the claim column is the claim on every row. Every other
+ * column — the position, the status, the subject, the category, the domain, the
+ * tier, the dates — is proof or derived from proof and is shown as it always
+ * is.
  *
  * Decision D-125, the domain column: the registered domain out of each entry's
  * signed core is read beside its category, on every page and under every filter.
@@ -141,25 +140,10 @@ function filters(filter: EntriesFilter): Safe {
 }
 
 /**
- * The claim cell, or what stands there when a reader was not served the content
- * (decision D-100, dormant at a window of zero days).
- *
- * Nothing on this log reaches the second branch: an entry is released by the
- * seal that covers it, so the claim is the cell. A fork that publishes a window
- * of its own gets the row back — still linking the entry, because the proof of
- * it is on that page either way, and naming the date it was given rather than a
- * date this listing worked out.
+ * The claim cell: the claim, linking the entry (D-127, the record is free).
  */
 export function claimCell(entry: EntryRow): Safe {
-  if (entry.withheld === null) {
-    return html`<a href="/entries/${entry.id}">${entry.claim}</a>`;
-  }
-  const date = entry.withheld.releaseDate;
-  return html`<a class="dim" href="/entries/${entry.id}"
-    >${date === null
-      ? "content not served to this reader"
-      : `content served from ${fmtDate(date)}`}</a
-  >`;
+  return html`<a href="/entries/${entry.id}">${entry.claim}</a>`;
 }
 
 function row(entry: EntryRow): Safe {

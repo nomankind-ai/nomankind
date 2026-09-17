@@ -31,19 +31,12 @@
  * an event the log has not committed to has no business in an archive somebody
  * may still be reading in ten years.
  *
- * Nothing unreleased is exported in full either (decision D-100). A seal's
- * events about entries are written whole once that seal's `sealed_at` is a
- * window old, and until then they are hash lines: the seq, the instant, the
- * type, the entry id, the chain link and the hash, with `payload: null` and
- * `withheld: true`. Its registry events are written whole from the first day,
- * because the registry is public from the first minute (src/release.ts,
- * `REGISTRY_EVENT_TYPES`) — so a fork can name the operators out of the seal
- * files on the day the clone is taken rather than a window later. An
- * entry gets its `entries/<id>.json` when its own submission event releases, and
- * `index.json` carries a row for it from the first day either way -- every index
- * column is proof, and the row names the date the file will appear on. So a seal
- * file changes exactly once in its life, on the day its events release, and the
- * push's changed-blob diff turns that into one commit rather than a rewrite.
+ * Everything sealed is exported in full (decision D-127): the record is free
+ * from the seal, so every event under a seal is written with its payload, every
+ * sealed entry gets its `entries/<id>.json`, and `index.json` carries a row for
+ * each with `release_date` naming the seal date the content opened on. A seal
+ * file is written once and never rewritten, so the push's changed-blob diff is
+ * one commit per seal rather than a rewrite of the log.
  *
  * Three of the families are not read from anywhere at all — they are recomputed
  * here, out of the sealed events, at the sealed head: the attestations
@@ -71,28 +64,14 @@
  */
 
 import { DOMAIN_SLUGS, MIRROR, NORM_VERSION, SCHEMA_VERSION } from "./policy.js";
-import {
-  isEventReleased,
-  isReleased,
-  isWithheld,
-  releaseDateOf,
-  releasedHead,
-  withholdEvent,
-  type WithheldEvent,
-} from "./release.js";
 import { deriveAttestation, type DerivedAttestation } from "./attest.js";
 import { bountyAccrual } from "./bounty.js";
 import { deriveEntry, type Sidecar } from "./derive.js";
-import { recordMeasured } from "./evidence.js";
 import {
   bountyAccrualRow,
-  clawbackRows,
   disputeRewardRow,
-  readShareRows,
   reconciliationRow,
-  type EntryShareState,
   type LedgerRow,
-  type ReadShareSlotState,
 } from "./ledger.js";
 import {
   STANDING_FORMULA,
@@ -200,18 +179,12 @@ export const SEAL_SEQ_DIGITS = 8;
  * the caller read the log and the seals at two different moments — an export
  * built from that would be missing events a seal commits to, and a verifier
  * would call the mirror broken rather than the read.
- * `withheld`: a seal whose window has run out by this export's own clock was
- * handed over as hash lines, which means the caller read the log at a different
- * instant from the one it is exporting at, or with less access than the export
- * claims (decision D-100). Refused rather than written: an export that quietly
- * left out the content of a released seal would be a mirror that disagrees with
- * every other copy of the same head.
  */
 export class MirrorError extends Error {
   override readonly name = "MirrorError";
-  readonly reason: "no_seal" | "gap" | "withheld";
+  readonly reason: "no_seal" | "gap";
 
-  constructor(reason: "no_seal" | "gap" | "withheld", detail: string) {
+  constructor(reason: "no_seal" | "gap", detail: string) {
     super(`buildMirror: ${reason}: ${detail}`);
     this.reason = reason;
   }
@@ -284,26 +257,11 @@ export interface MirrorInput {
   /**
    * The published window, from src/policy.ts, as the manifest records it.
    *
-   * The rule itself is src/release.ts's and reads the same number; this is what
-   * a reader of the directory is told it was built under, so a clone carries the
-   * window it was made with rather than whatever the code says today.
+   * Zero since D-127 and frozen there, and still written: it is a column of the
+   * mirror format that every reader of a v1, v2 or v3 clone reads, so a clone
+   * carries the number it was made under rather than nothing at all.
    */
   readonly release_window_days: number;
-  /**
-   * Which of the two directories this is (decision D-100), `released` by
-   * default and by omission.
-   *
-   * `released` is the published export: a seal inside its window has its events
-   * about entries written as hash lines and its registry events written whole,
-   * and an entry whose submission has not opened has no file. `full`
-   * is the copy a fork entitled to the content takes with a key or a signature
-   * — the same directory with every seal and every entry written whole. It is a
-   * superset and never a different reading of the clock: `released_head`,
-   * `standing_position` and the three recomputed families are judged at `now` in
-   * both, so an entitled fork's manifest says exactly what the public export's
-   * says for the same instant, and the extra files are the extra it paid for.
-   */
-  readonly view?: "released" | "full";
   /** Every seal, in seq order. */
   readonly seals: readonly Seal[];
   /** Every anchor, in date order. */
@@ -345,24 +303,6 @@ function text(source: unknown, key: string): string | null {
   if (typeof source !== "object" || source === null) return null;
   const value = (source as Record<string, unknown>)[key];
   return typeof value === "string" ? value : null;
-}
-
-/**
- * The `sealed_at` of the newest released seal, or the empty string when no seal
- * has released: the instant the three recomputed families are folded at.
- *
- * Their own head's instant rather than the sealed head's, for the reason they
- * are folded over the released events at all: a clone has to be able to reach
- * the same three files from the same events, and the instant is one of the
- * inputs.
- */
-function newestReleased(seals: readonly Seal[], now: Date): string {
-  let newest: Seal | null = null;
-  for (const seal of seals) {
-    if (!isReleased(seal.sealed_at, now)) continue;
-    if (newest === null || seal.seq > newest.seq) newest = seal;
-  }
-  return newest === null ? "" : newest.sealed_at;
 }
 
 /**
@@ -447,9 +387,8 @@ function indexRow(
     stale: entry["stale"],
     superseded_by: entry["superseded_by"],
     entry_hash: record.entry_hash,
-    // Every column above is proof and is written for a released entry and a
-    // withheld one alike -- there is no content column in the index to null --
-    // and this is the one the window adds: the day the file appears.
+    // The instant the content opened, which is the seal date (D-127): the
+    // column the mirror format has always carried, now equal to the seal.
     release_date: releaseDate,
   };
 }
@@ -565,33 +504,6 @@ export function mirrorStanding(
   };
 }
 
-/** What pricing needs about an entry, held once per entry across the fold. */
-interface PricingState {
-  readonly author_operator: string | null;
-  readonly read_share_slots: readonly ReadShareSlotState[] | null;
-  readonly expires_at: string | null;
-  readonly verified: boolean;
-  /** The tier verification fixed (D-035), which is what the rate is read from. */
-  readonly effective_tier: Sidecar["effective_tier"];
-}
-
-/**
- * Whether the holder seated at `seq` measured anything (decision D-087).
- *
- * The sweep asks the same question of the same event through `eventBySeq`; this
- * asks it of the events the fold already holds, so two independent recomputes
- * of one log give one answer. An event that is not in the range, or is not a
- * validation or a reconfirmation, is false — the stated rate.
- */
-function slotMeasured(bySeq: ReadonlyMap<number, Event>, seq: number): boolean {
-  const event = bySeq.get(seq);
-  if (event === undefined) return false;
-  if (isType(event, "validation") || isType(event, "reconfirmation")) {
-    return recordMeasured(event.payload.record);
-  }
-  return false;
-}
-
 /** The `dispute_filed` an outcome settles, or null when the range holds none. */
 function disputeFiling(
   events: readonly Event[],
@@ -656,21 +568,16 @@ function stakeLedgerRow(record: StakeRecord): LedgerRow {
  * Every ledger row that is a pure function of the log, recomputed from the
  * sealed events.
  *
- * Section 9: "any operator can reconcile their payout against the log". This is
- * that sentence made into a file — one fold over the sealed events in seq order,
+ * Section 9: "any operator can reconcile ... against the log". This is that
+ * sentence made into a file — one fold over the sealed events in seq order,
  * emitting at each event the rows that event is worth, with src/stake.ts's rows
  * (which the doors write as the event lands) before src/ledger.ts's (which the
- * sweep's ledger step prices afterwards). Read one way: the ledger table is a
+ * sweep's ledger step writes afterwards). Read one way: the ledger table is a
  * cache of this, and a row of it that disagrees is wrong.
  *
- * Payouts are not here and never can be: a payout records money leaving through
- * a provider under a reference, which no amount of replaying events reproduces.
- * Two smaller consequences of the same fact are worth saying out loud. A
- * clawback is computed against every read share this fold has already emitted
- * for the entry, because "already paid out" is a fact about a payout and not
- * about the log. And the reward of an upheld dispute is priced from those
- * clawbacks here exactly as the ledger step prices it there, so a row the sweep
- * stored and a row this recomputed are the same row down to its `ref`.
+ * Nothing is priced above zero (D-127), so the reward of an upheld dispute and
+ * a reconfirmation's bounty come out here exactly as the ledger step writes
+ * them there, down to the `ref`.
  *
  * A day is priced at its own position in the log, and not at the head. The
  * sweep prices a day in the run that published it, so the entry it read is the
@@ -694,81 +601,14 @@ export function mirrorLedgerRows(
   void asOf;
   const ordered = inSeqOrder(events);
   const rows: LedgerRow[] = [];
-  /** Keyed by the position priced at, then the entry: one derivation per day. */
-  const states = new Map<string, PricingState | null>();
-  const bySeq = new Map<number, Event>(ordered.map((event) => [event.seq, event]));
-
-  const stateOf = (
-    entryId: string,
-    through: readonly Event[],
-    position: number,
-    now: string,
-  ): PricingState | null => {
-    const key = `${position}:${entryId}`;
-    const held = states.get(key);
-    if (held !== undefined) return held;
-    let state: PricingState | null = null;
-    try {
-      const derived = deriveEntry(through, entryId, { now });
-      const entry = derived.entry as unknown as Record<string, unknown>;
-      const author = entry["author_operator"];
-      const expires = entry["expires_at"];
-      const slots = derived.sidecar.read_share_slots;
-      state = {
-        author_operator: typeof author === "string" ? author : null,
-        read_share_slots:
-          slots === null
-            ? null
-            : slots.map((slot) => ({
-                operator: slot.operator,
-                seq: slot.seq,
-                measured: slotMeasured(bySeq, slot.seq),
-              })),
-        expires_at: typeof expires === "string" ? expires : null,
-        verified: typeof entry["verified_at"] === "string",
-        effective_tier: derived.sidecar.effective_tier,
-      };
-    } catch {
-      // An entry the sealed events carry no submission for is not part of the
-      // sealed record, and the sweep's own pricing skips it for the same reason.
-      state = null;
-    }
-    states.set(key, state);
-    return state;
-  };
 
   for (let index = 0; index < ordered.length; index += 1) {
     const event = ordered[index]!;
     if (isType(event, "read_count")) {
-      const { date } = event.payload;
-      // The log as it stood when this day was published, which is the log the
-      // sweep priced it against: every event of the same run up to this one,
-      // and nothing after it.
-      const through = ordered.slice(0, index + 1);
-      const priced = readShareRows(event, (entryId): EntryShareState | null => {
-        const state = stateOf(entryId, through, event.seq, event.at);
-        if (state === null) return null;
-        return {
-          author_operator: state.author_operator,
-          read_share_slots: state.read_share_slots,
-          // Stale on the day being priced, not today: the day is what is being
-          // paid for, and an entry that went stale since must not turn a fresh
-          // day's reads into half a day's.
-          stale: state.expires_at !== null && state.expires_at < date,
-          verified: state.verified,
-          effective_tier: state.effective_tier,
-        };
-      });
-      // Every share row of one entry carries that entry's published count, so
-      // the map holds it once: the reconciliation asks what the ledger accrued
-      // for the entry, not what each holder was paid.
-      const accrued = new Map<string, number>();
-      for (const row of priced) {
-        if (row.kind !== "read_share") continue;
-        if (row.entry_id === null || row.reads === null) continue;
-        accrued.set(row.entry_id, row.reads);
-      }
-      rows.push(...priced, reconciliationRow(event, accrued));
+      // Nothing is priced (D-127): a read is free, so no entry accrues a share
+      // of a published day and the day's own reconciliation is the only row it
+      // produces. The accrued map is empty for the same reason.
+      rows.push(reconciliationRow(event, new Map()));
       continue;
     }
 
@@ -791,16 +631,9 @@ export function mirrorLedgerRows(
     }
 
     if (isType(event, "dispute_upheld")) {
-      // The clawbacks first, because the reward is what they come to: the same
-      // order the sweep's ledger step writes them in, for the same reason.
-      const held = rows.filter(
-        (row) =>
-          row.kind === "read_share" &&
-          row.entry_id === event.entry_id &&
-          row.available_at !== null &&
-          row.available_at > event.at,
-      );
-      const clawed = clawbackRows(event, held);
+      // No clawbacks (D-127): nothing accrued on the entry, so the reward the
+      // challenger is paid is what those clawbacks come to, which is nothing.
+      const clawed: LedgerRow[] = [];
       const filed = disputeFiling(
         ordered,
         event.entry_id,
@@ -857,11 +690,9 @@ export function mirrorLedgerRows(
       }
       if (before === null) continue;
       const accrual = bountyAccrual(before, event);
-      const row = bountyAccrualRow(
-        event,
-        accrual,
-        rows.filter((one) => one.kind === "bounty_pool"),
-      );
+      // No pool rows are written any more (D-127), so the bounty an accrual
+      // collects is the sum of nothing.
+      const row = bountyAccrualRow(event, accrual, []);
       if (row !== null) rows.push(row);
       continue;
     }
@@ -892,22 +723,10 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
   // Immutable once written: a seal's range never moves, so a seal's file never
   // changes and a mirror's history shows one commit per seal rather than one
   // rewrite of the whole log per day.
-  const now = new Date(input.now);
-  const released = releasedHead(seals, now);
-  // A fork holding a key or an operator signature was served the payloads and
-  // writes them; it does not get a different clock for it. Every number below
-  // that says how much of the log is public is still `released`'s.
-  const whole = input.view === "full";
   for (const seal of seals) {
-    const batch: (Event | WithheldEvent)[] = [];
+    const batch: Event[] = [];
     for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
-      const event = bySeq.get(seq)!;
-      // Per event and through the door's own function, so a seal file and a
-      // free `GET /events` page hold the same lines for the same instant: the
-      // registry from the first day, the entries a window later. A file inside
-      // its window is still written once and rewritten once, on release.
-      const open = whole || isEventReleased(event, seal.sealed_at, now);
-      batch.push(open ? event : withholdEvent(event));
+      batch.push(bySeq.get(seq)!);
     }
     files.push({ path: sealFileName(seal.seq), content: lines(batch) });
   }
@@ -959,15 +778,11 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
     const position = positions.get(id);
     if (position === undefined) continue;
     const covering = coveringSeal(seals, position);
-    // The entry's release date is its submission event's, which is the date the
-    // seal covering that event opens. A position nothing covers is not part of
-    // the sealed record at all, and the row says so with a null date.
-    const releaseDate =
-      covering === null ? null : releaseDateOf(covering.sealed_at);
-    if (
-      releaseDate !== null &&
-      (whole || (released !== null && position <= released))
-    ) {
+    // The entry's release date is its submission event's covering seal date
+    // (D-127). A position nothing covers is not part of the sealed record at
+    // all, and the row says so with a null date and no file.
+    const releaseDate = covering === null ? null : covering.sealed_at;
+    if (releaseDate !== null) {
       files.push({
         path: `entries/${id}.json`,
         content: document({
@@ -994,34 +809,20 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
   });
 
   // The three families nothing is read for: recomputed here, out of the events
-  // the seals cover -- and out of the released ones only.
-  //
-  // All three are folds over payloads, and a payload that has not released is
-  // not in this directory: a file folded over one would be both a leak of it and
-  // a file no reader of this clone could recompute. So they are folded at the
-  // released head, which is the head of the log this export made public, and a
-  // fork that holds the directory gets the same three files out of the same
-  // events. They catch up with the sealed head as the windows run out, one seal
-  // at a time, exactly as the seal files do.
+  // the seals cover. All three are folds over payloads, and every sealed
+  // payload is in this directory (D-127), so a fork that holds the directory
+  // gets the same three files out of the same events.
   const releasedEvents: Event[] = [];
   for (const seal of seals) {
-    if (!isReleased(seal.sealed_at, now)) continue;
     for (let seq = seal.first_seq; seq <= seal.last_seq; seq += 1) {
-      const event = bySeq.get(seq)!;
-      if (isWithheld(event)) {
-        throw new MirrorError(
-          "withheld",
-          `seal ${seal.seq} released on ${releaseDateOf(seal.sealed_at)}, and ` +
-            `event ${seq} was handed over as a hash line`,
-        );
-      }
-      releasedEvents.push(event);
+      releasedEvents.push(bySeq.get(seq)!);
     }
   }
-  // The position the three families stand at: the released head, or the
-  // position before the first event when nothing of the log is public yet.
-  const releasedPosition = released ?? -1;
-  const releasedAsOf = newestReleased(seals, now);
+  // The position the three families stand at: the sealed head, which is the
+  // public head, or the position before the first event when nothing is sealed.
+  const released = newest.last_seq;
+  const releasedPosition = released;
+  const releasedAsOf = newest.sealed_at;
 
   const attestations = mirrorAttestations(
     releasedEvents,
@@ -1058,9 +859,8 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
       as_of: newest.sealed_at,
       head: newest.last_seq,
       seal_seq: newest.seq,
-      // The window this directory was built under, and how much of it is in
-      // full: null when nothing has released yet, which is every log younger
-      // than the window and is a directory of hash lines and proof.
+      // The window this directory was built under, frozen at zero (D-127), and
+      // the head it made public, which is the sealed head.
       release_window_days: input.release_window_days,
       released_head: released,
       seals: seals.length,

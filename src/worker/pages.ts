@@ -29,15 +29,6 @@
  * the way — the counters are counts, the listing is one keyset page, and every
  * derived field an entry shows was derived when the entry was written.
  *
- * The release window (decision D-100) is read here and decided nowhere else on
- * the way to a page: the three gatherers that show an entry's content — the home
- * page, the listing and the entry page — resolve the reader once with
- * `readerAccess` and ask src/release.ts whether the covering seal is old enough.
- * A free reader of an unreleased entry is handed the proof and the date it
- * opens; a keyed or operator reader is handed everything, through the same
- * renderer. Nothing else on any page changes, because the window holds back
- * content and never a count, a hash, a seal or a proof.
- *
  * Four files a crawler reads are served here too (decision D-114): /robots.txt,
  * /sitemap.xml and the icon on both /favicon.svg and /favicon.ico. They are
  * pages in every sense that matters to this file — anonymous, the same bytes for
@@ -75,7 +66,6 @@ import {
   SITEMAP_MAX_ENTRIES,
   WITNESS_PIN,
 } from "../policy.js";
-import { isReleased, releaseDateOf, withholdEntry } from "../release.js";
 import type { Seal } from "../seal.js";
 import { exercisedStages, stageStates, statusCounters } from "../status.js";
 import type { D1Like } from "../storage/d1.js";
@@ -111,7 +101,6 @@ import {
   operatorForAgent,
   operatorStanding,
   overturnedCountsByOperator,
-  payoutRows,
   reconciliationRows,
   sealCovering,
   sealsAfter,
@@ -183,7 +172,6 @@ import type {
   OperatorRow,
   PageContext,
   StatusData,
-  WithheldView,
 } from "../ui/types.js";
 import {
   readerAccess,
@@ -313,11 +301,7 @@ function field(source: Record<string, unknown>, name: string): string {
  * so a listing and a read taken at the same instant cannot disagree about
  * whether a window has closed.
  */
-function toRow(
-  stored: StoredEntry,
-  withheld: WithheldView | null,
-  now: Date,
-): EntryRow {
+function toRow(stored: StoredEntry, now: Date): EntryRow {
   const entry = clocked(stored.entry, now) as unknown as Record<
     string,
     unknown
@@ -334,60 +318,12 @@ function toRow(
     // empty string for an entry sealed before the key existed, and the listing
     // prints that as an em dash: a page never fills a domain in.
     domain: field(entry, "domain"),
-    // The claim is content (D-100): a withheld row carries none at all, rather
-    // than a string the page would have to remember not to print.
-    claim: withheld === null ? field(entry, "claim") : "",
-    withheld,
+    claim: field(entry, "claim"),
     tier: stored.sidecar.effective_tier,
     last_confirmed: field(entry, "last_confirmed"),
     expires_at: typeof expires === "string" ? expires : null,
     stale: entry["stale"] === true,
   };
-}
-
-// ---------------------------------------------------------------------------
-// The release window (decision D-100)
-// ---------------------------------------------------------------------------
-
-/**
- * Who is reading, for the one question the window asks, resolved once per
- * request by the gatherer that needs it.
- *
- * A refusal from the key gate is read here as "not a paid reader" and the page
- * is drawn free: these routes meter nothing, charge nothing and issue no
- * receipt, so a cap that a reader met at the API doors is not a page's to
- * enforce, and the free view shows strictly less than the one they asked for. A
- * refusal never opens anything — the only thing a bad key or a bad signature can
- * buy on a page is the withheld view.
- */
-async function readerOf(
-  request: Request,
-  env: Env,
-  db: D1Like,
-  now: Date,
-): Promise<ReaderAccess> {
-  const answer = await readerAccess(request, env, db, now);
-  return answer.ok ? answer.reader : unmeteredFreeReader(now);
-}
-
-/**
- * What this reader is told about one entry's content: null when it is theirs to
- * read, and the release date when it is not.
- *
- * One rule and src/release.ts's own: the entry's release date is its covering
- * seal's `sealed_at` through the window, an unsealed entry is not released at
- * all, and a keyed or operator reader is never withheld from. `sealedAt` is null
- * both when nothing covers the entry yet and when the caller could not read a
- * seal for it, which are the same fact for this question.
- */
-function withheldFor(
-  reader: ReaderAccess,
-  sealedAt: string | null,
-  now: Date,
-): WithheldView | null {
-  if (reader.kind !== "free") return null;
-  if (isReleased(sealedAt, now)) return null;
-  return { releaseDate: sealedAt === null ? null : releaseDateOf(sealedAt) };
 }
 
 /**
@@ -564,12 +500,6 @@ async function home(
     ...narrowed,
     limit: HOME_LATEST_ENTRIES,
   });
-  // The window (D-100): who is asking, once, and the seals covering exactly the
-  // rows this page holds, so a row that is not this reader's to read yet shows
-  // its release date instead of its claim.
-  const reader = await readerOf(request, env, db, now);
-  const covering = await sealsCovering(db, latest);
-
   return htmlResponse(
     renderHome(ctx, {
       domain: asked,
@@ -582,13 +512,7 @@ async function home(
         witnesses: seal === null ? null : seal.witnesses.length,
         seals,
       },
-      latest: latest.map((stored) =>
-        toRow(
-          stored,
-          withheldFor(reader, sealedAtOf(covering, stored.submittedSeq), now),
-          now,
-        ),
-      ),
+      latest: latest.map((stored) => toRow(stored, now)),
     }),
   );
 }
@@ -644,17 +568,7 @@ async function entries(
       ? page
       : page.filter((stored) => stored.sidecar.source.class === filter.source);
 
-  // The window (D-100), over the rows the filters left: one reader and one read
-  // of the seals covering this page's own span of positions.
-  const reader = await readerOf(request, env, db, now);
-  const covering = await sealsCovering(db, kept);
-  const rows = kept.map((stored) =>
-    toRow(
-      stored,
-      withheldFor(reader, sealedAtOf(covering, stored.submittedSeq), now),
-      now,
-    ),
-  );
+  const rows = kept.map((stored) => toRow(stored, now));
   // The cursor is the last row *read*, not the last row kept: a page whose
   // source filter dropped everything still advances, so the pager cannot stall
   // on a run of entries the reader filtered out.
@@ -693,41 +607,9 @@ async function entry(
   // `stale` against the router's own clock rather than the column's last
   // writer, by the same `clocked` the read door and the listing use: the page
   // and `GET /read/{id}` are two doors onto one entry, and an entry past its
-  // window has to read stale on both before any sweep rewrites the row. Taken
-  // here, above the window, so the withheld proof carries the clocked answer
-  // too — `stale` is proof and not content, and the hash is over the core,
-  // which `stale` is not part of.
+  // window has to read stale on both before any sweep rewrites the row.
   const shown = clocked(stored.entry, now);
-  // The window (D-100). The reader is resolved once, and when the content is
-  // not theirs yet the record this page is built from is `withholdEntry`'s
-  // proof — every content field null, every proof field untouched — so nothing
-  // below this line can print what was not served. Only the proof is taken from
-  // it: the date the page shows is `withheld`, which is null for an entry no
-  // seal covers, and `withholdEntry`'s own `release_date` is the served
-  // envelope's field rather than a page's.
-  const reader = await readerOf(request, env, db, now);
-  const withheld = withheldFor(
-    reader,
-    seal === null ? null : seal.sealed_at,
-    now,
-  );
-  // The hash travels with the withheld view and with nothing else: on a full
-  // view the reader holds the core the hash is over and can take it themselves,
-  // and before release they cannot, so the page prints it where the content
-  // would have been. It is `withholdEntry`'s, taken over the whole core.
-  let record: Record<string, unknown>;
-  let view: WithheldView | null = withheld;
-  if (withheld === null) {
-    record = shown as unknown as Record<string, unknown>;
-  } else {
-    const held = await withholdEntry(
-      shown,
-      stored.sidecar,
-      withheld.releaseDate ?? "",
-    );
-    record = held.proof as unknown as Record<string, unknown>;
-    view = { releaseDate: withheld.releaseDate, entryHash: held.entry_hash };
-  }
+  const record = shown as unknown as Record<string, unknown>;
   const superseders = await supersedersOf(db, id, LIST_PAGE_LIMIT);
   const ledger = await ledgerRowsForEntry(db, id, LIST_PAGE_LIMIT);
   // Section 9's money rows for this entry: everything the ledger holds about it
@@ -860,7 +742,6 @@ async function entry(
     renderEntry(ctx, {
       entry: record,
       sidecar: stored.sidecar,
-      withheld: view,
       position: stored.submittedSeq,
       events,
       seal,
@@ -977,12 +858,11 @@ async function operator(
   // This operator's own row rather than the top of the leaderboard, so an
   // operator ranked past a page of standings still shows the one it has.
   const standing = await operatorStanding(db, id);
-  // One keyset page of the operator's own rows, newest first, and its payouts.
-  // The balance is `ledgerBalance` over exactly those rows at the router's
-  // instant, because held and released are questions about a clock and the page
-  // has none; the page adds nothing up.
+  // One keyset page of the operator's own rows, newest first. The balance is
+  // `ledgerBalance` over exactly those rows at the router's instant, because
+  // held and released are questions about a clock and the page has none; the
+  // page adds nothing up.
   const ledger = await ledgerRowsForOperator(db, id, LIST_PAGE_LIMIT);
-  const payouts = await payoutRows(db, LIST_PAGE_LIMIT, id);
   // Both sides of Section 8's drift attestation, one keyset page each, at the
   // same explicit limit every other panel on this page reads at. The derived
   // record is carried through as the row: the page picks columns off it and
@@ -1000,7 +880,6 @@ async function operator(
   const balance = ledgerBalance(ledger, now.toISOString());
   const attestation = record.details["attestation"];
   const namedBy = record.details["named_by"];
-  const payoutStatus = record.details["payout_status"];
 
   return htmlResponse(
     renderOperator(ctx, {
@@ -1013,7 +892,6 @@ async function operator(
         cosigners.length,
       ),
       ledger,
-      payouts,
       balance,
       agents: agents.map((each) => each.agentId),
       domains: domains.map((each) => ({
@@ -1026,7 +904,6 @@ async function operator(
           ? (attestation as Record<string, unknown>)
           : null,
       namedBy: typeof namedBy === "string" ? namedBy : null,
-      payoutStatus: typeof payoutStatus === "string" ? payoutStatus : null,
       validations,
       cosigners: cosigners.map((each) => ({
         cosigner: each.cosigner,

@@ -27,7 +27,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import type { Core } from "../src/core.js";
 import { base64urlEncode } from "../src/encoding.js";
 import type { ApproverRecord } from "../src/events.js";
@@ -178,7 +177,6 @@ async function register(party: Party): Promise<void> {
       body: {
         operator: party.operator,
         attestation: await attestFor(party.agent, party.operator, AT),
-        payout: { reference: VERIFIED_REFERENCE },
       },
       timestamp: AT,
     }),
@@ -283,7 +281,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout: new MockPayoutAdapter(),
     fetcher: new FixtureFetcher(PAGES),
   };
 
@@ -347,7 +344,6 @@ describe("two operators registering the same name in one tick", () => {
           body: {
             operator: CONTESTED,
             attestation: await attestFor(agent, CONTESTED, AT),
-            payout: { reference: VERIFIED_REFERENCE },
           },
           timestamp: AT,
           nonce: `twin-${agent.agentId}`,

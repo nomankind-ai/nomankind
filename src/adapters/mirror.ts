@@ -846,7 +846,7 @@ export class MockMirrorAdapter implements MirrorAdapter {
 /**
  * No token, no mirror.
  *
- * It refuses rather than pretending, exactly as the payout stub and the witness
+ * It refuses rather than pretending, exactly as the witness
  * adapter do on production: a mirror that answered "exported" without a
  * repository behind it would put a link on the status page that goes nowhere.
  */

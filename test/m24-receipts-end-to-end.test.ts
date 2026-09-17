@@ -24,7 +24,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import type { Core } from "../src/core.js";
 import { base64urlEncode } from "../src/encoding.js";
 import { deriveEntry } from "../src/derive.js";
@@ -196,7 +195,6 @@ async function register(party: Party): Promise<void> {
       body: {
         operator: party.operator,
         attestation: await attestFor(party.agent, party.operator, AT),
-        payout: { reference: VERIFIED_REFERENCE },
       },
       timestamp: AT,
     }),
@@ -364,7 +362,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout: new MockPayoutAdapter(),
     fetcher: new FixtureFetcher(PAGES),
   };
 
@@ -384,9 +381,7 @@ beforeAll(async () => {
     keyHash: await minted.hash,
     tier: TIER,
     status: "active",
-    customer: "cus_m24",
-    subscription: "sub_m24",
-    checkoutSession: "cs_m24",
+    clientDay: "cs_m24",
     createdAt: AT,
   });
 
@@ -615,7 +610,7 @@ describe("the ledger over a day with free reads in it", () => {
     const answer = await get("/ledger", { now: day(1) });
     expect(answer.status).toBe(200);
     expect(answer.body["reconciliations"]).toEqual([]);
-    expect(answer.body["payouts"]).toEqual([]);
+    expect(answer.body).not.toHaveProperty("payouts");
   }, 600_000);
 });
 
@@ -669,9 +664,7 @@ describe("a duplicate group delivered in one paid sync", () => {
       keyHash: await minted.hash,
       tier: TIER,
       status: "active",
-      customer: "cus_m24_dup",
-      subscription: "sub_m24_dup",
-      checkoutSession: "cs_m24_dup",
+      clientDay: "cs_m24_dup",
       createdAt: AT,
     });
 

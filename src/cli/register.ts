@@ -1,11 +1,11 @@
 /**
  * register: an operator's own client for the joining door.
  *
- * Whitepaper Section 11: joining is three steps — publish a TXT record on a
- * domain you control carrying your 1F916 agent id, complete payout onboarding,
- * and sign the attestation that no model provider holds control or a beneficial
- * stake. Section 10 names the attestation; src/registry.ts holds its text and
- * its signing bytes.
+ * Whitepaper Section 11, less the money step (D-127): joining is publishing a
+ * TXT record on a domain you control carrying your 1F916 agent id, and signing
+ * the attestation that no model provider holds control or a beneficial stake.
+ * Section 10 names the attestation; src/registry.ts holds its text and its
+ * signing bytes.
  *
  * The TXT record is step one and it is not ours to make, so this command prints
  * exactly the line the operator has to publish before anything is asked of the
@@ -35,7 +35,6 @@
 
 import { resolve } from "node:path";
 
-import { MOCK_VERIFIED_PREFIX } from "../adapters/payout.js";
 import { DEFAULT_DOMAIN } from "../policy.js";
 import { signAttestation, txtRecordName } from "../registry.js";
 import { runCommand } from "./main.js";
@@ -58,20 +57,6 @@ const USAGE =
 const OK = 0;
 const FAILED = 1;
 const BAD_ARGUMENTS = 2;
-
-/**
- * The payout reference this command sends.
- *
- * Not a policy number and not a rule: it is the mock adapter's own wire format
- * (src/adapters/payout.ts), which demo and local run and which production
- * refuses outright. Decision D-013 as amended puts the real provider in M25, and
- * until it exists there is no honest reference for this command to send but the
- * mock's — so it sends one that names the domain it is for, and production's
- * stub answers `payout_unavailable` rather than letting it through.
- */
-export function payoutReferenceFor(domain: string): string {
-  return `${MOCK_VERIFIED_PREFIX}${domain}`;
-}
 
 /** What one invocation asks for. */
 export interface RegisterPlan {
@@ -274,7 +259,6 @@ export async function runRegister(input: {
       operator: input.domain,
       domain: recordDomain,
       attestation,
-      payout: { reference: payoutReferenceFor(input.domain) },
     },
     input.key,
   );

@@ -268,9 +268,7 @@ describe("an endpoint that stops answering", () => {
       keyHash: await keyHash(SECRET),
       tier: "startup",
       status: "active",
-      customer: "cus_test",
-      subscription: "sub_test",
-      checkoutSession: "cs_test",
+      clientDay: "cs_test",
       createdAt: AT,
     });
     await endpoint(store.db, DEAD, KEY_ID, DEAD_URL);

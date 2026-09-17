@@ -185,12 +185,11 @@ export async function getJson(
 /**
  * The same client, with one agent's M2 signature on every read it makes.
  *
- * The release window (decision D-100) serves an unreleased event's content only
- * to a paid key or to a signed request from an agent bound to a registered
- * operator, and this is how a command carries the second: exactly the form
- * `readerAccess` verifies — method GET, the URL's pathname with no query
- * string, a null body, and a fresh nonce per request, which is why the headers
- * are built inside `fetch` rather than once.
+ * A signed read is what buys a command the operator read cap, and this is how
+ * one carries it: exactly the form `readerAccess` verifies — method GET, the
+ * URL's pathname with no query string, a null body, and a fresh nonce per
+ * request, which is why the headers are built inside `fetch` rather than
+ * once.
  *
  * The timestamp is asked of the clock inside `fetch` for the same reason. A
  * fixed instant stamped at process start is a signature that ages: a walk that
@@ -346,49 +345,17 @@ export function refusalLines(status: number, body: unknown): readonly string[] {
 // Reading the entry (decision D-124)
 // ---------------------------------------------------------------------------
 
-/** The stop reason when the door served the withheld view instead of the entry. */
-export const ENTRY_WITHHELD = "entry_withheld";
-
 /**
  * The stop reason when the signing key is bound to no registered operator.
  *
- * One word for one condition. It used to be two: a run whose key the registry
- * does not know stopped as `unregistered_operator` inside the release window --
- * where the withheld view is the first thing that gives the key away -- and as
- * `unregistered_agent` once the entry had released and the run reached its own
- * registry check a few lines later. Same key, same registry, same answer, and
- * only one of the two words was ever written down.
+ * One word for one condition, written down once and asked for by every command
+ * at its own registry check.
  */
 export const UNREGISTERED_OPERATOR = "unregistered_operator";
 
 /** What that stop says about the key, in the one place the sentence lives. */
 export function unregisteredOperatorDetail(agentId: string): string {
   return `agent ${agentId} is bound to no registered operator`;
-}
-
-/**
- * The withheld view of an entry, or null when this body is the entry itself.
- *
- * `GET /entries/{id}` answers a free reader inside the release window with the
- * proof under its own key and never under `entry` (decision D-100,
- * src/worker/submit.ts): `{proof, sidecar, entry_hash, release_date}`, the
- * content fields nulled. It is a 200 and it is not an entry, so `extractCore`
- * of it throws and every command used to call that `entry_malformed` -- which
- * says the log served something broken when the log served exactly what the
- * window says it serves.
- *
- * Recognised by the two keys only the withheld envelope has, so an entry can
- * never be mistaken for one: an entry object carries neither `proof` nor
- * `entry_hash`.
- */
-export function withheldRelease(
-  body: unknown,
-): { readonly released_at: string | null } | null {
-  if (!isRecord(body)) return null;
-  if (!isRecord(body["proof"])) return null;
-  if (typeof body["entry_hash"] !== "string") return null;
-  const date = body["release_date"];
-  return { released_at: typeof date === "string" ? date : null };
 }
 
 /** The operator the registry puts behind one key, or null when it has none. */
@@ -422,21 +389,11 @@ export type EntryRead =
   | { readonly ok: false; readonly stop: ReadStop };
 
 /**
- * Read one entry with this run's own key, and tell the two 200s apart.
+ * Read one entry with this run's own key.
  *
- * Signed with the operator key the run already holds (decision D-100): an entry
- * inside the release window is served to a signed request from an agent bound
- * to a registered operator, and a validator is exactly that reader -- the people
- * who have to judge an entry are the ones the window is not for.
- *
- * Which is why a withheld view coming back at all is the door saying this key
- * bought nothing: `readerAccess` (src/worker/access.ts) resolves a signature it
- * verified but whose agent is bound to nobody to the *free* reader, and
- * `byId`'s window then hands back the proof. So the two cases arrive in one
- * shape and are told apart by asking the registry itself, through the same
- * `/agents/{id}` door every command already reads -- never by guessing from the
- * body. A key with no operator behind it stops as `unregistered_operator`; a
- * key with one stops as `entry_withheld`, carrying the date the door gave.
+ * Signed with the operator key the run already holds, which buys the operator
+ * read cap. The record is free from the seal (D-127), so a 200 is the entry
+ * itself and there is no second shape to tell it from.
  *
  * `entry_malformed` is left for what it was always meant for: a body that
  * claims to be an entry and cannot be read as one.
@@ -463,30 +420,7 @@ export async function readEntry(input: {
     };
   }
 
-  const withheld = withheldRelease(read.body);
-  if (withheld === null) return { ok: true, body: read.body };
-
-  const operator = await operatorFor(
-    input.http,
-    input.baseUrl,
-    input.key.agentId,
-  );
-  if (operator === null) {
-    return {
-      ok: false,
-      stop: {
-        reason: UNREGISTERED_OPERATOR,
-        detail: unregisteredOperatorDetail(input.key.agentId),
-      },
-    };
-  }
-  return {
-    ok: false,
-    stop: {
-      reason: ENTRY_WITHHELD,
-      detail: `released_at ${withheld.released_at ?? "unsealed"}`,
-    },
-  };
+  return { ok: true, body: read.body };
 }
 
 /**
@@ -718,8 +652,7 @@ export interface ValidatorRun {
   readonly error: string | null;
   /**
    * The short phrase behind the word, or null when the word is all there is
-   * (decision D-124): the release date on `entry_withheld`, the agent on
-   * `unregistered_operator`.
+   * (decision D-124): the agent on `unregistered_operator`.
    */
   readonly detail: string | null;
   /** The `errors` array a 422 carried, or null when the answer had none. */
@@ -768,8 +701,7 @@ export async function runValidator(input: {
 }): Promise<ValidatorRun> {
   const { deps, io } = input;
 
-  // Read with this run's own key, and the two 200s told apart (D-124): the
-  // entry, or the withheld view the window serves a reader it does not know.
+  // Read with this run's own key: a 200 is the entry (D-127).
   const read = await readEntry({
     http: deps.http,
     baseUrl: input.baseUrl,
@@ -796,9 +728,8 @@ export async function runValidator(input: {
     input.baseUrl,
     deps.key.agentId,
   );
-  // The same condition the withheld read above answers for, so the same word
-  // and the same sentence: the entry having released only changes which line
-  // notices that the registry puts nobody behind this key.
+  // The registry is the only answer that can be right about which operator is
+  // behind this key (D-124).
   if (operator === null) {
     return stopped(
       UNREGISTERED_OPERATOR,

@@ -32,7 +32,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { buildExport } from "../src/cli/export.js";
 import {
   registerPlan,
@@ -130,7 +129,6 @@ let pageHashValue = "";
 let entryId = "";
 
 const beacon = new FixtureBeacon("agents");
-const payout = new MockPayoutAdapter();
 
 function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, env, { ...deps, now, beacon });
@@ -245,7 +243,6 @@ async function register(party: Party): Promise<void> {
     operator: party.operator,
     domain: DEFAULT_DOMAIN,
     attestation: await attestFor(party.agent, party.operator, AT, DEFAULT_DOMAIN),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -311,7 +308,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout,
     fetcher: new FixtureFetcher({ [PAGE_URL]: PAGE }),
     beacon,
   };
@@ -755,7 +751,6 @@ describe("the offline verifier, with two agents under one operator", () => {
       pinned: pinnedSet([]),
       ineligibleAgents: new Set<string>(),
       anchor: new FakeAnchorAdapter(null),
-      payout,
     });
 
     exported = await buildExport({

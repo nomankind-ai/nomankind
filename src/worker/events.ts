@@ -38,11 +38,6 @@ import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: 
 
 import type { Event } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
-import {
-  isEventReleased,
-  withholdEvent,
-  type WithheldEvent,
-} from "../release.js";
 import type { Seal } from "../seal.js";
 import {
   eventsAfter,
@@ -104,43 +99,10 @@ const EVENTS_QUERY_WORDS = {
   repeated: "bad_query",
 } as const;
 
-/**
- * The page as a free reader sees it: every event the window has not opened yet
- * as a hash line (decision D-100).
- *
- * Per event and by its own seal rather than by a single boundary, because the
- * question the window asks is about the seal that covers the event: an event
- * nothing has sealed is not released either, and it is a hash line too. The
- * hash, the links, the type, the instant and the entry id all stay, so a reader
- * who cannot yet see what happened can still prove that it happened, in that
- * order, at that instant — which is the whole of what `GET /events` is for.
- *
- * Which events wait is src/release.ts's to say and not this door's: the mirror
- * export asks the same function, so a page read here and a seal file cloned
- * from the mirror hold the same lines. The registry never waits, which is why
- * this door no longer withholds the naming that `GET /operators` publishes.
- */
-function withhold(
-  events: readonly Event[],
-  seals: readonly Seal[],
-  now: Date,
-): (Event | WithheldEvent)[] {
-  return events.map((event) => {
-    const seal = seals.find(
-      (candidate) =>
-        event.seq >= candidate.first_seq && event.seq <= candidate.last_seq,
-    );
-    const sealedAt = seal === undefined ? null : seal.sealed_at;
-    return isEventReleased(event, sealedAt, now) ? event : withholdEvent(event);
-  });
-}
-
 async function page(
   url: URL,
   env: Env,
   access: Access,
-  free: boolean,
-  now: Date,
 ): Promise<Response> {
   const checked = checkParameters(
     url.searchParams,
@@ -163,16 +125,6 @@ async function page(
   const limit = page.value;
 
   const events = await eventsAfter(env.DB, after, limit);
-  // The seals covering exactly the events on this page, read once: a page is a
-  // contiguous run, so one range read answers the window for every event in it.
-  const seals =
-    free && events.length > 0
-      ? await sealsBetween(
-          env.DB,
-          events[0]!.seq,
-          events[events.length - 1]!.seq,
-        )
-      : [];
   // The head is read after the page, so a caller that sees head === the last
   // event's seq is caught up on a log that had not moved on underneath them.
   // It is the true head whoever is asking: a position is proof, and proof is
@@ -187,7 +139,7 @@ async function page(
   await chargeReads(env.DB, access, 1);
   return json(
     {
-      events: free ? withhold(events, seals, now) : events,
+      events,
       head,
     },
     200,
@@ -231,17 +183,14 @@ function entryEventsId(path: string): string | null {
  * absent from `proofs` — the same answer `GET /events/{seq}/proof` gives it,
  * said by leaving it out rather than by a null nobody can check.
  *
- * The window is the paged door's window (decision D-100): a free reader inside
- * it gets the events as hash lines, and the proofs beside them either way,
- * because proof is public from the first minute. The charge is the paged door's
- * charge: one call, one unit, after the answer was built.
+ * Every reader is served the payloads (D-127), and the proofs beside them. The
+ * charge is the paged door's charge: one call, one unit, after the answer was
+ * built.
  */
 async function entryEvents(
   id: string,
   env: Env,
   access: Access,
-  free: boolean,
-  now: Date,
 ): Promise<Response> {
   if (!ENTRY_ID_PATTERN.test(id)) return refuse(400, "bad_id");
 
@@ -294,7 +243,7 @@ async function entryEvents(
     {
       entry_id: id,
       head,
-      events: free ? withhold(events, seals, now) : events,
+      events,
       proofs,
     },
     200,
@@ -319,28 +268,16 @@ export async function handleEvents(
 
   try {
     const guarded: Env = { ...env, DB: guardDatabase(env.DB) };
-    // Once for the request (decision D-100), and its refusals are the gate's
-    // own: a mistyped key is 401 `bad_key` and a signature that does not verify
-    // is 401 `bad_signature`, never a quiet free read of the hash lines. One
-    // gate for both doors, because they are one read answered two ways.
+    // Once for the request, and its refusals are the gate's own: a mistyped key
+    // is 401 `bad_key` and a signature that does not verify is 401
+    // `bad_signature`. One gate for both doors, because they are one read
+    // answered two ways.
     const granted = await readerAccess(request, guarded, guarded.DB, deps.now);
     if (!granted.ok) return refusalResponse(granted.refusal);
     if (entryId !== null) {
-      return await entryEvents(
-        entryId,
-        guarded,
-        granted.reader.access,
-        granted.reader.kind === "free",
-        deps.now,
-      );
+      return await entryEvents(entryId, guarded, granted.reader.access);
     }
-    return await page(
-      url,
-      guarded,
-      granted.reader.access,
-      granted.reader.kind === "free",
-      deps.now,
-    );
+    return await page(url, guarded, granted.reader.access);
   } catch (error) {
     if (error instanceof StorageUnreachable) {
       // The message only: no binding contents, no request data.

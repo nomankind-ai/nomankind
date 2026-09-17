@@ -1312,9 +1312,6 @@ export const EXERCISED_COUNT = 4;
  * stop there.
  */
 export function exercisedStages(input: StatusInput): Exercised[] {
-  // `payout` is deliberately not read: the payout step is retired (D-127), so
-  // there is no door behind that row and a page that still showed it would be
-  // reporting a thing nobody can do.
   const { submission, registration, read_receipt, sync_receipt } =
     input.exercised;
   return [

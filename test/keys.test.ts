@@ -8,9 +8,8 @@
  * stored as a hash, and never recoverable from anything the system keeps. A
  * quota must be the database's arithmetic and not an isolate's, or two readers
  * served at the same instant cost one read between them. And the gate must say
- * no in the right word — a mistyped key, an unknown key, a canceled
- * subscription and a used-up day are four different answers and a reader owed
- * one of them is owed that one.
+ * no in the right word — a mistyped key, an unknown key and a used-up day are
+ * three different answers and a reader owed one of them is owed that one.
  *
  * miniflare's D1 with the real migrations applied, because the UPSERT, the
  * partial unique index and `UPDATE ... RETURNING` are the things under test and
@@ -26,7 +25,6 @@ import {
   KEY_PREFIX,
   KEY_REFUSALS,
   keyHash,
-  keyStatusFromSubscription,
   looksLikeKey,
   mintKey,
   quotaScopeForClient,
@@ -36,20 +34,16 @@ import {
 import { FREE_TIER, RATE_TIERS, isPaidTier } from "../src/policy.js";
 import type { D1Like } from "../src/storage/d1.js";
 import {
-  KeyClaimConflictError,
+  KeyDayConflictError,
   addQuota,
-  keyByCheckoutSession,
+  keyByClientDay,
   keyByHash,
   keyById,
-  keyBySubscription,
   putKey,
-  putStripeEvent,
   quotaDays,
   quotaOn,
   readCountEventOn,
   receiptsForKey,
-  setKeyStatus,
-  stripeEventSeen,
 } from "../src/storage/keys.js";
 import { signRequest } from "../src/request.js";
 import { putAgent, putOperator } from "../src/storage/repository.js";
@@ -88,7 +82,6 @@ function ask(headers: Record<string, string> = {}): Request {
 /** One claimed key, with the secret its holder was shown once. */
 async function claim(input: {
   tier?: string;
-  status?: "active" | "past_due" | "canceled";
   suffix: string;
 }): Promise<{ id: string; secret: string }> {
   const minted = mintKey();
@@ -96,10 +89,8 @@ async function claim(input: {
     id: minted.id,
     keyHash: await minted.hash,
     tier: input.tier ?? "standard",
-    status: input.status ?? "active",
-    customer: `cus_${input.suffix}`,
-    subscription: `sub_${input.suffix}`,
-    checkoutSession: `cs_${input.suffix}`,
+    status: "active",
+    clientDay: `cs_${input.suffix}`,
     createdAt: NOW.toISOString(),
   });
   return { id: minted.id, secret: minted.secret };
@@ -155,21 +146,6 @@ describe("looksLikeKey", () => {
     ]) {
       expect([value, looksLikeKey(value)]).toEqual([value, false]);
     }
-  });
-});
-
-describe("keyStatusFromSubscription", () => {
-  it("maps the provider's vocabulary onto our three words", () => {
-    expect(keyStatusFromSubscription("active")).toBe("active");
-    expect(keyStatusFromSubscription("trialing")).toBe("active");
-    expect(keyStatusFromSubscription("past_due")).toBe("past_due");
-    expect(keyStatusFromSubscription("unpaid")).toBe("past_due");
-    expect(keyStatusFromSubscription("canceled")).toBe("canceled");
-    expect(keyStatusFromSubscription("incomplete")).toBe("canceled");
-    expect(keyStatusFromSubscription("paused")).toBe("canceled");
-    // A word nobody anticipated refuses rather than serving: the safe reading
-    // of an unknown status is the one that says no.
-    expect(keyStatusFromSubscription("something_new")).toBe("canceled");
   });
 });
 
@@ -234,10 +210,11 @@ describe("the published tiers", () => {
       "missing_key",
       "bad_key",
       "unknown_key",
-      "key_canceled",
-      "key_past_due",
       "rate_limited",
     ]);
+    // The two the bill was about went with it (D-127 item 2).
+    expect([...KEY_REFUSALS]).not.toContain("key_canceled");
+    expect([...KEY_REFUSALS]).not.toContain("key_past_due");
   });
 });
 
@@ -246,7 +223,7 @@ describe("the published tiers", () => {
 // ---------------------------------------------------------------------------
 
 describe("the key store", () => {
-  it("stores a key and finds it four ways, never returning the hash", async () => {
+  it("stores a key and finds it three ways, never returning the hash", async () => {
     const minted = mintKey();
     const hash = await minted.hash;
     const stored = await putKey(db, {
@@ -254,9 +231,7 @@ describe("the key store", () => {
       keyHash: hash,
       tier: "standard",
       status: "active",
-      customer: "cus_store",
-      subscription: "sub_store",
-      checkoutSession: "cs_store",
+      clientDay: "client_store:2026-09-12",
       createdAt: NOW.toISOString(),
     });
     expect(stored.counter).toBe(0);
@@ -266,16 +241,15 @@ describe("the key store", () => {
     for (const found of [
       await keyByHash(db, hash),
       await keyById(db, minted.id),
-      await keyBySubscription(db, "sub_store"),
-      await keyByCheckoutSession(db, "cs_store"),
+      await keyByClientDay(db, "client_store:2026-09-12"),
     ]) {
       expect(found).toEqual(stored);
     }
     expect(await keyByHash(db, await keyHash("nmk_nobody"))).toBeNull();
-    expect(await keyBySubscription(db, "sub_nobody")).toBeNull();
+    expect(await keyByClientDay(db, "client_nobody:2026-09-12")).toBeNull();
   });
 
-  it("refuses a second key for one checkout session", async () => {
+  it("refuses a second key for one client on one day", async () => {
     const minted = mintKey();
     await expect(
       putKey(db, {
@@ -283,24 +257,10 @@ describe("the key store", () => {
         keyHash: await minted.hash,
         tier: "standard",
         status: "active",
-        customer: "cus_store2",
-        subscription: "sub_store2",
-        checkoutSession: "cs_store",
+        clientDay: "client_store:2026-09-12",
         createdAt: NOW.toISOString(),
       }),
-    ).rejects.toBeInstanceOf(KeyClaimConflictError);
-  });
-
-  it("moves a status and nothing else", async () => {
-    const claimed = await claim({ suffix: "status" });
-    const before = await keyById(db, claimed.id);
-    await setKeyStatus(db, claimed.id, "past_due", "2026-09-12T00:00:00.000Z");
-    const after = await keyById(db, claimed.id);
-    expect(after).toEqual({
-      ...before!,
-      status: "past_due",
-      updated_at: "2026-09-12T00:00:00.000Z",
-    });
+    ).rejects.toBeInstanceOf(KeyDayConflictError);
   });
 
   it("adds to a day inside the database rather than in an isolate", async () => {
@@ -327,30 +287,6 @@ describe("the key store", () => {
       { day: "2026-09-10", reads: 5 },
     ]);
     expect(await quotaDays(db, scope, "2026-09-12", "2026-09-13")).toEqual([]);
-  });
-
-  it("records a provider event once", async () => {
-    expect(await stripeEventSeen(db, "evt_one")).toBe(false);
-    await putStripeEvent(db, {
-      id: "evt_one",
-      type: "invoice.paid",
-      receivedAt: NOW.toISOString(),
-      outcome: "applied",
-    });
-    expect(await stripeEventSeen(db, "evt_one")).toBe(true);
-    // A retry of a message already acted on must not throw and must not change
-    // what was recorded.
-    await putStripeEvent(db, {
-      id: "evt_one",
-      type: "invoice.paid",
-      receivedAt: "2027-01-01T00:00:00.000Z",
-      outcome: "ignored",
-    });
-    const row = await db
-      .prepare(`SELECT outcome FROM stripe_events WHERE id = ?`)
-      .bind("evt_one")
-      .first<{ outcome: string }>();
-    expect(row?.outcome).toBe("applied");
   });
 
   it("finds the read_count event for one date by its payload", async () => {
@@ -493,34 +429,26 @@ describe("resolveAccess", () => {
     ]);
   });
 
-  it("refuses a canceled subscription's key with 402", async () => {
-    const claimed = await claim({ suffix: "canceled", status: "canceled" });
-    const resolved = await resolveAccess(
-      db,
-      ask({ authorization: `Bearer ${claimed.secret}` }),
-      NOW,
-    );
-    expect(resolved.ok).toBe(false);
-    if (resolved.ok) return;
-    expect([resolved.refusal.status, resolved.refusal.reason]).toEqual([
-      402,
-      "key_canceled",
-    ]);
-  });
+  it("serves a key whose row still says a pre-D-127 word", async () => {
+    // A deployment that sold keys can hold a row whose `status` reads
+    // `canceled` or `past_due`. Nothing writes either any more and no door
+    // refuses on one (D-127 item 2), so the gate reads the row and serves it;
+    // the parser hands the word back rather than throwing on it.
+    const claimed = await claim({ suffix: "legacystatus" });
+    await db
+      .prepare(`UPDATE api_keys SET status = 'canceled' WHERE id = ?`)
+      .bind(claimed.id)
+      .run();
 
-  it("refuses a key whose bill did not clear with 402", async () => {
-    const claimed = await claim({ suffix: "pastdue", status: "past_due" });
     const resolved = await resolveAccess(
       db,
       ask({ authorization: `Bearer ${claimed.secret}` }),
       NOW,
     );
-    expect(resolved.ok).toBe(false);
-    if (resolved.ok) return;
-    expect([resolved.refusal.status, resolved.refusal.reason]).toEqual([
-      402,
-      "key_past_due",
-    ]);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.access.key?.id).toBe(claimed.id);
+    expect((await keyById(db, claimed.id))?.status).toBe("canceled");
   });
 
   it("serves the last read of the day and refuses the next", async () => {

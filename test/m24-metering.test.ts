@@ -3,8 +3,8 @@
  *
  * Decision D-127, "the record is free, no money anywhere": the metering step and
  * the payout step are retired. What was the bill's side of Section 9 is gone —
- * no key-day is reported to any provider and no `meter_reports` row is ever
- * written again — and what stays is the sentence underneath it: "Read counts are
+ * the `meter_reports` table is dropped with the step that wrote it (migration
+ * 0023) — and what stays is the sentence underneath it: "Read counts are
  * published to the sealed log daily, so nomankind cannot quietly change the
  * numbers later." The daily `read_count` event goes on being published, with its
  * per-key counts, as evidence of use that nobody prices.
@@ -32,11 +32,9 @@ import { LIST_PAGE_LIMIT } from "../src/policy.js";
 import { signReadReceipt } from "../src/receipt.js";
 import { putKey } from "../src/storage/keys.js";
 import {
-  countMeterReports,
   eventsAfter,
   ledgerCursor,
   nextReadCounter,
-  payoutRows,
   putReadReceipt,
   reconciliationRows,
   sweepSteps,
@@ -156,9 +154,7 @@ beforeAll(async () => {
       keyHash: await minted.hash,
       tier: "standard",
       status: "active",
-      customer: holder.customer,
-      subscription: `sub_${minted.id}`,
-      checkoutSession: `cs_${minted.id}`,
+      clientDay: `cs_${minted.id}`,
       createdAt: NOW.toISOString(),
     });
   }
@@ -194,8 +190,10 @@ describe("a published day, under D-127", () => {
     expect(payload.paid!.total).toBe(3);
   });
 
-  it("bills nobody: no meter report, ever", async () => {
-    expect(await countMeterReports(store.db)).toBe(0);
+  it("bills nobody: there is no table left to write a report into", async () => {
+    await expect(
+      store.db.prepare(`SELECT COUNT(*) AS n FROM meter_reports`).first(),
+    ).rejects.toThrow();
   }, 600_000);
 
   it("has no metering step and no payout step to run", () => {
@@ -231,7 +229,6 @@ describe("a published day, under D-127", () => {
     });
     // No row of any kind followed from a day of reads.
     expect(await reconciliationRows(store.db, LIST_PAGE_LIMIT)).toEqual([]);
-    expect(await payoutRows(store.db, LIST_PAGE_LIMIT)).toEqual([]);
   }, 600_000);
 
   it("keeps the cursor a fork restarts from", async () => {
@@ -248,7 +245,6 @@ describe("a published day, under D-127", () => {
     const second = await publishedOn(date(1));
     const payload = second.payload as EventPayloads["read_count"];
     expect(payload.paid!.keys).toEqual({ [one.id]: 1 });
-    expect(await countMeterReports(store.db)).toBe(0);
     expect(again.ledger!.read_shares).toBe(0);
     expect(await reconciliationRows(store.db, LIST_PAGE_LIMIT)).toEqual([]);
   }, 600_000);

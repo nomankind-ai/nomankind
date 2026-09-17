@@ -17,17 +17,12 @@
  * would be a number the server is right to disagree with. Which is also why the
  * endpoint computes at exactly that position.
  *
- * Reads are unauthenticated and this command signs nothing by default. That was
- * enough until the release window (decision D-100) arrived: an event inside the
- * window is served to a free reader as a hash line — its payload null and
- * `withheld: true` beside it — and every event on a running log is inside the
- * window for its first thirty days. A fold over a nulled payload is not a
- * disagreement about a number, it is a crash, and the D-102 gap was exactly
- * that: `npm run standing` read the events door keyless and fell over on the
- * first hash line. So the fold refuses in one named sentence when it meets one,
- * and `--sign <key.json>` is the way through — the same flag, the same
- * `signingHttp`, the same operator signature `readerAccess` verifies, as
- * `npm run read` and `npm run sync` already take.
+ * Reads are unauthenticated and this command signs nothing by default: the
+ * record is free from the seal (decision D-127), so a keyless run folds the
+ * same payloads a signed one does. `--sign <key.json>` is still taken — the
+ * same flag, the same `signingHttp`, the same operator signature `readerAccess`
+ * verifies, as `npm run read` and `npm run sync` already take — and buys the
+ * higher read cap a long fold needs, nothing else.
  *
  * Everything goes over the injected http client, so a test drives it in process
  * with no network. node:path is allowed in this CLI file only.
@@ -37,7 +32,6 @@ import { resolve } from "node:path";
 
 import type { Event } from "../events.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
-import { isWithheld } from "../release.js";
 import { standingOf, zeroStanding, type Standing } from "../standing.js";
 import {
   errorOf,
@@ -52,16 +46,6 @@ import {
 import { runCommand } from "./main.js";
 
 const USAGE = "usage: standing <base-url> <operator> [--sign <key.json>]";
-
-/**
- * What a free run is told when the log it must fold is still inside the window.
- *
- * Names the flag rather than the decision: an operator checking their own
- * number wants the next command to type, and the rule behind it is on
- * /policy and in the paper for whoever wants it.
- */
-export const WITHHELD_REFUSAL =
-  "withheld inside the release window; pass --sign <key.json>";
 
 /** The fields compared, in the order they are printed. The order is the contract. */
 export const STANDING_FIELDS = [
@@ -109,14 +93,13 @@ async function sealedHead(
 /**
  * The sealed log, paged off the public endpoint, oldest first.
  *
- * `null` is a door that would not answer; `"withheld"` is a door that answered
- * with a hash line, which is a different thing and gets a different sentence.
+ * `null` is a door that would not answer.
  */
 async function sealedEvents(
   http: HttpClient,
   baseUrl: string,
   through: number,
-): Promise<Event[] | null | "withheld"> {
+): Promise<Event[] | null> {
   const events: Event[] = [];
   // `after` is exclusive and seq 0 is a real position, so the start of the log
   // is asked for by omitting `after` rather than by writing -1.
@@ -134,9 +117,6 @@ async function sealedEvents(
 
     for (const event of listed as Event[]) {
       if (event.seq > through) return events;
-      // A hash line carries no payload to fold. Caught here rather than in the
-      // kernel, where it would be a TypeError about a property of null.
-      if (isWithheld(event)) return "withheld";
       events.push(event);
     }
     after = (listed[listed.length - 1] as Event).seq;
@@ -226,10 +206,6 @@ export async function runStanding(
     local = zeroStanding(operator, 0);
   } else {
     const events = await sealedEvents(client, baseUrl, head);
-    if (events === "withheld") {
-      io.stdout(WITHHELD_REFUSAL);
-      return FAILED;
-    }
     if (events === null) {
       io.stdout("failed events");
       return FAILED;

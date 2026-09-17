@@ -26,7 +26,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { receiptArtifactHash } from "../src/artifact.js";
 import type { DerivedAttestation } from "../src/attest.js";
 import {
@@ -137,7 +136,6 @@ let entryId = "";
 let submitted: SubmitRun;
 
 const beacon = new FixtureBeacon("m22-clients");
-const payout = new MockPayoutAdapter();
 
 /** The clock the CLI runs at. Moved by the tests as the world advances. */
 let clock = NOW;
@@ -217,7 +215,6 @@ async function register(party: Party): Promise<void> {
   const answer = await post(party.agent, "/operators", {
     operator: party.operator,
     attestation: await attestFor(party.agent, party.operator, AT),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -359,7 +356,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout,
     fetcher: new FixtureFetcher({ [PAGE_URL]: PAGE }),
     beacon,
   };
@@ -416,7 +412,6 @@ beforeAll(async () => {
     pinned: pinnedSet([]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout,
   });
   expect(opened.snapshot).not.toBeNull();
   await beacon.advance(hour(2).toISOString());

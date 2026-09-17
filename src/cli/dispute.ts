@@ -233,8 +233,7 @@ export interface DisputeRun {
   readonly error: string | null;
   /**
    * The short phrase behind the word, or null when the word is all there is
-   * (decision D-124): the release date on `entry_withheld`, the agent on
-   * `unregistered_operator`.
+   * (decision D-124): the agent on `unregistered_operator`.
    */
   readonly detail: string | null;
   /** The `errors` array a 422 carried, or null when the answer had none. */
@@ -274,8 +273,7 @@ export async function runDispute(input: {
 
   // The target, for its subject: a challenge is about the same fact, so the
   // correction carries the subject the entry it challenges carries.
-  // Read with this run's own key, and the two 200s told apart (D-124): the
-  // entry, or the withheld view the window serves a reader it does not know.
+  // Read with this run's own key: a 200 is the entry (D-127).
   const read = await readEntry({
     http: deps.http,
     baseUrl: input.baseUrl,

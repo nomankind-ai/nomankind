@@ -61,18 +61,6 @@ const USAGE = [
   "       attest score <key.json> <base-url> <id> [--sign <key.json>]",
 ].join("\n");
 
-/**
- * What a run is told when the entry behind a probe is still inside the window.
- *
- * The D-102 gap, on this command: the scorer reads each probed entry's own
- * claim, and a claim inside the release window (decision D-100) is not served
- * to a free reader at all — the envelope carries the proof and the day it
- * opens, and no words. Scoring a model against a claim nobody was shown would
- * be scoring nothing, so the run stops and names the flag that reaches inside.
- */
-export const WITHHELD_REFUSAL =
-  "withheld inside the release window; pass --sign <key.json>";
-
 /** The exit codes, named where they are decided. */
 const OK = 0;
 const FAILED = 1;
@@ -262,19 +250,13 @@ async function claimOf(
   deps: AttestDeps,
   baseUrl: string,
   entryId: string,
-): Promise<string | "withheld" | null> {
+): Promise<string | null> {
   const { status, body } = await getJson(
     deps.http,
     baseUrl,
     `/entries/${encodeURIComponent(entryId)}`,
   );
   if (status !== 200 || !isRecord(body)) return null;
-  // The withheld view (src/release.ts): the proof under `proof`, the day the
-  // content opens beside it, and no claim anywhere. A different answer from an
-  // entry that could not be read, so it gets a different sentence.
-  if (isRecord(body["proof"]) && typeof body["release_date"] === "string") {
-    return "withheld";
-  }
   const claim = body["claim"];
   return typeof claim === "string" ? claim : null;
 }
@@ -312,9 +294,6 @@ export async function runAnswer(input: {
         continue;
       }
       const claim = await claimOf(deps, input.baseUrl, probe.entry_id);
-      if (claim === "withheld") {
-        return stopped(WITHHELD_REFUSAL, input.attestation);
-      }
       if (claim === null) return stopped("entry_unreadable", input.attestation);
       built.push({ entry_id: probe.entry_id, answer: claim });
     }
@@ -381,9 +360,6 @@ export async function runScore(input: {
   let agreed = 0;
   for (const probe of probes) {
     const claim = await claimOf(deps, input.baseUrl, probe.entry_id);
-    if (claim === "withheld") {
-      return stopped(WITHHELD_REFUSAL, input.attestation);
-    }
     if (claim === null) return stopped("entry_unreadable", input.attestation);
     const answer = said.get(probe.entry_id);
     if (answer === undefined) continue;

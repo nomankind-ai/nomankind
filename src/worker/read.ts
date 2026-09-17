@@ -49,7 +49,6 @@ import { agentIdFromPublicKey, importPrivateKeyPkcs8 } from "../identity.js";
 import { LIST_PAGE_LIMIT } from "../policy.js";
 import { chooseReadable, parseReadQuery, type ReadQuery } from "../read.js";
 import { signReadReceipt, type ReadReceipt } from "../receipt.js";
-import { isReleased, releaseDateOf } from "../release.js";
 import type { Entry } from "../schema.js";
 import type { D1Like } from "../storage/d1.js";
 import {
@@ -161,33 +160,6 @@ export function signerFor(
   const pending = importSigner(secret);
   SIGNERS.set(secret, pending);
   return pending;
-}
-
-/**
- * When one entry's content opens, and whether it has (decision D-100).
- *
- * The rule is src/release.ts's and nothing here decides it: an entry's release
- * date is its `entry_submitted` event's covering seal's `sealed_at` plus the
- * window, and an entry nothing has sealed yet is not released and has no date
- * to name — `release_date` is then null, which is the honest answer and the one
- * a reader can act on, because a date computed from a seal that does not exist
- * would be a promise the log has not made.
- *
- * Exported because the entry door and the captures door in src/worker/submit.ts
- * ask exactly this question, and two places working it out from a seal row
- * would be two chances to disagree about when a thing opens.
- */
-export async function entryRelease(
-  db: D1Like,
-  submittedSeq: number,
-  now: Date,
-): Promise<{ readonly released: boolean; readonly release_date: string | null }> {
-  const seal = await sealCovering(db, submittedSeq);
-  const sealedAt = seal === null ? null : seal.sealed_at;
-  return {
-    released: isReleased(sealedAt, now),
-    release_date: sealedAt === null ? null : releaseDateOf(sealedAt),
-  };
 }
 
 /** A required string field on a stored entry, read by the schema's own name. */
@@ -337,36 +309,7 @@ async function byId(
     );
   }
 
-  // Last of the refusals and never before them (decision D-100): what an entry
-  // is and whether it was verified are proof and are answered to everybody, so
-  // the window changes what a free reader is handed and not what they are told
-  // about. Nothing is charged and no receipt is issued, because nothing was
-  // served.
-  const unreleased = await withheld(db, stored.submittedSeq, reader, now);
-  if (unreleased !== null) return unreleased;
-
   return serve(db, stored, env, access, now);
-}
-
-/**
- * The 402 a free reader gets before an entry's content opens, or null when this
- * reader may see it.
- *
- * Free only. A paid key and a signed request from an agent bound to a
- * registered operator both read inside the window and are served exactly as
- * they are today, receipt, charge and all — the window is what the paid product
- * is, not a second gate on top of it.
- */
-async function withheld(
-  db: D1Like,
-  submittedSeq: number,
-  reader: ReaderAccess,
-  now: Date,
-): Promise<Response | null> {
-  if (reader.kind !== "free") return null;
-  const release = await entryRelease(db, submittedSeq, now);
-  if (release.released) return null;
-  return json({ error: "unreleased", release_date: release.release_date }, 402);
 }
 
 /**
@@ -409,12 +352,6 @@ async function bySubject(
       const id = field(chosen.entry, "id");
       const stored = page.find((row) => field(row.entry, "id") === id);
       if (stored !== undefined) {
-        // The entry the reader's demands chose, and then the window on it: a
-        // free reader is told when that answer opens rather than handed the
-        // next-best one, which would be a different answer to the question
-        // they asked.
-        const unreleased = await withheld(db, stored.submittedSeq, reader, now);
-        if (unreleased !== null) return unreleased;
         return serve(db, stored, env, access, now);
       }
     }

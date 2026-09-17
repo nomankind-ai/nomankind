@@ -58,19 +58,8 @@ const USAGE =
 /** The flag that waits for the sweep to seal the entry before exporting. */
 const WAIT_SEAL_FLAG = "--wait-seal";
 
-/** The flag that signs every read this walk makes (decision D-100). */
+/** The flag that signs every read this walk makes. */
 const SIGN_FLAG = "--sign";
-
-/**
- * What the walk says when the entry it just made is still inside the window.
- *
- * The D-102 gap, on this command: the entry is seconds old, so a free export of
- * it is the released view — the proof, the seal, and the day the content opens
- * — and `verifyOffline` answers `entry_withheld` rather than ok. That is the
- * window working, not the checkpoint failing, and the fix is the flag.
- */
-export const WITHHELD_REFUSAL =
-  "withheld inside the release window; pass --sign <key.json>";
 
 /**
  * How often the wait asks, in seconds. Not a policy number and not a rule: the
@@ -92,9 +81,6 @@ export const CHECKPOINT_DOMAINS: readonly string[] = Object.freeze([
   "fixture-b.nomankind.ai",
   "fixture-c.nomankind.ai",
 ]);
-
-/** The onboarding reference the mock payment provider calls verified. */
-export const CHECKPOINT_PAYOUT_REFERENCE = "mock-verified-checkpoint";
 
 /** The page the seeded entry cites. */
 export const CHECKPOINT_CITATION = "https://example.com/";
@@ -367,7 +353,6 @@ export async function runCheckpoint(input: {
         operator,
         domain: DEFAULT_DOMAIN,
         attestation,
-        payout: { reference: CHECKPOINT_PAYOUT_REFERENCE },
       },
       key,
     );
@@ -520,14 +505,6 @@ export async function runCheckpoint(input: {
 
   // Step seven: the offline verifier, on those two files and nothing else.
   const report = await verifyOffline(exported.entry, exported.bundle);
-  // An export taken without a credential, of an entry made a minute ago, is the
-  // released view of something the window has not opened. One named line, and
-  // the diffs below are not printed: they would all say the same thing.
-  const withheld = report.diffs.some((diff) => diff.reason === "entry_withheld");
-  if (withheld) {
-    step("verify", false, WITHHELD_REFUSAL);
-    return stop();
-  }
   const ok = step(
     "verify",
     report.ok,

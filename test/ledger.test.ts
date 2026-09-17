@@ -3,12 +3,12 @@
  *
  * "The record is free, no money anywhere." There is no price of a read, no
  * contributor share, no payout floor and no cycle, so the functions that used to
- * build priced rows build none: a published day of reads is worth nothing to
- * anybody, an upheld dispute claws back nothing, and a reconfirmation collects a
- * pool that was never filled. What the paper's Section 9 arithmetic came to is
- * history now, and the rows that arithmetic wrote are still in the table — which
- * is why `ledgerBalance` is tested at length below and the pricing is tested
- * only for being absent.
+ * build priced rows are gone with the money they counted (D-127 item 2): a
+ * published day of reads is worth nothing to anybody, an upheld dispute claws
+ * back nothing, and a reconfirmation collects a pool that was never filled.
+ * What the paper's Section 9 arithmetic came to is history now, and the rows
+ * that arithmetic wrote are still in the table — which is why `ledgerBalance`
+ * is tested at length below.
  *
  * Every event is a real sealed event and every instant comes from a fake clock.
  * No test asserts a bare amount without deriving it from the policy constant
@@ -21,12 +21,9 @@ import {
   appendEvent,
   bountyAccrualRow,
   buildReadCountPayload,
-  clawbackRows,
   disputeRewardRow,
   ledgerBalance,
-  readShareRows,
   reconciliationRow,
-  type EntryShareState,
   type Event,
   type LedgerRow,
   type ReadCountRow,
@@ -63,21 +60,6 @@ async function readCount(
   return log[0] as Event<"read_count">;
 }
 
-/** A verified entry with a submitter and three seated slots: the paid case. */
-function state(overrides: Partial<EntryShareState> = {}): EntryShareState {
-  return {
-    author_operator: SUBMITTER,
-    read_share_slots: SLOTS.map((operator, index) => ({
-      operator,
-      seq: index + 1,
-      measured: false,
-    })),
-    stale: false,
-    verified: true,
-    effective_tier: "stated",
-    ...overrides,
-  };
-}
 
 /** The signed record a reconfirmation carries, in the shape the log takes. */
 function reconfirmationRecord() {
@@ -110,53 +92,6 @@ function storedShare(overrides: Partial<LedgerRow> = {}): LedgerRow {
     ...overrides,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Nothing is priced
-// ---------------------------------------------------------------------------
-
-describe("readShareRows", () => {
-  it("builds no row for a day of reads, however many there were", async () => {
-    const event = await readCount([
-      { entry_id: ENTRY, count: READS },
-      { entry_id: OTHER, count: 7 },
-    ]);
-    expect(readShareRows(event, () => state())).toEqual([]);
-  });
-
-  it("builds no bounty pool for a stale entry either", async () => {
-    // The stale rule used to withhold half of every holder's share into a pool
-    // on the entry. Half of nothing is nothing, and no pool row is written.
-    const event = await readCount([{ entry_id: ENTRY, count: READS }]);
-    expect(readShareRows(event, () => state({ stale: true }))).toEqual([]);
-  });
-
-  it("builds no row for a paid block, which is what a key's reads are", async () => {
-    const event = await readCount(
-      [{ entry_id: ENTRY, count: READS }],
-      { reads: [{ entry_id: ENTRY, count: 4 }], keys: { [KEY]: 4 } },
-    );
-    // The block is still published — the counts are evidence of use (D-127) —
-    // and nobody is paid for a single one of them.
-    expect(event.payload.paid!.keys).toEqual({ [KEY]: 4 });
-    expect(readShareRows(event, () => state())).toEqual([]);
-  });
-});
-
-describe("clawbackRows", () => {
-  it("claws back nothing, because nothing accrued", async () => {
-    const log = await appendEvent([], {
-      at: "2026-09-10T00:00:00.000Z",
-      type: "dispute_upheld",
-      entry_id: ENTRY,
-      payload: { correction_entry_id: OTHER },
-    });
-    const event = log[0] as Event<"dispute_upheld">;
-    // Even handed a held share from the log's own history, it writes nothing:
-    // Section 6's clawback was a money rule, and there is no money.
-    expect(clawbackRows(event, [storedShare()])).toEqual([]);
-  });
-});
 
 describe("disputeRewardRow", () => {
   it("prices an upheld challenge's reward at zero, explicitly", () => {
@@ -247,7 +182,7 @@ describe("reconciliationRow", () => {
 // ---------------------------------------------------------------------------
 
 describe("ledgerBalance", () => {
-  it("adds up what is held, released, clawed back and paid", () => {
+  it("adds up what is held, released and clawed back", () => {
     const share = storedShare();
     const clawback: LedgerRow = {
       ...share,
@@ -255,22 +190,6 @@ describe("ledgerBalance", () => {
       kind: "clawback",
       amount: -share.amount,
     };
-    const paid: LedgerRow = {
-      id: `payout:${SUBMITTER}:2026-10-10`,
-      kind: "payout",
-      entry_id: null,
-      operator: SUBMITTER,
-      role: null,
-      date: "2026-10-10",
-      reads: null,
-      unit: "micros",
-      amount: 1_000,
-      available_at: null,
-      seq: 9,
-      at: "2026-10-10T00:00:00.000Z",
-      ref: {},
-    };
-
     // Inside the holdback: the share and its clawback both wait, so nothing is
     // held, because nothing is owed.
     expect(ledgerBalance([share, clawback], "2026-09-09T00:00:00.000Z")).toEqual({
@@ -278,19 +197,15 @@ describe("ledgerBalance", () => {
       held: 0,
       released: 0,
       clawed_back: -share.amount,
-      paid: 0,
-      carried_forward: 0,
     });
 
-    // Past it, with the payout that took money out.
-    const later = ledgerBalance([share, paid], "2026-10-10T00:00:00.000Z");
+    // Past it, the share has released and the clawback with it.
+    const later = ledgerBalance([share], "2026-10-10T00:00:00.000Z");
     expect(later).toEqual({
       accrued: share.amount,
       held: 0,
       released: share.amount,
       clawed_back: 0,
-      paid: 1_000,
-      carried_forward: share.amount - 1_000,
     });
   });
 
@@ -329,16 +244,12 @@ describe("ledgerBalance", () => {
       held: 4_000,
       released: 0,
       clawed_back: 0,
-      paid: 0,
-      carried_forward: 0,
     });
     expect(ledgerBalance([priced, unpriced], release)).toEqual({
       accrued: 4_000,
       held: 0,
       released: 4_000,
       clawed_back: 0,
-      paid: 0,
-      carried_forward: 4_000,
     });
     // On its own the unpriced row moves nothing at all.
     expect(ledgerBalance([unpriced], release)).toEqual({
@@ -346,8 +257,6 @@ describe("ledgerBalance", () => {
       held: 0,
       released: 0,
       clawed_back: 0,
-      paid: 0,
-      carried_forward: 0,
     });
   });
 
@@ -364,8 +273,6 @@ describe("ledgerBalance", () => {
       held: 0,
       released: 0,
       clawed_back: 0,
-      paid: 0,
-      carried_forward: 0,
     });
   });
 });

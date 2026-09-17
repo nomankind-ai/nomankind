@@ -251,9 +251,7 @@ async function openWorld(
       keyHash: await key.hash,
       tier: "standard",
       status: "active",
-      customer: `cus_alerts_${minted}`,
-      subscription: `sub_alerts_${minted}`,
-      checkoutSession: `cs_alerts_${minted}`,
+      clientDay: `cs_alerts_${minted}`,
       createdAt: AT,
     });
     return key.secret;
@@ -266,7 +264,6 @@ async function openWorld(
         body: {
           operator: party.operator,
           attestation: await attestFor(party.agent, party.operator, AT),
-          payout: { reference: VERIFIED_REFERENCE },
         },
         timestamp: AT,
       }),

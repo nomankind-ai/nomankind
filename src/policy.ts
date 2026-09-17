@@ -1043,8 +1043,9 @@ export function isVersionStalenessCategory(
 }
 
 /**
- * Incentives / Money. Accrued fees are held for thirty days before payout so an
- * upheld dispute can claw them back before they leave.
+ * Incentives / Money. The holdback an accrued fee waited out while the record
+ * was sold. Nothing accrues any more (D-127); it is published because it is the
+ * one number a reader still needs to read an old ledger row.
  */
 export const HOLDBACK_DAYS = 30;
 
@@ -1187,8 +1188,8 @@ export const SWEEP_BATCH_STATEMENTS = 100;
 
 /**
  * Incentives / Money, Section 9: "Each day's published count is the number the
- * seal commits to and payouts are computed from." How many of a published day's
- * entries one run of the ledger step prices.
+ * seal commits to." How many of a published day's entries one run of the ledger
+ * step walks.
  *
  * Not a whitepaper number and not a rule about money: what a day is worth does
  * not depend on it. Pricing one entry is a read of the entry and a read per
@@ -1621,19 +1622,19 @@ export const STANDING_DECAY_PAUSED = true;
 /**
  * The release window, and it is zero: the record is free (decision D-127).
  *
- * An event's release date is its covering seal's `sealed_at` plus this many
- * days, and an entry's is its `entry_submitted` event's — so at zero every
- * event and every entry is released the moment it is sealed, its content public
- * and CC0 from that instant, in the mirror and served to anyone who asks. The
- * proof was always public from the first minute and still is: every hash, seal,
- * anchor, operator record, and every entry's id, domain, subject, category,
- * status, effective tier, entry hash, seal object, signers and release date.
+ * Every event and every entry is released the moment it is sealed, its content
+ * public and CC0 from that instant, in the mirror and served to anyone who
+ * asks. The proof was always public from the first minute and still is: every
+ * hash, seal, anchor, operator record, and every entry's id, domain, subject,
+ * category, status, effective tier, entry hash, seal object, signers and
+ * release date.
  *
- * Zero and not gone. The window's code stays exactly as it is, dormant behind
- * this number, and its tests stay as regression cover: the rule is computed
- * from the seal date at read time and never stored on a row, so a fork that
- * publishes a window of its own sets this one constant and the withheld paths
- * come back whole. Nothing else anywhere may set or override it.
+ * Zero, and the arithmetic behind it is gone: D-127 item 1 removed the withhold
+ * paths, so there is no code left that could hold a payload back. The number
+ * stays because it is published — `mirror.json` carries
+ * `release_window_days` in every v1, v2 and v3 clone, and `verify-mirror` reads
+ * that column — so a reader of a directory is told what it was built under.
+ * Nothing computes from it.
  *
  * This supersedes D-101's thirty days, and the whitepaper's Money section until
  * v1.7 rewrites it. It moves only by a later decision.
@@ -1656,7 +1657,7 @@ export const RELEASE_WINDOW_DAYS = 0;
  * and move only by a later decision.
  */
 export interface RateTier {
-  /** The display name: what the tiers table and the checkout page show. */
+  /** The display name: what the tiers table shows. */
   readonly name: string;
   /** The cap per UTC day, per key on a paid tier and per client on the free one. */
   readonly reads_per_day: number;

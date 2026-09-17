@@ -40,7 +40,6 @@ import type { EvidenceTier } from "../evidence.js";
 import { entryHash } from "../hash.js";
 import { signSyncReceipt, type SyncReceipt } from "../receipt.js";
 import { isVersionStalenessCategory, LIST_PAGE_LIMIT } from "../policy.js";
-import { releasedHead } from "../release.js";
 import type { Entry } from "../schema.js";
 import type { Seal } from "../seal.js";
 import type { SourceClass } from "../sources.js";
@@ -459,28 +458,12 @@ async function page(
   const sealedHead = latest.last_seq;
   const asked = Math.min(query.from + query.limit - 1, sealedHead);
 
-  // The release window (decision D-100). A free reader's page stops at the
-  // released head over the seals the page would have covered, and the whole
-  // page is then the world as it stood at that boundary: `head` and the receipt
-  // name it, and `sealed_head` still reports the true sealed head, so a reader
-  // sees exactly how far ahead the log is of what they were handed. A key and a
-  // signed operator are served to the sealed head, as today.
-  let head = asked;
-  let worldHead = sealedHead;
-  let asOf = latest.sealed_at;
-  if (reader.kind === "free") {
-    const covering = await sealsBetween(db, query.from, asked);
-    const released = releasedHead(covering, now);
-    // Nothing in the range has opened yet: an empty page, with `head` null and
-    // no receipt, exactly as a trainer already past the sealed head is answered.
-    if (released === null || released < query.from) {
-      return emptyPage(query.from, latest, access);
-    }
-    head = Math.min(asked, released);
-    worldHead = released;
-    const boundary = await sealCovering(db, released);
-    if (boundary !== null) asOf = boundary.sealed_at;
-  }
+  // Every reader, free or keyed, is served to the sealed head (D-127): the
+  // record is free from the seal, so there is one boundary and `head`,
+  // `sealed_head` and the receipt all name it.
+  const head = asked;
+  const worldHead = sealedHead;
+  const asOf = latest.sealed_at;
 
   const events = await eventsInRange(db, query.from, head);
 
@@ -499,10 +482,9 @@ async function page(
     const state =
       kind === "event" || event.entry_id === null
         ? null
-        // Derived at the head of the page's own world and never past it: a
-        // reader served to the released head is handed every entry as it stood
-        // there, so a validation the window still withholds cannot reach them
-        // through a re-derived record (decision D-100).
+        // Derived at the head of the page's own world and never past it, so
+        // every reader is handed each entry as it stood at the head they were
+        // served to.
         : await entries.state(db, event.entry_id, at, worldHead);
 
     items.push({

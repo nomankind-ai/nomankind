@@ -18,7 +18,7 @@
  * The other two are the ledger's. The record is free and prices nothing
  * (decision D-127), so what they serve is history: an operator's ledger is its
  * own stored rows and what they add up to, and the ledger page is the daily
- * reconciliations and the payouts that were made while the record was sold.
+ * reconciliations.
  * One policy number is published beside them, the holdback every accrual
  * waited out, because it is the one a reader still needs to read an old row.
  *
@@ -48,7 +48,6 @@ import {
   listOperators,
   ledgerRowsForOperator,
   operatorStanding as storedStanding,
-  payoutRows,
   reconciliationRows,
   storedStandingOf,
   storedStandings,
@@ -193,7 +192,7 @@ async function operatorStanding(db: D1Like, operator: string): Promise<Response>
  * GET /operators/{id}/ledger: what an operator's rows add up to, and the newest
  * page of them.
  *
- * Section 9: "any operator can reconcile their payout against the log". The
+ * Section 9: "any operator can reconcile ... against the log". The
  * balance is computed over the page that is served, so what is added up and what
  * is shown are the same rows; an operator with more rows than a page pages back
  * through them exactly as every other listing here is paged.
@@ -212,19 +211,17 @@ async function operatorLedger(
 }
 
 /**
- * GET /ledger: the daily reconciliations and the payouts, as history.
+ * GET /ledger: the daily reconciliations, as history.
  *
- * Nothing is priced any more (D-127), so no row is ever added to either
- * listing: what is served is what the log accrued and paid while the record was
- * sold. The policy block is down to the one number that still reads an old
- * row — the holdback every accrual waited out. The price of a read, the payout
- * floor and the payout cycle are not published, because there are none.
+ * Nothing is priced any more (D-127), so the listing only grows by the
+ * reconciliation each published day writes. The policy block is down to the one
+ * number that still reads an old row — the holdback every accrual waited out.
+ * There is no price of a read to publish, and nothing leaves.
  */
 async function ledger(db: D1Like): Promise<Response> {
   return json(
     {
       reconciliations: await reconciliationRows(db, LIST_PAGE_LIMIT),
-      payouts: await payoutRows(db, LIST_PAGE_LIMIT),
       policy: { HOLDBACK_DAYS },
     },
     200,

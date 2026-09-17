@@ -32,7 +32,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { receiptArtifactHash } from "../src/artifact.js";
 import {
   attestationDeadline,
@@ -168,7 +167,6 @@ let snapshotSeq = -1;
 
 /** One beacon for the whole run, so the tests own which round each request sees. */
 const beacon = new FixtureBeacon("m22");
-const payout = new MockPayoutAdapter();
 
 /** The attestations this file builds, in the order it builds them. */
 let first: DerivedAttestation;
@@ -224,7 +222,6 @@ async function register(party: Party): Promise<void> {
   const answer = await post(party.agent, "/operators", {
     operator: party.operator,
     attestation: await attestFor(party.agent, party.operator, AT),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -305,7 +302,6 @@ async function sweep(at: Date): Promise<SweepReport> {
     pinned: pinnedSet([]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout,
   });
 }
 
@@ -411,7 +407,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout,
     fetcher: new FixtureFetcher({ [PRICING_URL]: PRICING }),
     beacon,
   };

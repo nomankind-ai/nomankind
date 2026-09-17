@@ -67,7 +67,7 @@ import type {
 } from "../seal.js";
 import { signWitness, type Witness } from "../witness.js";
 import type { Env } from "../worker/env.js";
-import { PRODUCTION } from "./payout.js";
+import { PRODUCTION } from "../worker/config.js";
 
 /** Which registry track an environment's adapter is on. */
 export type WitnessAdapterKind = "mock" | "registry" | "unavailable";
@@ -195,7 +195,7 @@ export class MockWitnessAdapter implements EnvironmentWitnessAdapter {
  * Production before the citizen is registered, and any production without both
  * secrets: the registry track is simply not available.
  *
- * It answers nothing rather than a mock, for the reason the payout stub answers
+ * It answers nothing rather than a mock, for the reason the witness stub answers
  * "unavailable" rather than "verified": a fake countersignature on production
  * would be a seal claiming a witness it never had. A seal with no witnesses is
  * an honest seal; a seal with invented ones is not.

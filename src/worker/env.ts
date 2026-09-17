@@ -152,12 +152,10 @@ export type Env = {
    */
   MIRROR_APP_PRIVATE_KEY?: string;
   /*
-   * No payment provider secret is named here any more (decision D-127, "the
-   * record is free, no money anywhere"). STRIPE_SECRET_KEY and
-   * STRIPE_WEBHOOK_SECRET were the paid loop's two secrets; the doors they
-   * authenticated answer 410 now and nothing on this deployment reads them, so
-   * an environment that still has them set is an environment carrying two dead
-   * secrets rather than one that behaves differently. Absent is fine, present
-   * is ignored, and neither is read at any door.
+   * No payment provider secret is named here (decision D-127, "the record is
+   * free, no money anywhere"). The paid loop's two secrets went with the doors
+   * they authenticated, which are gone: an environment that still has them set
+   * is carrying two dead secrets rather than behaving differently, because
+   * nothing in this Worker reads either name.
    */
 };

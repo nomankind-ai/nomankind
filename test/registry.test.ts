@@ -314,19 +314,13 @@ describe("request bodies", () => {
   const body = {
     operator: OPERATOR,
     attestation,
-    payout: { reference: "acct_123" },
   };
 
   it("reads a registration body", () => {
     const parsed = parseRegistrationBody(body);
     expect(parsed).toEqual({
       ok: true,
-      value: {
-        operator: OPERATOR,
-        domain: null,
-        attestation,
-        payout: { reference: "acct_123" },
-      },
+      value: { operator: OPERATOR, domain: null, attestation },
     });
   });
 
@@ -338,15 +332,11 @@ describe("request bodies", () => {
       [],
       {},
       { ...body, extra: true },
-      { operator: OPERATOR, attestation },
       { ...body, operator: 42 },
       { ...body, attestation: "signed" },
       { ...body, attestation: 42 },
       { ...body, attestation: [] },
-      { ...body, payout: "acct_123" },
-      { ...body, payout: {} },
-      { ...body, payout: { reference: "" } },
-      { ...body, payout: { reference: 42 } },
+      { ...body, payout: { reference: "acct_123" } },
     ]) {
       expect(parseRegistrationBody(bad)).toEqual({
         ok: false,
@@ -364,12 +354,7 @@ describe("request bodies", () => {
       const parsed = parseRegistrationBody(missing);
       expect(parsed).toEqual({
         ok: true,
-        value: {
-          operator: OPERATOR,
-          domain: null,
-          attestation: null,
-          payout: { reference: "acct_123" },
-        },
+        value: { operator: OPERATOR, domain: null, attestation: null },
       });
     }
 

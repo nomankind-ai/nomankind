@@ -5,9 +5,10 @@
  * any more, it is asked for. Nothing about it is priced, nothing about it is
  * sold, and the caps it carries are caps and never products — what a key buys
  * is an identity the log can count under, so a reader can hold alerts, read
- * their own receipts by counter, and see what they read day by day. Six doors:
- * what the tiers allow, take a key, what my key is, what my key read, the
- * receipts behind that, and the four retired ones that answer 410.
+ * their own receipts by counter, and see what they read day by day. Five doors:
+ * what the tiers allow, take a key, what my key is, what my key read, and the
+ * receipts behind that. The four the paid loop had are gone, addresses and
+ * all, so they fall through to the Worker's own 404.
  *
  * One key per client per UTC day, which is the whole of what stands between a
  * free identity and an identity factory. The client is the same per-client
@@ -47,8 +48,8 @@ import {
 import { utcDay } from "../anchor.js";
 import type { D1Like } from "../storage/d1.js";
 import {
-  KeyClaimConflictError,
-  keyByCheckoutSession,
+  KeyDayConflictError,
+  keyByClientDay,
   keyByHash,
   putKey,
   quotaDays,
@@ -57,7 +58,6 @@ import {
   receiptsForKey,
 } from "../storage/keys.js";
 import type { Env } from "./env.js";
-import { retiredDoor } from "./stripe.js";
 import {
   guardDatabase,
   isRead,
@@ -82,11 +82,8 @@ const MILLISECONDS_PER_DAY = 86_400_000;
  *
  * The identity checks only, and deliberately not the quota: these are a
  * holder's own account doors, not reading doors. A key at its daily cap must
- * still be able to see that it is at its cap, and a key whose bill did not
- * clear must still be able to reach the billing portal — a door that refused
- * `key_past_due` here would lock a customer out of the one page that fixes it.
- * The read and sync doors are where a status and a cap decide anything, through
- * `resolveAccess`.
+ * still be able to see that it is at its cap. The read and sync doors are where
+ * a cap decides anything, through `resolveAccess`.
  */
 async function keyOf(
   db: D1Like,
@@ -300,32 +297,14 @@ function clientDigest(scope: string): string {
 }
 
 /**
- * What one client's free key for one day is filed under.
+ * What one client's key for one day is filed under: the client, then the day.
  *
- * `api_keys` still has the three NOT NULL columns the paid loop put there —
- * customer, subscription and checkout_session — and this milestone adds no
- * migration (D-127), so they are filled with synthetic values rather than left
- * out. They are not references to anything at any provider and are not meant to
- * be: `free` says where they came from, the client digest says which client, and
- * the day says which day.
- *
- * The unique index on `checkout_session` is what actually enforces one key per
- * client per UTC day. The check below it is the courteous answer; this is the
- * rule, and it holds when two requests race, exactly as it held for two tabs
- * open on a claim.
+ * The unique index on `client_day` (migrations/0023_money_removed.sql) is what
+ * actually enforces one key per client per UTC day. The check below it is the
+ * courteous answer; this is the rule, and it holds when two requests race.
  */
-function syntheticColumns(
-  scope: string,
-  day: string,
-): { customer: string; subscription: string; checkoutSession: string } {
-  const digest = clientDigest(scope);
-  return {
-    // The client, across every day: one client is one "customer", which is what
-    // makes a second key today a duplicate of the first rather than a stranger.
-    customer: `free:client:${digest}`,
-    subscription: `free:sub:${digest}:${day}`,
-    checkoutSession: `free:day:${digest}:${day}`,
-  };
+function clientDayOf(scope: string, day: string): string {
+  return `${clientDigest(scope)}:${day}`;
 }
 
 /**
@@ -373,9 +352,9 @@ async function free(
 
   const day = utcDay(deps.now.toISOString());
   const scope = await quotaScopeForClient(request.headers.get("cf-connecting-ip"));
-  const columns = syntheticColumns(scope, day);
+  const clientDay = clientDayOf(scope, day);
 
-  const standing = await keyByCheckoutSession(db, columns.checkoutSession);
+  const standing = await keyByClientDay(db, clientDay);
   if (standing !== null) return refuse(429, "key_today");
 
   const minted = mintKey();
@@ -386,17 +365,15 @@ async function free(
       id: minted.id,
       keyHash: await minted.hash,
       tier,
-      // Active from the minute it is minted: there is no bill behind it that
-      // could fall past due and no subscription behind it that could be
-      // canceled, so the only status a free key ever has is the working one.
+      // Active from the minute it is minted: there is nothing behind it that
+      // could fall due or be cancelled, so the only status a key ever has now
+      // is the working one.
       status: "active",
-      customer: columns.customer,
-      subscription: columns.subscription,
-      checkoutSession: columns.checkoutSession,
+      clientDay,
       createdAt: at,
     });
   } catch (error) {
-    if (error instanceof KeyClaimConflictError) return refuse(429, "key_today");
+    if (error instanceof KeyDayConflictError) return refuse(429, "key_today");
     throw error;
   }
 
@@ -435,24 +412,6 @@ async function route(
   if (path === "/keys/free") {
     if (request.method !== "POST") return methodNotAllowed("POST");
     return free(request, db, deps);
-  }
-
-  // The three doors of the paid loop, retired (D-127). The method check stays
-  // in front of each, so what is answered about the method is still true; the
-  // door itself touches no storage and reads no secret on its way to the 410.
-  if (path === "/keys/checkout") {
-    if (request.method !== "POST") return methodNotAllowed("POST");
-    return retiredDoor();
-  }
-
-  if (path === "/keys/claim") {
-    if (!isRead(request)) return methodNotAllowed(READ_METHODS);
-    return retiredDoor();
-  }
-
-  if (path === "/keys/me/portal") {
-    if (request.method !== "POST") return methodNotAllowed("POST");
-    return retiredDoor();
   }
 
   if (path === "/keys/me") {

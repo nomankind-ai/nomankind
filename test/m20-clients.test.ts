@@ -23,7 +23,7 @@ import {
   runDispute,
   type DisputeDeps,
 } from "../src/cli/dispute.js";
-import { registerPlan, runRegister, payoutReferenceFor } from "../src/cli/register.js";
+import { registerPlan, runRegister } from "../src/cli/register.js";
 import { checkReport, reportPlan, runReport } from "../src/cli/report.js";
 import { revalidatePlan, runRevalidate } from "../src/cli/revalidate.js";
 import type {
@@ -718,9 +718,7 @@ describe("register: what one run asks for", () => {
 
     const body = http.asked[0]!.body as Record<string, unknown>;
     expect(body["operator"]).toBe(OPERATOR);
-    expect(body["payout"]).toEqual({
-      reference: payoutReferenceFor(OPERATOR),
-    });
+    expect(body).not.toHaveProperty("payout");
     const attestation = body["attestation"] as Record<string, unknown>;
     expect(typeof attestation["signature"]).toBe("string");
     expect(attestation["signed_at"]).toBe(NOW.toISOString());

@@ -56,7 +56,6 @@ import {
   isDisclosureCategory,
   CAPTURE_MAX_BYTES,
 } from "../policy.js";
-import { withholdEntry } from "../release.js";
 import { validateEntry } from "../schema.js";
 import { verifyEntrySignature } from "../sign.js";
 import { checkCapturedSource } from "../sources.js";
@@ -85,7 +84,7 @@ import { readerAccess, type ReaderAccess } from "./access.js";
 import { STRICT_TRANSPORT_SECURITY } from "../ui/html.js";
 import { fetcherAgentId } from "./config.js";
 import type { Env } from "./env.js";
-import { entryRelease, refusalResponse } from "./read.js";
+import { refusalResponse } from "./read.js";
 import {
   unavailable,
   withChainRetry,
@@ -1095,38 +1094,10 @@ async function entryById(
   // `stale` is derived and outside the core, so the hash below is untouched.
   const entry = clocked(stored.entry, deps.now);
 
-  // A key and a signed operator are served the entry itself, and so is anybody
-  // once it has released: the body is the entry object exactly as this route
-  // has always answered it, so nothing that parses this door has to change.
-  if (reader.kind !== "free") return json(entry, 200);
-  const release = await entryRelease(env.DB, stored.submittedSeq, deps.now);
-  if (release.released) return json(entry, 200);
-
-  // Withheld (decision D-100): the proof under its own key, never under
-  // `entry`, so a reader cannot mistake a nulled claim for the claim, and the
-  // date beside it at the top level rather than inside the entry, so the
-  // schema's shape is the one thing the window never bends. `release_date` is
-  // null while nothing has sealed the submission: there is no date to name yet.
-  //
-  // `entry_hash` is the whole point of calling this proof at all: it is taken
-  // over the core before anything is nulled, so a keyless reader is handed the
-  // one number that identifies the entry the log sealed, and can hold whatever
-  // they are served later against it. Without it the proof names a record
-  // nobody outside the door could pin down.
-  const withheld = await withholdEntry(
-    entry,
-    stored.sidecar,
-    release.release_date ?? "",
-  );
-  return json(
-    {
-      proof: withheld.proof,
-      sidecar: withheld.sidecar,
-      entry_hash: withheld.entry_hash,
-      release_date: release.release_date,
-    },
-    200,
-  );
+  // Every reader is served the entry itself (D-127): the record is free from
+  // the seal, so the body is the entry object exactly as this route has always
+  // answered it, to a key, a signed operator and a stranger alike.
+  return json(entry, 200);
 }
 
 /**
@@ -1188,40 +1159,6 @@ async function undisclosed(
 }
 
 /**
- * The release window on a capture (decision D-100), or null when this reader
- * may have the bytes.
- *
- * A capture is evidence, and evidence is the content of the entry that rests on
- * it: a capture whose every index row belongs to an entry that has not released
- * is served only to a key or a signed operator, and refused to a free reader
- * with the earliest date any of those entries opens. One row belonging to a
- * released entry is enough to serve it — the bytes are that entry's public
- * evidence, and no other entry citing the same hash can take that back.
- */
-async function unreleasedCapture(
-  env: Env,
-  deps: SubmitDeps,
-  reader: ReaderAccess,
-  rows: readonly CaptureRecord[],
-): Promise<Response | null> {
-  if (reader.kind !== "free") return null;
-  if (rows.length === 0) return null;
-
-  let earliest: string | null = null;
-  for (const row of rows) {
-    const stored = await getEntry(env.DB, row.entryId);
-    // A capture row whose entry is not there points at nothing this door can
-    // date; it cannot release the bytes, and it cannot put a date on them.
-    if (stored === null) continue;
-    const release = await entryRelease(env.DB, stored.submittedSeq, deps.now);
-    if (release.released) return null;
-    const date = release.release_date;
-    if (date !== null && (earliest === null || date < earliest)) earliest = date;
-  }
-  return json({ error: "unreleased", release_date: earliest }, 403);
-}
-
-/**
  * The capture behind a hash: the raw bytes, exactly as they were fetched.
  *
  * The hash asked for is the content hash the entry carries, not the archive
@@ -1241,8 +1178,6 @@ async function captureByHash(
   if (record === null) return refuse(404, "not_found");
   const gate = await undisclosed(env, deps, reader, rows);
   if (gate !== null) return gate;
-  const window = await unreleasedCapture(env, deps, reader, rows);
-  if (window !== null) return window;
 
   const stored = await throughArchive(() =>
     readCapture(env.CAPTURES, record.archiveHash),
@@ -1272,11 +1207,9 @@ async function sidecarByHash(
   const record = rows[0] ?? null;
   if (record === null) return refuse(404, "not_found");
   // The sidecar says when and how the payload was archived, which is a fact
-  // about the payload: it waits for the same date the bytes do.
+  // about the payload: it waits for the same disclosure date the bytes do.
   const gate = await undisclosed(env, deps, reader, rows);
   if (gate !== null) return gate;
-  const window = await unreleasedCapture(env, deps, reader, rows);
-  if (window !== null) return window;
 
   const sidecar = await throughArchive(() =>
     readSidecar(env.CAPTURES, record.archiveHash),

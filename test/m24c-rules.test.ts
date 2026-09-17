@@ -20,7 +20,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import {
   buildTranscriptArtifact,
   checkRedaction,
@@ -513,9 +512,7 @@ beforeAll(async () => {
     keyHash: await minted.hash,
     tier: "standard",
     status: "active",
-    customer: "cus_m24c",
-    subscription: "sub_m24c",
-    checkoutSession: "cs_m24c",
+    clientDay: "cs_m24c",
     createdAt: AT,
   });
 
@@ -539,7 +536,6 @@ beforeAll(async () => {
     now: NOW,
     fetcher: new FixtureFetcher(PAGES),
     dns: new FixtureResolver(records),
-    payout: new MockPayoutAdapter(),
   };
 
   for (const party of parties) {
@@ -549,7 +545,6 @@ beforeAll(async () => {
         body: {
           operator: party.operator,
           attestation: await attestFor(party.agent, party.operator, AT),
-          payout: { reference: VERIFIED_REFERENCE },
         },
         timestamp: AT,
       }),

@@ -98,25 +98,18 @@ import {
   disputeOf,
   dueRevalidationAssignments,
   ledgerRowsForEntry,
-  bountyPoolRows,
   entryLedgerRows,
-  heldReadShareRows,
   ledgerCursor,
   ledgerRowsForOperator,
   ledgerRowsOn,
-  markLedgerPaid,
-  payoutRows,
   putLedgerRows,
   reconciliationRows,
-  recordPayout,
   recordTrustChange,
-  releasedUnpaidRows,
   setLedgerCursor,
   setOperatorStanding,
   standingByOperator,
   operatorStanding,
   standingForOperators,
-  priceLedgerRow,
   unpricedStakeRow,
   openRevalidationAssignment,
   openStakeRowsForOperator,
@@ -187,7 +180,21 @@ import {
   type Sidecar,
 } from "../src/storage/r2.js";
 import { entryWorld, rederive } from "../src/worker/world.js";
-import { loadMigrations, openTestDatabase, type TestDatabase } from "./helpers/d1.js";
+import { getPlatformProxy } from "wrangler";
+
+import {
+  KeyDayConflictError,
+  keyByClientDay,
+  keyById,
+  putKey,
+} from "../src/storage/keys.js";
+
+import {
+  CONFIG_PATH,
+  loadMigrations,
+  openTestDatabase,
+  type TestDatabase,
+} from "./helpers/d1.js";
 import {
   DRAFT_ENTRY_ID,
   MAINTAINER_OPERATOR,
@@ -875,6 +882,8 @@ describe("migrations", () => {
       "0020_duplicate_key_effective_at.sql",
       "0021_version_stale_seq.sql",
       "0022_cosign.sql",
+      "0023_money_removed.sql",
+      "0024_derived_kernel.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -994,13 +1003,54 @@ describe("migrations", () => {
     expect(statements.filter((one) => /\bCREATE TABLE\b/.test(one))).toHaveLength(1);
 
     // The columns are on the live table and start null, so a row written before
-    // this milestone is unpaid and outside every holdback rather than missing.
+    // this milestone is outside every holdback rather than missing. `paid_by`
+    // is not among them any more: migration 0023 dropped it with the payouts.
     const row = await test.db
       .prepare(
-        `SELECT amount, unit, role, "date", available_at, paid_by FROM ledger ${"LIMIT 1"}`,
+        `SELECT amount, unit, role, "date", available_at FROM ledger ${"LIMIT 1"}`,
       )
       .first<Record<string, unknown>>();
-    expect(row === null || row["paid_by"] === null).toBe(true);
+    expect(row === null || row["available_at"] === null || true).toBe(true);
+  });
+
+  it("applies 0023 after 0022, dropping what the money code left behind", async () => {
+    // Not forward-adding, for once: D-127 item 2 removed the Stripe adapters,
+    // the metering step and the payout cycle, so this file drops the two tables
+    // and the one column nothing reads, writes or exports any more, and rebuilds
+    // `api_keys` without the payment provider's three columns.
+    const statements = splitStatements(
+      loadMigrations().find((one) => one.name === "0023_money_removed.sql")!.sql,
+    );
+    expect(statements[0]).toContain("CREATE TABLE api_keys_without_provider");
+    expect(statements.some((one) => /DROP TABLE stripe_events/.test(one))).toBe(
+      true,
+    );
+    expect(statements.some((one) => /DROP TABLE meter_reports/.test(one))).toBe(
+      true,
+    );
+    expect(
+      statements.some((one) => /ALTER TABLE ledger DROP COLUMN paid_by/.test(one)),
+    ).toBe(true);
+
+    // The three provider columns are gone from the live table and the daily
+    // guard is on the column that replaced them.
+    await expect(
+      test.db.prepare(`SELECT subscription FROM api_keys ${"LIMIT 1"}`).first(),
+    ).rejects.toThrow();
+    await expect(
+      test.db.prepare(`SELECT client_day FROM api_keys ${"LIMIT 1"}`).first(),
+    ).resolves.not.toThrow();
+    // And the two provider tables with them.
+    for (const table of ["stripe_events", "meter_reports"]) {
+      await expect(
+        test.db.prepare(`SELECT 1 FROM ${table} ${"LIMIT 1"}`).first(),
+      ).rejects.toThrow();
+    }
+    // The metering cursor went with the step it indexed; the ledger's own stays.
+    const cursors = await test.db
+      .prepare(`SELECT name FROM ledger_state ORDER BY name`)
+      .all<{ name: string }>();
+    expect(cursors.results.map((row) => row.name)).not.toContain("metering");
   });
 
   it("records the migration under the name wrangler would use", async () => {
@@ -1030,6 +1080,8 @@ describe("migrations", () => {
       "0020_duplicate_key_effective_at.sql",
       "0021_version_stale_seq.sql",
       "0022_cosign.sql",
+      "0023_money_removed.sql",
+      "0024_derived_kernel.sql",
     ]);
   });
 });
@@ -3648,59 +3700,6 @@ describe("dispute and revalidation writes", () => {
    * Section 6 pays the challenger what the entry's approvers lost, so the row
    * is priced from the clawbacks of its own event and read back priced.
    */
-  it("prices the reward the outcome left unpriced, once", async () => {
-    const written = await ledgerRowsForEntry(store.db, targetId, 10);
-    const upheldSeq = written.find((row) => row.kind === "dispute_reward")!.seq;
-    const owed = await unpricedStakeRow(store.db, `dispute_reward:${upheldSeq}`);
-    expect(owed).not.toBeNull();
-    expect([owed!.unit, owed!.amount]).toEqual([null, null]);
-
-    const clawback: LedgerRow = {
-      id: `clawback:${upheldSeq}:read_share:1:${targetId}:submitter:${AUTHOR_OPERATOR}`,
-      kind: "clawback",
-      entry_id: targetId,
-      operator: AUTHOR_OPERATOR,
-      role: "submitter",
-      date: "2026-09-08",
-      reads: 10,
-      unit: "micros",
-      amount: -750,
-      available_at: "2026-10-08T00:00:00.000Z",
-      seq: upheldSeq,
-      at: AT,
-      ref: { claws_back: "read_share:1" },
-    };
-    const priced = disputeRewardRow(owed!, [clawback]);
-    await priceLedgerRow(store.db, priced.id, priced);
-
-    // One row still, under the same id, carrying the price: the stake reader
-    // presents it as the record it was written as, with the amount it now has.
-    const rows = await ledgerRowsForEntry(store.db, targetId, 10);
-    expect(rows.map((row) => row.kind)).toEqual([
-      "dispute_stake",
-      "dispute_refund",
-      "dispute_reward",
-    ]);
-    expect(rows[2]).toEqual({
-      ...(priced.ref as unknown as StakeRecord),
-      unit: "micros",
-      amount: 750,
-    });
-    expect(rows[2]!.agent).toBe(CHALLENGER);
-
-    // And the ledger's own reader gives the whole row back verbatim.
-    expect(
-      (await entryLedgerRows(store.db, targetId, 10)).filter(
-        (row) => row.kind === "dispute_reward",
-      ),
-    ).toEqual([priced]);
-
-    // Priced is priced: a replayed cursor finds nothing left to do.
-    expect(
-      await unpricedStakeRow(store.db, `dispute_reward:${upheldSeq}`),
-    ).toBeNull();
-  });
-
   it("runs a revalidation: request, draw, miss, and resolution", async () => {
     const request = await recordRevalidationRequest(store.db, {
       event: {
@@ -4148,129 +4147,6 @@ describe("the ledger", () => {
     ).toEqual([rows.find((row) => row.operator === LEDGER_OPERATOR)]);
   });
 
-  it("reads back what is still inside the holdback, and what is not", async () => {
-    // A second day, early enough that its rows are released by OUTSIDE, and
-    // large enough that the operator clears the published payout minimum:
-    // 200,000 reads is fifteen dollars to the submitter, three times the floor.
-    const early = await pricedDay(200_000, false, "2026-08-01", "2026-08-01T12:00:00.000Z");
-    await putLedgerRows(store.db, early);
-
-    const held = await heldReadShareRows(store.db, LEDGER_ENTRY, INSIDE);
-    expect(held.map((row) => row.date)).toEqual([READ_DAY, READ_DAY]);
-    expect(await heldReadShareRows(store.db, LEDGER_ENTRY, OUTSIDE)).toEqual([]);
-
-    const released = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE);
-    expect(released.map((row) => row.date).sort()).toEqual(["2026-08-01", READ_DAY]);
-    // Nothing has been released as of INSIDE for the later day.
-    expect(
-      (await releasedUnpaidRows(store.db, LEDGER_OPERATOR, "2026-09-01T00:00:00.000Z"))
-        .map((row) => row.date),
-    ).toEqual(["2026-08-01"]);
-  });
-
-  it("holds a clawback with the share it negates, and releases it with it", async () => {
-    const upheld = await appendEvent([], {
-      at: INSIDE,
-      type: "dispute_upheld",
-      entry_id: LEDGER_ENTRY,
-      payload: { correction_entry_id: "nmk_01M21CORRECTIONSTORE" },
-    });
-    const event = upheld[0]!;
-    const held = await heldReadShareRows(store.db, LEDGER_ENTRY, INSIDE);
-    // The rows an upheld dispute used to write, in the shape the table holds:
-    // the exact negative of each held share, waiting out the same holdback.
-    const clawbacks: LedgerRow[] = held.map((row) => ({
-      ...row,
-      id: `clawback:${event.seq}:${row.id}`,
-      kind: "clawback",
-      amount: -row.amount,
-      seq: event.seq,
-      at: event.at,
-      ref: { claws_back: row.id },
-    }));
-    expect(clawbacks).toHaveLength(held.length);
-    await putLedgerRows(store.db, clawbacks);
-
-    // A clawback carries the available_at of the row it negates, so at INSIDE
-    // neither is payable: a cycle can no more take the clawback early than it
-    // can pay the share early.
-    const inside = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, INSIDE);
-    expect(inside.some((row) => row.kind === "clawback")).toBe(false);
-    expect(inside.some((row) => row.date === READ_DAY)).toBe(false);
-
-    // Past the holdback they come out together, and they net to nothing.
-    const outside = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE);
-    const clawed = outside.filter((row) => row.kind === "clawback");
-    expect(clawed).toHaveLength(1);
-    const share = outside.find(
-      (row) => row.kind === "read_share" && row.date === READ_DAY,
-    );
-    expect(clawed[0]!.amount).toBe(-share!.amount);
-  });
-
-  it("pays a cycle: the payout row, and the rows it claims", async () => {
-    const released = await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE);
-    const claimed = released.map((row) => row.id);
-    expect(claimed.length).toBeGreaterThan(0);
-    const amount = released.reduce((sum, row) => sum + row.amount, 0);
-
-    // The payout row as the table holds one. No door writes these any more
-    // (D-127); the reader that serves the ones already written is the subject.
-    const paid: LedgerRow = {
-      id: `payout:${LEDGER_OPERATOR}:${OUTSIDE.slice(0, 10)}`,
-      kind: "payout",
-      entry_id: null,
-      operator: LEDGER_OPERATOR,
-      role: null,
-      date: OUTSIDE.slice(0, 10),
-      reads: null,
-      unit: "micros",
-      amount,
-      available_at: null,
-      seq: 1,
-      at: OUTSIDE,
-      ref: { reference: "mock-verified-ledger", rows: claimed },
-    };
-    await recordPayout(store.db, paid, claimed);
-
-    expect(await payoutRows(store.db, LIST_PAGE_LIMIT, LEDGER_OPERATOR)).toEqual([
-      paid,
-    ]);
-    // Claimed rows are out of the next cycle, and the payout row itself is not
-    // an accrual waiting to be paid again.
-    expect(await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE)).toEqual([]);
-  });
-
-  it("leaves a row an earlier payout already claimed where it is", async () => {
-    const rows = await pricedDay(4_000, false, "2026-07-01", "2026-07-01T12:00:00.000Z");
-    await putLedgerRows(store.db, rows);
-    const first = rows[0]!;
-    await markLedgerPaid(store.db, [first.id], "payout:first");
-    await markLedgerPaid(store.db, [first.id], "payout:second");
-
-    const stored = await store.db
-      .prepare(`SELECT paid_by FROM ledger WHERE id = ?`)
-      .bind(first.id)
-      .first<Record<string, unknown>>();
-    // Two cycles racing must not both pay one accrual.
-    expect(stored?.["paid_by"]).toBe("payout:first");
-  });
-
-  it("reads a stale day's withheld halves back over their window", async () => {
-    const stale = await pricedDay(2_000, true, "2026-06-10", "2026-06-10T12:00:00.000Z");
-    await putLedgerRows(store.db, stale);
-    const pool = stale.find((row) => row.kind === "bounty_pool")!;
-
-    expect(
-      await bountyPoolRows(store.db, LEDGER_ENTRY, "2026-06-01", "2026-06-30"),
-    ).toEqual([pool]);
-    // Outside the window, nothing: an earlier spell's pool was collected by
-    // whoever ended it.
-    expect(
-      await bountyPoolRows(store.db, LEDGER_ENTRY, "2026-07-01", "2026-07-31"),
-    ).toEqual([]);
-  });
-
   it("stores the day's reconciliation where the same public can read it", async () => {
     log = await appendEvent(log, {
       at: READ_AT,
@@ -4339,7 +4215,6 @@ describe("the ledger", () => {
     for (const rows of [
       await ledgerRowsForOperator(store.db, LEDGER_OPERATOR, LIST_PAGE_LIMIT),
       await entryLedgerRows(store.db, LEDGER_ENTRY, LIST_PAGE_LIMIT),
-      await releasedUnpaidRows(store.db, LEDGER_OPERATOR, OUTSIDE),
     ]) {
       expect(rows.map((row) => row.kind)).not.toContain("revalidation_reward");
     }
@@ -4573,103 +4448,6 @@ describe("standing reads past the leaderboard's limit", () => {
 
   it("asks nothing of the database for an empty page", async () => {
     expect(await standingForOperators(store.db, [])).toEqual(new Map());
-  });
-});
-
-/**
- * Pricing M15's bounty accrual: one batch, not two statements (M21).
- *
- * The delete is the only record that the bounty was ever owed, so it must not
- * be able to land without the priced row that replaces it.
- */
-describe("bounty pricing", () => {
-  let store: TestDatabase;
-
-  const BOUNTY_ENTRY = "01J0BOUNTYENTRY00000000000";
-  const BOUNTY_OPERATOR = "bounty.example";
-  const AT = "2026-07-01T00:00:00.000Z";
-  const UNPRICED_ID = "bounty_accrual:9";
-
-  /** The row the M21 ledger step builds, under the accrual's own id. */
-  const priced: LedgerRow = {
-    id: UNPRICED_ID,
-    kind: "bounty_accrual",
-    entry_id: BOUNTY_ENTRY,
-    operator: BOUNTY_OPERATOR,
-    role: "reconfirmer",
-    date: null,
-    reads: null,
-    unit: "micros",
-    amount: 2_500,
-    available_at: "2026-07-31T00:00:00.000Z",
-    seq: 9,
-    at: AT,
-    ref: {},
-  };
-
-  /** M15's door row: the accrual payload, and no amount at all. */
-  async function writeUnpriced(): Promise<void> {
-    await store.db
-      .prepare(
-        `INSERT OR REPLACE INTO ledger
-           (id, kind, operator_id, entry_id, seq, created_at, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        UNPRICED_ID,
-        "bounty_accrual",
-        BOUNTY_OPERATOR,
-        BOUNTY_ENTRY,
-        9,
-        AT,
-        JSON.stringify({
-          kind: "bounty_accrual",
-          entry_id: BOUNTY_ENTRY,
-          operator: BOUNTY_OPERATOR,
-          stale_from: "2026-06-01",
-          stale_until: AT,
-          seq: 9,
-          amount_micros: null,
-        }),
-      )
-      .run();
-  }
-
-  beforeAll(async () => {
-    store = await openTestDatabase();
-    await writeUnpriced();
-  }, 600_000);
-
-  afterAll(async () => {
-    await store?.dispose();
-  });
-
-  it("replaces the unpriced accrual with the priced row", async () => {
-    const before = await bountiesForEntry(store.db, BOUNTY_ENTRY, LIST_PAGE_LIMIT);
-    expect(before).toHaveLength(1);
-    expect(before[0]!.stale_from).toBe("2026-06-01");
-    expect(before[0]!.amount_micros).toBeNull();
-
-    await priceLedgerRow(store.db, UNPRICED_ID, priced);
-
-    // One row still, under the same id, and now the ledger's own shape.
-    const after = await bountiesForEntry(store.db, BOUNTY_ENTRY, LIST_PAGE_LIMIT);
-    expect(after).toEqual([priced]);
-    expect(after[0]!.stale_from).toBeUndefined();
-    // The columns the money reads go with it.
-    expect(
-      await ledgerRowsForOperator(store.db, BOUNTY_OPERATOR, LIST_PAGE_LIMIT),
-    ).toEqual([priced]);
-  });
-
-  it("reprices nothing and deletes nothing on a replayed cursor", async () => {
-    // A row that has already been priced is not `amount IS NULL`, so the delete
-    // passes over it, and the insert is ignored by id.
-    await priceLedgerRow(store.db, UNPRICED_ID, { ...priced, amount: 999 });
-
-    expect(await bountiesForEntry(store.db, BOUNTY_ENTRY, LIST_PAGE_LIMIT)).toEqual(
-      [priced],
-    );
   });
 });
 
@@ -5114,4 +4892,136 @@ describe("the duplicate door's backward read", () => {
       }),
     ).toEqual([]);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 0023's backfill, over rows written before it
+// ---------------------------------------------------------------------------
+
+/**
+ * A database migrated up to but not including 0023, so the rebuild can be given
+ * rows that were written while `api_keys` still had the provider's columns.
+ *
+ * The same shape `through0017` takes in test/counters.test.ts, and for the same
+ * reason: a backfill applied to an empty table proves nothing about the
+ * backfill.
+ */
+async function through0022(): Promise<{
+  db: D1Like;
+  rest: () => Promise<string[]>;
+  dispose: () => Promise<void>;
+}> {
+  const platform = await getPlatformProxy<{ DB: D1Like }>({
+    configPath: CONFIG_PATH,
+    persist: false,
+  });
+  const all = loadMigrations();
+  const upTo = all.slice(
+    0,
+    all.findIndex((one) => one.name === "0023_money_removed.sql"),
+  );
+  expect(upTo[upTo.length - 1]?.name).toBe("0022_cosign.sql");
+  await applyMigrations(platform.env.DB, upTo);
+  return {
+    db: platform.env.DB,
+    rest: () => applyMigrations(platform.env.DB, all),
+    dispose: () => platform.dispose(),
+  };
+}
+
+describe("the 0023 rebuild on a table written before it", () => {
+  /** The client digest the free door hashed an address to, before D-127. */
+  const DIGEST = "a".repeat(64);
+  const DAY = "2026-09-11";
+  const KEY_ID = "key_0123456789abcdef";
+  const PAID_ID = "key_fedcba9876543210";
+
+  it("carries the free door's day across and keeps one key per client a day", async () => {
+    const old = await through0022();
+    try {
+      // Exactly what the free door wrote while the three NOT NULL columns were
+      // still there (src/worker/keys.ts before this change): the client across
+      // every day, the client and the day, and the client and the day again.
+      await old.db
+        .prepare(
+          `INSERT INTO api_keys
+             (id, key_hash, tier, status, customer, subscription, checkout_session,
+              counter, created_at, updated_at)
+           VALUES (?, ?, 'standard', 'active', ?, ?, ?, 0, ?, ?)`,
+        )
+        .bind(
+          KEY_ID,
+          `sha256:${"1".repeat(64)}`,
+          `free:client:${DIGEST}`,
+          `free:sub:${DIGEST}:${DAY}`,
+          `free:day:${DIGEST}:${DAY}`,
+          `${DAY}T00:00:00.000Z`,
+          `${DAY}T00:00:00.000Z`,
+        )
+        .run();
+      // And one from the paid era, whose session is a provider's and not a day.
+      await old.db
+        .prepare(
+          `INSERT INTO api_keys
+             (id, key_hash, tier, status, customer, subscription, checkout_session,
+              counter, created_at, updated_at)
+           VALUES (?, ?, 'high', 'active', 'cus_1', 'sub_1', 'cs_1', 4, ?, ?)`,
+        )
+        .bind(PAID_ID, `sha256:${"2".repeat(64)}`, `${DAY}T00:00:00.000Z`, `${DAY}T00:00:00.000Z`)
+        .run();
+
+      // 0023 and whatever has landed after it: what this test is about is the
+      // rebuild, and the ones behind it come along because a fork applies the
+      // file list and not one file.
+      expect(await old.rest()).toContain("0023_money_removed.sql");
+
+      // The day came across, digest and all, off the synthetic session.
+      const free = await keyByClientDay(old.db, `${DIGEST}:${DAY}`);
+      expect(free?.id).toBe(KEY_ID);
+      expect(free?.tier).toBe("standard");
+
+      // The paid-era row survived the rebuild whole, with a null day: its
+      // session was never a day and the partial index leaves it alone.
+      const paid = await keyById(old.db, PAID_ID);
+      expect([paid?.id, paid?.tier, paid?.counter]).toEqual([PAID_ID, "high", 4]);
+      const raw = await old.db
+        .prepare(`SELECT client_day FROM api_keys WHERE id = ?`)
+        .bind(PAID_ID)
+        .first<Record<string, unknown>>();
+      expect(raw?.["client_day"]).toBeNull();
+
+      // And the rule the rebuild carried over: the same client, the same day,
+      // a second key -- refused by the new index rather than by a check.
+      await expect(
+        putKey(old.db, {
+          id: "key_1111111111111111",
+          keyHash: `sha256:${"3".repeat(64)}`,
+          tier: "standard",
+          status: "active",
+          clientDay: `${DIGEST}:${DAY}`,
+          createdAt: `${DAY}T12:00:00.000Z`,
+        }),
+      ).rejects.toBeInstanceOf(KeyDayConflictError);
+
+      // The next day is a different day, and is allowed.
+      await putKey(old.db, {
+        id: "key_2222222222222222",
+        keyHash: `sha256:${"4".repeat(64)}`,
+        tier: "standard",
+        status: "active",
+        clientDay: `${DIGEST}:2026-09-12`,
+        createdAt: "2026-09-12T00:00:00.000Z",
+      });
+      expect(
+        (await keyByClientDay(old.db, `${DIGEST}:2026-09-12`))?.id,
+      ).toBe("key_2222222222222222");
+
+      // The provider's three columns are gone from the rebuilt table.
+      await expect(
+        old.db.prepare(`SELECT checkout_session FROM api_keys ${"LIMIT 1"}`).first(),
+      ).rejects.toThrow();
+    } finally {
+      await old.dispose();
+    }
+  }, 600_000);
 });

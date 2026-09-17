@@ -39,7 +39,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { receiptArtifactHash } from "../src/artifact.js";
 import type { Core } from "../src/core.js";
 import { base64urlEncode } from "../src/encoding.js";
@@ -175,7 +174,6 @@ let statedEntry: Core;
 /** Entry id -> the receipt hash its measurement was taken against. */
 const receiptHashes = new Map<string, string>();
 
-const payout = new MockPayoutAdapter();
 
 function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, world.env, { ...world.deps, now });
@@ -225,7 +223,6 @@ async function register(party: Party): Promise<void> {
   const answer = await post(party.agent, "/operators", {
     operator: party.operator,
     attestation: await attestFor(party.agent, party.operator, AT),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -405,7 +402,6 @@ async function sweep(at: Date): Promise<SweepReport> {
     pinned: pinnedSet([]),
     ineligibleAgents: new Set<string>(),
     anchor: new FakeAnchorAdapter(null),
-    payout,
   });
 }
 
@@ -448,9 +444,7 @@ beforeAll(async () => {
     keyHash: await minted.hash,
     tier: "standard",
     status: "active",
-    customer: "cus_m24b",
-    subscription: "sub_m24b",
-    checkoutSession: "cs_m24b",
+    clientDay: "cs_m24b",
     createdAt: AT,
   });
 
@@ -485,7 +479,6 @@ beforeAll(async () => {
     deps: {
       now: NOW,
       dns: new FixtureResolver(records),
-      payout,
       fetcher: new FixtureFetcher({ [PRICING_URL]: PRICING }),
     },
     maintainer,

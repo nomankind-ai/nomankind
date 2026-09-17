@@ -35,36 +35,17 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-
-/**
- * A window this file publishes for itself: thirty days, which is what the
- * policy module published before D-127 zeroed it.
- *
- * D-127 made the record free — RELEASE_WINDOW_DAYS is 0 and everything is
- * released the instant it is sealed — and left the window's code exactly as it
- * was, dormant behind that zero. The withheld paths this file covers are part
- * of that code, so the regression cover stays by publishing a window here
- * instead: every rule below the mock is the kernel's own, read from the same
- * one place, and only the number is this file's.
- */
-vi.mock("../src/policy.js", async () => {
-  const actual = await vi.importActual<Record<string, unknown>>(
-    "../src/policy.js",
-  );
-  return { ...actual, RELEASE_WINDOW_DAYS: 30 };
-});
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { MockMirrorAdapter } from "../src/adapters/mirror.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import {
   attestationDeadline,
   attestationId,
   deriveAttestation,
 } from "../src/attest.js";
 import type { Core } from "../src/core.js";
-import { deriveEntry } from "../src/derive.js";
+import { DERIVATION_VERSION, deriveEntry } from "../src/derive.js";
 import { base64urlEncode } from "../src/encoding.js";
 import {
   appendEvent,
@@ -76,7 +57,6 @@ import {
   type Probe,
 } from "../src/events.js";
 import { entryHash } from "../src/hash.js";
-import { REGISTRY_EVENT_TYPES, withholdEvent } from "../src/release.js";
 import { exportPrivateKeyPkcs8, generateKeypair } from "../src/identity.js";
 import { ImportRefusal } from "../src/import.js";
 import {
@@ -97,7 +77,6 @@ import {
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
   NORM_VERSION,
-  RELEASE_WINDOW_DAYS,
 } from "../src/policy.js";
 import { answersHash, probeSetHash, type ProbeAnswer } from "../src/probe.js";
 import { signRecord } from "../src/records.js";
@@ -116,6 +95,7 @@ import {
   operatorDomains,
   operatorStanding,
   putEntry,
+  rederiveDue,
   recordAttestationAnswers,
   recordAttestationRequest,
   recordAttestationScore,
@@ -185,12 +165,10 @@ const ANCHOR_AT = new Date(EXPORT_AT.getTime() + 86_400_000);
  * newest seal as hash lines, and it is exactly what the import has to stop in
  * front of.
  */
-const RELEASE_AT = new Date(
-  ANCHOR_AT.getTime() + (RELEASE_WINDOW_DAYS + 1) * 86_400_000,
-);
+const RELEASE_AT = new Date(ANCHOR_AT.getTime() + 31 * 86_400_000);
 
-/** How many days of read counts the release run backfills, and so seals. */
-const BACKFILL_DAYS = RELEASE_WINDOW_DAYS;
+/** How many days of read counts the third run backfills, and so seals. */
+const BACKFILL_DAYS = 30;
 
 /** Not `local`: the directory name and the captures base are part of the copy. */
 const ENVIRONMENT = "demo";
@@ -234,19 +212,15 @@ let attestation = "";
 
 /** The bytes the origin's sweep pushed: what every import below replays. */
 let pushed: MockMirrorAdapter;
-/**
- * The origin's first seal: the one whose window has run out by the export, and
- * so the head every import below stops at (D-100).
- */
+/** The origin's newest seal: the head every import below replays to. */
 let released: Seal;
-/** The export made while every seal was still inside its window. */
-let insideWindow: Map<string, string> = new Map();
+/** Its first seal, which is what a v2 copy of this log would have carried. */
+let firstSeal: Seal;
 /** The mirror as a directory on disk, and the workspace holding it. */
 let workspace = "";
 let mirrorDir = "";
 
 const beacon = new FixtureBeacon("import-mirror");
-const payout = new MockPayoutAdapter();
 
 /** The databases opened by the tests, disposed together at the end. */
 const opened: TestDatabase[] = [];
@@ -396,7 +370,6 @@ async function register(party: Party): Promise<void> {
   const answer = await post(party.agent, "/operators", {
     operator: party.operator,
     attestation: await attestFor(party.agent, party.operator, AT),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -604,8 +577,7 @@ function v1MirrorFiles(): Map<string, string> {
     files.set(path, `${JSON.stringify(file, null, 2)}\n`);
   }
 
-  // The index column the release window added (D-100) was not a v1 column
-  // either: a copy pulled before the window has no release date to carry.
+  // `release_date` was not a v1 column: a copy pulled before it has none.
   const index = JSON.parse(files.get("index.json")!) as Record<string, unknown>[];
   for (const row of index) delete row["release_date"];
   files.set("index.json", `${JSON.stringify(index, null, 2)}\n`);
@@ -656,7 +628,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout,
     fetcher: new FixtureFetcher({ [CITATION]: PAGE }),
     beacon,
   };
@@ -738,7 +709,6 @@ beforeAll(async () => {
     return runSweep(env, {
       now: at,
       beacon,
-      payout,
       mirror: pushed,
       trigger: "alarm",
       witness: new FakeWitnessAdapter({ signers: [witness] }),
@@ -749,19 +719,17 @@ beforeAll(async () => {
   };
   const sealed = await sweepAt(EXPORT_AT);
   expect(sealed.sealed).not.toBeNull();
-  released = (await latestSeal(origin.db))!;
+  firstSeal = (await latestSeal(origin.db))!;
   const anchored = await sweepAt(ANCHOR_AT);
   expect(anchored.anchored).not.toBeNull();
   expect(anchored.mirror).not.toBeNull();
-  // Kept as it stands: the export of a log every seal of which is still inside
-  // its window, which is what a new environment's mirror looks like all month.
-  insideWindow = mirrorFiles();
-  // And a third, a window on: the run whose export carries the first seal in
-  // full and its own new one as hash lines, which is the directory every import
-  // below replays.
+  // And a third, a month on, which backfills the days of read counts between
+  // and seals them: the directory every import below replays carries two seals
+  // and every payload under both of them (D-127).
   const releasedRun = await sweepAt(RELEASE_AT);
   expect(releasedRun.sealed).not.toBeNull();
   expect(releasedRun.mirror).not.toBeNull();
+  released = (await latestSeal(origin.db))!;
 
   workspace = await mkdtemp(join(tmpdir(), "nomankind-import-"));
   mirrorDir = join(workspace, "log", ENVIRONMENT);
@@ -787,27 +755,29 @@ describe("a fresh database replays the whole record", () => {
     summary = await replay(fork);
   }, 600_000);
 
-  it("says what it imported, and what it stopped in front of", async () => {
+  it("says what it imported, which is everything the directory carries", async () => {
+    const manifest = JSON.parse(mirrorFiles().get("mirror.json")!) as Record<
+      string,
+      number
+    >;
     expect(summary).toEqual({
       environment: ENVIRONMENT,
       format: "v3",
       answers: true,
-      events: released.last_seq + 1,
-      seals: 1,
+      // Exactly what the manifest says the directory holds: the record is free
+      // from the seal (D-127), so there is no prefix for an import to stop at.
+      events: manifest["events"],
+      seals: manifest["seals"],
       anchors: 1,
       operators: 4,
       entries: 2,
       attestations: 1,
-      ledgerRows: 1,
-      // The export's own newest seal is a month of read counts sealed at the
-      // instant it exported, and a hash line cannot be replayed: the import
-      // stops in front of them and says how many (D-100).
-      withheld: BACKFILL_DAYS,
+      ledgerRows: manifest["ledger_rows"],
       head: released.last_seq,
       sealSeq: released.seq,
     });
-    expect(summaryLine(summary)).toContain(`withheld ${BACKFILL_DAYS}`);
-    expect(await latestSeal(origin.db)).not.toEqual(released);
+    expect(summaryLine(summary)).toContain(`head ${released.last_seq}`);
+    expect(await latestSeal(origin.db)).toEqual(released);
   }, 600_000);
 
   it("is the same chain at the same head", async () => {
@@ -826,8 +796,8 @@ describe("a fresh database replays the whole record", () => {
   }, 600_000);
 
   it("carries the seals, the anchors and the registry the log implies", async () => {
-    // The released seal, which is the fork's head: the origin's newer one is
-    // still inside its window and was not replayed.
+    // The origin's newest seal, which is the fork's head: everything sealed is
+    // exported and everything exported is replayed (D-127).
     const newest = (await latestSeal(fork.db))!;
     expect(newest).toEqual(released);
     expect(newest.witnesses.length).toBeGreaterThan(0);
@@ -891,9 +861,10 @@ describe("a fresh database replays the whole record", () => {
     }
   }, 600_000);
 
-  it("exports byte-identical bytes for the same sealed head", async () => {
+  it("seals on from the imported head rather than starting again", async () => {
     const again = new MockMirrorAdapter();
-    await beacon.advance(ANCHOR_AT.toISOString());
+    const later = new Date(RELEASE_AT.getTime() + 31 * 86_400_000);
+    await beacon.advance(later.toISOString());
     const report = await runSweep(
       {
         ...env,
@@ -901,12 +872,8 @@ describe("a fresh database replays the whole record", () => {
         CAPTURES: fork.captures,
       },
       {
-        // A window on, so the fork's own export is the released view: a
-        // re-export inside the window would be hash lines, which is right and
-        // is not what this test is about.
-        now: RELEASE_AT,
+        now: later,
         beacon,
-        payout,
         mirror: again,
         trigger: "alarm",
         witness: new FakeWitnessAdapter({ signers: [witness] }),
@@ -916,24 +883,22 @@ describe("a fresh database replays the whole record", () => {
       },
     );
 
-    // The fork seals on from the released head, and what it seals is what the
-    // origin's own run at this instant sealed: the same thirty days of read
-    // counts, on the same log, at the same clock — so the same events, the same
-    // hashes and the same seal.
+    // The log continues rather than restarting: the fork's first seal begins at
+    // the position after the one it imported, and its export is headed past it.
     expect(report.sealed).not.toBeNull();
     expect(report.sealed!.first_seq).toBe(released.last_seq + 1);
-    expect(report.sealed!.size).toBe(BACKFILL_DAYS);
     expect(report.mirror).not.toBeNull();
-    expect(report.mirror!.head).toBe(released.last_seq + BACKFILL_DAYS);
+    expect(report.mirror!.head).toBeGreaterThan(released.last_seq);
 
+    // And the directory it pushes is the same layout, path for path, with the
+    // seal file the fork itself made beside the ones it imported.
     const rebuilt = new Map<string, string>();
     for (const [path, content] of again.files) {
       rebuilt.set(path.slice(`${ENVIRONMENT}/`.length), content);
     }
     const source = mirrorFiles();
-    expect([...rebuilt.keys()].sort()).toEqual([...source.keys()].sort());
-    for (const [path, content] of source) {
-      expect([path, rebuilt.get(path)]).toEqual([path, content]);
+    for (const path of source.keys()) {
+      expect([path, rebuilt.has(path)]).toEqual([path, true]);
     }
   }, 600_000);
 });
@@ -1035,18 +1000,28 @@ describe("a v1 mirror is still an exit", () => {
   }, 600_000);
 
   it("imports the whole record, and says it has no answers to put back", async () => {
+    // A v1 manifest carries no ledger count, so the one row this world is worth
+    // is named here; every other count is what the directory says it holds.
+    const v3Manifest = JSON.parse(mirrorFiles().get("mirror.json")!) as Record<
+      string,
+      number
+    >;
+    const v1Manifest: Record<string, number | undefined> = {
+      events: v3Manifest["events"],
+      seals: v3Manifest["seals"],
+      ledger_rows: v3Manifest["ledger_rows"],
+    };
     expect(summary).toEqual({
       environment: ENVIRONMENT,
       format: "v1",
       answers: false,
-      events: released.last_seq + 1,
-      seals: 1,
+      events: v1Manifest["events"],
+      seals: v1Manifest["seals"],
       anchors: 1,
       operators: 4,
       entries: 2,
       attestations: 1,
-      ledgerRows: 1,
-      withheld: BACKFILL_DAYS,
+      ledgerRows: v1Manifest["ledger_rows"] ?? 1,
       head: released.last_seq,
       sealSeq: released.seq,
     });
@@ -1101,18 +1076,15 @@ describe("a v1 mirror is still an exit", () => {
     }
   }, 600_000);
 
-  it("re-exports the record under v2, and that export verifies", async () => {
+  it("re-exports the record under v3, and that export verifies", async () => {
     const again = new MockMirrorAdapter();
-    await beacon.advance(ANCHOR_AT.toISOString());
+    const later = new Date(RELEASE_AT.getTime() + 31 * 86_400_000);
+    await beacon.advance(later.toISOString());
     const report = await runSweep(
       { ...env, DB: fork.db, CAPTURES: fork.captures },
       {
-        // A window on, as the run that exported the directory this fork was
-        // built from: the record in full behind the window, the seal this run
-        // makes as hash lines.
-        now: RELEASE_AT,
+        now: later,
         beacon,
-        payout,
         mirror: again,
         trigger: "alarm",
         witness: new FakeWitnessAdapter({ signers: [witness] }),
@@ -1122,7 +1094,7 @@ describe("a v1 mirror is still an exit", () => {
       },
     );
     expect(report.mirror).not.toBeNull();
-    expect(report.mirror!.head).toBe(released.last_seq + BACKFILL_DAYS);
+    expect(report.mirror!.head).toBeGreaterThanOrEqual(released.last_seq);
 
     const rebuilt = new Map<string, string>();
     for (const [path, content] of again.files) {
@@ -1144,501 +1116,34 @@ describe("a v1 mirror is still an exit", () => {
     const io = recorder();
     const code = await verifyMirror([target], io.io, new InProcessHttp());
     expect([code, io.out.join("\n")]).toEqual([0, io.out.join("\n")]);
-    // The three families are folded over the released events at the released
-    // head, by the export and by the verifier alike, so a clone whose newest
-    // seal is still inside its window still checks all three.
+    // The three families are folded at the sealed head, by the export and by
+    // the verifier alike.
     expect(io.out).toContain("ok standing");
     expect(io.out).toContain("ok ledger");
   }, 600_000);
 });
 
 // ---------------------------------------------------------------------------
-// The window
-// ---------------------------------------------------------------------------
 
 /**
- * The export a log inside its window makes, and what a fork can do with it
- * (decisions D-100, D-101).
- *
- * The sweep's mirror step is the same step it always was — this is the same
- * directory, at a clock a month earlier — and what the window changes is which
- * of it is written out: the seal's events as hash lines, no entry file at all,
- * and an index that still names every entry, its proof columns and the day it
- * opens. A fork handed that copy has the proof of the whole record and nothing
- * to replay, and is told so in one word.
- */
-describe("an export made inside the window", () => {
-  it("writes the seal's entry events as hash lines and no entry file", () => {
-    const seal = insideWindow.get(sealFileName(released.seq))!;
-    const lines = seal
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(lines).toHaveLength(released.size);
-    let held = 0;
-    for (const line of lines) {
-      expect(typeof line["hash"]).toBe("string");
-      // The registry is public from the first minute and is written whole, so
-      // a fork can name the operators on the day it takes the clone; the rest
-      // of the seal waits for its window.
-      if (REGISTRY_EVENT_TYPES.includes(line["type"] as Event["type"])) {
-        expect(line["payload"]).not.toBeNull();
-        expect(line["withheld"]).toBeUndefined();
-        continue;
-      }
-      held += 1;
-      expect(line["payload"]).toBeNull();
-      expect(line["withheld"]).toBe(true);
-    }
-    expect(held).toBeGreaterThan(0);
-    expect(
-      [...insideWindow.keys()].filter((path) => path.startsWith("entries/")),
-    ).toEqual([]);
-
-    // And the same export a window later holds everything: the same seal file,
-    // written once, with the payloads in it.
-    const later = mirrorFiles().get(sealFileName(released.seq))!;
-    expect(later).not.toBe(seal);
-    expect(
-      [...mirrorFiles().keys()].filter((path) => path.startsWith("entries/")),
-    ).toHaveLength(2);
-  });
-
-  it("keeps every index row, its proof and the date it opens", () => {
-    const rows = JSON.parse(insideWindow.get("index.json")!) as Record<
-      string,
-      unknown
-    >[];
-    expect(rows).toHaveLength(2);
-    for (const row of rows) {
-      expect(typeof row["entry_hash"]).toBe("string");
-      expect(typeof row["subject"]).toBe("string");
-      expect(row["release_date"]).toBe(
-        new Date(
-          Date.parse(released.sealed_at) + RELEASE_WINDOW_DAYS * 86_400_000,
-        ).toISOString(),
-      );
-    }
-    const manifest = JSON.parse(insideWindow.get("mirror.json")!) as Record<
-      string,
-      unknown
-    >;
-    expect(manifest["release_window_days"]).toBe(RELEASE_WINDOW_DAYS);
-    expect(manifest["released_head"]).toBeNull();
-  });
-
-  it("is verified as the proof it is, and refused as a replay", async () => {
-    const target = join(workspace, "inside", ENVIRONMENT);
-    await writeMirrorDirectory(target, insideWindow);
-
-    const io = recorder();
-    expect(await verifyMirror([target], io.io, new InProcessHttp())).toBe(0);
-    expect(io.out).toContain("ok events");
-    expect(io.out).toContain(`ok seal/${released.seq}`);
-    // Both entries are counted withheld — neither has a file yet — and nothing
-    // is failed: the chain, the seal and the index rows are all there to check.
-    expect(io.out.some((line) => line.startsWith("withheld "))).toBe(true);
-    expect(io.out.some((line) => line.includes("withheld 2 failed 0"))).toBe(
-      true,
-    );
-
-    // And nothing to replay: a hash line cannot be appended, and a fork is told
-    // that in one word rather than handed an empty log.
-    const store = await freshDatabase();
-    expect(await refusalOf(replay(store, { dir: target }))).toBe(
-      "nothing_released",
-    );
-    expect(await headSeq(store.db)).toBeNull();
-  }, 600_000);
-});
-
-// ---------------------------------------------------------------------------
-// The layout before the window
-// ---------------------------------------------------------------------------
-// A seal released in part
-// ---------------------------------------------------------------------------
-
-/**
- * A mirror whose newest seal is inside its window and begins with the registry.
- *
- * The shape the registry carve-out made possible (src/release.ts,
- * `REGISTRY_EVENT_TYPES`): a sweep appends its `pool_snapshot` and then seals,
- * so the seal it makes can open with a registry event written in full and carry
- * every entry event after it as a hash line. Built by re-sealing this log's own
- * events one position earlier, so the boundary falls between a full registry
- * line and the hash lines behind it rather than on a seal edge.
- *
- * Nothing is invented: the events are the origin's, the roots are `buildSeal`'s
- * over the same leaves, and the three families are re-folded at the head the new
- * partition makes public, which is what an export of this partition would have
- * written.
- */
-async function partlyReleasedMirrorFiles(): Promise<Map<string, string>> {
-  const files = new Map(mirrorFiles());
-  const lines: Event[] = [];
-  for (const path of [...files.keys()].sort()) {
-    if (!path.startsWith("events/")) continue;
-    for (const line of files.get(path)!.split("\n")) {
-      if (line.length > 0) lines.push(JSON.parse(line) as Event);
-    }
-    files.delete(path);
-  }
-  lines.sort((left, right) => left.seq - right.seq);
-
-  // One position earlier than the real seal, so the event it used to end on --
-  // the sweep's own `pool_snapshot` -- opens the seal that is still inside its
-  // window instead.
-  const cut = released.last_seq;
-  const opener = lines[cut]!;
-  expect(REGISTRY_EVENT_TYPES.includes(opener.type)).toBe(true);
-  expect(lines[cut + 1]!.payload).toBeNull();
-
-  const manifest = JSON.parse(files.get("mirror.json")!) as Record<
-    string,
-    unknown
-  >;
-  const first = await buildSeal(lines.slice(0, cut), null, {
-    now: released.sealed_at,
-  });
-  if (!first.ok) throw new Error(`partlyReleased: buildSeal ${first.reason}`);
-  const second = await buildSeal(lines, first.seal, {
-    now: manifest["as_of"] as string,
-  });
-  if (!second.ok) throw new Error(`partlyReleased: buildSeal ${second.reason}`);
-
-  const jsonl = (rows: readonly unknown[]): string =>
-    rows.map((row) => `${JSON.stringify(row)}\n`).join("");
-  const document = (value: unknown): string =>
-    `${JSON.stringify(value, null, 2)}\n`;
-
-  files.set("seals.jsonl", jsonl([first.seal, second.seal]));
-  files.set(sealFileName(first.seal.seq), jsonl(lines.slice(0, cut)));
-  files.set(sealFileName(second.seal.seq), jsonl(lines.slice(cut)));
-
-  // The three families stand at the head this partition makes public, which is
-  // one position back: the pool snapshot is inside the newest seal now.
-  const head = first.seal.last_seq;
-  const publicEvents = lines.slice(0, cut);
-  files.set("standing.json", document(mirrorStanding(publicEvents, head)));
-  files.set(
-    "ledger.jsonl",
-    jsonl(mirrorLedgerRows(publicEvents, released.sealed_at)),
-  );
-
-  // Every entry file carries its own seal object and inclusion proof, which are
-  // facts about the partition rather than about the entry: re-derived here by
-  // the same functions the verifier uses, so the directory is self-consistent
-  // and this test is about the import boundary and nothing else.
-  const asOf = manifest["as_of"] as string;
-  const proof = lines.map((event) =>
-    event.payload === null && event.type === "entry_submitted"
-      ? ({ ...event, payload: { core: {} } } as unknown as Event)
-      : event,
-  );
-  const entrySeals = await sealsForEntries(proof, [first.seal, second.seal]);
-  for (const path of [...files.keys()]) {
-    if (!path.startsWith("entries/")) continue;
-    const file = JSON.parse(files.get(path)!) as Record<string, unknown>;
-    const id = (file["entry"] as Record<string, unknown>)["id"] as string;
-    const derived = deriveEntry(publicEvents, id, { now: asOf }, entrySeals);
-    files.set(
-      path,
-      document({
-        entry: derived.entry,
-        sidecar: derived.sidecar,
-        entry_hash: file["entry_hash"],
-      }),
-    );
-  }
-
-  // The day's anchor commits to the seal hashes this partition replaced, so it
-  // is dropped rather than forged: an anchor is an external timestamp over a
-  // seal, and nothing here is testing anchors.
-  files.set("anchors.jsonl", "");
-
-  manifest["released_head"] = head;
-  manifest["standing_position"] = head;
-  files.set("mirror.json", document(manifest));
-  return files;
-}
-
-describe("a seal released in part stops the import on the seal", () => {
-  let fork: TestDatabase;
-  let dir = "";
-  let files: Map<string, string> = new Map();
-  let opener = 0;
-
-  beforeAll(async () => {
-    files = await partlyReleasedMirrorFiles();
-    dir = join(workspace, "part", ENVIRONMENT);
-    await writeMirrorDirectory(dir, files);
-    fork = await freshDatabase();
-    opener = released.last_seq;
-  }, 600_000);
-
-  it("carries the registry line in full inside the window", () => {
-    const batch = files
-      .get(sealFileName(1))!
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as Event);
-    expect(batch[0]!.seq).toBe(opener);
-    expect(batch[0]!.payload).not.toBeNull();
-    expect(REGISTRY_EVENT_TYPES.includes(batch[0]!.type)).toBe(true);
-    expect(batch.slice(1).every((event) => event.payload === null)).toBe(true);
-  });
-
-  it("verifies as the proof it is", async () => {
-    const io = recorder();
-    expect([
-      await verifyMirror([dir], io.io, new InProcessHttp()),
-      io.out.join("\n"),
-    ]).toEqual([0, io.out.join("\n")]);
-  }, 600_000);
-
-  it("stops at the released seal and leaves the registry line behind", async () => {
-    const summary = await replay(fork, { dir });
-
-    // The boundary is the seal and not the first hash line. Cutting at the hash
-    // line would have replayed the registry event that opens the newest seal --
-    // a position past the head this import claims, covered by no seal it wrote,
-    // which the fork's own sweep would then seal under a seal the origin never
-    // made.
-    expect([summary.head, summary.sealSeq]).toEqual([opener - 1, 0]);
-    expect(await headSeq(fork.db)).toBe(opener - 1);
-    expect(await eventsInRange(fork.db, opener, opener)).toEqual([]);
-
-    // Counted as the events left behind rather than as the hash lines among
-    // them: the registry line was not replayed either.
-    const total = files
-      .get(sealFileName(1))!
-      .split("\n")
-      .filter((line) => line.length > 0).length;
-    expect(summary.withheld).toBe(total);
-
-    // And the fork seals on from there: the seal it stopped at is its newest,
-    // and the sweep's next seal starts at the position after it.
-    const newest = (await latestSeal(fork.db))!;
-    expect([newest.seq, newest.last_seq]).toEqual([0, opener - 1]);
-  }, 600_000);
-});
-
-// ---------------------------------------------------------------------------
-// The release rule, over a stranger's directory
-// ---------------------------------------------------------------------------
-
-/**
- * `verify-mirror` decides what has released by the export's own clock, and
- * holds the seal files against that rule from both sides (D-100).
- *
- * Fullness is not the rule and cannot be: a seal covering only registry events
- * is written whole from the day it is sealed (src/release.ts,
- * `REGISTRY_EVENT_TYPES`), so a genesis seal inside its window is a full file
- * whose window has not run out. Reading fullness as release put the recomputed
- * released head past the manifest's, failed an honest directory, and folded the
- * standing and the ledger past the boundary the export folded them at.
- *
- * So the clock says which seals are public, and the content has to agree: a
- * released seal holds no hash line, and an unreleased one holds its registry
- * events whole and everything else as a hash line.
- */
-describe("the release rule over a stranger's directory", () => {
-  /** A genesis directory: one seal, all of it registry, inside its window. */
-  async function genesisFiles(): Promise<Map<string, string>> {
-    const source = mirrorFiles();
-    const lines: Event[] = [];
-    for (const path of [...source.keys()].sort()) {
-      if (!path.startsWith("events/")) continue;
-      for (const line of source.get(path)!.split("\n")) {
-        if (line.length > 0) lines.push(JSON.parse(line) as Event);
-      }
-    }
-    lines.sort((left, right) => left.seq - right.seq);
-
-    // The registry the log opens with, and nothing after it: the first event
-    // that is not one of the six ends the genesis seal.
-    const size = lines.findIndex(
-      (event) => !REGISTRY_EVENT_TYPES.includes(event.type),
-    );
-    expect(size).toBeGreaterThan(1);
-    const batch = lines.slice(0, size);
-
-    // Sealed at the export's own instant, so the window has not run at all.
-    const sealedAt = released.sealed_at;
-    const seal = await buildSeal(batch, null, { now: sealedAt });
-    if (!seal.ok) throw new Error(`genesisFiles: buildSeal ${seal.reason}`);
-
-    const jsonl = (rows: readonly unknown[]): string =>
-      rows.map((row) => `${JSON.stringify(row)}\n`).join("");
-    const document = (value: unknown): string =>
-      `${JSON.stringify(value, null, 2)}\n`;
-
-    const files = new Map<string, string>();
-    files.set("operators.json", source.get("operators.json")!);
-    files.set("seals.jsonl", jsonl([seal.seal]));
-    files.set(sealFileName(seal.seal.seq), jsonl(batch));
-    files.set("anchors.jsonl", "");
-    files.set("index.json", document([]));
-    files.set("standing.json", document(mirrorStanding([], -1)));
-    files.set("ledger.jsonl", "");
-
-    const manifest = JSON.parse(source.get("mirror.json")!) as Record<
-      string,
-      unknown
-    >;
-    manifest["exported_at"] = sealedAt;
-    manifest["as_of"] = sealedAt;
-    manifest["head"] = seal.seal.last_seq;
-    manifest["seal_seq"] = seal.seal.seq;
-    manifest["seals"] = 1;
-    manifest["events"] = seal.seal.size;
-    manifest["entries"] = 0;
-    manifest["attestations"] = 0;
-    manifest["ledger_rows"] = 0;
-    manifest["standing_position"] = -1;
-    // Nothing has released: the window starts at this seal and the export is
-    // its own instant. The file is whole all the same, because it is registry.
-    manifest["released_head"] = null;
-    files.set("mirror.json", document(manifest));
-    return files;
-  }
-
-  it("passes a genesis seal that is whole and still inside its window", async () => {
-    const files = await genesisFiles();
-    const dir = join(workspace, "genesis", ENVIRONMENT);
-    await writeMirrorDirectory(dir, files);
-
-    const batch = files
-      .get(sealFileName(0))!
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as Event);
-    // The premise: every line is full, and every one of them is registry.
-    expect(batch.every((event) => event.payload !== null)).toBe(true);
-    expect(
-      batch.every((event) => REGISTRY_EVENT_TYPES.includes(event.type)),
-    ).toBe(true);
-
-    const io = recorder();
-    expect([
-      await verifyMirror([dir], io.io, new InProcessHttp()),
-      io.out.join("\n"),
-    ]).toEqual([0, io.out.join("\n")]);
-    expect(io.out).toContain("ok window");
-    // The released head and the folds stop in front of it, because the clock
-    // says so and not because the file is short of anything.
-    expect(io.out).toContain("ok mirror.json");
-    expect(io.out).toContain("ok standing");
-    expect(
-      JSON.parse(files.get("mirror.json")!)["released_head"] as unknown,
-    ).toBeNull();
-  }, 600_000);
-
-  it("names a registry line withheld inside the window", async () => {
-    const files = await partlyReleasedMirrorFiles();
-    const batch = files
-      .get(sealFileName(1))!
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as Event);
-    const opener = batch[0]!;
-    expect(REGISTRY_EVENT_TYPES.includes(opener.type)).toBe(true);
-    // The hash is the log's own either way, so nothing but the window check
-    // has anything to say about this edit.
-    files.set(
-      sealFileName(1),
-      [withholdEvent(opener), ...batch.slice(1)]
-        .map((event) => `${JSON.stringify(event)}\n`)
-        .join(""),
-    );
-
-    const dir = join(workspace, "held-registry", ENVIRONMENT);
-    await writeMirrorDirectory(dir, files);
-    const io = recorder();
-    expect(await verifyMirror([dir], io.io, new InProcessHttp())).toBe(1);
-    expect(io.out).toContain(
-      `FAIL seal/1 window /events/${opener.seq} withheld_registry`,
-    );
-    expect(io.out).toContain("ok events");
-  }, 600_000);
-
-  it("names a line withheld under a seal the window has released", async () => {
-    const files = await partlyReleasedMirrorFiles();
-    const batch = files
-      .get(sealFileName(0))!
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as Event);
-    // The far side of the same rule: this seal's window has run out by the
-    // export's own clock, so the export owed every payload under it.
-    const last = batch[batch.length - 1]!;
-    files.set(
-      sealFileName(0),
-      [...batch.slice(0, -1), withholdEvent(last)]
-        .map((event) => `${JSON.stringify(event)}\n`)
-        .join(""),
-    );
-
-    const dir = join(workspace, "held-after-release", ENVIRONMENT);
-    await writeMirrorDirectory(dir, files);
-    const io = recorder();
-    expect(await verifyMirror([dir], io.io, new InProcessHttp())).toBe(1);
-    expect(io.out).toContain(
-      `FAIL seal/0 window /events/${last.seq} withheld_after_release`,
-    );
-  }, 600_000);
-
-  it("names an entry payload published inside the window", async () => {
-    const files = await partlyReleasedMirrorFiles();
-    const batch = files
-      .get(sealFileName(1))!
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    const held = batch[1]!;
-    expect(held["payload"]).toBeNull();
-    expect(
-      REGISTRY_EVENT_TYPES.includes(held["type"] as Event["type"]),
-    ).toBe(false);
-    // A line the window says must be a hash line, published with a payload.
-    batch[1] = { ...held, payload: {}, withheld: undefined };
-    files.set(
-      sealFileName(1),
-      batch.map((event) => `${JSON.stringify(event)}\n`).join(""),
-    );
-
-    const dir = join(workspace, "early-payload", ENVIRONMENT);
-    await writeMirrorDirectory(dir, files);
-    const io = recorder();
-    expect(await verifyMirror([dir], io.io, new InProcessHttp())).toBe(1);
-    expect(io.out).toContain(
-      `FAIL seal/1 window /events/${String(held["seq"])} released_early`,
-    );
-  }, 600_000);
-});
-
-// ---------------------------------------------------------------------------
-
-/**
- * The released record as a `nomankind-mirror-v2` directory: the layout the
- * export wrote before the window existed.
+ * The record as a `nomankind-mirror-v2` directory: the layout the export wrote
+ * before the manifest's two window columns and the index's `release_date`.
  *
  * Built from the v3 export rather than checked in, exactly as the v1 copy is:
- * the withheld seal and its events come out, the three families are recomputed
- * at the released head — which is what a v2 export of this log would have
- * written, since a v2 export had no withheld seal to fold over — and the
- * manifest says v2 and carries neither of the two fields the window added.
+ * everything past the first seal comes out, so what is left is a complete log
+ * from seq 0 headed by that seal, and the manifest says v2 and carries neither
+ * of the two columns v3 added.
  */
 function v2MirrorFiles(): Map<string, string> {
   const files = new Map(mirrorFiles());
   const events = files
-    .get(sealFileName(released.seq))!
+    .get(sealFileName(firstSeal.seq))!
     .split("\n")
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as Event);
 
   for (const path of [...files.keys()]) {
-    if (path.startsWith("events/") && path !== sealFileName(released.seq)) {
+    if (path.startsWith("events/") && path !== sealFileName(firstSeal.seq)) {
       files.delete(path);
     }
   }
@@ -1647,16 +1152,32 @@ function v2MirrorFiles(): Map<string, string> {
     .split("\n")
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as Seal)
-    .filter((seal) => seal.seq === released.seq);
+    .filter((seal) => seal.seq === firstSeal.seq);
   files.set("seals.jsonl", `${JSON.stringify(seals[0])}\n`);
 
-  // The three families need no rewriting: the export folds them over the
-  // released events at the released head, which for this log is exactly the
-  // seal a v2 export would have been headed by.
   const document = (value: unknown): string =>
     `${JSON.stringify(value, null, 2)}\n`;
 
-  const index = JSON.parse(files.get("index.json")!) as Record<string, unknown>[];
+  // The three families are folds at the sealed head, and this copy's head is
+  // the first seal, so they are refolded over the events it covers.
+  const standing = mirrorStanding(events, firstSeal.last_seq);
+  files.set("standing.json", document(standing));
+  const ledger = mirrorLedgerRows(events, firstSeal.sealed_at);
+  files.set(
+    "ledger.jsonl",
+    ledger.map((row) => `${JSON.stringify(row)}\n`).join(""),
+  );
+
+  // Only the entries this copy's own seal covers, by the index rows it keeps.
+  const index = (
+    JSON.parse(files.get("index.json")!) as Record<string, unknown>[]
+  ).filter((row) => (row["position"] as number) <= firstSeal.last_seq);
+  const kept = new Set(index.map((row) => String(row["id"])));
+  for (const path of [...files.keys()]) {
+    if (!path.startsWith("entries/")) continue;
+    const id = path.slice("entries/".length, -".json".length);
+    if (!kept.has(id)) files.delete(path);
+  }
   for (const row of index) delete row["release_date"];
   files.set("index.json", document(index));
 
@@ -1665,11 +1186,14 @@ function v2MirrorFiles(): Map<string, string> {
     unknown
   >;
   manifest["format"] = "nomankind-mirror-v2";
-  manifest["head"] = released.last_seq;
-  manifest["seal_seq"] = released.seq;
-  manifest["as_of"] = released.sealed_at;
+  manifest["head"] = firstSeal.last_seq;
+  manifest["seal_seq"] = firstSeal.seq;
+  manifest["as_of"] = firstSeal.sealed_at;
   manifest["seals"] = 1;
-  manifest["events"] = released.size;
+  manifest["events"] = firstSeal.size;
+  manifest["entries"] = index.length;
+  manifest["ledger_rows"] = ledger.length;
+  manifest["standing_position"] = standing.position;
   delete manifest["release_window_days"];
   delete manifest["released_head"];
   files.set("mirror.json", document(manifest));
@@ -1686,25 +1210,22 @@ describe("a v2 mirror is still an exit", () => {
     fork = await freshDatabase();
   }, 600_000);
 
-  it("verifies whole, with nothing withheld in it", async () => {
+  it("verifies whole", async () => {
     const io = recorder();
     const code = await verifyMirror([v2Dir], io.io, new InProcessHttp());
     expect([code, io.out.join("\n")]).toEqual([0, io.out.join("\n")]);
-    // A copy with no hash line in it is checked exactly as it always was: the
-    // three families included, and every entry re-derived.
+    // The three families included, and every entry re-derived.
     expect(io.out).toContain("ok standing");
     expect(io.out).toContain("ok ledger");
     expect(io.out).toContain(`ok ${entryId}`);
-    expect(io.out.some((line) => line.includes("withheld 0"))).toBe(true);
   }, 600_000);
 
   it("replays the whole record it carries", async () => {
     const summary = await replay(fork, { dir: v2Dir });
     expect(summary.format).toBe("v2");
-    expect(summary.withheld).toBe(0);
-    expect(summary.head).toBe(released.last_seq);
+    expect(summary.head).toBe(firstSeal.last_seq);
     expect(summary.entries).toBe(2);
-    expect(await headSeq(fork.db)).toBe(released.last_seq);
+    expect(await headSeq(fork.db)).toBe(firstSeal.last_seq);
     expect(await getEntry(fork.db, entryId)).not.toBeNull();
   }, 600_000);
 });
@@ -1800,4 +1321,147 @@ describe("the command's arguments", () => {
     ]);
     expect(io.out.some((line) => line.includes("    at "))).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// The rows an older derivation wrote (decision D-135)
+// ---------------------------------------------------------------------------
+
+/**
+ * A stored row is a copy of what deriving the entry's events would give, and
+ * D-107 publishes exactly those rows: the export writes what the table holds,
+ * and `verify-mirror` re-derives every one of them from the sealed events with
+ * the kernel the clone has. So a row written by an older derivation is a row the
+ * export publishes and its own verifier contradicts — which is what the demo
+ * export did after D-111 moved the verification precondition, three entries
+ * saying `verified` in the files while the kernel derived `draft`.
+ *
+ * The gap is closed in the sweep, before the export it feeds: the `rederive`
+ * step (D-135) rewrites the rows whose `derived_kernel` is not this build's, and
+ * it runs earlier in the same run than the mirror step that publishes them.
+ *
+ * The older row here is made the only way a test can make one — the row is
+ * written through the repository with a derivation of its own and its stamp
+ * cleared, which is exactly the state a deploy that moved a rule leaves behind.
+ */
+describe("a row an older derivation wrote is rewritten before it is exported", () => {
+  /** A day past the release run, so the mirror step owes another export. */
+  const RERUN_AT = new Date(RELEASE_AT.getTime() + 86_400_000);
+
+  let exported: MockMirrorAdapter;
+  let report: SweepReport;
+  /** What the doors and the seal left in the row: derivation's own answer. */
+  let derivedRow: Awaited<ReturnType<typeof getEntry>>;
+
+  beforeAll(async () => {
+    derivedRow = await getEntry(origin.db, entryId);
+    // A draft, and D-111 is why: this log has three operators and a
+    // maintainer, the submitter is one of the three, and the maintainer may
+    // never sign — so two operators could ever have signed this entry and the
+    // precondition asks for three. Both approvals are in the log and counted;
+    // the entry is a draft all the same. This is exactly the shape of the three
+    // demo rows D-135 found, which is why it is the row doctored below.
+    expect(derivedRow?.entry.status).toBe("draft");
+    // Stamped by every write, so nothing in the table is owed a rewrite yet.
+    expect(derivedRow?.derivedKernel).toBe(DERIVATION_VERSION);
+    expect(
+      await rederiveDue(origin.db, {
+        kernel: DERIVATION_VERSION,
+        limit: LIST_PAGE_LIMIT,
+      }),
+    ).toEqual([]);
+
+    // The row an older kernel left: `verified`, which is what the precondition
+    // said before the QA of 2026-09-13 counted who could actually sign, and no
+    // stamp beside it to say which code said so.
+    await putEntry(
+      origin.db,
+      {
+        ...derivedRow!.entry,
+        status: "verified",
+        verified_at: RELEASE_AT.toISOString(),
+      } as Entry,
+      derivedRow!.sidecar,
+      derivedRow!.derivedThroughSeq,
+    );
+    await origin.db
+      .prepare(`UPDATE entries SET derived_kernel = NULL WHERE id = ?`)
+      .bind(entryId)
+      .run();
+
+    exported = new MockMirrorAdapter();
+    await beacon.advance(RERUN_AT.toISOString());
+    report = await runSweep(env, {
+      now: RERUN_AT,
+      beacon,
+      mirror: exported,
+      trigger: "alarm",
+      witness: new FakeWitnessAdapter({ signers: [witness] }),
+      pinned: pinnedSet([witness]),
+      ineligibleAgents: new Set<string>(),
+      anchor: new FakeAnchorAdapter(null),
+    });
+  }, 600_000);
+
+  it("finds the row by its stamp and rewrites it from the events", async () => {
+    expect(report.rederived).toContain(entryId);
+
+    const row = await getEntry(origin.db, entryId);
+    // Not "close enough": the whole row is derivation's answer again, and the
+    // sidecar beside it with it.
+    expect(row?.entry).toEqual(derivedRow?.entry);
+    expect(row?.sidecar).toEqual(derivedRow?.sidecar);
+    // And what the events say, asked here rather than taken from the row.
+    const fresh = deriveEntry(await wholeLog(origin), entryId, {
+      now: RERUN_AT.toISOString(),
+    });
+    expect([row?.entry.status, row?.entry.verified_at]).toEqual([
+      fresh.entry.status,
+      fresh.entry.verified_at,
+    ]);
+  });
+
+  it("stamps what it wrote, so the next run finds nothing", async () => {
+    const row = await getEntry(origin.db, entryId);
+    expect(row?.derivedKernel).toBe(DERIVATION_VERSION);
+    expect(
+      await rederiveDue(origin.db, {
+        kernel: DERIVATION_VERSION,
+        limit: LIST_PAGE_LIMIT,
+      }),
+    ).toEqual([]);
+    // The same read against any other derivation is owed every row there is,
+    // which is what a kernel bump leaves behind.
+    expect(
+      await rederiveDue(origin.db, {
+        kernel: "some-older-derivation",
+        limit: LIST_PAGE_LIMIT,
+      }),
+    ).toContain(entryId);
+  });
+
+  it("exports the rewritten row, and a fresh clone verifies with no failure", async () => {
+    const files = new Map<string, string>();
+    for (const [path, content] of exported.files) {
+      files.set(path.slice(`${ENVIRONMENT}/`.length), content);
+    }
+    expect(files.size).toBeGreaterThan(0);
+    const published = JSON.parse(files.get(`entries/${entryId}.json`)!) as {
+      entry: Record<string, unknown>;
+    };
+    expect(published.entry["status"]).toBe("draft");
+    expect(published.entry["verified_at"]).toBeNull();
+
+    const target = join(workspace, "rederived", ENVIRONMENT);
+    await writeMirrorDirectory(target, files);
+    const io = recorder();
+    const code = await verifyMirror(
+      [target],
+      io.io,
+      new InProcessHttp(RERUN_AT),
+    );
+    expect([code, io.out.join("\n")]).toEqual([0, io.out.join("\n")]);
+    expect(io.out[io.out.length - 1]).toMatch(/ failed 0$/);
+    expect(io.out).toContain(`ok ${entryId}`);
+  }, 600_000);
 });

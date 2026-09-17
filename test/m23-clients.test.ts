@@ -34,25 +34,7 @@ import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-
-/**
- * A window this file publishes for itself: thirty days, which is what the
- * policy module published before D-127 zeroed it.
- *
- * D-127 made the record free — RELEASE_WINDOW_DAYS is 0 and everything is
- * released the instant it is sealed — and left the window's code exactly as it
- * was, dormant behind that zero. The withheld paths this file covers are part
- * of that code, so the regression cover stays by publishing a window here
- * instead: every rule below the mock is the kernel's own, read from the same
- * one place, and only the number is this file's.
- */
-vi.mock("../src/policy.js", async () => {
-  const actual = await vi.importActual<Record<string, unknown>>(
-    "../src/policy.js",
-  );
-  return { ...actual, RELEASE_WINDOW_DAYS: 30 };
-});
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import {
@@ -61,7 +43,6 @@ import {
   deriveAttestation,
 } from "../src/attest.js";
 import { MockMirrorAdapter } from "../src/adapters/mirror.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { type Core } from "../src/core.js";
 import { deriveEntry } from "../src/derive.js";
 import { base64urlEncode } from "../src/encoding.js";
@@ -75,7 +56,7 @@ import {
   type Probe,
 } from "../src/events.js";
 import { entryHash } from "../src/hash.js";
-import { REGISTRY_EVENT_TYPES } from "../src/release.js";
+import { REGISTRY_EVENT_TYPES } from "../src/worker/world.js";
 import { answersHash, probeSetHash, type ProbeAnswer } from "../src/probe.js";
 import { exportPrivateKeyPkcs8, generateKeypair } from "../src/identity.js";
 import { runMirror } from "../src/cli/mirror.js";
@@ -85,7 +66,6 @@ import {
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
   NORM_VERSION,
-  RELEASE_WINDOW_DAYS,
 } from "../src/policy.js";
 import { signRecord } from "../src/records.js";
 import type { Entry } from "../src/schema.js";
@@ -138,26 +118,19 @@ const EXPORT_AT = new Date(NOW.getTime() + HOUR_MS);
  * A window and a day on: the instant the sweep exports at, and the instant the
  * command runs at (decision D-100).
  *
- * The run that seals also exports, and everything it sealed is inside its
- * window that minute — a real export, all hash lines and no entry file, and not
- * the one this file is about. By this run the first seal has opened and the
- * record is exported in full. This run's own new seal is a month of read counts
- * sealed at this instant, and it is exported as hash lines, which is what every
- * live export looks like.
+ * A month and a day after the first run: this run backfills the days of read
+ * counts between and seals them, so its export carries two seals and every
+ * payload under both of them.
  */
 const EXPORT_AT_RELEASED = new Date(
-  EXPORT_AT.getTime() + (RELEASE_WINDOW_DAYS + 1) * 86_400_000,
+  EXPORT_AT.getTime() + 31 * 86_400_000,
 );
 
 /**
- * An hour before that run: when the entry this file's export cannot show is
- * submitted (decision D-100).
- *
- * A mirror built on a day when everything has released is not the mirror the
- * window exists for. This instant puts one entry inside the seal this run makes
- * -- sealed at EXPORT_AT_RELEASED, so a month short of opening -- and that is
- * the entry a keyless command has to write an index row for out of a hash line
- * and the free entry door, with no file beside it and no claim in it.
+ * An hour before that run: when the entry sealed by its own new seal, rather
+ * than by the first one, is submitted. It is exported whole like every other
+ * (D-127); what it pins is that the command reaches an entry under the newest
+ * seal and not only under the oldest.
  */
 const UNRELEASED_AT = new Date(EXPORT_AT_RELEASED.getTime() - HOUR_MS);
 
@@ -208,7 +181,6 @@ let pristine = "";
 let workspace = "";
 
 const beacon = new FixtureBeacon("m23-clients");
-const payout = new MockPayoutAdapter();
 
 function send(request: Request, now: Date = NOW): Promise<Response> {
   return handleRequest(request, env, { ...deps, now, beacon });
@@ -284,7 +256,6 @@ async function register(party: Party): Promise<void> {
   const answer = await post(party.agent, "/operators", {
     operator: party.operator,
     attestation: await attestFor(party.agent, party.operator, AT),
-    payout: { reference: VERIFIED_REFERENCE },
   });
   expect([answer.status, party.operator]).toEqual([201, party.operator]);
 }
@@ -591,7 +562,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout,
     fetcher: new FixtureFetcher({ [CITATION]: PAGE }),
     beacon,
   };
@@ -675,7 +645,6 @@ beforeAll(async () => {
   const sealing = await runSweep(env, {
     now: EXPORT_AT,
     beacon,
-    payout,
     mirror,
     trigger: "alarm",
     witness: new FakeWitnessAdapter({ signers: [witness] }),
@@ -720,7 +689,6 @@ beforeAll(async () => {
   const report = await runSweep(env, {
     now: EXPORT_AT_RELEASED,
     beacon,
-    payout,
     mirror,
     trigger: "alarm",
     witness: new FakeWitnessAdapter({ signers: [witness] }),
@@ -754,9 +722,7 @@ describe("the mirror command rebuilds the export from the public doors", () => {
     );
     expect([code, io.out.join("\n")]).toEqual([0, io.out.join("\n")]);
     expect(code).toBe(0);
-    expect(io.out[0]).toMatch(
-      /^mirror demo head \d+ seal \d+ files \d+ view released$/,
-    );
+    expect(io.out[0]).toMatch(/^mirror demo head \d+ seal \d+ files \d+$/);
     expect(io.out[1]).toBe(join(pristine, ENVIRONMENT));
   }, 600_000);
 
@@ -768,23 +734,16 @@ describe("the mirror command rebuilds the export from the public doors", () => {
     }
 
     expect([...written.keys()].sort()).toEqual([...pushed.keys()].sort());
-    // Both released records are in it: the entry the door took and the legacy
-    // one. The third was sealed an hour ago and is a month from opening, so it
-    // has no file here -- in either directory.
+    // Every sealed record is in it, under both seals (D-127).
     expect([...written.keys()]).toContain(`entries/${entryId}.json`);
     expect([...written.keys()]).toContain(`entries/${legacyId}.json`);
-    expect([...written.keys()]).not.toContain(`entries/${unreleasedId}.json`);
+    expect([...written.keys()]).toContain(`entries/${unreleasedId}.json`);
     for (const [path, content] of pushed) {
       expect([path, written.get(path)]).toEqual([path, content]);
     }
   }, 600_000);
 
-  // The reason the test above is worth running at this clock at all (decision
-  // D-100). A keyless reader is served `/sync` only to the released head, so the
-  // unreleased entry never reaches the command that way: it is found in the
-  // hash lines `GET /events` serves and read off the free entry door, and the
-  // row it becomes is the row the Worker wrote, proof columns and all.
-  it("writes the index row of an entry it was never served the content of", async () => {
+  it("writes the index row of every entry the seals cover", async () => {
     const written = await filesUnder(join(pristine, ENVIRONMENT));
     const index = JSON.parse(written.get("index.json")!) as Record<
       string,
@@ -797,7 +756,7 @@ describe("the mirror command rebuilds the export from the public doors", () => {
     expect(typeof row["entry_hash"]).toBe("string");
     expect(typeof row["release_date"]).toBe("string");
     expect(row["position"]).toEqual(expect.any(Number));
-    // And the manifest counts it: three entries, two of them released.
+    // And the manifest counts it: three entries, every one of them exported.
     const manifest = JSON.parse(written.get("mirror.json")!) as Record<
       string,
       unknown
@@ -841,14 +800,11 @@ describe("the mirror command rebuilds the export from the public doors", () => {
       .filter((line) => line.length > 0)
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(ledger.length).toBeGreaterThan(0);
-    // The day is reconciled and nothing is priced: this world's entry is a
-    // draft — three operators outside the submitter's own are what verify one,
-    // and there are two here — and Section 9 pays for verified entries, so the
-    // reconciliation names it under `unpriced` rather than passing over it.
-    expect(ledger).toHaveLength(1);
-    expect(ledger[0]!["kind"]).toBe("reconciliation");
-    expect(ledger[0]!["date"]).toBe(READ_DAY);
-    expect((ledger[0]!["ref"] as Record<string, unknown>)["unpriced"]).toEqual([
+    // One reconciliation per published day and nothing else: nothing is priced
+    // (D-127), so the day's row names its entries under `unpriced`.
+    expect(ledger.every((row) => row["kind"] === "reconciliation")).toBe(true);
+    const first = ledger.find((row) => row["date"] === READ_DAY)!;
+    expect((first["ref"] as Record<string, unknown>)["unpriced"]).toEqual([
       entryId,
     ]);
 
@@ -859,144 +815,6 @@ describe("the mirror command rebuilds the export from the public doors", () => {
     expect(manifest["attestations"]).toBe(1);
     expect(manifest["ledger_rows"]).toBe(ledger.length);
     expect(manifest["standing_position"]).toBe(standing.position);
-  }, 600_000);
-
-  it("builds the released view keyless and the whole log with --sign", async () => {
-    // Inside the window (decision D-100). A stranger reading the doors sees the
-    // proof and not the content, and the command writes exactly that: the seal
-    // as hash lines, and no entry file for an entry nobody may read yet. An
-    // operator signing its own reads sees the log, and the same command writes
-    // the same directory in full.
-    const stranger = join(workspace, "keyless");
-    expect(
-      await runMirror([TEST_ORIGIN, stranger], recorder().io, new InProcessHttp(NOW), NOW),
-    ).toBe(0);
-    const withheld = await filesUnder(join(stranger, ENVIRONMENT));
-    expect([...withheld.keys()].filter((path) => path.startsWith("entries/"))).toEqual(
-      [],
-    );
-    let held = 0;
-    for (const line of withheld
-      .get("events/00000000.jsonl")!
-      .split("\n")
-      .filter((one) => one.length > 0)
-      .map((one) => JSON.parse(one) as Record<string, unknown>)) {
-      // The registry is never withheld: it is public from the first minute at
-      // `GET /operators`, so the command writes it whole (D-100).
-      if (REGISTRY_EVENT_TYPES.includes(line["type"] as EventType)) {
-        expect(line["payload"]).not.toBeNull();
-        continue;
-      }
-      held += 1;
-      expect(line["payload"]).toBeNull();
-      expect(line["withheld"]).toBe(true);
-    }
-    expect(held).toBeGreaterThan(0);
-
-    // The same reads, signed by an agent bound to a registered operator: the
-    // M2 signature every write door already verifies, over the method, the
-    // path, a timestamp, a nonce and an empty body.
-    const keyPath = join(workspace, "k1.json");
-    await writeFile(
-      keyPath,
-      JSON.stringify({
-        agent_id: k1.agent.agentId,
-        private_key_pkcs8: base64urlEncode(
-          await exportPrivateKeyPkcs8(k1.agent.privateKey),
-        ),
-      }),
-      "utf8",
-    );
-    const signed = join(workspace, "signed");
-    const io = recorder();
-    expect(
-      await runMirror(
-        [TEST_ORIGIN, signed, "--sign", keyPath],
-        io.io,
-        new InProcessHttp(NOW),
-        NOW,
-      ),
-    ).toBe(0);
-    expect(io.out[0]).toMatch(/ view full$/);
-
-    const whole = await filesUnder(join(signed, ENVIRONMENT));
-    expect([...whole.keys()]).toContain(`entries/${entryId}.json`);
-    for (const line of whole
-      .get("events/00000000.jsonl")!
-      .split("\n")
-      .filter((one) => one.length > 0)
-      .map((one) => JSON.parse(one) as Record<string, unknown>)) {
-      expect(line["payload"]).not.toBeNull();
-      expect(line["withheld"]).toBeUndefined();
-    }
-  }, 600_000);
-
-  // Decision D-100, the full view's clock. A fork that paid for the content
-  // writes the content; it does not get to say that more of the log is public
-  // than is. So the two numbers that say how much is public -- the released head
-  // and the position the standing was folded to -- are the Worker's own for the
-  // same instant, and what the directory holds on top of them is the extra the
-  // fork is entitled to rather than a different reading of the window.
-  it("says the same released head as the Worker, with the content on top", async () => {
-    const keyPath = join(workspace, "k1-full.json");
-    await writeFile(
-      keyPath,
-      JSON.stringify({
-        agent_id: k1.agent.agentId,
-        private_key_pkcs8: base64urlEncode(
-          await exportPrivateKeyPkcs8(k1.agent.privateKey),
-        ),
-      }),
-      "utf8",
-    );
-    const full = join(workspace, "full-at-released");
-    expect(
-      await runMirror(
-        [TEST_ORIGIN, full, "--sign", keyPath],
-        recorder().io,
-        new InProcessHttp(),
-        EXPORT_AT_RELEASED,
-      ),
-    ).toBe(0);
-
-    const whole = await filesUnder(join(full, ENVIRONMENT));
-    const pushed = new Map<string, string>();
-    for (const [path, content] of mirror.files) {
-      pushed.set(path.slice(`${ENVIRONMENT}/`.length), content);
-    }
-    const manifest = JSON.parse(whole.get("mirror.json")!) as Record<
-      string,
-      unknown
-    >;
-    const worker = JSON.parse(pushed.get("mirror.json")!) as Record<
-      string,
-      unknown
-    >;
-    expect([manifest["released_head"], manifest["standing_position"]]).toEqual([
-      worker["released_head"],
-      worker["standing_position"],
-    ]);
-    expect(manifest["head"]).toBe(worker["head"]);
-    // The three families are folds over released events and are the same bytes
-    // in both directories; the seals and the entries are the superset.
-    expect(whole.get("standing.json")).toBe(pushed.get("standing.json"));
-    expect(whole.get("ledger.jsonl")).toBe(pushed.get("ledger.jsonl"));
-
-    expect([...whole.keys()]).toContain(`entries/${unreleasedId}.json`);
-    const record = JSON.parse(whole.get(`entries/${unreleasedId}.json`)!) as {
-      entry: Record<string, unknown>;
-    };
-    expect(record.entry["claim"]).toBe(
-      "example/kestrel-1 seat pricing is $44 per seat per month",
-    );
-    for (const line of whole
-      .get("events/00000001.jsonl")!
-      .split("\n")
-      .filter((one) => one.length > 0)
-      .map((one) => JSON.parse(one) as Record<string, unknown>)) {
-      expect(line["payload"]).not.toBeNull();
-      expect(line["withheld"]).toBeUndefined();
-    }
   }, 600_000);
 
   it("refuses a call that is not one, before any read", async () => {
@@ -1026,7 +844,7 @@ describe("verify-mirror checks a fresh clone end to end", () => {
     expect(io.out).toContain("ok seal/0");
     expect(io.out).toContain(`ok ${entryId}`);
     expect(io.out[io.out.length - 1]).toMatch(
-      /^summary demo head \d+ seals 2 anchors \d+ entries 3 ok 1 legacy 1 withheld \d+ failed 0$/,
+      /^summary demo head \d+ seals 2 anchors \d+ entries 3 ok 1 legacy 2 failed 0$/,
     );
   }, 600_000);
 

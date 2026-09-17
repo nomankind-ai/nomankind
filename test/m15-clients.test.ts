@@ -24,7 +24,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { transcriptArtifactHash } from "../src/artifact.js";
 import {
   CHECKPOINT_CITATION,
@@ -306,7 +305,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver(records),
-    payout: new MockPayoutAdapter(),
     fetcher: new FixtureFetcher(PAGES),
   };
 

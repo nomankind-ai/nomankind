@@ -28,7 +28,7 @@ import type {
 import { base64Decode, base64Encode } from "../encoding.js";
 import { ANCHOR_CALENDARS, FETCH_TIMEOUT_MS } from "../policy.js";
 import { withDeadline } from "./timeout.js";
-import { PRODUCTION } from "./payout.js";
+import { PRODUCTION } from "../worker/config.js";
 
 /** The OpenTimestamps calendar wire, as the calendars publish it. Format, not policy. */
 const OTS_MEDIA_TYPE = "application/vnd.opentimestamps.v1";
@@ -449,7 +449,7 @@ export function spliceUpgrade(
 /**
  * Local and demo: the day's hash is recorded and posted nowhere.
  *
- * Null rather than an invented receipt, for the reason the payout stub refuses
+ * Null rather than an invented receipt, for the reason the witness adapter refuses
  * rather than passes: a fabricated timestamp is worse than none, because it
  * looks like evidence. The anchor still exists and still commits to the day's
  * roots; it simply has no external witness, which is the truth about a laptop.

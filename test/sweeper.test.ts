@@ -334,52 +334,6 @@ describe("arming the timer from a request", () => {
 });
 
 /**
- * The payout adapter the timer's own deps carry: none (decision D-127).
- *
- * `sweepDepsFor` is the one place a run's adapters are built, and there is no
- * payout step left to build one for — the record is free, so a sweep moves no
- * money. An environment that still built one would be carrying a way out to a
- * provider that nothing can reach.
- */
-describe("the payout adapter the timer runs with", () => {
-  it("is not built at all, on any environment", async () => {
-    const store = await database();
-
-    expect(
-      (await sweepDepsFor(envFor(store), () => NOW)).payout,
-    ).toBeUndefined();
-    expect(
-      (
-        await sweepDepsFor(
-          { ...envFor(store), ENVIRONMENT: "production" },
-          () => NOW,
-        )
-      ).payout,
-    ).toBeUndefined();
-  });
-
-  it("reaches the alarm's own run, which configures the payout step", async () => {
-    const store = await database();
-    // The deps a caller hands the object carry no payout adapter, and neither
-    // do the deployed object's: nothing builds one any more (D-127).
-    const deps = await sweeperDeps(await makeWitness("sweeper-witness.example"));
-    expect(deps).not.toHaveProperty("payout");
-    const sweeper = new Sweeper(fakeState(), envFor(store), deps);
-
-    const response = await sweeper.fetch(new Request("https://sweeper/run"));
-
-    expect(response.status).toBe(200);
-    const report = (await response.json()) as SweepReport;
-    // The run sealed. There is no payout step to reach any more (D-127): the
-    // record is free, so a sweep pays nobody and the report carries no payouts
-    // at all rather than an empty list of them.
-    expect(report.sealed).not.toBeNull();
-    expect(report.skipped["payout_unconfigured"]).toBeUndefined();
-    expect(report).not.toHaveProperty("payouts");
-  });
-});
-
-/**
  * The cron trigger, which is the watchdog over this timer and not a second one.
  *
  * The scheduled handler in src/worker/index.ts arms the alarm and nothing else,

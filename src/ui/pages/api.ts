@@ -126,9 +126,9 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/events",
     parameters: `after=<seq>, limit=<1..${LIST_PAGE_LIMIT}>, and nothing else`,
     answers:
-      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. Every event goes out in full the moment a seal covers it, to anybody who asks: the record is released at the seal, so no payload is withheld from anyone and the chain a reader gets is the chain the root is over. One page is one read: it is charged one unit against the caller's own bucket after the page is built, and carries the same three x-nomankind headers every other door does.",
+      "The log in seq order with its head, so a reader knows how far behind they are. Keyset paging, never offset, and the events go out exactly as stored, hash chain and all. Every event goes out in full the moment a seal covers it, to anybody who asks: the record is free from the seal, so every reader gets the same chain the root is over. One page is one read: it is charged one unit against the caller's own bucket after the page is built, and carries the same three x-nomankind headers every other door does.",
     refusals:
-      "400 bad_query for a parameter this door does not take, a parameter given twice, an after that is not a position, or a limit outside the page size; 401 and 402 as the key gate gives them; 429 rate_limited past the cap.",
+      "400 bad_query for a parameter this door does not take, a parameter given twice, an after that is not a position, or a limit outside the page size; 401 as the key gate gives it; 429 rate_limited past the cap.",
   },
   {
     method: "GET",
@@ -137,7 +137,7 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "One entry's own events, in seq order, with the log's head and one proof per sealed event: entry_id, head, events, proofs. Each proof is exactly what GET /events/{seq}/proof answers — seq, hash, seal (seq, root, hash, sealed_at), inclusion_proof, witnesses — and an event nothing has sealed yet is simply absent from proofs. The events go out whole to anybody who asks, as the paged door serves them, and so do the proofs: content and proof are both public from the seal. Bounded by the entry and not by the log, which is what lets a reader gather one entry's whole story without paging GET /events to its head. One call is one read: one unit against the caller's own bucket after the answer is built, and the same three x-nomankind headers every other door carries. JSON only, and never held at the edge — what it answers depends on who is asking.",
     refusals:
-      "400 bad_id for an id that is not the schema's shape; 404 not_found for an id the log has no events for; 401 and 402 as the key gate gives them; 429 rate_limited past the cap; 405 with Allow: GET, HEAD otherwise.",
+      "400 bad_id for an id that is not the schema's shape; 404 not_found for an id the log has no events for; 401 as the key gate gives it; 429 rate_limited past the cap; 405 with Allow: GET, HEAD otherwise.",
   },
   {
     method: "GET",
@@ -297,7 +297,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/ledger",
     parameters: "—",
     answers:
-      "The ledger as a whole: the reconciliations, one per published day, which hold that day's sealed read count against the rows written for it. The counts are evidence that the record is used and buy nobody anything — there is no price, no share and no payout to reconcile against.",
+      "The ledger as a whole: the reconciliations, one per published day, which hold that day's sealed read count against the rows written for it. The counts are evidence that the record is used and buy nobody anything — there is no price and no share to reconcile against.",
     refusals: "400 bad_query for any parameter at all; 405 with Allow: GET.",
   },
 ];
@@ -307,11 +307,11 @@ const WRITE_PATH: readonly Endpoint[] = [
     method: "POST",
     path: "/operators",
     parameters:
-      "operator, domain (the registered domain this operator joins first, and the one its attestation is signed for), attestation { version, domain, signed_at, signature }, payout { reference }; no other keys",
+      "operator, domain (the registered domain this operator joins first, and the one its attestation is signed for), attestation { version, domain, signed_at, signature }; no other keys",
     answers:
-      "201 with the operator record: id, maintainer, provider, registered_seq, details (registered_by, attestation, trusted, trusted_seq, named_by, payout_status), agents, domains. The events operator_registered and agent_bound are appended atomically with the rows.",
+      "201 with the operator record: id, maintainer, provider, registered_seq, details (registered_by, attestation, trusted, trusted_seq, named_by), agents, domains. The events operator_registered and agent_bound are appended atomically with the rows.",
     refusals:
-      "400 bad body shape; 401 authentication; 422 bad_domain (a domain that is not a lowercase hostname of at least two labels, an IP address written as a dotted quad or in brackets, or a name whose last label is all digits), unregistered_domain, provider_operator (decided against that domain's excluded parties), missing_attestation, bad_attestation (which is also a signed_at outside REQUEST_CLOCK_SKEW_SECONDS of the request clock: on a first registration the request and the attestation are signed by the same key, so one fresh signature must not stand for two), attestation_domain_mismatch; 409 operator_exists, agent_bound (the name check is re-read on every rebuild, so a twin registering the same name in the same tick is told operator_exists rather than handed a 503); 422 dns_no_record, dns_mismatch and 503 dns_unavailable; 422 payout_not_verified and 503 payout_unavailable; 503 chain_conflict.",
+      "400 bad body shape; 401 authentication; 422 bad_domain (a domain that is not a lowercase hostname of at least two labels, an IP address written as a dotted quad or in brackets, or a name whose last label is all digits), unregistered_domain, provider_operator (decided against that domain's excluded parties), missing_attestation, bad_attestation (which is also a signed_at outside REQUEST_CLOCK_SKEW_SECONDS of the request clock: on a first registration the request and the attestation are signed by the same key, so one fresh signature must not stand for two), attestation_domain_mismatch; 409 operator_exists, agent_bound (the name check is re-read on every rebuild, so a twin registering the same name in the same tick is told operator_exists rather than handed a 503); 422 dns_no_record, dns_mismatch and 503 dns_unavailable; 503 chain_conflict.",
   },
   {
     method: "GET",
@@ -518,7 +518,8 @@ const ATTESTATION_PATH: readonly Endpoint[] = [
  * A key buys nothing and costs nothing. It is a free identity: something for an
  * alert endpoint, a receipt counter and a usage listing to be named under, and
  * a cap of its own instead of the address it came from. The doors that sold one
- * are gone and answer 410.
+ * are gone: their addresses answer 404, like any path this Worker has never
+ * heard of.
  *
  * Every one of them is JSON with `cache-control: no-store`, and the three
  * `/keys/me` doors take the key as a bearer token. They are account doors and
@@ -569,24 +570,6 @@ const KEY_PATH: readonly Endpoint[] = [
 ];
 
 /**
- * The doors the paid loop left behind (decision D-127).
- *
- * Named rather than deleted from the page: a caller that integrated against one
- * of them is owed the reason it stopped answering, and 410 is that reason said
- * in the protocol's own word — gone, and not coming back under another path.
- */
-const RETIRED_DOORS: readonly { readonly path: string; readonly was: string }[] =
-  [
-    { path: "POST /keys/checkout", was: "the provider's hosted checkout" },
-    { path: "GET /keys/claim", was: "the key a checkout session paid for" },
-    { path: "POST /keys/me/portal", was: "the provider's billing page" },
-    {
-      path: "POST /stripe/webhook",
-      was: "the payment provider's own webhook",
-    },
-  ];
-
-/**
  * The change-alert doors (Section 9's "structured feeds and webhooks, change
  * alerts"), all under the holder's own key.
  */
@@ -597,7 +580,7 @@ const ALERT_PATH: readonly Endpoint[] = [
     parameters: "url, domain?, subject?, category?, kinds?",
     answers:
       "201 with { id, url, filter, created_at, secret }. The secret is the delivery signature's key and is shown exactly once, here; there is no door that shows it again, and deleting the endpoint is how a leaked one is revoked.",
-    refusals: `401 missing_key, bad_key, unknown_key; 402 key_canceled; 400 bad_body; 422 unknown_kind; 422 bad_url (https only, a hostname with a dot, no credentials, no localhost); 422 unknown_domain; 409 endpoint_limit past ${ALERT_ENDPOINTS_PER_KEY} live endpoints.`,
+    refusals: `401 missing_key, bad_key, unknown_key; 400 bad_body; 422 unknown_kind; 422 bad_url (https only, a hostname with a dot, no credentials, no localhost); 422 unknown_domain; 409 endpoint_limit past ${ALERT_ENDPOINTS_PER_KEY} live endpoints.`,
   },
   {
     method: "GET",
@@ -605,7 +588,7 @@ const ALERT_PATH: readonly Endpoint[] = [
     parameters: "—",
     answers:
       "{ key, endpoints: [{ id, url, filter, created_at, enabled }] } — this key's live endpoints, and never a secret. `enabled` is false on an endpoint the step turned off after ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE consecutive timed-out deliveries; it still holds its slot, and deleting it frees the slot.",
-    refusals: "401 and 402 as above.",
+    refusals: "401 as above.",
   },
   {
     method: "DELETE",
@@ -614,7 +597,7 @@ const ALERT_PATH: readonly Endpoint[] = [
     answers:
       "204 and no body. The endpoint is disabled rather than deleted, so the deliveries that name it keep naming something, and the slot it held is free.",
     refusals:
-      "401 and 402 as above; 404 not_found, which is also the answer for an endpoint that exists under another key — a holder learning that an id is somebody else's has learned something about another customer.",
+      "401 as above; 404 not_found, which is also the answer for an endpoint that exists under another key — a holder learning that an id is somebody else's has learned something about another holder.",
   },
   {
     method: "GET",
@@ -622,7 +605,7 @@ const ALERT_PATH: readonly Endpoint[] = [
     parameters: `after=<delivery id>, limit=<1..${LIST_PAGE_LIMIT}>`,
     answers:
       "{ key, endpoint, deliveries: [{ id, event_seq, kind, entry_id, status, attempts, next_at, delivered_at, last_status, last_error, created_at, body }] }, newest first. The bodies are whole because they are public; the endpoint's secret is in no delivery record at all.",
-    refusals: "401 and 402 as above; 404 not_found; 400 bad_limit.",
+    refusals: "401 as above; 404 not_found; 400 bad_limit.",
   },
 ];
 
@@ -907,14 +890,6 @@ POST
           bug to debug.
         </p>
         <dl class="dl">
-          <dt class="mono">entry_withheld</dt>
-          <dd>
-            The entry's content was not served to this reader. Nothing on this
-            log answers it: the release window is zero days, so every entry is
-            released the moment it is sealed. It is what a fork that publishes a
-            window of its own would stop on, and the release date is printed
-            with the refusal.
-          </dd>
           <dt class="mono">unregistered_operator</dt>
           <dd>
             The key is bound to no registered operator. Registration comes
@@ -1073,8 +1048,7 @@ npm run attest -- score &lt;scorer-key.json&gt; ${origin} &lt;attestation-id&gt;
           served to anybody who asks for it, so the flag buys the run its
           operator's own daily cap rather than the content: it is what keeps a
           scorer walking many probes out of the free tier of the address it came
-          from. Against a fork that publishes a release window of its own it is
-          also what reaches content that fork withholds.
+          from.
         </p>
         <p class="note">
           The submit command gained the other half of an observed entry:
@@ -1147,9 +1121,7 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           <span class="mono">/sync</span>,
           <span class="mono">/events</span> and
           <span class="mono">GET /entries/{id}</span> answer the same record to
-          everybody, and the release window is one number in
-          <a href="/policy">policy</a>, at zero, with its code dormant behind it
-          for a fork that publishes a window of its own.
+          everybody: the record is free from the seal.
         </p>
         <p class="note">
           Section 9: "The log is free to read at low volume, forever." A tier is
@@ -1216,13 +1188,12 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           one word, in the order the gate checks: a header that is not a
           well-formed key is 401 <span class="mono">bad_key</span> before the
           database is touched, a key nobody holds is 401
-          <span class="mono">unknown_key</span>, a key whose row reads canceled
-          is 402 <span class="mono">key_canceled</span> and one that reads
-          past_due is 402 <span class="mono">key_past_due</span> — two states
-          left over from the paid loop that a key minted at the free door is
-          never in, since there is no bill behind it to fall past due and no
-          subscription to cancel. A reader who mistyped their key is told which
-          rule refused them rather than "unauthorized".
+          <span class="mono">unknown_key</span>, and past the cap it is 429
+          <span class="mono">rate_limited</span>. There is no status left to
+          refuse on: <span class="mono">key_canceled</span> and
+          <span class="mono">key_past_due</span> went with the bill they were
+          about (D-127), and a key is free. A reader who mistyped their key is
+          told which rule refused them rather than "unauthorized".
         </p>
         <p class="note">
           Past the cap the answer is 429 with
@@ -1242,34 +1213,6 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           another tomorrow.`,
           KEY_PATH,
         )}
-        <p class="note">
-          Four doors of the paid loop are retired and answer 410
-          <span class="mono">{"error":"retired"}</span> (decision D-127). They
-          keep their addresses and their method checks, and each touches no
-          storage and reads no secret on the way to that answer, because a
-          caller that integrated against one is owed the reason it stopped
-          rather than a 404 that reads like a typo.
-        </p>
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>door</th>
-                <th>what it was</th>
-                <th>answer</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${RETIRED_DOORS.map(
-                (door) => html`<tr>
-                  <td class="mono">${door.path}</td>
-                  <td>${door.was}</td>
-                  <td class="mono">410 retired</td>
-                </tr>`,
-              )}
-            </tbody>
-          </table>
-        </div>
         <p class="note">
           What a contributor earns is standing and nothing else: the amounts are
           on <a href="/policy">the policy page</a>, an entry's own acts are on
@@ -1459,7 +1402,6 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
           a dependency cannot answer
           (<span class="mono">storage_unreachable</span>,
           <span class="mono">dns_unavailable</span>,
-          <span class="mono">payout_unavailable</span>,
           <span class="mono">maintainer_not_configured</span>,
           <span class="mono">fetcher_not_configured</span>,
           <span class="mono">environment_misconfigured</span>,
@@ -1493,11 +1435,8 @@ npm run checkpoint -- [--wait-seal] ${origin} &lt;maintainer-key.json&gt; &lt;fi
           entry, so the export carries an inclusion proof rather than a seal not
           yet made, and <span class="mono">--sign &lt;key.json&gt;</span> signs
           every read it makes. The entry it just made is minutes old and is
-          exported whole all the same: the window is zero days, so a seal is all
-          it takes. Against a fork that publishes a window of its own an
-          unsigned export writes the released view, the verifier answers
-          <span class="mono">entry_withheld</span>, and the walk says so in one
-          line rather than printing a diff that means the same thing.
+          exported whole all the same: the record is free from the seal, so a
+          seal is all it takes.
         </p>
         <p class="note">
           <span class="mono">--sign</span> signs the export's reads with an

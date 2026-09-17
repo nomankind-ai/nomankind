@@ -11,13 +11,6 @@
  * stranger's file is data, never a crash: an unreadable or unparsable file gets
  * one named line on stderr and never a stack trace.
  *
- * One answer is neither a pass nor a fault: the entry file `npm run export`
- * writes for an entry still inside the release window (decision D-100) is the
- * released view, every content field null. It cannot check out, so the exit
- * code is 1 as it has always been, and it is printed as the one thing it is —
- * `entry_withheld` and the day the content opens — rather than as the eight
- * true-but-useless differences the ordinary checks found in it.
- *
  * A bounded bundle (decision D-120) is a third answer that is neither a pass
  * nor a fault on its own: the file carries this entry's events, a proof each
  * against the seal that covers them, and the seals' own links, and not the rest
@@ -132,38 +125,14 @@ export async function verify(
   // answer about versions rather than as a mystery.
   io.stdout(`schema ${SCHEMA_VERSION}`);
 
-  // What the release window kept back from this reader (decision D-100): the
-  // events the bundle carries as hash lines, checked for their place in the
-  // chain and under the seal and read for nothing else. Printed only when there
-  // are any, because a released log — or a keyed export — has nothing to say
-  // here and its two lines are what they have always been.
-  if (report.withheld > 0) {
-    io.stdout(`withheld ${report.withheld}`);
-  }
-
-  // What a bounded bundle bought and what it cost (decision D-120). Beside the
-  // withheld count and before the verdict, because both change what the verdict
-  // means: `ok` over a bounded bundle says this entry's events were sealed and
-  // its signatures hold, and does not say the log they came out of folds to
-  // this entry. Printed only for a bounded bundle, so the full path's two lines
-  // are what they have always been.
+  // What a bounded bundle bought and what it cost (decision D-120). Before the
+  // verdict, because it changes what the verdict means: `ok` over a bounded
+  // bundle says this entry's events were sealed and its signatures hold, and
+  // does not say the log they came out of folds to this entry. Printed only for
+  // a bounded bundle, so the full path's two lines are what they have always
+  // been.
   if (report.bounded) {
     io.stdout(`bounded not_run=${report.not_run.join(",")}`);
-  }
-
-  // The other half of the window (decision D-100): the entry file itself is the
-  // released view of an entry whose content has not opened, which is not an
-  // entry to check but a promise that one exists. One line naming the day it
-  // opens, rather than a diff whose shape says nothing to the reader who ran
-  // the command. Still exit 1 — nothing was verified.
-  const held = report.diffs.find((diff) => diff.reason === "entry_withheld");
-  if (held !== undefined) {
-    const opens =
-      typeof held.expected === "string"
-        ? held.expected
-        : "the day it is sealed";
-    io.stdout(`entry_withheld ${report.entry_id}: content opens ${opens}`);
-    return 1;
   }
 
   if (report.ok) {

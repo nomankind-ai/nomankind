@@ -407,7 +407,6 @@ describe("a read_count event in a verified world", () => {
       ok: true,
       entry_id: world.entryId,
       diffs: [],
-      withheld: 0,
       bounded: false,
       not_run: [],
     });
@@ -432,7 +431,6 @@ describe("a read_count event in a verified world", () => {
       ok: true,
       entry_id: world.entryId,
       diffs: [],
-      withheld: 0,
       bounded: false,
       not_run: [],
     });

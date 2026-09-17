@@ -249,12 +249,9 @@ async function readCapture(
   const response = await http.fetch(new Request(urlFor(baseUrl, path)));
   if (response.status === 404) return null;
   // A capture this reader may not have is absent from this view rather than a
-  // failed export: the release window withholds an unreleased entry's evidence
-  // from a free reader (decision D-100) and the disclosure rule withholds a
-  // redacted transcript's payload from anyone but an operator (D-096), and in
-  // both cases what the bundle carries is the hash, which is what it was always
-  // going to check. A credential changes the answer, and the command says which
-  // view it exported.
+  // failed export: the disclosure rule withholds a redacted transcript's
+  // payload from anyone but an operator (D-096), and what the bundle carries is
+  // the hash, which is what it was always going to check.
   if (response.status === 403) return null;
   if (response.status !== 200) {
     throw new ExportFailure(`${path}: ${response.status}`);
@@ -396,13 +393,6 @@ async function buildBoundedBundle(input: {
 export interface ExportResult {
   readonly entry: unknown;
   readonly bundle: LogBundle;
-  /**
-   * The instant this entry's content opens, on an export that could not see it
-   * (decision D-100); absent on an export of an entry the reader was served
-   * whole. Null where nothing has sealed the entry yet, which is a window that
-   * has not started rather than one that has passed.
-   */
-  readonly release_date?: string | null;
 }
 
 /**
@@ -428,14 +418,9 @@ export async function buildExport(input: {
     input.baseUrl,
     `/entries/${encodeURIComponent(input.entryId)}`,
   );
-  // The release window (decision D-100). A reader with no entitlement is handed
-  // the proof under `proof` and the date the content opens beside it, never
-  // under `entry`, so the two views are told apart by the key the door answered
-  // with rather than by guessing at nulls. What is written is then the released
-  // view — every hash, seal, signer and position the entry carries, and no
-  // claim — and the command says so rather than writing it silently.
-  const withheld = isWithheldEntry(answer);
-  const entry = withheld === null ? answer : withheld.proof;
+  // The record is free from the seal (D-127): the entry door answers with the
+  // entry itself to every reader, so what is written is what was read.
+  const entry = answer;
 
   const captures: Record<string, Capture> = {};
   for (const hash of captureHashes(entry)) {
@@ -455,29 +440,7 @@ export async function buildExport(input: {
           seals: await readSeals(input.http, input.baseUrl),
           captures,
         };
-  return withheld === null
-    ? { entry, bundle }
-    : { entry, bundle, release_date: withheld.release_date };
-}
-
-/**
- * The withheld envelope, or null when the door answered with the entry itself.
- *
- * `proof` and `release_date` at the top level and no `entry` key is exactly
- * what src/release.ts's `withholdEntry` produces and what the entry door serves
- * a free reader inside the window; anything else is the entry as it has always
- * been served.
- */
-function isWithheldEntry(
-  body: unknown,
-): { proof: unknown; release_date: string | null } | null {
-  if (!isRecord(body)) return null;
-  if (!("proof" in body) || !("release_date" in body)) return null;
-  const releaseDate = body["release_date"];
-  return {
-    proof: body["proof"],
-    release_date: typeof releaseDate === "string" ? releaseDate : null,
-  };
+  return { entry, bundle };
 }
 
 /** Write the two files into `outDir`, and answer the two paths. */
@@ -565,10 +528,6 @@ export function exportPlan(args: readonly string[]): ExportPlan | null {
  * The command: build the two files and write them. Returns the process's exit
  * code — 0 with both paths printed, 1 when a read the bundle needs failed.
  *
- * A withheld export is a success and not a failure: the released view is what
- * the log publishes to everybody, the verifier checks exactly the proof it
- * carries, and the line on stderr says which view this is and when the rest of
- * it opens, so nobody mistakes one for the other.
  */
 export async function exportEntry(
   baseUrl: string,
@@ -588,12 +547,6 @@ export async function exportEntry(
         `${entryId}: ${error instanceof Error ? error.message : String(error)}`,
     );
     return 1;
-  }
-
-  if ("release_date" in result) {
-    io.stderr(
-      `${entryId}: withheld until ${result.release_date ?? "it is sealed"}; exported the released view`,
-    );
   }
 
   // What a bounded bundle is, said where a reader will see it and not only in

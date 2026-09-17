@@ -20,7 +20,6 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { MockPayoutAdapter } from "../src/adapters/payout.js";
 import { utcDay } from "../src/anchor.js";
 import {
   DEFAULT_DOMAIN,
@@ -92,7 +91,6 @@ beforeAll(async () => {
   deps = {
     now: NOW,
     dns: new FixtureResolver({}),
-    payout: new MockPayoutAdapter(),
     fetcher,
   };
   agentScope = writeScopeForAgent(author.agentId);
