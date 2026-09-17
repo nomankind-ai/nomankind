@@ -118,6 +118,7 @@ import {
   type ExecutionContextLike,
 } from "./sweeper.js";
 import { handleSync } from "./sync.js";
+import { handleVotes } from "./vote.js";
 import { handleValidate } from "./validate.js";
 
 /**
@@ -635,6 +636,13 @@ async function dispatch(
   // beside them. JSON only, whatever the caller asks for.
   const standing = await handleStanding(request, env, { now });
   if (standing !== null) return standing;
+
+  // The governance vote (D-130 item 4): the door a senior operator casts a
+  // ballot through, and the two reads that publish the tally. After the pages
+  // handler, which answers a browser the same paths in HTML, so there is one
+  // implementation of the fold behind both.
+  const voted = await handleVotes(request, env, { now });
+  if (voted !== null) return voted;
 
   // M23's one read, Section 11's "Deployment and status": whether the clockwork
   // is running, as JSON. A browser asking for the same path never gets here —

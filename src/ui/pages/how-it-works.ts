@@ -373,7 +373,10 @@ export function renderHowItWorks(
       may dispute, and how early it may join a newly registered domain. What it
       never buys is truth — no tier is read by the consensus rule — and what it
       pays out is not money: a certificate the log signs, a badge, attribution
-      on every read, and access by contribution.
+      on every read, and access by contribution. At the top tier it also carries
+      <a href="/votes">the vote</a>, one per operator and one per disclosed
+      perimeter, whose tally is advisory to the maintainer until the record's
+      hosting decentralizes.
     </p>
     <dl class="kv">
       ${row(

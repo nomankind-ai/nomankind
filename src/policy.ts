@@ -2346,6 +2346,117 @@ export const WRITES_PER_AGENT_PER_DAY_PROBATION = 10;
  */
 export const WRITES_PER_AGENT_PER_DAY_SENIOR = 300;
 
+// ---------------------------------------------------------------------------
+// The vote (decision D-130 item 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a question stays open, in days (decision D-131 item 2).
+ *
+ * D-130 item 4: senior operators vote, one operator one vote and one vote per
+ * disclosed perimeter, and "the tally is advisory to the maintainer until the
+ * record's hosting decentralizes". A week is long enough that an operator that
+ * validates on weekdays sees every question, and short enough that a number
+ * nobody defends is not left open for a month. Not a whitepaper number: the
+ * maintainer's published policy, and the first question put to the vote is
+ * whether it and the five beside it are right.
+ *
+ * The window is end-exclusive (`voteWindow`): a vote cast at the closing
+ * instant is a vote cast after the window, and a vote is refused `vote_closed`.
+ */
+export const VOTE_WINDOW_DAYS = 7;
+
+/**
+ * How many questions may be open at once, and it is one.
+ *
+ * A vote is advisory and its whole value is that the answer is legible: two
+ * questions at once share a window, a quorum and a reader's attention, and the
+ * second one is answered by whoever is still reading. One question, answered,
+ * then the next.
+ */
+export const VOTE_QUESTIONS_OPEN_MAX = 1;
+
+/**
+ * One question put to the senior operators.
+ *
+ * `id` is the date it opened and a slug, which is what a vote event names and
+ * what a tally is keyed by; it never changes, because the events that carry it
+ * are sealed. `about` names the POLICY keys the question is about, so a reader
+ * can see the numbers under discussion beside the question rather than in a
+ * paragraph somewhere else — every string in it is a key of POLICY, which
+ * test/policy.test.ts holds.
+ *
+ * `options` is the ballot and the whole of it: a vote carries one of these
+ * strings and nothing else, so a tally is a count and never an interpretation.
+ */
+export interface VoteQuestion {
+  readonly id: string;
+  /** The UTC date the window opens on, end-exclusive at + VOTE_WINDOW_DAYS. */
+  readonly opened_at: string;
+  readonly text: string;
+  readonly options: readonly string[];
+  /** The POLICY keys this question is about. */
+  readonly about: readonly string[];
+}
+
+/**
+ * Every question, in the order they were opened.
+ *
+ * The first is the one D-131 item 2 opens with this milestone: the six numbers
+ * the tiers and the vote itself are built out of. Composed from the constants
+ * rather than from literals — a number that moved and a sentence that did not
+ * would be a question about a policy nobody is running.
+ */
+export const VOTE_QUESTIONS: readonly VoteQuestion[] = Object.freeze([
+  Object.freeze({
+    id: "2026-09-17-tier-numbers",
+    opened_at: "2026-09-17",
+    text:
+      `Are the six numbers right: the probation write cap ${WRITES_PER_AGENT_PER_DAY_PROBATION}, ` +
+      `the senior bar ${STANDING_SENIOR}, early access ${DOMAIN_EARLY_ACCESS_DAYS} days, ` +
+      `the senior write cap ${WRITES_PER_AGENT_PER_DAY_SENIOR}, ` +
+      `${VOTE_QUESTIONS_OPEN_MAX === 1 ? "one question" : `${VOTE_QUESTIONS_OPEN_MAX} questions`} per vote, ` +
+      `a ${VOTE_WINDOW_DAYS === 7 ? "seven" : String(VOTE_WINDOW_DAYS)}-day window?`,
+    options: Object.freeze(["keep", "revisit"] as const),
+    about: Object.freeze([
+      "WRITES_PER_AGENT_PER_DAY_PROBATION",
+      "STANDING_SENIOR",
+      "DOMAIN_EARLY_ACCESS_DAYS",
+      "WRITES_PER_AGENT_PER_DAY_SENIOR",
+      "VOTE_QUESTIONS_OPEN_MAX",
+      "VOTE_WINDOW_DAYS",
+    ] as const),
+  }),
+]);
+
+/** How many milliseconds a day is. Not a policy number: it is what a day is. */
+const MILLISECONDS_IN_A_DAY = 86_400_000;
+
+/**
+ * When a question opens and when it closes, both as ISO 8601 instants.
+ *
+ * The window opens at midnight UTC on `opened_at` and closes exactly
+ * `VOTE_WINDOW_DAYS` later, end-exclusive: a vote at `closes` is late. One
+ * function, because the door that refuses a late vote and the page that prints
+ * the window must not be able to disagree about which day it is.
+ */
+export function voteWindow(question: VoteQuestion): {
+  readonly opens: string;
+  readonly closes: string;
+} {
+  const opens = `${question.opened_at}T00:00:00.000Z`;
+  const closes = new Date(
+    Date.parse(opens) + VOTE_WINDOW_DAYS * MILLISECONDS_IN_A_DAY,
+  ).toISOString();
+  return { opens, closes };
+}
+
+/** One question by id, or null when no question carries it. */
+export function voteQuestion(id: unknown): VoteQuestion | null {
+  if (typeof id !== "string") return null;
+  return VOTE_QUESTIONS.find((question) => question.id === id) ?? null;
+}
+
 /**
  * How many writes one client address may make in a UTC day, across every agent
  * it signs as.
@@ -2487,6 +2598,10 @@ export const POLICY = Object.freeze({
   TIERS,
   STANDING_SENIOR,
   DOMAIN_EARLY_ACCESS_DAYS,
+  // The vote (D-130 item 4, D-131 item 2).
+  VOTE_WINDOW_DAYS,
+  VOTE_QUESTIONS_OPEN_MAX,
+  VOTE_QUESTIONS,
   STANDING_DECAY_PAUSED,
   RELEASE_WINDOW_DAYS,
   RATE_TIERS,

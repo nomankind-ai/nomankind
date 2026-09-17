@@ -477,6 +477,10 @@ export function operatorRows(
   for (const event of events) {
     if (event.seq > head) break;
 
+    // Only the events that put a row in the registry are folded here. Every
+    // other event is imported into the log untouched and folded where it
+    // belongs — a `vote_cast` (D-130 item 4) changes no registry row at all,
+    // because a tally is a fold over the events and never a table.
     if (isType(event, "operator_registered")) {
       const { operator, maintainer, domain } = event.payload;
       folds.set(operator, {

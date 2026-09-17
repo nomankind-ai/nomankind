@@ -96,7 +96,7 @@ function clone(log: readonly Event[]): Event[] {
 }
 
 describe("event types", () => {
-  it("names exactly the twenty-eight event types", () => {
+  it("names exactly the twenty-nine event types", () => {
     expect(EVENT_TYPES).toEqual([
       "operator_registered",
       "operator_trusted",
@@ -127,8 +127,10 @@ describe("event types", () => {
       "community_operator_registered",
       "community_operator_joined_domain",
       "community_validation",
+      // The governance vote (D-130 item 4).
+      "vote_cast",
     ]);
-    expect(new Set(EVENT_TYPES).size).toBe(28);
+    expect(new Set(EVENT_TYPES).size).toBe(29);
   });
 
   it("scopes fifteen of them to an entry", () => {

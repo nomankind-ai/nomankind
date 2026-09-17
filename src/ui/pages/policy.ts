@@ -743,6 +743,34 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
     },
   ];
 
+  // The governance vote (decision D-130 item 4, decision D-131 item 2). The
+  // window and the ceiling are numbers; the questions are the policy itself,
+  // one row each, with the options they were opened with. Every value is read
+  // off the frozen object, this page holds none, and the tally each question has
+  // drawn is on the votes page rather than here — policy publishes the question
+  // and the log answers it.
+  const vote: Row[] = [
+    {
+      name: "VOTE_WINDOW_DAYS",
+      value: `${policy.VOTE_WINDOW_DAYS} days`,
+      means:
+        "How long a question stays open from the day it was opened. A vote cast after it closes is refused rather than counted late, and the window is on the question rather than on the voter: everybody has the same days.",
+    },
+    {
+      name: "VOTE_QUESTIONS_OPEN_MAX",
+      value: String(policy.VOTE_QUESTIONS_OPEN_MAX),
+      means:
+        "How many questions may be open at once. A ceiling rather than a rule of the record: a governance surface that asked a dozen things at a time would be asking nothing, and the senior operators' attention is the scarce thing here.",
+    },
+    ...policy.VOTE_QUESTIONS.map((question) => ({
+      name: `VOTE_QUESTIONS.${question.id}`,
+      value: `opened ${question.opened_at} · ${question.options.join(" | ")}`,
+      means: `${question.text} It is about ${
+        question.about.length === 0 ? "nothing else published" : question.about.join(", ")
+      }. The tally is on the votes page, folded from the sealed vote_cast events, and it is advisory to the maintainer until the record's hosting decentralizes.`,
+    })),
+  ];
+
   const standing: Row[] = [
     {
       name: "STANDING_VALIDATION_VOLUNTEERED",
@@ -1103,7 +1131,19 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         name, and the caps are what keep one reader from being the whole day.
       </p>
 
-      ${group("Tiers", tiers)} ${group("Standing", standing)}
+      ${group("Tiers", tiers)} ${group("Vote", vote)}
+
+      <p class="note">
+        The vote is the senior tier's (decision D-130 item 4), and
+        <a href="/votes">the votes page</a> shows every question with its tally
+        and every voter by name. One vote per operator and one per disclosed
+        perimeter, and the tally is advisory to the maintainer until the
+        record's hosting decentralizes: one party still runs the Worker, the
+        database and the keys, so a vote that called itself binding would be
+        claiming a power nobody can check.
+      </p>
+
+      ${group("Standing", standing)}
       ${group("Disputes and reports", disputes)}
       ${group("Attestation", attestation)}
 

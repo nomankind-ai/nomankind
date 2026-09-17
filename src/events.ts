@@ -644,6 +644,37 @@ export type EventPayloads = {
     line: number;
     posted_at: string;
   };
+  /**
+   * One senior operator's vote on one open question (decision D-130 item 4).
+   *
+   * "One operator one vote among senior operators, one vote per disclosed
+   * perimeter, cast as a signed sealed event, tallied by derivation." Every
+   * clause of that is in this payload: the question and the choice are what was
+   * voted, the operator and the agent are who voted, the perimeter is the
+   * grouping the bootstrap pool counts once as (D-128), and the signature is
+   * the agent key's own over the vote — so a tally is a fold and never a table
+   * somebody wrote.
+   *
+   * `perimeter` is a copy of what the registry disclosed at the vote's own
+   * position, sealed beside the vote for the reason every other snapshotted
+   * field is: the tally must be recomputable from the log at the position it
+   * was taken at, and a perimeter read from today's registry would retally a
+   * closed question.
+   *
+   * The signature is over `{ question_id, choice, operator, agent, signed_at }`
+   * under the `nomankind-vote-v1` tag (src/vote.ts), so a vote signed for one
+   * question can never be replayed onto another, and no other signature this
+   * system makes can be replayed as a vote.
+   */
+  vote_cast: {
+    question_id: string;
+    choice: string;
+    operator: string;
+    agent: string;
+    perimeter: string | null;
+    signed_at: string;
+    signature: string;
+  };
 };
 
 /**
@@ -854,6 +885,9 @@ export const EVENT_TYPES: readonly EventType[] = [
   "community_operator_registered",
   "community_operator_joined_domain",
   "community_validation",
+  // The governance vote (D-130 item 4): about a published question and not
+  // about any entry, so it carries a null entry_id like every registry event.
+  "vote_cast",
 ] as const;
 
 /**

@@ -1,13 +1,14 @@
 /**
  * One operator: its agents, its attestation, its validations.
  *
- * Section 11's three joining steps, read back: the domain that registered, the
+ * The registration panel is Section 11's three joining steps, read back: the
+ * domain that registered, the
  * agent keys bound under it, and the signed independence attestation Section 10
  * requires. The attestation is shown as what was signed — version, instant,
  * signature — because that is what an offline reader rechecks it from; the page
  * neither verifies it nor claims it verified.
  *
- * The overturned count in the record block is the same reading the directory
+ * The overturned count in the registration block is the same reading the directory
  * shows (Section 6): entries this operator signed that an upheld dispute
  * overturned, counted once per entry.
  *
@@ -45,7 +46,7 @@
  * Pure: the route gathered all of it, the balance included.
  */
 
-import { REGISTRY } from "../../policy.js";
+import { REGISTRY, TIERS } from "../../policy.js";
 import { tierAllows } from "./policy.js";
 import {
   badge,
@@ -563,6 +564,14 @@ function tierPanel(data: OperatorData): Safe {
         <dd class="mono">${row.tier}</dd>
         <dt>allows</dt>
         <dd>${tierAllows(row.tier)}</dd>
+        ${row.tier === TIERS[TIERS.length - 1]
+          ? html`<dt>vote</dt>
+              <dd>
+                This operator may vote:
+                <a href="/votes">the open questions</a> and what the senior
+                operators have answered so far.
+              </dd>`
+          : raw("")}
       </dl>
     </div>
     <p class="note">
@@ -836,7 +845,7 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
 
       <div class="cols">
         <section class="panel">
-          <div class="panel-head"><h2>Record</h2></div>
+          <div class="panel-head"><h2>Registration</h2></div>
           <div class="panel-body">
             <dl class="kv">
               <dt>id</dt>

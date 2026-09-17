@@ -44,7 +44,11 @@ import {
   type ConfirmationTrust,
 } from "./confirm.js";
 import { CORE_KEYS, coreVersion, domainOf, extractCore } from "./core.js";
-import { deriveEntry, registeredOperatorsAt } from "./derive.js";
+import {
+  deriveEntry,
+  registeredOperatorsAt,
+  trustedOperatorsAt,
+} from "./derive.js";
 import { disputeExclusions } from "./dispute.js";
 import { base64Decode, base64urlDecode } from "./encoding.js";
 import { isTranscriptCategory } from "./evidence.js";
@@ -63,6 +67,7 @@ import {
   DEFAULT_DOMAIN,
   NORM_VERSION,
   SCHEMA_VERSION,
+  voteQuestion,
 } from "./policy.js";
 import { validateEntry } from "./schema.js";
 import {
@@ -76,6 +81,8 @@ import { verifyBytes } from "./identity.js";
 import { verifyEntrySignature } from "./sign.js";
 import { checkValidation, type OperatorInfo } from "./validate.js";
 import { verifyRecordSignature } from "./records.js";
+import { standingAt, tierOf } from "./standing.js";
+import { tallyOf, verifyVoteSignature, type Tally } from "./vote.js";
 
 /** An archived capture: the bytes the snapshot hash was taken over, and how they were served. */
 export interface Capture {
@@ -193,8 +200,23 @@ export type AttestationCheck =
   | "attestation_hashes"
   | "attestation_derived";
 
-/** Every check either verifier can name. */
-export type Check = EntryCheck | AttestationCheck;
+/**
+ * A vote's checks, in the order they run (`verifyVotes`, decision D-130 item 4).
+ *
+ * Three, because there are three ways a vote can be wrong that the log itself
+ * can settle: it was not signed by the key it names, it was cast by an operator
+ * that was not senior at the position it was sealed at, and it is a second vote
+ * by an operator or by a perimeter that had already voted. Everything else
+ * about a vote — which question, which option — is either in the signed bytes
+ * or is not counted by the fold.
+ */
+export type VoteCheck =
+  | "vote_signature"
+  | "vote_eligibility"
+  | "vote_duplicate";
+
+/** Every check any of the verifiers can name. */
+export type Check = EntryCheck | AttestationCheck | VoteCheck;
 
 /**
  * A check a bundle carried no inputs for, named rather than quietly skipped.
@@ -2241,5 +2263,197 @@ export async function verifySignedCertificate(
       : issuer !== undefined && named !== null && named !== issuer
         ? "issuer_mismatch"
         : "bad_signature",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The votes (decision D-130 item 4)
+// ---------------------------------------------------------------------------
+
+/** One question's verdict: every difference the log itself can settle. */
+export interface VoteVerdict {
+  question_id: string;
+  /** The tally as this bundle's events fold to, or null when the id is unknown. */
+  tally: Tally | null;
+  diffs: Diff[];
+}
+
+/** The verdict over every question the bundle carries votes on. */
+export interface VoteReport {
+  ok: boolean;
+  questions: VoteVerdict[];
+}
+
+/**
+ * Check every vote the bundle carries, offline.
+ *
+ * Decision D-130 item 4 gives the vote three properties a reader has to be able
+ * to check for themselves, and this checks all three:
+ *
+ *  - the signature, under the `nomankind-vote-v1` tag, against the key inside
+ *    the voting agent's own id — a vote nobody can attribute is not a vote;
+ *  - the voter's tier AT THE VOTE'S OWN POSITION, folded by `standingAt` and
+ *    read by `tierOf`, because the electorate is senior operators and standing
+ *    moves: a vote is judged by what was true when it was cast, exactly as
+ *    every other retrospective question in this system is;
+ *  - one vote per operator and one per disclosed perimeter per question, which
+ *    is the rule the door refuses a second vote by and the fold counts by.
+ *
+ * The perimeter is taken from the vote's own sealed payload, because that is
+ * what the door snapshotted at the vote's position: a check that re-read
+ * today's registry would fail a vote that was right when it was cast.
+ *
+ * Pure and total, exactly as `verifyOffline` and `verifyAttestations` are: no
+ * I/O, no clock beyond the bundle's own `as_of`, and never a throw — an
+ * unforeseen one becomes a single `internal_error` diff.
+ */
+export async function verifyVotes(bundle: LogBundle): Promise<VoteReport> {
+  try {
+    return await runVotes(bundle);
+  } catch (error) {
+    return {
+      ok: false,
+      questions: [
+        {
+          question_id: "",
+          tally: null,
+          diffs: [
+            {
+              check: "vote_duplicate",
+              field: "/",
+              expected: null,
+              actual: truncate(
+                error instanceof Error ? error.message : String(error),
+              ),
+              reason: "internal_error",
+            },
+          ],
+        },
+      ],
+    };
+  }
+}
+
+async function runVotes(bundle: LogBundle): Promise<VoteReport> {
+  const events = Array.isArray(bundle?.events)
+    ? inSeqOrder(bundle.events.filter((event) => isEventShape(event)))
+    : [];
+  const votes = events.filter((event) => event.type === "vote_cast");
+  if (votes.length === 0) return { ok: true, questions: [] };
+
+  const asOf =
+    typeof bundle?.as_of === "string" ? new Date(bundle.as_of) : new Date(0);
+
+  /** Question id -> its verdict, in the order the log first mentions each. */
+  const byQuestion = new Map<string, VoteVerdict>();
+  const verdictFor = (questionId: string): VoteVerdict => {
+    const held = byQuestion.get(questionId);
+    if (held !== undefined) return held;
+    const question = voteQuestion(questionId);
+    const created: VoteVerdict = {
+      question_id: questionId,
+      tally: question === null ? null : tallyOf(events, question, asOf),
+      diffs: [],
+    };
+    byQuestion.set(questionId, created);
+    return created;
+  };
+
+  /** Who has already voted on each question, by operator and by perimeter. */
+  const voted = new Map<string, Set<string>>();
+  const perimeters = new Map<string, Set<string>>();
+  const seen = (map: Map<string, Set<string>>, key: string): Set<string> => {
+    const held = map.get(key);
+    if (held !== undefined) return held;
+    const created = new Set<string>();
+    map.set(key, created);
+    return created;
+  };
+
+  for (const event of votes) {
+    const payload = isRecord(event.payload) ? (event.payload as Json) : {};
+    const questionId =
+      typeof payload["question_id"] === "string" ? payload["question_id"] : "";
+    const verdict = verdictFor(questionId);
+    const field = `/events/${event.seq}`;
+
+    const operator =
+      typeof payload["operator"] === "string" ? payload["operator"] : "";
+    const agent = typeof payload["agent"] === "string" ? payload["agent"] : "";
+    const choice =
+      typeof payload["choice"] === "string" ? payload["choice"] : "";
+    const signedAt =
+      typeof payload["signed_at"] === "string" ? payload["signed_at"] : "";
+    const signature =
+      typeof payload["signature"] === "string" ? payload["signature"] : "";
+    const perimeter =
+      typeof payload["perimeter"] === "string" ? payload["perimeter"] : null;
+
+    const signed = await verifyVoteSignature(
+      {
+        question_id: questionId,
+        choice,
+        operator,
+        agent,
+        signed_at: signedAt,
+      },
+      signature,
+    );
+    if (!signed) {
+      verdict.diffs.push({
+        check: "vote_signature",
+        field,
+        expected: agent,
+        actual: truncate(signature),
+        reason: "vote_signature_invalid",
+      });
+    }
+
+    // The tier at this vote's own position: everything the log had sealed up to
+    // and including the vote, which is what the door read when it took it.
+    const standing = standingAt(events, event.seq).get(operator);
+    const trusted = trustedOperatorsAt(events, event.seq).has(operator);
+    const tier = tierOf(standing?.standing ?? 0, trusted);
+    if (tier !== "senior") {
+      verdict.diffs.push({
+        check: "vote_eligibility",
+        field,
+        expected: "senior",
+        actual: tier,
+        reason: "vote_ineligible",
+      });
+    }
+
+    const operatorsVoted = seen(voted, questionId);
+    if (operatorsVoted.has(operator)) {
+      verdict.diffs.push({
+        check: "vote_duplicate",
+        field,
+        expected: null,
+        actual: operator,
+        reason: "vote_duplicate",
+      });
+    }
+    operatorsVoted.add(operator);
+
+    if (perimeter !== null) {
+      const perimetersVoted = seen(perimeters, questionId);
+      if (perimetersVoted.has(perimeter)) {
+        verdict.diffs.push({
+          check: "vote_duplicate",
+          field,
+          expected: null,
+          actual: perimeter,
+          reason: "vote_duplicate",
+        });
+      }
+      perimetersVoted.add(perimeter);
+    }
+  }
+
+  const questions = [...byQuestion.values()];
+  return {
+    ok: questions.every((one) => one.diffs.length === 0),
+    questions,
   };
 }

@@ -226,8 +226,8 @@ export function parseSyncQuery(params: URLSearchParams): SyncQueryResult {
  *
  * An "entry" carries a fact to learn; an "unlearn" says a fact already learnt
  * was never true; an "event" is everything else the log recorded — a registry
- * change, a pool snapshot, a day's read count — which a trainer replaying the
- * log needs but which is about no single entry.
+ * change, a pool snapshot, a day's read count, a cast vote (D-130 item 4) —
+ * which a trainer replaying the log needs but which is about no single entry.
  */
 export type SyncItemKind = "entry" | "unlearn" | "event";
 
@@ -239,6 +239,11 @@ export type SyncItemKind = "entry" | "unlearn" | "event";
  * folds exactly that event into status "overturned" with `overturned_by` set.
  */
 export function syncItemKind(event: Event): SyncItemKind {
+  // Everything about no single entry is an "event" item: the registry's
+  // changes, a pool snapshot, a day's read counts, a drift attestation — and
+  // the governance vote (D-130 item 4), which is about a published question and
+  // not about any entry. A trainer replaying the log needs them and no entry
+  // filter has an opinion about them.
   if (event.entry_id === null) return "event";
   if (event.type === "dispute_upheld") return "unlearn";
   return "entry";

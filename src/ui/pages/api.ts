@@ -43,6 +43,10 @@ import { EXERCISED_COUNT, STAGE_COUNT } from "../../status.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
 import type { PageContext } from "../types.js";
+// The vote's own signing tag and its refusals, from the module that applies
+// them: a documented refusal the door does not have, or one it has and this
+// page does not name, is exactly what reading them off the source prevents.
+import { HASH_TAG_VOTE, VOTE_REFUSALS } from "../../vote.js";
 
 /**
  * The venues whose keys are bound by a public profile (decision D-138).
@@ -334,6 +338,22 @@ const READ_PATH: readonly Endpoint[] = [
   },
   {
     method: "GET",
+    path: "/votes",
+    parameters: "—",
+    answers:
+      "Every question policy publishes, each with its tally: question_id, state (open or closed), opens, closes, counts (one number per published option, including the options nobody chose), voters (operator, perimeter, at, seq) and advisory, which is always true. The counts are a fold over the sealed vote_cast events at the instant of the request and are never stored, so a caller folding the same events gets the same numbers. A browser gets the votes page.",
+    refusals: "400 bad_query for any parameter at all; 405 with Allow: GET, HEAD, POST.",
+  },
+  {
+    method: "GET",
+    path: "/votes/{id}",
+    parameters: "—",
+    answers:
+      "One question's tally, in the same shape as a row of the listing above. A browser gets that question's page.",
+    refusals: "400 bad_query for any parameter at all; 404 not_found for an id policy does not publish.",
+  },
+  {
+    method: "GET",
     path: "/operators/{id}/ledger",
     parameters: "—",
     answers:
@@ -481,6 +501,14 @@ const WRITE_PATH: readonly Endpoint[] = [
       "201 with the derived entry and opened_revalidation, which names the request the report crossed the threshold to open, or null. A report changes neither the core nor the status by itself.",
     refusals:
       "400 bad_id, bad_body; 401 the request verdicts; 404 not_found; 422 unknown_artifact, transcript_shape, receipt_shape, unknown_method, billing_shape, redacted_load_bearing; 422 entry_not_verified, empty_observed, bad_artifact_hash; 409 duplicate_reporter; 503 fetcher_not_configured; 422 schema_invalid.",
+  },
+  {
+    method: "POST",
+    path: "/votes",
+    parameters: `question_id, choice, signed_at, signature; no other keys. The signature is ${HASH_TAG_VOTE} over the canonical form of the question, the choice, the operator, the agent and the instant — the operator and the agent are the request's own signing key read back, not fields of the body, because the voter signs the ballot and the door holds no key of its own`,
+    answers:
+      "201 with the question's tally as it now stands. The event vote_cast is appended atomically with nothing else — there is no vote table and no stored result, so the counts on every door are a fold over the sealed events and a vote that is in the log is a vote that counts. The event carries question_id, choice, operator, agent, perimeter, signed_at and signature, so a reader can recheck any voter's signature offline and recount without asking anybody.",
+    refusals: `400 bad_body; 401 the request verdicts, in the order the verifier applies them; then this door's own, in the order the check applies them: ${VOTE_REFUSALS.join(", ")}. unknown_question is an id policy does not publish; vote_not_open is a question whose window has not opened and vote_closed one whose window has run out, which are two different facts and are answered as two; bad_choice is an option the question does not offer, because the ballot is the whole of what may be said; insufficient_tier is an operator below the senior tier, and a bare key has no operator and so no tier at all; already_voted is a second vote by the same operator and perimeter_voted a vote by a second operator inside the same disclosed perimeter, which names the operator that already voted for it; bad_signature is the voter's own signature over the bytes above, checked apart from the request envelope's because the two are different keys' claims about different things.`,
   },
 ];
 
@@ -852,6 +880,26 @@ POST
 2026-09-09T04:49:44Z
 &lt;nonce&gt;
 &lt;JCS of the body&gt;</pre>
+        <p class="note">
+          A vote carries a second signature inside that envelope (decision D-130
+          item 4). The body of
+          <span class="mono">POST /votes</span> is signed under the tag
+          <span class="mono">${HASH_TAG_VOTE}</span>, a newline, and the RFC
+          8785 canonical JSON of five fields: question_id, choice, operator,
+          agent and signed_at. The question is inside them, so a vote cast on
+          one question cannot be moved onto another; the operator is inside them
+          beside the agent, so a key cannot vote in somebody else's name; and the
+          instant is inside them, so a vote cannot be re-dated into an open
+          window after its own closed. The perimeter is deliberately not signed —
+          it is the registry's disclosure and not the voter's claim to make — and
+          the door snapshots what the registry said at the vote's position. It is
+          sealed into the log as a <span class="mono">vote_cast</span> event
+          carrying question_id, choice, operator, agent, perimeter, signed_at and
+          that signature, which is what lets anyone recount the tally offline and
+          recheck each voter's signature against that operator's own key.
+        </p>
+        <pre class="block mono">${HASH_TAG_VOTE}
+{"agent":"1F916:...","choice":"...","operator":"k1.example","question_id":"...","signed_at":"2026-09-09T04:49:44Z"}</pre>
         <p class="note">
           The verifier checks six things, in this order, and names the first that
           fails: <span class="mono">missing_header</span>,

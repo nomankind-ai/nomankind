@@ -7933,3 +7933,63 @@ export async function recordCommunityValidation(
 ): Promise<Event<"community_validation">> {
   return recordRevalidationEvent(db, input);
 }
+
+// ---------------------------------------------------------------------------
+// The governance vote (decision D-130 item 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every `vote_cast` on one question, oldest first (decision D-130 item 4).
+ *
+ * The one read the vote needs, and it is a read of the log: there is no vote
+ * table and no stored result, because a tally is a fold (`tallyOf`) and a table
+ * beside it would be a second answer that could disagree.
+ *
+ * In full, and that is the point. A page of the votes would be a page of the
+ * electorate: past a page of ballots a door reading one page would stop seeing
+ * the early ones, take a second vote from an operator that had already voted,
+ * and leave the verifier naming `vote_duplicate` over a log the door itself
+ * wrote. So this pages until the log is exhausted, filtered to the question in
+ * SQLite rather than in the Worker — the bound is what it should be, one vote
+ * per senior operator per question, and never a page size.
+ */
+export async function votesForQuestion(
+  db: D1Like,
+  questionId: string,
+): Promise<Event[]> {
+  const votes: Event[] = [];
+  let after = -1;
+  for (;;) {
+    const page = await db
+      .prepare(
+        `SELECT ${EVENT_COLUMNS} FROM events
+         WHERE type = 'vote_cast'
+           AND json_extract(payload, '$.question_id') = ?
+           AND seq > ?
+         ORDER BY seq LIMIT ?`,
+      )
+      .bind(questionId, after, LIST_PAGE_LIMIT)
+      .all<Row>();
+    const rows = page.results.map(toEvent);
+    votes.push(...rows);
+    if (rows.length < LIST_PAGE_LIMIT) return votes;
+    after = rows[rows.length - 1]!.seq;
+  }
+}
+
+/**
+ * Seal one vote onto the head (decision D-130 item 4).
+ *
+ * The event and nothing else: a vote changes no row anywhere, so this is a
+ * plain append through the same head check every other writer uses — which is
+ * exactly what makes the tally recomputable, since the log is the only place a
+ * vote is recorded.
+ */
+export async function recordVote(
+  db: D1Like,
+  input: EventInput<"vote_cast">,
+): Promise<Event<"vote_cast">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  await db.batch(statements);
+  return event as Event<"vote_cast">;
+}

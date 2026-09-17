@@ -71,6 +71,7 @@ import {
   MIRROR,
   POLICY,
   SITEMAP_MAX_ENTRIES,
+  VOTE_QUESTIONS,
   WITNESS_PIN,
   type OperatorKind,
 } from "../policy.js";
@@ -81,6 +82,10 @@ import type { Seal } from "../seal.js";
 // never stored, and no renderer reaches for a rule of its own.
 import { MARK_EVENT_TYPES, marksOf, tierOf } from "../standing.js";
 import { attributionOf } from "../attribution.js";
+// The governance tally (decision D-130 item 4). Folded on the way to the page
+// and never stored: a vote is a signed event, and the counts are a reading of
+// the events at the route's own instant.
+import { tallyOf } from "../vote.js";
 import { exercisedStages, stageStates, statusCounters } from "../status.js";
 import type { D1Like } from "../storage/d1.js";
 import {
@@ -127,6 +132,7 @@ import {
   supersedersOf,
   validationCountersForOperators,
   validationsByOperator,
+  votesForQuestion,
   type EntryLocation,
   type OperatorRecord,
   type OperatorStanding,
@@ -173,6 +179,7 @@ import { renderOperator } from "../ui/pages/operator.js";
 import { renderOperators } from "../ui/pages/operators.js";
 import { renderPolicy } from "../ui/pages/policy.js";
 import { renderStatus } from "../ui/pages/status.js";
+import { renderVotes } from "../ui/pages/votes.js";
 import { ENTRY_DOMAINS, parseEntriesQuery } from "../ui/query.js";
 import { APP_CSS } from "../ui/styles.js";
 import type {
@@ -190,6 +197,7 @@ import type {
   OperatorRow,
   PageContext,
   StatusData,
+  VoteQuestionView,
 } from "../ui/types.js";
 import type { StandingCounts } from "../standing.js";
 import {
@@ -263,6 +271,29 @@ const PAGE_ONLY_PATHS: ReadonlySet<string> = new Set([
   // there is nothing here a POST could have been meant for.
   "/mirror",
 ]);
+
+/**
+ * The question id in `/votes/{id}`, or null when the path is not that shape.
+ *
+ * Its own matcher rather than `segmentAfter`, and the difference is the edge
+ * cache. Every path `segmentAfter` matches is one the router holds at the edge
+ * for a minute; a vote page is not one of those. It shows a tally that moves
+ * with every vote cast and a window that closes on a clock, so it is served from
+ * the log each time and both `/votes` and the question pages under it answer
+ * `no-store` like the doors beside them. A page cached for a minute would be a
+ * page that could tell a reader a vote is still open after it has closed.
+ */
+function voteQuestionPath(path: string): string | null {
+  const prefix = "/votes/";
+  if (!path.startsWith(prefix)) return null;
+  const rest = path.slice(prefix.length);
+  if (rest === "" || rest.includes("/")) return null;
+  try {
+    return decodeURIComponent(rest);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The documents the sitemap index names, which are this route's outright too.
@@ -1155,6 +1186,56 @@ async function operator(
 }
 
 /**
+ * Every published question with its tally (decision D-130 item 4).
+ *
+ * One read per question and each in full (`votesForQuestion`), not a page of
+ * the votes: a question's ballots are at most one per senior operator, so the
+ * bound is the electorate, and a page would silently drop the oldest votes on a
+ * busy question — the page would then show a tally the log does not support.
+ * The fold is `tallyOf`'s, never this route's, so the page and `GET /votes`
+ * cannot disagree about who voted.
+ */
+async function voteQuestions(
+  db: D1Like,
+  now: Date,
+): Promise<VoteQuestionView[]> {
+  const views: VoteQuestionView[] = [];
+  for (const question of VOTE_QUESTIONS) {
+    views.push({
+      question,
+      tally: tallyOf(
+        await votesForQuestion(db, question.id),
+        question.id,
+        now.toISOString(),
+      ),
+    });
+  }
+  return views;
+}
+
+async function votes(
+  db: D1Like,
+  ctx: PageContext,
+  now: Date,
+): Promise<Response> {
+  return htmlResponse(
+    renderVotes(ctx, { questions: await voteQuestions(db, now), only: null }),
+  );
+}
+
+async function vote(
+  db: D1Like,
+  ctx: PageContext,
+  id: string,
+  now: Date,
+): Promise<Response> {
+  const questions = await voteQuestions(db, now);
+  const one = questions.find((each) => each.question.id === id);
+  if (one === undefined) return htmlResponse(renderNotFound(ctx), 404);
+  return htmlResponse(renderVotes(ctx, { questions: [one], only: id }));
+}
+
+/**
  * Genesis (Section 11): the founding pool, and the three joining steps read
  * back — the TXT record's prefix, and the attestation text an operator signs.
  */
@@ -1687,6 +1768,10 @@ const SITEMAP_STATIC_PATHS: readonly string[] = Object.freeze([
   "/how-it-works",
   "/independence",
   "/status",
+  // The governance vote (decision D-130 item 4): a page a crawler should reach,
+  // like every other documentation page named here. The question pages under it
+  // are not named: a vote is a published handful and the list is the way in.
+  "/votes",
   "/docs",
   "/docs/fork",
   "/docs/whitepaper",
@@ -2117,6 +2202,18 @@ async function route(
   }
   if (path === "/docs/summary") {
     return htmlResponse(renderDocument(ctx, SUMMARY_DOCUMENT));
+  }
+
+  // The governance vote (decision D-130 item 4): the page for a browser, and
+  // everything else falls through to the JSON doors in src/worker/vote.ts, so
+  // there is one implementation of the tally and one of the endpoint. The
+  // question id is matched by `voteQuestionPath` rather than by `segmentAfter`
+  // because neither of these is held at the edge — see the note on that
+  // function — and the prefix helper is the router's mark for a cached one.
+  if (path === "/votes") return wants ? votes(db, ctx, now) : null;
+  const questionId = voteQuestionPath(path);
+  if (questionId !== null) {
+    return wants ? vote(db, ctx, questionId, now) : null;
   }
 
   if (path === "/dry-run") return htmlResponse(renderDryRun(ctx));
