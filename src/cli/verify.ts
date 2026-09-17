@@ -35,6 +35,7 @@ import { SCHEMA_VERSION } from "../policy.js";
 import {
   oneEditExplains,
   verifyOffline,
+  verifySignedCertificate,
   type Diff,
   type VerifyReport,
 } from "../verify.js";
@@ -44,7 +45,9 @@ export interface VerifyIo {
   stderr: (line: string) => void;
 }
 
-const USAGE = "usage: verify <entry.json> <log-bundle.json>";
+const USAGE =
+  "usage: verify <entry.json> <log-bundle.json>\n" +
+  "       verify --certificate <certificate.json> [--issuer <agent id>]";
 
 /** A short, one-line cause: an errno where there is one, else the first line. */
 function reasonOf(error: unknown): string {
@@ -158,22 +161,108 @@ export async function verify(
   return 1;
 }
 
+/**
+ * Check one standing certificate (decisions D-127 and D-130).
+ *
+ * `npm run verify -- --certificate <file> [--issuer <agent id>]`. The exit code
+ * is the answer, exactly as the entry check's is: 0 when the signature holds, 1
+ * when it does not or the file cannot be read.
+ *
+ * The issuer is printed whether or not it was given, because that is the line
+ * the reader acts on: a certificate names the key that signed it, and what
+ * makes it nomankind's is that the key is the record's own sealing agent, which
+ * the reader compares for themselves. Given `--issuer`, the check also refuses
+ * a document some other key signed, so a mistake is an exit code and not a line
+ * somebody has to notice.
+ */
+export async function verifyCertificateFile(
+  certificatePath: string,
+  issuer: string | null,
+  io: VerifyIo,
+): Promise<number> {
+  const file = await readJson(certificatePath);
+  if (!file.ok) {
+    io.stderr(file.message);
+    return 1;
+  }
+
+  const report = await verifySignedCertificate(
+    file.value,
+    issuer ?? undefined,
+  );
+  io.stdout(`issuer ${report.issuer ?? "(none)"}`);
+  if (report.subject !== null) {
+    io.stdout(
+      `subject ${report.subject} standing ${report.standing ?? "?"} ${
+        report.tier ?? "?"
+      } at position ${report.sealed_position ?? "?"}`,
+    );
+  }
+  if (!report.ok) {
+    io.stdout(`certificate ${report.reason ?? "bad_signature"}`);
+    return 1;
+  }
+  io.stdout("ok certificate");
+  return 0;
+}
+
+/** What one invocation asks for, or null when the arguments are not one. */
+export interface CertificatePlan {
+  readonly certificatePath: string;
+  readonly issuer: string | null;
+}
+
+/**
+ * Read a `--certificate` invocation, or null when this is not one.
+ *
+ * Refuses rather than guesses, exactly as the export's parser does: an unknown
+ * flag, a repeated one, or a value that looks like another flag is a command
+ * nobody meant to type.
+ */
+export function certificatePlan(
+  args: readonly string[],
+): CertificatePlan | null {
+  if (args[0] !== "--certificate") return null;
+  const certificatePath = args[1];
+  if (certificatePath === undefined || certificatePath.startsWith("--")) {
+    return null;
+  }
+  const rest = args.slice(2);
+  if (rest.length === 0) return { certificatePath, issuer: null };
+  if (rest.length !== 2 || rest[0] !== "--issuer") return null;
+  const issuer = rest[1];
+  if (issuer === undefined || issuer.startsWith("--")) return null;
+  return { certificatePath, issuer };
+}
+
 /* c8 ignore start -- the process entry point, exercised by running the CLI. */
 if (
   process.argv[1] !== undefined &&
   import.meta.filename === resolve(process.argv[1])
 ) {
-  const entryPath = process.argv[2];
-  const bundlePath = process.argv[3];
+  const io: VerifyIo = {
+    stdout: (line: string) => console.log(line),
+    stderr: (line: string) => console.error(line),
+  };
+  const args = process.argv.slice(2);
+
+  if (args[0] === "--certificate") {
+    const plan = certificatePlan(args);
+    if (plan === null) {
+      console.error(USAGE);
+      process.exit(2);
+    }
+    process.exit(
+      await verifyCertificateFile(plan.certificatePath, plan.issuer, io),
+    );
+  }
+
+  const entryPath = args[0];
+  const bundlePath = args[1];
   if (entryPath === undefined || bundlePath === undefined) {
     console.error(USAGE);
     process.exit(2);
   }
-  process.exit(
-    await verify(entryPath, bundlePath, {
-      stdout: (line: string) => console.log(line),
-      stderr: (line: string) => console.error(line),
-    }),
-  );
+  process.exit(await verify(entryPath, bundlePath, io));
 }
 /* c8 ignore stop */

@@ -62,12 +62,14 @@ import {
   STANDING_DISPUTE_UPHELD,
   STANDING_OVERTURNED_SIGNER,
   STANDING_REVALIDATION_CHANGED,
+  STANDING_SENIOR,
   STANDING_SUBMISSION_VERIFIED,
   STANDING_TRUSTED_ENTRY,
   STANDING_TRUSTED_STAY,
   STANDING_VALIDATION_ASSIGNED,
   STANDING_VALIDATION_REPRODUCED,
   STANDING_VALIDATION_VOLUNTEERED,
+  type Tier,
 } from "./policy.js";
 
 /**
@@ -769,4 +771,266 @@ export function trustChangesAt(
   trust.sort();
   untrust.sort();
   return { trust, untrust };
+}
+
+// ---------------------------------------------------------------------------
+// Tiers, and the Record marks (decision D-130)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which tier a standing sits in (decision D-130).
+ *
+ * "Standing is an asset: public and named, and participation is gated on it by
+ * tiers as published policy." The three bands are POLICY's `TIERS`, and an
+ * operator reaches the next one either way a standing can be recognised: by the
+ * number, or by the pool.
+ *
+ * `probation` is an operator that is neither — not in the trusted pool and
+ * below `STANDING_TRUSTED_ENTRY` — which is every new name and every bare key.
+ * `established` is either: an operator the pool holds, whatever it has earned,
+ * or an operator at or above the bar the pool's own entry rule uses. Both are
+ * "trusted standing" in D-130's phrase, and the second half matters twice: the
+ * bootstrap operators are named at genesis and trusted by naming (Section 11,
+ * D-130 item 5), which grants trust and no standing at all, so a rule that read
+ * the number alone would put the record's own seed operators on probation; and
+ * the sweep moves the pool on a timer, so a rule that read the pool alone would
+ * make the tier depend on when it last fired — and would refuse a dispute to an
+ * operator whose standing covers the stake, which is the same number.
+ *
+ * `senior` asks for both: the number, and the pool. What senior buys is
+ * discretionary — early access to a new domain, and the vote — and Section 10
+ * keeps the discretionary things from every party the pool excludes: the
+ * maintainer's own operator, a provider's, a party excluded in its own domain
+ * (`trustChangesAt`). None of those is ever in the pool, so none is ever senior,
+ * whatever it has earned.
+ *
+ * Derived and never stored, like the standing it reads: "standing that falls
+ * drops the tier the same run", which is what this being a pure function of the
+ * number makes true by construction.
+ */
+export function tierOf(standing: number, trusted: boolean): Tier {
+  if (!trusted && standing < STANDING_TRUSTED_ENTRY) return "probation";
+  if (trusted && standing >= STANDING_SENIOR) return "senior";
+  return "established";
+}
+
+/**
+ * What the Record marks against one operator: factual, permanent, and derived
+ * from the sealed events every time they are asked for (decision D-130).
+ *
+ * "Losing it visible: the Record marks, factual and permanent, derived from
+ * sealed events and never edited." So there is no table of marks and no way to
+ * clear one — a mark is a reading of events that are already in the log, and
+ * the only way it could disappear is if the log itself changed, which the seals
+ * make evident.
+ *
+ * The three kinds are exactly the three burns Section 9 names against an
+ * operator's own conduct, and they line up one for one with the counts the fold
+ * already keeps: `overturned` with `counts.overturned`, `missed` with
+ * `counts.missed`, and `failed_disputes` with the challenges among
+ * `counts.forfeits`. A revalidation request whose entry held forfeits its stake
+ * and is counted there too, and is not a mark here: nothing was claimed and
+ * nothing was overturned, the request only asked for a check.
+ */
+export interface RecordMarks {
+  /** Entries this operator signed that an upheld dispute later overturned. */
+  readonly overturned: readonly {
+    entry_id: string;
+    /** How it signed: as the entry's author, an approver, or a reconfirmer. */
+    role: "submitter" | "validator" | "reconfirmer";
+    agent: string;
+    /** The seq of the `dispute_upheld` that overturned it. */
+    seq: number;
+    at: string;
+    correction_entry_id: string;
+  }[];
+  /** Assignments, revalidation checks and scores that were never answered. */
+  readonly missed: readonly {
+    /** The entry, or the attestation id for a drift score nobody signed. */
+    entry_id: string;
+    agent: string;
+    seq: number;
+    at: string;
+  }[];
+  /** Challenges this operator filed that did not hold. */
+  readonly failed_disputes: readonly {
+    correction_entry_id: string;
+    seq: number;
+    at: string;
+  }[];
+}
+
+/**
+ * The event types `marksOf` reads, and the whole of them.
+ *
+ * Published beside the fold for the reason `STANDING_FORMULA` is published
+ * beside the amounts: a caller that gathers the events itself — the operator
+ * page reads by type rather than paging the log — has to gather exactly what
+ * the fold looks at, and a second list written by hand would drift. It did:
+ * a page that loaded the upheld disputes and the missed assignments alone
+ * showed no failed challenge at all, because a failing outcome is attributed to
+ * its challenger through the `dispute_filed` that opened it.
+ *
+ * Two things are NOT here, and deliberately, because they are not read by type:
+ * an overturned entry's own events, which `signersOf` and `roleOf` walk to see
+ * who signed it, and which a caller gathers per entry; and nothing else.
+ * `attestation_requested` is here because an expiry names the operators that
+ * never scored and the request is where their agents are.
+ */
+export const MARK_EVENT_TYPES: readonly EventType[] = Object.freeze([
+  "dispute_upheld",
+  "dispute_filed",
+  "dispute_failed",
+  "assignment_missed",
+  "revalidation_missed",
+  "attestation_requested",
+  "attestation_expired",
+]);
+
+/** How an operator signed an entry, and with which agent, before `through`. */
+function roleOf(
+  events: readonly Event[],
+  entryId: string,
+  operator: string,
+  through: number,
+): { role: "submitter" | "validator" | "reconfirmer"; agent: string } | null {
+  for (const event of events) {
+    if (event.seq > through) break;
+    if (event.entry_id !== entryId) continue;
+    if (isType(event, "entry_submitted")) {
+      if (event.payload.core["author_operator"] !== operator) continue;
+      const author = event.payload.core["author"];
+      return {
+        role: "submitter",
+        agent: typeof author === "string" ? author : "",
+      };
+    }
+    if (isType(event, "validation")) {
+      const record = event.payload.record as ApproverRecord;
+      if (record.decision !== "approve" || record.operator !== operator) {
+        continue;
+      }
+      return { role: "validator", agent: record.agent };
+    }
+    if (isType(event, "reconfirmation")) {
+      if (event.payload.record.operator !== operator) continue;
+      return { role: "reconfirmer", agent: event.payload.record.agent };
+    }
+  }
+  return null;
+}
+
+/** The agent an expired attestation drew this operator's score from, if any. */
+function scorerAgent(
+  events: readonly Event[],
+  attestation: string,
+  operator: string,
+): string {
+  for (const event of events) {
+    if (!isType(event, "attestation_requested")) continue;
+    if (event.payload.attestation !== attestation) continue;
+    for (const scorer of event.payload.scorers) {
+      if (scorer.operator === operator) return scorer.agent;
+    }
+  }
+  return "";
+}
+
+/**
+ * One operator's marks, folded out of the events exactly as its standing is.
+ *
+ * The same order, the same dedupe and the same events as `standingAfter`: an
+ * entry overturned twice marks its signers once, because the fold burns them
+ * once, and a mark that counted a second time would say the operator lost
+ * something it never lost. That is the whole reason this lives beside the fold
+ * rather than in the page that renders it.
+ */
+export function marksOf(
+  events: readonly Event[],
+  operator: string,
+): RecordMarks {
+  const ordered = [...events].sort((left, right) => left.seq - right.seq);
+
+  const overturned: {
+    entry_id: string;
+    role: "submitter" | "validator" | "reconfirmer";
+    agent: string;
+    seq: number;
+    at: string;
+    correction_entry_id: string;
+  }[] = [];
+  const missed: {
+    entry_id: string;
+    agent: string;
+    seq: number;
+    at: string;
+  }[] = [];
+  const failed: {
+    correction_entry_id: string;
+    seq: number;
+    at: string;
+  }[] = [];
+
+  /** The entries this operator has already been marked on, once each. */
+  const marked = new Set<string>();
+
+  for (const event of ordered) {
+    if (isType(event, "dispute_upheld")) {
+      const entryId = event.entry_id;
+      if (entryId === null || marked.has(entryId)) continue;
+      if (!signersOf(ordered, entryId, event.seq).has(operator)) continue;
+      marked.add(entryId);
+      const signed = roleOf(ordered, entryId, operator, event.seq);
+      overturned.push({
+        entry_id: entryId,
+        role: signed?.role ?? "validator",
+        agent: signed?.agent ?? "",
+        seq: event.seq,
+        at: event.at,
+        correction_entry_id: event.payload.correction_entry_id,
+      });
+      continue;
+    }
+
+    if (isType(event, "assignment_missed") || isType(event, "revalidation_missed")) {
+      if (event.payload.operator !== operator) continue;
+      missed.push({
+        entry_id: event.entry_id ?? "",
+        agent: event.payload.agent,
+        seq: event.seq,
+        at: event.at,
+      });
+      continue;
+    }
+
+    if (isType(event, "attestation_expired")) {
+      if (!event.payload.missing.includes(operator)) continue;
+      // A drift score is about a model rather than an entry, so the mark names
+      // the attestation — the same id the score's own signing bytes carry in
+      // the entry_id slot (src/records.ts).
+      missed.push({
+        entry_id: event.payload.attestation,
+        agent: scorerAgent(ordered, event.payload.attestation, operator),
+        seq: event.seq,
+        at: event.at,
+      });
+      continue;
+    }
+
+    if (isType(event, "dispute_failed")) {
+      const filing = filingFor(ordered, event, event.payload.correction_entry_id);
+      if ((filing?.payload.operator ?? null) !== operator) continue;
+      failed.push({
+        correction_entry_id: event.payload.correction_entry_id,
+        seq: event.seq,
+        at: event.at,
+      });
+    }
+  }
+
+  return {
+    overturned: Object.freeze(overturned),
+    missed: Object.freeze(missed),
+    failed_disputes: Object.freeze(failed),
+  };
 }

@@ -287,6 +287,46 @@ export async function eventsForEntry(
   return rows.results.map(toEvent);
 }
 
+/**
+ * The events of several entries at once, keyed by entry, in seq order.
+ *
+ * The read the attribution block needs on a page (decision D-130): a delta
+ * stream hands a trainer thirty entries and every one of them is owed to
+ * somebody, and asking `eventsForEntry` thirty times is thirty statements
+ * answering one question. Chunked at fifty ids, because D1 binds a hundred
+ * values to a statement and one id is one value here.
+ *
+ * An id with no events is absent from the map, which is what a caller reads as
+ * "nothing about this entry" rather than as a failed read.
+ */
+export async function eventsForEntries(
+  db: D1Like,
+  entryIds: readonly string[],
+): Promise<Map<string, Event[]>> {
+  const byEntry = new Map<string, Event[]>();
+  if (entryIds.length === 0) return byEntry;
+  const CHUNK = 50;
+  for (let from = 0; from < entryIds.length; from += CHUNK) {
+    const chunk = entryIds.slice(from, from + CHUNK);
+    const rows = await db
+      .prepare(
+        `SELECT ${EVENT_COLUMNS} FROM events
+         WHERE entry_id IN (${chunk.map(() => "?").join(", ")}) ORDER BY seq`,
+      )
+      .bind(...chunk)
+      .all<Row>();
+    for (const row of rows.results) {
+      const event = toEvent(row);
+      const id = event.entry_id;
+      if (id === null) continue;
+      const bucket = byEntry.get(id);
+      if (bucket === undefined) byEntry.set(id, [event]);
+      else bucket.push(event);
+    }
+  }
+  return byEntry;
+}
+
 /** A contiguous slice of the log, both ends inclusive, in seq order. */
 export async function eventsInRange(
   db: D1Like,
@@ -1575,6 +1615,70 @@ export async function operatorForAgent(
     .bind(agentId)
     .first<Row>();
   return row === null ? null : readText(row, "operator_id");
+}
+
+/**
+ * What deciding an operator's tier takes, in one statement (decision D-130).
+ *
+ * The doors ask this on every signed write, so it is one keyed read and not
+ * three: the operator behind the agent, whether the pool holds it, and the
+ * standing the sweep cached. `standing` is null when the fold has never run for
+ * this operator, which `tierOf` reads as zero — an operator nothing has paid
+ * yet is on probation, which is the honest answer and the safe one.
+ *
+ * Null for an agent no operator has bound: a bare key, which the caller treats
+ * as probation for the same reason (it is nobody's established operator).
+ *
+ * The `trusted` column rather than the JSON beside it, because the two are
+ * written in one statement (`operatorStatement`) and the column is the one an
+ * index can seek.
+ */
+export interface OperatorTierRow {
+  readonly operator: string;
+  readonly trusted: boolean;
+  readonly standing: number | null;
+}
+
+/** The tier inputs for the operator behind one agent, or null for a bare key. */
+export async function operatorTierForAgent(
+  db: D1Like,
+  agentId: string,
+): Promise<OperatorTierRow | null> {
+  const row = await db
+    .prepare(
+      `SELECT o.id AS id, o.trusted AS trusted, o.standing AS standing
+       FROM agents a JOIN operators o ON o.id = a.operator_id
+       WHERE a.agent_id = ? ${ONE_ROW}`,
+    )
+    .bind(agentId)
+    .first<Row>();
+  if (row === null) return null;
+  const standing = row["standing"];
+  return {
+    operator: readText(row, "id"),
+    trusted: readBoolean(row, "trusted"),
+    standing: typeof standing === "number" ? standing : null,
+  };
+}
+
+/** The same inputs for a named operator, or null when there is no such row. */
+export async function operatorTier(
+  db: D1Like,
+  operator: string,
+): Promise<OperatorTierRow | null> {
+  const row = await db
+    .prepare(
+      `SELECT id, trusted, standing FROM operators WHERE id = ? ${ONE_ROW}`,
+    )
+    .bind(operator)
+    .first<Row>();
+  if (row === null) return null;
+  const standing = row["standing"];
+  return {
+    operator: readText(row, "id"),
+    trusted: readBoolean(row, "trusted"),
+    standing: typeof standing === "number" ? standing : null,
+  };
 }
 
 // ---------------------------------------------------------------------------

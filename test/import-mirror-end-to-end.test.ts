@@ -51,7 +51,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { clearWriteQuota } from "./helpers/quota.js";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { MockMirrorAdapter } from "../src/adapters/mirror.js";
@@ -728,6 +730,20 @@ afterAll(async () => {
   if (workspace !== "") await rm(workspace, { recursive: true, force: true });
 });
 
+/**
+ * Each test starts the day's write counters fresh (decision D-130).
+ *
+ * Every signing key here is a bare one or a probation operator's, and both
+ * write under the probationary per-agent cap: a whole suite driving one door
+ * under one frozen clock is one caller writing all day, and without this the
+ * later cases would be answered by the quota rather than by the rule they are
+ * about. The caps themselves are pinned in test/write-quota.test.ts and
+ * test/standing-tiers.test.ts.
+ */
+beforeEach(async () => {
+  await clearWriteQuota(origin.db);
+});
+
 // ---------------------------------------------------------------------------
 // The same questions
 // ---------------------------------------------------------------------------
@@ -771,6 +787,13 @@ describe("the fork answers what nomankind answered", () => {
       "details/payout_status",
       "details/payout_reference",
       "details/named_by",
+      // The sweep's own accumulator (decision D-130), which is a cache of the
+      // fold and not part of the log: a fork holds every event the standing is
+      // derived from and none of the rows the origin's sweep left behind, so
+      // its counts are null until its own sweep runs. `npm run standing` folds
+      // the same log to the same numbers on either side, which is the promise
+      // that matters here.
+      "counts",
     ];
     await sameAnswer(
       "/operators",

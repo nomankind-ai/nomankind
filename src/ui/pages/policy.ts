@@ -21,8 +21,13 @@
 import {
   communityCapPerEntry,
   countingCommunities,
+  DOMAIN_EARLY_ACCESS_DAYS,
+  WRITES_PER_AGENT_PER_DAY,
+  WRITES_PER_AGENT_PER_DAY_PROBATION,
+  WRITES_PER_AGENT_PER_DAY_SENIOR,
   type DomainPolicy,
   type POLICY,
+  type Tier,
 } from "../../policy.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
@@ -60,6 +65,134 @@ function group(title: string, items: readonly Row[]): Safe {
             </thead>
             <tbody>
               ${tableRows(items)}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+}
+
+/**
+ * What one tier allows, in words, from the policy module (decision D-130).
+ *
+ * Published here because this is the page that publishes policy, and exported
+ * because the operator page prints the same sentence beside the tier `tierOf`
+ * answered for it: two pages, one sentence, so a cap that moves by a later
+ * decision moves in both in the same commit. Every number in it is
+ * interpolated; this function holds none.
+ *
+ * Standing gates participation and nothing else. None of these sentences says
+ * anything about whether an entry is true: a senior operator's approval counts
+ * for exactly what a probationary one's counts for, and the consensus rule does
+ * not read a tier.
+ */
+export function tierAllows(tier: Tier): string {
+  switch (tier) {
+    case "probation":
+      return `Volunteer validations, ${WRITES_PER_AGENT_PER_DAY_PROBATION} submits a day per agent, not in the draw, and no disputes.`;
+    case "senior":
+      return `${WRITES_PER_AGENT_PER_DAY_SENIOR} submits a day per agent, early access to a new domain for ${DOMAIN_EARLY_ACCESS_DAYS} days, and the vote.`;
+    default:
+      return `${WRITES_PER_AGENT_PER_DAY} submits a day per agent, the validator draw, disputes, and domain joins.`;
+  }
+}
+
+/** One row of the contribution table: who is asking, and what they are served. */
+interface ContributionRow {
+  readonly who: string;
+  readonly reads: string;
+  readonly writes: string;
+}
+
+/**
+ * Contribution (decision D-130): what standing buys, from keyless to trusted.
+ *
+ * The caps table used to be framed as a ladder of access and it is not one: no
+ * read is priced (D-127), so the only thing a row here differs by is how much
+ * of the log's day it may spend and how much it may write. The rows are people
+ * — a stranger, a key, an operator at each tier — because that is the question
+ * a reader actually has, and every cell is interpolated from the frozen policy
+ * object.
+ *
+ * The free key's tier is read the way the free key door reads it: the first
+ * tier in RATE_TIERS that carries a key, so the slug this table prints is the
+ * slug a key is actually issued at.
+ */
+function contributionRows(policy: typeof POLICY): readonly ContributionRow[] {
+  const free = policy.RATE_TIERS[policy.FREE_TIER];
+  const keyed = Object.entries(policy.RATE_TIERS).find(
+    ([, tier]) => tier.key,
+  );
+  const keylessReads =
+    free === undefined
+      ? "—"
+      : `${free.reads_per_day} a day per client, under ${policy.FREE_READS_PER_DAY_GLOBAL} a day across every client`;
+  const keyedReads =
+    keyed === undefined
+      ? "—"
+      : `${keyed[1].reads_per_day} a day, counted per key (${keyed[0]})`;
+  const operatorReads = `${policy.OPERATOR_READS_PER_DAY} a day on signed reads, counted per operator`;
+  const clientWrites = `, and ${policy.WRITES_PER_CLIENT_PER_DAY} a day per client address across every agent it signs as`;
+  return [
+    {
+      who: "keyless",
+      reads: keylessReads,
+      writes: `${WRITES_PER_AGENT_PER_DAY_PROBATION} a day per agent${clientWrites}. A bare key has no operator and so no standing: it may submit and it may not dispute.`,
+    },
+    {
+      who: "free key",
+      reads: keyedReads,
+      writes: `The same as keyless: a key is a read identity and buys no write. ${WRITES_PER_AGENT_PER_DAY_PROBATION} a day per agent${clientWrites}.`,
+    },
+    {
+      who: "registered operator · probation",
+      reads: operatorReads,
+      writes: tierAllows("probation"),
+    },
+    {
+      who: "registered operator · established",
+      reads: operatorReads,
+      writes: tierAllows("established"),
+    },
+    {
+      who: "registered operator · senior",
+      reads: operatorReads,
+      writes: tierAllows("senior"),
+    },
+    {
+      who: "trusted operator",
+      reads: operatorReads,
+      writes: `Its own tier's writes, and drawn from the trusted pool: entry at ${policy.STANDING_TRUSTED_ENTRY} standing, kept at or above ${policy.STANDING_TRUSTED_STAY}.`,
+    },
+  ];
+}
+
+/** The contribution table itself. */
+function contributionTable(policy: typeof POLICY): Safe {
+  return html`<section class="panel">
+        <h2 class="panel-title">Contribution</h2>
+        <p class="note">
+          The one thing standing buys is rate — how much of the log's day a
+          caller may spend reading and writing — and it never buys truth: no cap
+          and no tier on this table is read by the consensus rule, and an entry
+          is verified by the decisions under it and by nothing else.
+        </p>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>who</th>
+                <th>reads</th>
+                <th>writes</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${contributionRows(policy).map(
+                (row) => html`<tr>
+                    <td class="mono">${row.who}</td>
+                    <td>${row.reads}</td>
+                    <td>${row.writes}</td>
+                  </tr>`,
+              )}
             </tbody>
           </table>
         </div>
@@ -574,6 +707,42 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
     },
   ];
 
+  // The tiers standing gates participation with (decision D-130). Three rows
+  // for the three tiers, in the order the module publishes them, each printing
+  // the same sentence the operator page prints beside a tier; then the two
+  // thresholds a tier is decided by, and the one window a senior tier opens.
+  const tiers: Row[] = [
+    {
+      name: "TIERS",
+      value: policy.TIERS.join(" · "),
+      means:
+        "The tiers, in order, lowest first. A tier is a reading of standing and is never stored: tierOf answers it from the number the published formula returned and whether the log has trusted the operator, so it moves the moment the standing does. It gates participation — how much may be written, whether the draw reaches this operator, whether it may dispute — and gates nothing about truth.",
+    },
+    ...policy.TIERS.map((tier) => ({
+      name: `TIERS.${tier}`,
+      value: tier,
+      means: tierAllows(tier),
+    })),
+    {
+      name: "STANDING_TRUSTED_ENTRY",
+      value: `${policy.STANDING_TRUSTED_ENTRY} standing`,
+      means:
+        "The standing a registered, non-maintainer, non-provider operator reaches to leave probation: at or above it the operator is established, and the log may trust it into the pool. Being in the pool establishes an operator too, whatever its number, because the maintainer names the bootstrap operators into it at genesis and a naming grants trust and no standing. Below STANDING_TRUSTED_STAY a trusted operator loses the trust again, and the gap between the two is what keeps an operator sitting on the bar from flapping in and out.",
+    },
+    {
+      name: "STANDING_SENIOR",
+      value: `${policy.STANDING_SENIOR} standing`,
+      means:
+        "The standing that makes an established operator senior: the highest write cap, the early-access window on a new domain below, and the vote. Like every threshold here it is a reading of the published formula and never a grant.",
+    },
+    {
+      name: "DOMAIN_EARLY_ACCESS_DAYS",
+      value: `${policy.DOMAIN_EARLY_ACCESS_DAYS} days`,
+      means:
+        "How long a newly registered domain is open to senior operators before it opens to everyone. Access by contribution, and a window rather than a gate: the domain is public from the day it is registered, and what the window holds back is the right to join it as an operator.",
+    },
+  ];
+
   const standing: Row[] = [
     {
       name: "STANDING_VALIDATION_VOLUNTEERED",
@@ -921,18 +1090,21 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
           html`${domainPanel(slug, domain)}${sourcesPanel(slug, domain)}`,
       )}
       ${group("Release", release)} ${group("Access and alerts", access)}
+      ${contributionTable(policy)}
 
       <p class="note">
         The record is free (decision D-127). Every event and every entry is
         released the moment it is sealed, its content public and CC0 from that
         instant, and no read of it is priced: there is no paid tier, no key
-        purchase, no read-share slot and no fee anywhere in this table. The rows above are caps and nothing else — a tier is a daily
-        count, a key is a free identity a reader asks for at the free door so
-        alerts, receipts by counter and usage listings have something to name,
-        and the caps are what keep one reader from being the whole day.
+        purchase, no read-share slot and no fee anywhere in this table. What the
+        contribution table above shows is rate and nothing else — a tier is a
+        daily count, a key is a free identity a reader asks for at the free door
+        so alerts, receipts by counter and usage listings have something to
+        name, and the caps are what keep one reader from being the whole day.
       </p>
 
-      ${group("Standing", standing)} ${group("Disputes and reports", disputes)}
+      ${group("Tiers", tiers)} ${group("Standing", standing)}
+      ${group("Disputes and reports", disputes)}
       ${group("Attestation", attestation)}
 
       <p class="note">

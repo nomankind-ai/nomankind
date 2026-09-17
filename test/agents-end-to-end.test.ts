@@ -29,7 +29,9 @@
  * window an attestation is signed inside is REQUEST_CLOCK_SKEW_SECONDS.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { clearWriteQuota } from "./helpers/quota.js";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
 import { buildExport } from "../src/cli/export.js";
@@ -325,6 +327,20 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await store?.dispose();
+});
+
+/**
+ * Each test starts the day's write counters fresh (decision D-130).
+ *
+ * Every signing key here is a bare one or a probation operator's, and both
+ * write under the probationary per-agent cap: a whole suite driving one door
+ * under one frozen clock is one caller writing all day, and without this the
+ * later cases would be answered by the quota rather than by the rule they are
+ * about. The caps themselves are pinned in test/write-quota.test.ts and
+ * test/standing-tiers.test.ts.
+ */
+beforeEach(async () => {
+  await clearWriteQuota(store.db);
 });
 
 // ---------------------------------------------------------------------------

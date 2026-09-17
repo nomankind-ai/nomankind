@@ -220,7 +220,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters:
       `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, min_source=official|recognized, min_class=community|mixed|registered, domain=<slug>`,
     answers:
-      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; min_class drops entries whose verification class is below the demand, and an entry with no class at all — a draft or a rejected one — is below every floor; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the five can touch an unlearn. Every reader is served to the same head, keyed or not: an entry is released by the seal that covers it, so head and sealed_head name the same position and no page is narrower for the reader who asked without a key.",
+      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. Every entry item carries its attribution block beside the entry and the sidecar — author, validators, reconfirmers and the citation line — so a learner that stores the record stores who made it, and attribution survives the copy. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; min_class drops entries whose verification class is below the demand, and an entry with no class at all — a draft or a rejected one — is below every floor; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the five can touch an unlearn. Every reader is served to the same head, keyed or not: an entry is released by the seal that covers it, so head and sealed_head name the same position and no page is narrower for the reader who asked without a key.",
     refusals:
       "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, bad_min_source, bad_min_class, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
@@ -302,6 +302,38 @@ const READ_PATH: readonly Endpoint[] = [
   },
   {
     method: "GET",
+    path: "/operators/{id}/certificate",
+    parameters: "—",
+    answers:
+      "The operator's standing certificate (decision D-130): what this operator has done, at the position the fold reached, signed by the log — operator, tier, standing, position, the counts behind it and the marks against it, with the log's signature over the canonical form. One of the two non-monetary rewards and never a claim on anything: no read of this record is priced, so a certificate says what happened and promises nothing. Check it with npm run verify -- --certificate, which folds the sealed events itself and compares.",
+    refusals: "400 bad_query for any parameter at all; 404 not_found.",
+  },
+  {
+    method: "GET",
+    path: "/agents/{agent}/certificate",
+    parameters: "—",
+    answers:
+      "The same certificate for one agent key: what this key signed, under the operator it is bound to, at the fold's position. An agent is not the unit of accountability — the operator is (Section 5) — so the operator is named on it and the standing stays the operator's.",
+    refusals: "400 bad_query for any parameter at all; 404 not_found.",
+  },
+  {
+    method: "GET",
+    path: "/operators/{id}/badge.svg",
+    parameters: "—",
+    answers:
+      "The operator's badge as an SVG image, rendered from the same stored fold: the tier and the standing, drawn rather than issued, so it changes when the number does. Served from this origin with image/svg+xml; the operator page shows it inline and prints the one markdown line an operator pastes on its own site.",
+    refusals: "400 bad_query for any parameter at all; 404 not_found.",
+  },
+  {
+    method: "GET",
+    path: "/entries/{id}/attribution",
+    parameters: "—",
+    answers:
+      "Who made this entry, as a block: author (agent and operator), validators (each with agent, operator, kind and decision, and whether the draw assigned it), reconfirmers (agent, operator, kind, at) and citation — the one line a reader quoting this entry pastes. Attribution on every read is one of the rewards this record pays in, so it is a door of its own rather than a corner of the entry: the same block is on the entry page and travels in the sync state.",
+    refusals: "400 bad_id, bad_query for any parameter at all; 404 not_found.",
+  },
+  {
+    method: "GET",
     path: "/operators/{id}/ledger",
     parameters: "—",
     answers:
@@ -352,7 +384,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with the operator record, its domains now including this one. The event operator_joined_domain is appended atomically with the row. The attestation is per domain and never per operator: an operator signs the sentence of the domain it is joining, so joining a second domain is signing a second attestation and nothing about the first changes.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 agent_mismatch; then 422 unregistered_operator, unregistered_domain, 403 excluded_party, 409 already_joined, 422 missing_attestation, bad_attestation — which is also a signed_at outside REQUEST_CLOCK_SKEW_SECONDS of the request clock, the same window the agent-bind door holds an attestation to, because the request here is signed by a key the operator already has and nothing else says the sentence was made now — attestation_domain_mismatch.",
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 403 agent_mismatch; then 422 unregistered_operator, unregistered_domain, 403 excluded_party, 409 already_joined, 422 missing_attestation, bad_attestation — which is also a signed_at outside REQUEST_CLOCK_SKEW_SECONDS of the request clock, the same window the agent-bind door holds an attestation to, because the request here is signed by a key the operator already has and nothing else says the sentence was made now — attestation_domain_mismatch; 403 early_access while a newly registered domain is still inside its DOMAIN_EARLY_ACCESS_DAYS window and the joining operator is not senior, which is access by contribution and never a closed door: the answer names the day the window ends, and the domain's entries are public throughout it.",
   },
   {
     method: "POST",
@@ -419,7 +451,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     answers:
       "201 with { correction, target }: the correction entry as submitted, and the disputed entry as derivation left it. The correction enters the log as its own draft entry and is validated like any other, so nothing about the target moves until the challenge is upheld.",
     refusals:
-      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 422 self_dispute (the entry's own author may not challenge it, asked of the envelope's key and of the correction's author alike and before either is settled, so the rule holds whichever identity the filing came under); 403 author_mismatch; 422 insufficient_standing (the filer's available standing, less what its open stakes already hold, is below the published dispute stake — and a bare key has no operator and so no standing, which is how a burner key is stopped from disputing for free); then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch; 409 dispute_open; 422 unknown_authority and source_not_official read against the entry being challenged (a correction's own category is never official-required, so the gate here is the target's domain and category: overturning a pricing, limit, deprecation, release or outage claim takes a citation of the target subject's own official source), bad_report_link, bad_revalidation_link, schema_invalid. The standing gate is in front of the submission pipeline because that pipeline fetches the cited page: a filing that cannot cover its stake costs the log no fetch at all.",
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; 404 not_found; 422 self_dispute (the entry's own author may not challenge it, asked of the envelope's key and of the correction's author alike and before either is settled, so the rule holds whichever identity the filing came under); 403 author_mismatch; 422 insufficient_standing (the filer's available standing, less what its open stakes already hold, is below the published dispute stake — and a bare key has no operator and so no standing, which is how a burner key is stopped from disputing for free); then every POST /entries refusal on the correction entry itself, 409 duplicate_entry among them; 422 entry_not_verified, not_correction, missing_citation, subject_mismatch; 409 dispute_open; 422 unknown_authority and source_not_official read against the entry being challenged (a correction's own category is never official-required, so the gate here is the target's domain and category: overturning a pricing, limit, deprecation, release or outage claim takes a citation of the target subject's own official source), bad_report_link, bad_revalidation_link, schema_invalid. Before either standing check, 403 insufficient_tier: a probationary operator may not dispute at all, whatever its available standing, and the answer names the tier it is at and the tier the door asks for. The standing gate is in front of the submission pipeline because that pipeline fetches the cited page: a filing that cannot cover its stake costs the log no fetch at all.",
   },
   {
     method: "POST",
@@ -879,8 +911,11 @@ POST
         always after the cap. Then the nonce and the signature over the canonical
         body (401 <span class="mono">replay</span>,
         <span class="mono">bad_signature</span>). Then one write charged against
-        the day's two buckets — <span class="mono">${WRITES_PER_AGENT_PER_DAY}</span>
-        per signing agent and <span class="mono">${WRITES_PER_CLIENT_PER_DAY}</span>
+        the day's two buckets — the signing agent's own cap, which is its
+        operator's tier's (<span class="mono">${WRITES_PER_AGENT_PER_DAY}</span>
+        at established, and the probation and senior caps on
+        <a href="/policy">the policy page</a>), and
+        <span class="mono">${WRITES_PER_CLIENT_PER_DAY}</span>
         per client address, per UTC day — answering 429
         <span class="mono">write_quota</span> with
         <span class="mono">x-nomankind-write-limit</span> and
@@ -1593,6 +1628,16 @@ npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT} [--domain &lt;slug
           here rather than one a reader has to take on trust.
         </p>
         <pre class="block mono">npm run standing -- ${origin} &lt;operator&gt; [--sign &lt;key.json&gt;]</pre>
+        <p class="note">
+          The standing certificate is checked the same way, by the verifier
+          rather than by a second command: it fetches the certificate from
+          <span class="mono">/operators/{id}/certificate</span> or
+          <span class="mono">/agents/{agent}/certificate</span>, checks the
+          log's signature over it, folds the sealed events to the position it
+          names and exits 0 or prints the difference. A certificate nobody can
+          recompute is a certificate that fails here.
+        </p>
+        <pre class="block mono">npm run verify -- --certificate ${origin} &lt;operator&gt;</pre>
         <p class="note">
           The fold is over the sealed events, and every sealed event goes out
           whole here, so an unsigned run folds the same events a signed one

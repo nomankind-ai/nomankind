@@ -61,12 +61,14 @@ import {
 import { verifyRecordSignature } from "../records.js";
 import { validateEntry, type ValidationError } from "../schema.js";
 import { revalidationOutcomeStakes, revalidationStake } from "../stake.js";
+import { tierOf } from "../standing.js";
 import {
   getEntry,
   headSeq,
   openRevalidationAssignment,
   openStakeRowsForOperator,
   operatorForAgent,
+  operatorTier,
   operatorStanding,
   recordRevalidationRequest,
   recordRevalidationResolution,
@@ -196,6 +198,20 @@ async function request_(
     // than a malformed ask: 409, as every other "already open" refusal is.
     const status = verdict.reason === "request_open" ? 409 : 422;
     return refuse(status, verdict.reason);
+  }
+
+  // The tier gate (decision D-130), after the kernel's own verdict — a bare key
+  // is refused `bare_key` there, which is the word this door has always
+  // answered one in — and before the stake gate below: "probation ... cannot
+  // file disputes or revalidation requests". Whether an operator may ask at all
+  // and whether it can cover the stake are two questions, and each is asked in
+  // its own words. Nothing has been fetched at this point and nothing is
+  // written, so a refusal costs the log a read of its own rows and no more.
+  if (operator !== null) {
+    const row = await operatorTier(env.DB, operator);
+    if (tierOf(row?.standing ?? 0, row?.trusted ?? false) === "probation") {
+      return refuse(403, "insufficient_tier");
+    }
   }
 
   // Section 6: the request is made "by staking a small amount of standing", and

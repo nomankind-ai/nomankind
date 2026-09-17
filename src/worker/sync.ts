@@ -33,6 +33,7 @@
  * `parseSyncQuery`.
  */
 
+import { attributionOf, type Attribution } from "../attribution.js";
 import { domainOf, extractCore } from "../core.js";
 import type { EntryStatus, Sidecar } from "../derive.js";
 import type { Event } from "../events.js";
@@ -42,6 +43,7 @@ import { signSyncReceipt, type SyncReceipt } from "../receipt.js";
 import {
   isVersionStalenessCategory,
   LIST_PAGE_LIMIT,
+  type OperatorKind,
   type VerificationClass,
 } from "../policy.js";
 import type { Entry } from "../schema.js";
@@ -51,7 +53,9 @@ import type { D1Like } from "../storage/d1.js";
 import {
   ReceiptConflictError,
   eventsAfter,
+  eventsForEntries,
   eventsInRange,
+  eventsOfType,
   getEntry,
   latestSeal,
   allocateReadCounter,
@@ -121,6 +125,18 @@ interface EntryState {
    * record it is serving.
    */
   readonly verification_class: VerificationClass | null;
+  /**
+   * Who the entry is owed to (decision D-130), folded by `attributionOf` from
+   * the entry's own events and the operator kinds at this head.
+   *
+   * On the stream because "attribution on every read" is what a contributor is
+   * paid in (D-127) and a training run is a read: a trainer that ingests a fact
+   * is handed the names that stand behind it in the same item, and the citation
+   * line with them. The entry object itself cannot carry it — the schema closes
+   * it to new keys — so it travels beside the entry, exactly as the sidecar
+   * does.
+   */
+  readonly attribution: Attribution;
 }
 
 /** One event of the page, with everything a trainer is handed about it. */
@@ -242,9 +258,19 @@ class Entries {
   readonly #memo = new Map<string, Promise<EntryState>>();
   readonly #cache = worldCache();
   readonly #moved: ReadonlySet<string> | null;
+  /** The page's entries' own events, read in one statement for all of them. */
+  readonly #events: ReadonlyMap<string, Event[]>;
+  /** Which operators are community ones, for the attribution block's `kind`. */
+  readonly #kinds: ReadonlyMap<string, OperatorKind>;
 
-  constructor(moved: ReadonlySet<string> | null) {
+  constructor(
+    moved: ReadonlySet<string> | null,
+    events: ReadonlyMap<string, Event[]>,
+    kinds: ReadonlyMap<string, OperatorKind>,
+  ) {
     this.#moved = moved;
+    this.#events = events;
+    this.#kinds = kinds;
   }
 
   state(db: D1Like, entryId: string, at: Date, head: number): Promise<EntryState> {
@@ -271,6 +297,11 @@ class Entries {
     return {
       entry,
       sidecar,
+      attribution: attributionOf(
+        entry as Record<string, unknown>,
+        world.entryEvents,
+        this.#kinds,
+      ),
       entry_hash: await entryHash(extractCore(entry)),
       status: derived.status,
       effective_tier: sidecar.effective_tier,
@@ -312,6 +343,14 @@ class Entries {
     return {
       entry,
       sidecar: stored.sidecar,
+      // Attribution is about who signed, which is in the entry's events and
+      // not in its derived row — and those events were read for the whole page
+      // in one statement, so the fast path stays a row read plus nothing.
+      attribution: attributionOf(
+        entry as Record<string, unknown>,
+        this.#events.get(entryId) ?? [],
+        this.#kinds,
+      ),
       entry_hash: await entryHash(extractCore(entry)),
       status: fields["status"] as EntryStatus,
       effective_tier: stored.sidecar.effective_tier,
@@ -320,6 +359,40 @@ class Entries {
       verification_class: stored.sidecar.verification_class,
     };
   }
+}
+
+/**
+ * Which operators are community ones, at this head (decision D-138).
+ *
+ * The cheap half of `operatorKindsAt`, and the only half a stream needs: every
+ * operator the log has not registered as a community one is a domain operator,
+ * which is the default `attributionOf` applies to an id the map does not name.
+ * One read of one event type, rather than the registry's six.
+ */
+async function communityKinds(
+  db: D1Like,
+  head: number,
+): Promise<ReadonlyMap<string, OperatorKind>> {
+  const kinds = new Map<string, OperatorKind>();
+  let after = -1;
+  for (;;) {
+    const page = await eventsOfType(
+      db,
+      "community_operator_registered",
+      after,
+      LIST_PAGE_LIMIT,
+    );
+    for (const event of page) {
+      if (event.seq > head) continue;
+      const operator = (event.payload as unknown as Record<string, unknown>)[
+        "operator"
+      ];
+      if (typeof operator === "string") kinds.set(operator, "community");
+    }
+    if (page.length < LIST_PAGE_LIMIT) break;
+    after = page[page.length - 1]!.seq;
+  }
+  return kinds;
 }
 
 /** The seal record a delivered item points at, exactly as `GET /seals/{seq}` serves it. */
@@ -343,6 +416,7 @@ function wireItem(item: Item): Record<string, unknown> {
     proof: item.proof,
     entry: item.entry,
     sidecar: item.sidecar,
+    attribution: item.state === null ? null : item.state.attribution,
     entry_hash: item.entry_hash,
   };
 }
@@ -483,7 +557,22 @@ async function page(
   const events = await eventsInRange(db, query.from, head);
 
   const covering = new Covering();
-  const entries = new Entries(await unservableAfter(db, worldHead));
+  // The two reads the attribution block takes for the whole page (D-130): the
+  // events of every entry the page names, in one statement, and which operators
+  // are community ones, in another. Both are about the page rather than about
+  // one item, so they are read once here and never per entry.
+  const entryIds = [
+    ...new Set(
+      events
+        .map((event) => event.entry_id)
+        .filter((id): id is string => id !== null),
+    ),
+  ];
+  const entries = new Entries(
+    await unservableAfter(db, worldHead),
+    await eventsForEntries(db, entryIds),
+    await communityKinds(db, worldHead),
+  );
   const at = new Date(asOf);
   const items: Item[] = [];
 
