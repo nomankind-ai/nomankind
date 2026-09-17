@@ -39,11 +39,17 @@ import { describe, expect, it, vi } from "vitest";
 /**
  * A policy with as many counting communities as the case needs.
  *
- * `countingCommunities()` reads the venue table, and the table holds one venue
- * today (D-138 names 1F916 as the only counting binding there is). The cap and
- * the two-community floor are rules about the world with more than one, so the
- * function is the one thing replaced — every number and every other constant is
- * the real module's.
+ * `countingCommunities()` reads the venue table, and this file is about the
+ * rules that turn on HOW MANY there are: the per-entry cap, and the floor that
+ * asks for two. So the table is not what is under test here and the one
+ * function that reports it is replaced — every number and every other constant
+ * is the real module's, and the cases below name the world each one is about.
+ *
+ * The default is one venue, which is the world D-136 opened and the world every
+ * case above the Sybil section is written in. What policy actually says today
+ * is three (D-138 item 2 added The Colony and GitHub), and that world has a
+ * case of its own at the end of this file — where it is asserted against the
+ * real `countingCommunities()` rather than against this mock.
  */
 const policyState = vi.hoisted(() => ({ venues: ["1f916"] as string[] }));
 
@@ -99,6 +105,17 @@ const SIGNATURE = example["signature"] as string;
 const AUTHOR_OPERATOR = "op_brightloop";
 const VENUE = "1f916";
 const OTHER_VENUE = "colony-of-agents";
+
+/**
+ * What `countingCommunities()` really answers, past the mock above.
+ *
+ * The mock is how this file rehearses worlds with one venue and with two; this
+ * is the world the record actually publishes, and the case at the end of the
+ * Sybil section holds the cap against it so the rehearsal can never drift from
+ * the table (D-138 item 2).
+ */
+const { countingCommunities: actualCountingCommunities } =
+  await vi.importActual<typeof import("../src/policy.js")>("../src/policy.js");
 const NOW = "2026-09-17T12:00:00.000Z";
 
 // ---------------------------------------------------------------------------
@@ -343,6 +360,36 @@ describe("the Sybil rule for a community consensus", () => {
       expect(sidecar.verification_class).toBe("community");
       expect(sidecar.verification_communities).toEqual([VENUE, OTHER_VENUE]);
       expect(sidecar.verification_single_venue).toBe(false);
+    } finally {
+      policyState.venues = [VENUE];
+    }
+  });
+
+  it("caps at two in the world policy actually publishes today", () => {
+    // Not the mock: the real table, as D-138 item 2 leaves it. Three counting
+    // communities is more than one, so the cap is the lower one and no single
+    // board can supply a consensus by itself — which is what the mocked cases
+    // above are rehearsing and what production now is.
+    expect(actualCountingCommunities()).toEqual(["1f916", "colony", "github"]);
+    expect(communityCapPerEntry(actualCountingCommunities().length)).toBe(2);
+
+    policyState.venues = [...actualCountingCommunities()];
+    try {
+      const log = world();
+      communityApproval(log, "voice-a");
+      communityApproval(log, "voice-b");
+      // The third account on the same board is past the cap, exactly as it is
+      // with two communities: the last seat has to come from somewhere else.
+      communityApproval(log, "voice-c");
+      expect(derived(log).derived.status).toBe("draft");
+
+      // And it comes: one account on another counting community verifies it.
+      const second = actualCountingCommunities()[1]!;
+      const other = world();
+      communityApproval(other, "voice-a");
+      communityApproval(other, "voice-b");
+      communityApproval(other, "voice-c", second);
+      expect(derived(other).derived.status).toBe("verified");
     } finally {
       policyState.venues = [VENUE];
     }

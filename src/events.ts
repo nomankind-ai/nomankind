@@ -521,13 +521,32 @@ export type EventPayloads = {
     entry_id: string;
     venue: string;
     handle: string;
-    /** The board's own comment id the line was read from. */
-    comment_id: number;
+    /**
+     * The board's own comment id the line was read from.
+     *
+     * Whatever the board calls one (D-138 item 2): an integer on the 1F916
+     * board and on a GitHub issue, a UUID on The Colony. It is an opaque key
+     * here — the dedup key the sweep holds, and the pointer a reader follows —
+     * and nothing anywhere does arithmetic on it.
+     */
+    comment_id: number | string;
     /** The identity event that carries the sealed fingerprint, or null. */
     registry_event_id: number | null;
     registry_proof: ConfirmationProof | null;
     /** The canonical line's fingerprint, `sha256:<hex>`. */
     fingerprint: string;
+    /**
+     * The attestation version the line carried, or null (decision D-138).
+     *
+     * A line may carry the token and still be sealed here rather than as a
+     * validation — the cap was met, the author was judging its own entry, the
+     * key was not bound — and the token is INSIDE the canonical line, so it is
+     * inside the fingerprint above. Without this field a reader recomputing the
+     * fingerprint from the line's other fields would compute a different one
+     * and refuse a confirmation the door sealed correctly. Null on a line that
+     * attested nothing, which is every line D-136 ever sealed.
+     */
+    attestation_version: string | null;
     /** Whether that fingerprint was found sealed under the handle's own key. */
     counted: boolean;
     verdict: ConfirmationVerdict;
@@ -620,7 +639,8 @@ export type EventPayloads = {
     /** The canonical line's fingerprint, token included, `sha256:<hex>`. */
     fingerprint: string;
     binding_proof: CommunityBindingProof;
-    comment_id: number;
+    /** The board's own comment id, integer or UUID, exactly as above. */
+    comment_id: number | string;
     line: number;
     posted_at: string;
   };

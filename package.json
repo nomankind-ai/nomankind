@@ -8,6 +8,7 @@
   },
   "scripts": {
     "attest": "npm run build --silent && node dist/cli/attest.js",
+    "batch-post": "npm run build --silent && node dist/cli/batch-post.js",
     "build": "tsc -p tsconfig.build.json",
     "checkpoint": "npm run build --silent && node dist/cli/checkpoint.js",
     "dev": "wrangler dev",

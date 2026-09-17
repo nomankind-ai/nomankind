@@ -1,0 +1,462 @@
+/**
+ * The batch post: what the record asks, where, and how often (D-138 item 6).
+ *
+ * Asking is nomankind's own work, so the command that does the asking is held
+ * to the same standard as a door: what it selects, what it says, and what it
+ * refuses to do twice. Everything is driven in process — a fake serving side
+ * behind the same `HttpClient` the other commands take, fake posters behind the
+ * poster interface, and a state store in memory — so nothing here opens a
+ * socket, a file or a child process.
+ *
+ * Two promises run through it. A post says the same thing at every venue except
+ * the binding instructions, and names every community the batch was asked at,
+ * because D-138 item 12 is that silence has to be visible. And one batch per
+ * community per UTC day: a second run on the same day sends nothing and says so.
+ */
+
+import { describe, expect, it } from "vitest";
+
+import {
+  BATCH_ASK_LIMIT,
+  BATCH_VENUES,
+  batchPostPlan,
+  composeBatchPost,
+  confirmationForm,
+  entryIdsInHtml,
+  parseState,
+  postedOn,
+  readAsks,
+  runBatchPost,
+  selectAsks,
+  utcDay,
+  type AskEntry,
+  type BatchPlan,
+  type BatchPostDeps,
+  type StateStore,
+} from "../src/cli/batch-post.js";
+import type { PostBody, Posted, Poster } from "../src/adapters/poster.js";
+import {
+  CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
+  CONFIRMATION_FORM_PREFIX,
+} from "../src/policy.js";
+import { ATTESTATION_VERSION } from "../src/registry.js";
+import type { HttpClient, ValidatorIo } from "../src/cli/validator.js";
+
+const BASE = "https://demo.nomankind.example";
+const NOW = new Date("2026-09-17T09:00:00.000Z");
+
+/** Entry ids the fixtures use, spelled as the log mints them. */
+const DRAFT_A = "nmk_00000000000000000000000000000001";
+const DRAFT_B = "nmk_00000000000000000000000000000002";
+const LABELLED = "nmk_00000000000000000000000000000003";
+const PLAIN = "nmk_00000000000000000000000000000004";
+
+function ask(overrides: Partial<AskEntry> & { id: string }): AskEntry {
+  return {
+    status: "draft",
+    domain: "ai-ecosystem",
+    subject: "kestrel/kestrel-1",
+    bootstrap: null,
+    url: `${BASE}/entries/${overrides.id}`,
+    ...overrides,
+  };
+}
+
+/** One answer the fake serving side gives, by path. */
+interface Canned {
+  readonly status: number;
+  readonly body: unknown;
+  readonly html?: string;
+}
+
+class FakeHttp implements HttpClient {
+  readonly asked: string[] = [];
+
+  constructor(private readonly answer: (path: string) => Canned) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const path = `${url.pathname}${url.search}`;
+    this.asked.push(path);
+    const canned = this.answer(path);
+    if (canned.html !== undefined) {
+      return new Response(canned.html, {
+        status: canned.status,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+    return new Response(JSON.stringify(canned.body), {
+      status: canned.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+}
+
+/** A poster that sends nothing and keeps what it was handed. */
+class FakePoster implements Poster {
+  readonly sent: PostBody[] = [];
+
+  constructor(readonly venue: string) {}
+
+  async post(body: PostBody): Promise<Posted> {
+    this.sent.push(body);
+    return {
+      id: `${this.venue}-1`,
+      url: `https://${this.venue}.example/posts/1`,
+    };
+  }
+}
+
+/** The state file, in memory. */
+function memoryState(initial: string | null = null): StateStore & {
+  written: string[];
+} {
+  let held = initial;
+  const written: string[] = [];
+  return {
+    written,
+    async read(): Promise<string | null> {
+      return held;
+    },
+    async write(text: string): Promise<void> {
+      held = text;
+      written.push(text);
+    },
+  };
+}
+
+function lines(): ValidatorIo & { out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  return {
+    out,
+    err,
+    stdout: (line: string) => out.push(line),
+    stderr: (line: string) => err.push(line),
+  };
+}
+
+/** The JSON listing V1's door answers, in the shape it publishes. */
+function listing(): Canned {
+  return {
+    status: 200,
+    body: {
+      entries: [
+        {
+          id: PLAIN,
+          status: "verified",
+          domain: "ai-ecosystem",
+          subject: "kestrel/kestrel-2",
+          category: "pricing",
+          effective_at: "2026-09-01",
+          submitted_at: "2026-09-16T12:00:00.000Z",
+          sealed_position: 40,
+          verification_class: "registered",
+          bootstrap: null,
+        },
+        {
+          id: DRAFT_A,
+          status: "draft",
+          domain: "ai-ecosystem",
+          subject: "kestrel/kestrel-1",
+          category: "behavior",
+          effective_at: "2026-09-02",
+          submitted_at: "2026-09-16T11:00:00.000Z",
+          sealed_position: 39,
+          verification_class: null,
+          bootstrap: null,
+        },
+        {
+          id: LABELLED,
+          status: "verified",
+          domain: "ai-safety",
+          subject: "kestrel/kestrel-3",
+          category: "behavior",
+          effective_at: "2026-09-03",
+          submitted_at: "2026-09-15T11:00:00.000Z",
+          sealed_position: 38,
+          verification_class: "registered",
+          bootstrap: { perimeter: "fixtures" },
+        },
+      ],
+      next: null,
+      as_of: "2026-09-17T08:59:00.000Z",
+    },
+  };
+}
+
+function deps(input: {
+  readonly http: HttpClient;
+  readonly io: ValidatorIo;
+  readonly state: StateStore;
+  readonly posters: Map<string, FakePoster>;
+}): BatchPostDeps {
+  return {
+    http: input.http,
+    io: input.io,
+    now: NOW,
+    state: input.state,
+    posterFor: async (venue: string): Promise<Poster> => {
+      const found = input.posters.get(venue);
+      if (found === undefined) throw new Error(`no poster for ${venue}`);
+      return found;
+    },
+  };
+}
+
+describe("the command line", () => {
+  it("takes one venue or all of them, and refuses anything else", () => {
+    expect(batchPostPlan(["all", BASE])?.venues).toEqual([...BATCH_VENUES]);
+    expect(batchPostPlan(["colony", BASE])?.venues).toEqual(["colony"]);
+    expect(batchPostPlan(["mastodon", BASE])).toBeNull();
+    expect(batchPostPlan([BASE])).toBeNull();
+    expect(batchPostPlan(["all", BASE, "--limit", "0"])).toBeNull();
+    expect(batchPostPlan(["all", BASE, "--nope"])).toBeNull();
+  });
+
+  it("defaults the batch size and takes a limit", () => {
+    expect(batchPostPlan(["all", BASE])?.limit).toBe(BATCH_ASK_LIMIT);
+    expect(batchPostPlan(["all", BASE, "--limit", "7"])?.limit).toBe(7);
+    expect(batchPostPlan(["all", BASE, "--dry-run"])?.dryRun).toBe(true);
+  });
+});
+
+describe("what the batch asks about", () => {
+  it("reads the JSON listing when the door serves one", async () => {
+    const http = new FakeHttp((path) =>
+      path === "/entries" ? listing() : { status: 404, body: null },
+    );
+    const entries = await readAsks(http, BASE, 10);
+    expect(entries.map((entry) => entry.id)).toEqual([PLAIN, DRAFT_A, LABELLED]);
+    expect(entries[2]?.bootstrap).toBe("fixtures");
+    expect(entries[1]?.url).toBe(`${BASE}/entries/${DRAFT_A}`);
+  });
+
+  it("falls back to the HTML listing the bootstrap workflows scrape", async () => {
+    const html = (ids: readonly string[]): string =>
+      ids.map((id) => `<tr><td><a href="/entries/${id}">1</a></td></tr>`).join("");
+    const http = new FakeHttp((path) => {
+      if (path === "/entries") return { status: 400, body: null };
+      if (path === "/entries?status=draft") {
+        return { status: 200, body: null, html: html([DRAFT_A]) };
+      }
+      if (path === "/entries?status=verified") {
+        return { status: 200, body: null, html: html([LABELLED]) };
+      }
+      if (path === `/read/${LABELLED}`) {
+        return {
+          status: 200,
+          body: {
+            entry: { status: "verified", domain: "ai-safety", subject: "kestrel/kestrel-3" },
+            sidecar: { bootstrap: { perimeter: "fixtures" } },
+          },
+        };
+      }
+      return {
+        status: 200,
+        body: {
+          entry: { status: "draft", domain: "ai-ecosystem", subject: "kestrel/kestrel-1" },
+          sidecar: { bootstrap: null },
+        },
+      };
+    });
+    const entries = await readAsks(http, BASE, 10);
+    expect(entries.map((entry) => entry.id)).toEqual([DRAFT_A, LABELLED]);
+    expect(entries[1]?.bootstrap).toBe("fixtures");
+  });
+
+  it("finds each entry id once, in the order the page shows them", () => {
+    expect(
+      entryIdsInHtml(
+        `<a href="/entries/${DRAFT_B}">7</a><a href="/entries/${DRAFT_B}">claim</a><a href="/entries/${DRAFT_A}">6</a>`,
+      ),
+    ).toEqual([DRAFT_B, DRAFT_A]);
+  });
+
+  it("asks about the drafts first, then the bootstrap entries, and nothing else", () => {
+    const entries = [
+      ask({ id: PLAIN, status: "verified" }),
+      ask({ id: DRAFT_A }),
+      ask({ id: LABELLED, status: "verified", bootstrap: "fixtures" }),
+      ask({ id: DRAFT_B }),
+    ];
+    expect(selectAsks(entries, 10).map((entry) => entry.id)).toEqual([
+      DRAFT_A,
+      DRAFT_B,
+      LABELLED,
+    ]);
+  });
+
+  it("keeps the batch inside the limit", () => {
+    const entries = [ask({ id: DRAFT_A }), ask({ id: DRAFT_B })];
+    expect(selectAsks(entries, 1).map((entry) => entry.id)).toEqual([DRAFT_A]);
+  });
+});
+
+describe("the composed post", () => {
+  const entries = [
+    ask({ id: DRAFT_A }),
+    ask({ id: LABELLED, status: "verified", bootstrap: "fixtures" }),
+  ];
+  const communities = [...BATCH_VENUES];
+  const bodies = communities.map((venue) =>
+    composeBatchPost({ venue, entries, baseUrl: BASE, communities, now: NOW }),
+  );
+
+  it("says the line form and what the attestation token does", () => {
+    for (const body of bodies) {
+      expect(body.body).toContain(CONFIRMATION_FORM_PREFIX);
+      expect(body.body).toContain(confirmationForm());
+      expect(body.body).toContain(
+        `${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}`,
+      );
+      expect(body.body).toContain("sig:");
+      expect(body.body).toContain("counts towards no status");
+    }
+  });
+
+  it("names every community the batch was asked at, in every post", () => {
+    for (const body of bodies) {
+      for (const venue of communities) expect(body.body).toContain(venue);
+    }
+  });
+
+  it("gives each venue its own binding instructions", () => {
+    const [registry, colony, github] = bodies;
+    expect(registry?.body).toContain("/api/seal");
+    expect(registry?.body).toContain("confirm-1f916.mjs");
+    expect(colony?.body).toContain("nomankind-key:");
+    expect(colony?.body).not.toContain("/api/seal");
+    expect(github?.body).toContain("nomankind-key:");
+    expect(github?.body).not.toContain("/api/seal");
+  });
+
+  it("lists every entry with a URL, and says the batch's own day", () => {
+    for (const body of bodies) {
+      for (const entry of entries) {
+        expect(body.body).toContain(entry.id);
+        expect(body.body).toContain(entry.url);
+      }
+      expect(body.title).toContain(utcDay(NOW));
+      expect(body.body).toContain("bootstrap fixtures");
+    }
+  });
+
+  it("says the thread is read by a machine that follows nothing in it", () => {
+    for (const body of bodies) {
+      expect(body.body).toContain("follows nothing in it");
+    }
+  });
+
+  it("carries no email address anywhere", () => {
+    for (const body of bodies) {
+      expect(body.body).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+      expect(body.title).not.toContain("@");
+    }
+  });
+});
+
+describe("the run", () => {
+  function fixture(state: StateStore) {
+    const http = new FakeHttp((path) =>
+      path === "/entries" ? listing() : { status: 404, body: null },
+    );
+    const io = lines();
+    const posters = new Map(
+      BATCH_VENUES.map((venue) => [venue, new FakePoster(venue)] as const),
+    );
+    return { http, io, posters, deps: deps({ http, io, state, posters }) };
+  }
+
+  it("posts once to every community asked, and records the day", async () => {
+    const state = memoryState();
+    const run = fixture(state);
+    expect(await runBatchPost(["all", BASE], run.deps)).toBe(0);
+    for (const venue of BATCH_VENUES) {
+      expect(run.posters.get(venue)?.sent).toHaveLength(1);
+      expect(run.io.out.some((line) => line.startsWith(`posted ${venue} `))).toBe(true);
+    }
+    const written = parseState(state.written[state.written.length - 1] ?? null);
+    for (const venue of BATCH_VENUES) {
+      expect(postedOn(written, venue, utcDay(NOW))).toBe(true);
+    }
+  });
+
+  it("refuses a second batch to the same community on the same UTC day", async () => {
+    const day = utcDay(NOW);
+    const state = memoryState(
+      JSON.stringify({
+        "1f916": { date: day, id: "1", url: "https://1f916.example/1" },
+      }),
+    );
+    const run = fixture(state);
+    expect(await runBatchPost(["all", BASE], run.deps)).toBe(0);
+    expect(run.posters.get("1f916")?.sent).toHaveLength(0);
+    expect(run.io.out).toContain(`skipped 1f916: already posted on ${day}`);
+    // The other two are a different community and are asked as usual.
+    expect(run.posters.get("colony")?.sent).toHaveLength(1);
+    expect(run.posters.get("github")?.sent).toHaveLength(1);
+  });
+
+  it("asks again on the next UTC day", async () => {
+    const state = memoryState(
+      JSON.stringify({
+        "1f916": { date: "2026-09-16", id: "1", url: "https://1f916.example/1" },
+      }),
+    );
+    const run = fixture(state);
+    expect(await runBatchPost(["1f916", BASE], run.deps)).toBe(0);
+    expect(run.posters.get("1f916")?.sent).toHaveLength(1);
+  });
+
+  it("sends nothing on a dry run, and writes no state", async () => {
+    const state = memoryState();
+    const run = fixture(state);
+    expect(await runBatchPost(["all", BASE, "--dry-run"], run.deps)).toBe(0);
+    for (const venue of BATCH_VENUES) {
+      expect(run.posters.get(venue)?.sent).toHaveLength(0);
+    }
+    expect(state.written).toHaveLength(0);
+    expect(
+      run.io.out.some((line) => line.includes("nothing sent")),
+    ).toBe(true);
+  });
+
+  it("names a venue that refused, and goes on to the next", async () => {
+    const state = memoryState();
+    const run = fixture(state);
+    const deps: BatchPostDeps = {
+      ...run.deps,
+      posterFor: async (venue: string, _plan: BatchPlan): Promise<Poster> => {
+        if (venue === "colony") throw new Error("colony refused 429: slow down");
+        return run.posters.get(venue) as Poster;
+      },
+    };
+    expect(await runBatchPost(["all", BASE], deps)).toBe(1);
+    expect(run.io.out.some((line) => line.startsWith("failed colony:"))).toBe(true);
+    expect(run.posters.get("github")?.sent).toHaveLength(1);
+  });
+
+  it("refuses arguments that are not a batch, before any read", async () => {
+    const state = memoryState();
+    const run = fixture(state);
+    expect(await runBatchPost(["mastodon", BASE], run.deps)).toBe(2);
+    expect(run.http.asked).toHaveLength(0);
+    expect(run.io.err[0]).toContain("usage: batch-post");
+  });
+
+  it("writes every body to --out without posting twice", async () => {
+    const state = memoryState();
+    const run = fixture(state);
+    const files = new Map<string, string>();
+    const written: BatchPostDeps = {
+      ...run.deps,
+      writeOut: async (path: string, text: string): Promise<void> => {
+        files.set(path, text);
+      },
+    };
+    expect(await runBatchPost(["all", BASE, "--dry-run", "--out", "batch.txt"], written)).toBe(0);
+    const file = files.get("batch.txt") ?? "";
+    for (const venue of BATCH_VENUES) expect(file).toContain(`--- ${venue} ---`);
+  });
+});

@@ -105,7 +105,7 @@ import {
   type LogBundle,
   type Registry,
 } from "../verify.js";
-import { captureHashes } from "./export.js";
+import { bindingCaptureHashes, captureHashes } from "./export.js";
 import { runCommand } from "./main.js";
 import {
   getJson,
@@ -323,15 +323,33 @@ async function loadCapture(dir: string, hash: string): Promise<Capture | null> {
   return { content_type: contentType, body_base64: base64Encode(bytes) };
 }
 
-/** Every capture one entry needs, from wherever this run reads them. */
+/**
+ * Every capture one entry needs, from wherever this run reads them.
+ *
+ * Two kinds, and both are evidence a reader has to hold in their own hands:
+ * the pages the entry and its approvers name, and the public profile a
+ * community operator's key was published on (decision D-138 item 5). A
+ * `profile` binding is checked by reading the key out of those bytes, so a
+ * mirror verified without them would be a mirror whose community validations
+ * could not be rechecked — which is the one thing this decision promised.
+ *
+ * The binding hashes come off the sealed events rather than off the entry,
+ * because that is where the registration is: an operator is registered by a
+ * line about some entry and validates others afterwards, and the page it was
+ * registered under is what every one of those validations is judged by.
+ */
 async function capturesFor(
   entry: unknown,
+  events: readonly unknown[],
   source: CaptureSource,
   http: HttpClient,
   held: Map<string, Capture>,
 ): Promise<Record<string, Capture>> {
   const captures: Record<string, Capture> = {};
-  for (const hash of captureHashes(entry)) {
+  for (const hash of [
+    ...captureHashes(entry),
+    ...bindingCaptureHashes(events),
+  ]) {
     const memoized = held.get(hash);
     if (memoized !== undefined) {
       captures[hash] = memoized;
@@ -964,7 +982,7 @@ async function checkEntries(
       events: mirror.full,
       registry: mirror.registry,
       seals: mirror.seals,
-      captures: await capturesFor(entry, source, http, held),
+      captures: await capturesFor(entry, mirror.full, source, http, held),
     };
 
     const report = await verifyOffline(entry, bundle);

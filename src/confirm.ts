@@ -43,6 +43,8 @@ import {
   CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
   CONFIRMATION_FORM_PREFIX,
   CONFIRMATION_REASON_MAX_CHARS,
+  CONFIRMATION_SIGNATURE_TOKEN_PREFIX,
+  PROFILE_KEY_PREFIX,
   REGISTRY,
   WITNESS_PIN,
   WITNESSES_REQUIRED,
@@ -111,6 +113,23 @@ export interface ConfirmationLine {
    * which is what it is.
    */
   readonly attestation_version: string | null;
+  /**
+   * The author's own signature over the canonical line, base64url, or null
+   * (decision D-138 item 2).
+   *
+   * A venue that binds a key through the author's public profile signs nothing
+   * on their behalf — the board attributes a comment to an account and stops
+   * there — so the author signs the canonical line itself and writes the
+   * signature into the line. Always the last token and always before the free
+   * text, and never part of the canonical line: a signature inside its own
+   * preimage is not a signature of anything.
+   *
+   * Parsed here and judged nowhere near here. What it is checked against is the
+   * key the author's profile published, which is a fact about a fetched page
+   * and not about these bytes (`verifyLineSignature`, and the sweep's profile
+   * path).
+   */
+  readonly signature: string | null;
   /** The rest of the line, trimmed and bounded, or null when there was none. */
   readonly reason: string | null;
 }
@@ -198,8 +217,27 @@ export function parseConfirmationLine(
       ATTESTATION_VERSION;
   const attestationVersion = carriesToken ? ATTESTATION_VERSION : null;
 
+  // The signature token, when the next word is one (D-138 item 2). One more
+  // optional token in the one place it may be — after the attestation token if
+  // there is one, before the reason always — so a line that carries none is
+  // read exactly as it was before the decision, byte for byte.
+  //
+  // The token is taken on its shape and never on its validity: an empty or
+  // malformed signature is a signature that will not verify, which is the same
+  // outcome by a shorter road and one the parser must not decide, because the
+  // parser has no key.
+  const afterToken = carriesToken ? 5 : 4;
+  const next = words[afterToken];
+  const carriesSignature =
+    next !== undefined &&
+    next.startsWith(CONFIRMATION_SIGNATURE_TOKEN_PREFIX) &&
+    next.length > CONFIRMATION_SIGNATURE_TOKEN_PREFIX.length;
+  const signature = carriesSignature
+    ? next.slice(CONFIRMATION_SIGNATURE_TOKEN_PREFIX.length)
+    : null;
+
   const rest = words
-    .slice(carriesToken ? 5 : 4)
+    .slice(carriesSignature ? afterToken + 1 : afterToken)
     .join(" ")
     .trim();
   const reason =
@@ -211,8 +249,67 @@ export function parseConfirmationLine(
     verdict,
     check,
     attestation_version: attestationVersion,
+    signature,
     reason,
   };
+}
+
+/**
+ * The key a profile publishes, or null when its bytes publish none.
+ *
+ * The whole of what a `profile` binding reads out of a page (decision D-138
+ * item 2): the first `nomankind-key:<base64url>` in the text the venue's
+ * profile door answered. The text is a stranger's and is treated as one — it is
+ * scanned for exactly this token and read for nothing else, and what is around
+ * it is never parsed, rendered or followed.
+ *
+ * The FIRST occurrence and no other, and nothing is merged: a profile naming
+ * two keys has published one key and something else, and picking between them
+ * would be this record choosing an identity on somebody's behalf. A key that
+ * does not decode, or that is not an Ed25519 key's length, is no key at all.
+ */
+export function profileKeyIn(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const at = text.indexOf(PROFILE_KEY_PREFIX);
+  if (at < 0) return null;
+  const rest = text.slice(at + PROFILE_KEY_PREFIX.length);
+  const match = /^[A-Za-z0-9_-]+/.exec(rest);
+  if (match === null) return null;
+  const key = match[0];
+  try {
+    return base64urlDecode(key).byteLength === ED25519_KEY_BYTES ? key : null;
+  } catch {
+    return null;
+  }
+}
+
+/** How many bytes a raw Ed25519 public key is. */
+const ED25519_KEY_BYTES = 32;
+
+/**
+ * Whether a line's own signature is by this key, over the canonical line.
+ *
+ * The other half of a `profile` binding, and the same shape every other check
+ * in this module has: bytes in, a verdict out, no I/O and no throw. The
+ * preimage is the canonical line's UTF-8 — the prefix, the entry, the verdict,
+ * the check and the attestation token when there is one, and never the
+ * signature token or the reason — so two agents that checked the same fact and
+ * wrote different sentences about it sign the same bytes.
+ */
+export async function verifyLineSignature(
+  publicKey: string,
+  canonicalLine: string,
+  signature: string,
+): Promise<boolean> {
+  try {
+    return await verifyBytes(
+      base64urlDecode(publicKey),
+      new TextEncoder().encode(canonicalLine),
+      base64urlDecode(signature),
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -559,12 +656,22 @@ export interface ConfirmationPayload {
   readonly entry_id: string;
   readonly venue: string;
   readonly handle: string;
-  readonly comment_id: number;
+  readonly comment_id: number | string;
   /** The identity event that carries the sealed fingerprint, or -1 when none. */
   readonly registry_event_id: number;
   readonly registry_proof: unknown;
   /** The canonical line's fingerprint, as the confirmer would have sealed it. */
   readonly fingerprint: string | null;
+  /**
+   * The attestation version the line carried, or null (decision D-138).
+   *
+   * Read here because the fingerprint above is taken over the canonical line
+   * WITH the token in it: a reader that recomputed the fingerprint without
+   * knowing whether the line attested would compute a different one and refuse
+   * a confirmation the door sealed correctly. An event that does not say reads
+   * as null, which is what every line sealed under D-136 alone was.
+   */
+  readonly attestation_version: string | null;
   /**
    * Whether the confirmer's own key sealed this line's fingerprint into the
    * registry's log, proved at ingestion. False is an account statement: the
@@ -614,16 +721,24 @@ export function confirmationPayloadOf(
 
   const reason = payload["reason"];
   const fingerprint = payload["fingerprint"];
+  const version = payload["attestation_version"];
   return {
     entry_id: entryId,
     venue: payload["venue"],
     handle: payload["handle"],
-    comment_id: isSize(payload["comment_id"]) ? payload["comment_id"] : -1,
+    // Integer or string, exactly as the board spelled it, and -1 for an event
+    // that names none: the id is a key and a pointer here, never a number to
+    // count with (D-138 item 2).
+    comment_id:
+      isSize(payload["comment_id"]) || typeof payload["comment_id"] === "string"
+        ? (payload["comment_id"] as number | string)
+        : -1,
     registry_event_id: isSize(payload["registry_event_id"])
       ? payload["registry_event_id"]
       : -1,
     registry_proof: payload["registry_proof"] ?? null,
     fingerprint: typeof fingerprint === "string" ? fingerprint : null,
+    attestation_version: typeof version === "string" ? version : null,
     // Absent reads as false, which is the only safe reading: an event that does
     // not say its fingerprint was sealed has not said it was.
     counted: payload["counted"] === true,

@@ -221,6 +221,7 @@ describe("the attestation token in the confirmation line", () => {
         verdict: "approve",
         check: { kind: "hash", value: SNAPSHOT_HASH },
         attestation_version: ATTESTATION_VERSION,
+        signature: null,
         reason: "fetched it myself",
       },
     ]);
@@ -235,6 +236,7 @@ describe("the attestation token in the confirmation line", () => {
         verdict: "approve",
         check: { kind: "span", value: "present" },
         attestation_version: null,
+        signature: null,
         reason: "looked at the page",
       },
     ]);
@@ -335,9 +337,21 @@ describe("the policy the second path is counted under", () => {
     expect(COUNTING_BINDING_KINDS).not.toContain("platform");
   });
 
-  it("counts the founding registry as the one counting community today", () => {
-    expect(countingCommunities()).toEqual(["1f916"]);
+  it("counts three communities: the registry, and the two profile venues", () => {
+    // D-138 item 2 opened the door on two more. The founding registry binds a
+    // key in its own log; The Colony and GitHub bind one on the author's public
+    // profile, captured and rechecked offline — and both kinds count, which is
+    // `COUNTING_BINDING_KINDS` above and not a second list here.
+    expect(countingCommunities()).toEqual(["1f916", "colony", "github"]);
     expect(CONFIRMATION_VENUES[0]!.binding).toBe("registry");
+    expect(CONFIRMATION_VENUES.map((row) => row.binding)).toEqual([
+      "registry",
+      "profile",
+      "profile",
+    ]);
+    // Three counting communities is more than one, so the per-entry cap is the
+    // lower one: no single board supplies a consensus by itself any more.
+    expect(communityCapPerEntry(countingCommunities().length)).toBe(2);
   });
 
   it("caps one community at the consensus, and lower once two sign", () => {
@@ -444,6 +458,9 @@ describe("communityLineDisposition", () => {
     verdict: "approve" as const,
     check: { kind: "hash" as const, value: SNAPSHOT_HASH },
     attestation_version: ATTESTATION_VERSION,
+    // No signature: this venue's binding is the registry's own (D-138 item 2),
+    // and the line's own signature is what a `profile` venue asks for instead.
+    signature: null,
     reason: null,
   };
 

@@ -216,6 +216,36 @@ export async function readRegistry(
   return { agents, operators };
 }
 
+/**
+ * Every capture a community operator's registration named, without duplicates
+ * (decision D-138 item 5).
+ *
+ * A `profile` binding is a key published on a page, and the page is evidence
+ * like a citation's snapshot: the registration names the hash its bytes are
+ * archived under, and the offline verifier reads the key out of those bytes for
+ * itself (src/verify.ts, `verifyProfileBinding`). A bundle that carried the
+ * validation and not the page would carry a binding nobody could recheck, which
+ * is exactly what this decision promised not to do.
+ *
+ * Read off the events by name and defensively, like every other reading of a
+ * stored payload here: an event shaped otherwise is one this function says
+ * nothing about.
+ */
+export function bindingCaptureHashes(events: readonly unknown[]): string[] {
+  const hashes: string[] = [];
+  for (const event of events) {
+    if (!isRecord(event)) continue;
+    if (event["type"] !== "community_operator_registered") continue;
+    const payload = event["payload"];
+    if (!isRecord(payload)) continue;
+    const binding = payload["binding"];
+    if (!isRecord(binding) || binding["kind"] !== "profile") continue;
+    const hash = binding["capture_hash"];
+    if (typeof hash === "string" && !hashes.includes(hash)) hashes.push(hash);
+  }
+  return hashes;
+}
+
 /** Every snapshot hash the entry and its approvers name, without duplicates. */
 export function captureHashes(entry: unknown): string[] {
   const hashes: string[] = [];
@@ -428,7 +458,7 @@ export async function buildExport(input: {
     if (capture !== null) captures[hash] = capture;
   }
 
-  const bundle: LogBundle =
+  let bundle: LogBundle =
     input.bounded === true
       ? await buildBoundedBundle({ ...input, captures })
       : {
@@ -440,6 +470,23 @@ export async function buildExport(input: {
           seals: await readSeals(input.http, input.baseUrl),
           captures,
         };
+
+  // The pages the bundle's own registrations named (D-138 item 5). After the
+  // bundle rather than before it, because which registrations are in it is a
+  // fact about the bundle: a bounded export carries the entry's own events and
+  // a full one carries the log's, and each gets exactly the captures its events
+  // ask for. A page the archive no longer holds is absent rather than a failed
+  // export, exactly as a citation's snapshot is.
+  const binding: Record<string, Capture> = {};
+  for (const hash of bindingCaptureHashes(bundle.events)) {
+    if (bundle.captures?.[hash] !== undefined) continue;
+    const capture = await readCapture(input.http, input.baseUrl, hash);
+    if (capture !== null) binding[hash] = capture;
+  }
+  if (Object.keys(binding).length > 0) {
+    bundle = { ...bundle, captures: { ...bundle.captures, ...binding } };
+  }
+
   return { entry, bundle };
 }
 

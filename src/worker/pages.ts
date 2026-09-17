@@ -572,9 +572,12 @@ async function entries(
   url: URL,
   now: Date,
 ): Promise<Response> {
+  const wants = wantsHtml(request);
   const parsed = parseEntriesQuery(url.searchParams);
   if (!parsed.ok) {
-    return htmlResponse(renderBadQuery(ctx, parsed.reason), 400);
+    return wants
+      ? htmlResponse(renderBadQuery(ctx, parsed.reason), 400)
+      : refuse(400, parsed.reason);
   }
   const filter: EntriesFilter = parsed.filter;
 
@@ -637,6 +640,53 @@ async function entries(
     page.length === LIST_PAGE_LIMIT && last !== undefined
       ? last.submittedSeq
       : null;
+
+  if (!wants) {
+    // The listing as data (decision D-138 item 6). The same query, the same
+    // filters, the same page size and the same cursor as the page above — one
+    // reading of the log, rendered two ways — so a workflow that lists drafts
+    // with `?status=draft` is reading exactly what a reader sees.
+    //
+    // Only the fields a caller can act on: what the entry is, where it stands,
+    // what class of validators met its consensus, and whether it still carries
+    // the bootstrap label. The claim itself is not here, because the entry door
+    // answers the entry and a listing that carried it would be the same bytes
+    // twice.
+    return json(
+      {
+        entries: kept.map((stored) => {
+          const entry = clocked(stored.entry, now) as unknown as Record<
+            string,
+            unknown
+          >;
+          const sealed = entry["seal"] !== null && entry["seal"] !== undefined;
+          return {
+            id: field(entry, "id"),
+            status: field(entry, "status"),
+            domain: field(entry, "domain"),
+            subject: field(entry, "subject"),
+            category: field(entry, "category"),
+            effective_at: field(entry, "effective_at"),
+            submitted_at: field(entry, "submitted_at"),
+            // Where the entry sits in the sealed log, or null while nothing
+            // has sealed it: the position is the same number the pager's
+            // cursor is on, and a row no seal covers has not been committed
+            // to yet.
+            sealed_position: sealed ? stored.submittedSeq : null,
+            // Who met its consensus (D-138), and whether the record still
+            // says every validator was inside one disclosed perimeter
+            // (D-128). Both are null and false respectively while an entry is
+            // draft, which is exactly what a draft is.
+            verification_class: stored.sidecar.verification_class,
+            bootstrap: stored.sidecar.bootstrap !== null,
+          };
+        }),
+        next: nextBefore,
+        as_of: now.toISOString(),
+      },
+      200,
+    );
+  }
 
   return htmlResponse(
     renderEntries(ctx, { filter, rows, total, nextBefore }),
@@ -1896,7 +1946,9 @@ async function route(
 
   if (path === "/landing") return landing(db, ctx);
 
-  // The listing has no JSON twin, so it answers whatever the Accept header says.
+  // The listing is one reading of the log rendered two ways (D-138 item 6): the
+  // page to a browser, the same rows as JSON to everything else, on the same
+  // filters and the same cursor. POST is the submit door's and falls through.
   if (path === "/entries") return entries(request, env, db, ctx, url, now);
 
   const entryId = segmentAfter(path, "/entries/");

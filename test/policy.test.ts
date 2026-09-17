@@ -119,6 +119,10 @@ const EXPECTED_POLICY_KEYS = [
   "CONFIRMATIONS_PER_RUN",
   "CONFIRMATION_COMMENTS_PER_THREAD",
   "BOARD_READ_MAX_BYTES",
+  // What one batch post asks about, and how much of the listing it reads
+  // (D-136 item 6).
+  "BATCH_ASK_LIMIT",
+  "BATCH_READ_PAGES_MAX",
   "ANCHOR_CALENDARS",
   "FAILURE_REPORT_THRESHOLD",
   "DISPUTE_STAKE_STANDING",
