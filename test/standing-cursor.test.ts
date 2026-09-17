@@ -168,6 +168,7 @@ async function seeded(): Promise<TestDatabase> {
   for (const id of registered.operators) {
     await putOperator(store.db, {
       id,
+      kind: "domain",
       maintainer: registered.maintainers.has(id),
       provider: false,
       registeredSeq: 0,
@@ -248,6 +249,7 @@ describe("GET /standing", () => {
     const newcomer = "op_after_the_fold";
     await putOperator(store.db, {
       id: newcomer,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 0,

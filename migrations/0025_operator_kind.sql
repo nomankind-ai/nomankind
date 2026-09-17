@@ -1,0 +1,42 @@
+-- 0025_operator_kind: which kind of operator a registry row is -- the domain
+-- operators Section 5 has always had, and the community operators decision
+-- D-138 adds (M25f).
+--
+-- Decision D-022 and the PoC retrospective's DEPLOY-1: migrations are numbered,
+-- forward-only, applied by the deploy workflow with wrangler before the Worker
+-- goes live, and never edited after merge. 0001 through 0024 are closed; this
+-- file adds and never reshapes.
+--
+-- No IF NOT EXISTS anywhere: idempotence belongs to the d1_migrations tracking
+-- table, not to the SQL. A migration that ran twice is a bug in the runner, and
+-- IF NOT EXISTS would hide it.
+--
+-- Nothing here is a source of truth. The kind is a copy of which event put the
+-- row there: an `operator_registered` registers a domain operator, and a
+-- `community_operator_registered` registers a community one (src/events.ts).
+-- Drop the column and the same answer comes back by replaying the log
+-- (src/derive.ts, `operatorKindsAt`). It exists because the questions the
+-- Worker asks of the registry table -- "is this id a community operator", "what
+-- kind is the operator this page is about" -- cannot be asked of the events
+-- table without scanning it.
+--
+-- NOT NULL with a default rather than a nullable column, and for 0012's reason:
+-- every operator has a kind, and every operator registered before D-138 is a
+-- domain operator, because a community one could not be registered at all. The
+-- default is what the column means for a row written before this migration and
+-- never a guess about a new one -- src/storage/repository.ts writes the value
+-- explicitly, for every row it writes.
+--
+-- A community operator's id carries a colon (`<venue>:<handle>`, src/registry.ts
+-- `communityOperatorId`), which is exactly the shape the registration doors
+-- refuse (src/worker/registry.ts, through `isOperatorDomain`). That refusal is
+-- the reason no self-registration can ever claim this kind: the only writer of a
+-- `community` row is the sweep's confirmations step.
+ALTER TABLE operators ADD COLUMN kind TEXT NOT NULL DEFAULT 'domain';
+
+-- "Every community operator, in id order": the listing the community page and
+-- the mirror's operators.json read, which is a filter on a column that is
+-- 'domain' for almost every row. The id leads the second position because it is
+-- the keyset every operator listing pages by (src/storage/repository.ts,
+-- `listOperators`).
+CREATE INDEX operators_kind_id ON operators (kind, id);

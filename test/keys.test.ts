@@ -586,6 +586,7 @@ describe("readerAccess", () => {
     const agent = await makeAgent();
     await putOperator(db, {
       id: operator,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 0,

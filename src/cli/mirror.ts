@@ -205,12 +205,23 @@ export async function readMirrorOperators(
     const agents = full["agents"];
     operators.push({
       operator: id,
+      // D-138: the kind the registry route reports, off the operator's own
+      // record. A deployment older than the decision reports none, and every
+      // operator it holds is a domain operator.
+      kind: full["kind"] === "community" ? "community" : "domain",
       maintainer: full["maintainer"] === true,
       provider: full["provider"] === true,
       trusted: isRecord(details) && details["trusted"] === true,
       // The perimeter the genesis naming disclosed (D-128), off the same
       // details the trusted flag is read from.
       perimeter: perimeterOf(details),
+      // And what binds a community operator's key to its handle (D-138), off
+      // the same details. A domain operator has none and carries none.
+      ...(isRecord(details) &&
+      typeof details["binding"] === "object" &&
+      details["binding"] !== null
+        ? { binding: details["binding"] as MirrorOperator["binding"] }
+        : {}),
       domains: Array.isArray(domains)
         ? domains.filter((one): one is string => typeof one === "string")
         : [],

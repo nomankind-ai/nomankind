@@ -1275,7 +1275,8 @@ describe("renderApi", () => {
     // caller knows exists.
     for (const marker of [
       "subject=<s>, category=<c>, domain=<slug>",
-      "min_source=official|recognized, domain=<slug>",
+      // D-138 put min_class between the source floor and the domain on /sync.
+      "min_source=official|recognized, min_class=community|mixed|registered, domain=<slug>",
       "category=<c>, status=<s>, domain=<slug>",
     ]) {
       expect(page, `${marker} is not documented`).toContain(
@@ -1303,6 +1304,7 @@ describe("renderApi", () => {
       "unknown_domain",
       "bad_source",
       "bad_tier",
+      "bad_min_class",
       "bad_fresh",
       "bad_before",
     ]);

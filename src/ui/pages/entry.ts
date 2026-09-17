@@ -68,6 +68,7 @@ import {
   CONFIRMATION_VENUES,
   DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
+  type VerificationClass,
   REGISTRY,
   REPRODUCTION_HOLDS,
   STANDING_DISPUTE_UPHELD,
@@ -90,6 +91,7 @@ import {
   statusClass,
   type Safe,
 } from "../html.js";
+import type { Sidecar } from "../../derive.js";
 import type { ApproverRow, EntryData, PageContext } from "../types.js";
 
 /** The derived field names, in the order the schema declares them. */
@@ -480,6 +482,157 @@ function bootstrap(data: EntryData): Safe {
   </p>`;
 }
 
+/**
+ * The four class fields of an entry, exactly as the sidecar names them
+ * (decision D-138).
+ *
+ * The page and the JSON door are two readings of one view model, so this is
+ * that model: the field names are the sidecar's own, the values are carried
+ * verbatim, and nothing here is computed — derivation decided the class at the
+ * decision seal and the layers after it, and a view that recomputed either
+ * would be a second derivation nobody can compare against the first.
+ */
+export interface EntryVerificationView {
+  readonly verification_class: VerificationClass | null;
+  readonly verification_communities: readonly string[];
+  readonly verification_single_venue: boolean;
+  readonly verification_layers: Sidecar["verification_layers"];
+}
+
+/** The entry JSON's class fields, off the sidecar and in the sidecar's names. */
+export function entryVerificationView(
+  sidecar: Sidecar,
+): EntryVerificationView {
+  // Defaulted exactly as `confirmations` and `bootstrap` are on this page: a
+  // sidecar stored before the decision carries none of these keys, and a reader
+  // takes the absence as no class rather than as a class it cannot read.
+  return {
+    verification_class: sidecar.verification_class ?? null,
+    verification_communities: sidecar.verification_communities ?? [],
+    verification_single_venue: sidecar.verification_single_venue === true,
+    verification_layers: sidecar.verification_layers ?? [],
+  };
+}
+
+/**
+ * The class, in words (decision D-138).
+ *
+ * Three sentences and one variant of the middle one, because the difference
+ * between them is the thing a reader actually wants: who had to be there for
+ * this entry to reach verified. `mixed` says the consensus needed community
+ * validators rather than that both kinds happened to sign, because an entry a
+ * registered majority carried on its own is `registered` however many community
+ * lines sit beside it.
+ */
+function classSentence(view: EntryVerificationView): string {
+  switch (view.verification_class) {
+    case "registered":
+      return "Verified by registered validators";
+    case "mixed":
+      return "Verified by both, the consensus needing community validators";
+    case "community": {
+      const venue = view.verification_communities[0];
+      return view.verification_single_venue && venue !== undefined
+        ? `Verified by community validators (single venue: ${venue})`
+        : "Verified by community validators";
+    }
+    default:
+      return "";
+  }
+}
+
+/** One layer's class, as the kind of validator that made it. */
+function layerActors(layerClass: VerificationClass): string {
+  switch (layerClass) {
+    case "registered":
+      return "a registered validator";
+    case "community":
+      return "a community validator";
+    default:
+      return "registered and community validators";
+  }
+}
+
+/**
+ * How this entry was verified: the class, the communities, the later layers.
+ *
+ * Sealed history and never a rating. The class is what the validators counted
+ * at the decision seal were, so a reconfirmation by a registered validator does
+ * not relabel a community entry — it is an additive dated line under it, which
+ * is what the layers are. A draft or a rejected entry has no consensus and so
+ * has no class, and the panel says that rather than printing a word for it.
+ *
+ * Pure: derivation decided every value; this prints them.
+ */
+function verification(data: EntryData): Safe {
+  const view = entryVerificationView(data.sidecar);
+  if (view.verification_class === null) {
+    return html`<section class="panel">
+      <div class="panel-head"><h2>Verification</h2></div>
+      <div class="panel-empty">
+        No verification class: this entry has not reached a consensus, and the
+        class is what the validators counted at that decision were.
+      </div>
+    </section>`;
+  }
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Verification</h2>
+      <span class="panel-label">who met the consensus, at the decision seal</span>
+    </div>
+    <div class="panel-body">
+      <p class="lede">${classSentence(view)}</p>
+      <dl class="kv">
+        <dt>verification_class</dt>
+        <dd class="mono">${view.verification_class}</dd>
+        <dt>verification_communities</dt>
+        <dd class="mono break">
+          ${view.verification_communities.length === 0
+            ? raw(EM_DASH)
+            : html`${view.verification_communities.join(" · ")}`}
+        </dd>
+        <dt>verification_single_venue</dt>
+        <dd class="mono">
+          ${view.verification_single_venue ? "true" : "false"}
+        </dd>
+      </dl>
+      ${view.verification_layers.length === 0
+        ? html`<p class="note">
+            No later layer: nothing has been added since the decision that
+            settled the class.
+          </p>`
+        : html`<div>
+            ${view.verification_layers.map(
+              (layer) => html`<div class="dim">
+                ${`${
+                  layer.kind === "reconfirmation" ? "reconfirmed" : "decided"
+                } by ${layerActors(layer.class)} at seal ${layer.seq}, ${fmtDate(
+                  layer.at,
+                )}`}${layer.operator === null
+                  ? raw("")
+                  : html` ·
+                      <a href="${`/operators/${encodeURIComponent(
+                        layer.operator,
+                      )}`}"
+                        >${layer.operator}</a
+                      >`}
+              </div>`,
+            )}
+          </div>`}
+      <p class="note">
+        The class is sealed history and not a rating: it is derived from the
+        validators counted at the decision seal and is never relabelled by what
+        came later. A confirmation from a registered validator after the fact is
+        an additive dated layer above, so an entry that says community goes on
+        saying community and a reader can see exactly when somebody else looked.
+        A community validator is a key bound to an account on an agent
+        community, listed with every other operator on
+        <a href="/operators">the operators page</a>.
+      </p>
+    </div>
+  </section>`;
+}
+
 function sidecar(data: EntryData): Safe {
   const label = data.sidecar.bootstrap;
   return html`<section class="panel">
@@ -534,7 +687,11 @@ function operatorCell(operator: string, trusted: boolean | null): Safe {
       : trusted === null
         ? html` <span class="dim">unknown</span>`
         : raw("");
-  return html`<a href="/operators/${operator}">${operator}</a>${mark}`;
+  // Encoded, exactly as the directory encodes it (src/ui/pages/operators.ts):
+  // a community operator's id is `<venue>:<handle>` (D-138), and a colon left
+  // raw in a path is a link to somewhere else.
+  const href = `/operators/${encodeURIComponent(operator)}`;
+  return html`<a href="${href}">${operator}</a>${mark}`;
 }
 
 /**
@@ -561,7 +718,15 @@ function approverRow(approver: ApproverRow): Safe {
   const hash = approver.snapshot_hash;
   return html`<tr class="row">
     <td class="break">${approver.agent}</td>
-    <td>${operatorCell(approver.operator, approver.operatorTrusted)}</td>
+    <td>
+      ${operatorCell(approver.operator, approver.operatorTrusted)}${approver.community ===
+      null
+        ? raw("")
+        : html`<div class="dim mono">
+            ${approver.operatorKind} · ${approver.community.venue} ·
+            ${approver.community.handle}
+          </div>`}
+    </td>
     <td class="${decisionClass}">${approver.decision}</td>
     <td class="prose">${reasonCell(approver)}</td>
     <td class="muted" title="${hash ?? ""}">
@@ -1426,6 +1591,11 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
         ${badge("", text(data.entry, "category") ?? EM_DASH)}
         <span class="dim">${text(data.entry, "subject")}</span>
       </div>
+      ${entryVerificationView(data.sidecar).verification_class === null
+        ? raw("")
+        : html`<p class="note">
+            ${classSentence(entryVerificationView(data.sidecar))}.
+          </p>`}
       <h1 class="claim-head">${text(data.entry, "claim")}</h1>
       ${freshness(data)}
       <p class="note">
@@ -1434,7 +1604,7 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
           : html` (${effective})`}; the core claims
         evidence_tier ${claimedTier ?? EM_DASH}.
       </p>
-      ${bootstrap(data)}
+      ${bootstrap(data)} ${verification(data)}
 
       <div class="cols">${core(data)} ${derived(data)}</div>
       ${confidence(ctx, data)}

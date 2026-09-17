@@ -145,6 +145,12 @@ function entryOf(fixture: Fixture): Entry {
 }
 
 const SIDECAR: Sidecar = {
+  // Who met the consensus (D-138): this fixture stands for an entry decided
+  // by registered operators, with no community validator and no later layer.
+  verification_class: "registered",
+  verification_communities: [],
+  verification_single_venue: false,
+  verification_layers: [],
   // Nobody outside has confirmed this fixture in public (D-136).
   confirmations: [],
   // No bootstrap label on this fixture (D-128): the entry it stands for
@@ -298,6 +304,7 @@ describe("the counters step", () => {
   ): OperatorRecord {
     return {
       id,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq,
@@ -695,6 +702,7 @@ describe("the 0018 backfill on a database written before it", () => {
         "0022_cosign.sql",
         "0023_money_removed.sql",
         "0024_derived_kernel.sql",
+        "0025_operator_kind.sql",
       ]);
 
       // The column says exactly what the JSON beside it has always said.

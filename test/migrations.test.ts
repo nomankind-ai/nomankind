@@ -170,6 +170,7 @@ describe("wrangler d1 migrations apply", () => {
         "0022_cosign.sql",
         "0023_money_removed.sql",
         "0024_derived_kernel.sql",
+        "0025_operator_kind.sql",
       ]);
       expect(oursApplied.results.map((row) => row.name)).toEqual(
         applied.results.map((row) => row.name),

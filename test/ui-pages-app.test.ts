@@ -114,6 +114,8 @@ const row: EntryRow = {
   domain: "ai-safety",
   claim: `The model refuses this prompt ${HOSTILE}`,
   tier: "stated",
+  // Who met this entry's consensus (D-138): the listing prints the word.
+  verification_class: "registered",
   last_confirmed: "2026-09-08",
   expires_at: "2026-10-08",
   stale: true,
@@ -149,6 +151,20 @@ const sidecar: Sidecar = {
     authority: "kestrel",
   },
   trusted_count_at_decision: 3,
+  // Domain operators alone met this entry's consensus (D-138), with the
+  // decision as its one dated layer.
+  verification_class: "registered",
+  verification_communities: [],
+  verification_single_venue: false,
+  verification_layers: [
+    {
+      kind: "decision",
+      class: "registered",
+      seq: 14,
+      at: "2026-09-08T13:00:00.000Z",
+      operator: null,
+    },
+  ],
   read_share_slots: [
     { operator: "k1.example", seq: 8 },
     { operator: "k2.example", seq: 9 },
@@ -468,6 +484,9 @@ const entryData: EntryData = {
     {
       agent: "1F916:k1",
       operator: "k1.example",
+      // A domain operator signed this one (D-138), so no account beside it.
+      operatorKind: "domain",
+      community: null,
       operatorTrusted: true,
       decision: "approve",
       reason: null,
@@ -482,6 +501,8 @@ const entryData: EntryData = {
     {
       agent: "1F916:k2",
       operator: "k2.example",
+      operatorKind: "domain",
+      community: null,
       operatorTrusted: null,
       decision: "reject",
       reason: `the source says otherwise ${HOSTILE}`,
@@ -529,6 +550,9 @@ const DISCLOSURE_HASH =
 
 const operatorRow: OperatorRow = {
   id: "k1.example",
+  // A domain operator (D-138): bound by a TXT record, with no account behind it.
+  kind: "domain",
+  community: null,
   maintainer: false,
   provider: false,
   trusted: true,
@@ -682,6 +706,7 @@ function everyPage(): Record<string, string> {
         status: "verified",
         domain: DEFAULT_DOMAIN,
         source: null,
+        min_class: null,
         tier: null,
         fresh: null,
       },
@@ -861,6 +886,7 @@ describe("the entries listing", () => {
       status: "verified",
       domain: null,
       source: null,
+      min_class: null,
       tier: null,
       fresh: "stale",
     },
@@ -937,6 +963,7 @@ describe("the entries listing", () => {
         status: null,
         domain: null,
         source: null,
+        min_class: null,
         tier: null,
         fresh: null,
       },
@@ -966,6 +993,7 @@ describe("the entries listing", () => {
         status: "verified",
         domain: DEFAULT_DOMAIN,
         source: null,
+        min_class: null,
         tier: null,
         fresh: "stale",
       },
@@ -1011,6 +1039,7 @@ describe("the entries listing", () => {
         status: "verified",
         domain: null,
         source: "official",
+        min_class: null,
         tier: null,
         fresh: "stale",
       },
@@ -1036,7 +1065,7 @@ describe("the entries listing", () => {
     // off the sidecar over the page. The line says which, because a filtered
     // two of nine that silently meant something else would be a wrong number.
     expect(document).toContain(
-      "the category, source, tier and freshness filters narrow the page, not the total",
+      "the category, source, tier, class and freshness filters narrow the page, not the total",
     );
   });
 
@@ -1047,6 +1076,7 @@ describe("the entries listing", () => {
         status: null,
         domain: null,
         source: null,
+        min_class: null,
         tier: null,
         fresh: null,
       },

@@ -40,12 +40,14 @@ import type {
   Event,
 } from "./events.js";
 import {
+  CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
   CONFIRMATION_FORM_PREFIX,
   CONFIRMATION_REASON_MAX_CHARS,
   REGISTRY,
   WITNESS_PIN,
   WITNESSES_REQUIRED,
 } from "./policy.js";
+import { ATTESTATION_VERSION } from "./registry.js";
 import {
   isHex64,
   registryCheckpointPayload,
@@ -96,6 +98,19 @@ export interface ConfirmationLine {
   readonly entry_id: string;
   readonly verdict: ConfirmationVerdict;
   readonly check: ConfirmationCheck;
+  /**
+   * The independence attestation this line carries, by version, or null
+   * (decision D-138).
+   *
+   * The whole of a community operator's registration: an agent that writes
+   * `attest:<version>` into the line is signing this record's attestation at
+   * that version with the same key and in the same breath as the confirmation,
+   * so there is no form to fill in and no door to walk through. Only
+   * `ATTESTATION_VERSION` is accepted; a line naming another version is a plain
+   * confirmation whose reason begins with a word this build does not know,
+   * which is what it is.
+   */
+  readonly attestation_version: string | null;
   /** The rest of the line, trimmed and bounded, or null when there was none. */
   readonly reason: string | null;
 }
@@ -169,11 +184,35 @@ export function parseConfirmationLine(
     return null;
   }
 
-  const rest = words.slice(4).join(" ").trim();
+  // The attestation token, when the next word is one (D-138). Only this
+  // build's own version is taken: a token naming another version is left where
+  // it was written, in the reason, because a record that quietly accepted an
+  // attestation text it has never seen would be accepting a promise it cannot
+  // read. The token is optional and always in this one place, so a line that
+  // carries none is read exactly as it was before the decision.
+  const fifth = words[4];
+  const carriesToken =
+    fifth !== undefined &&
+    fifth.startsWith(CONFIRMATION_ATTESTATION_TOKEN_PREFIX) &&
+    fifth.slice(CONFIRMATION_ATTESTATION_TOKEN_PREFIX.length) ===
+      ATTESTATION_VERSION;
+  const attestationVersion = carriesToken ? ATTESTATION_VERSION : null;
+
+  const rest = words
+    .slice(carriesToken ? 5 : 4)
+    .join(" ")
+    .trim();
   const reason =
     rest === "" ? null : rest.slice(0, CONFIRMATION_REASON_MAX_CHARS);
 
-  return { line: index, entry_id: entryId, verdict, check, reason };
+  return {
+    line: index,
+    entry_id: entryId,
+    verdict,
+    check,
+    attestation_version: attestationVersion,
+    reason,
+  };
 }
 
 /**
@@ -188,11 +227,21 @@ export function parseConfirmationLine(
  * their confirmation simply does not count, which is the safe direction.
  */
 export function canonicalConfirmationLine(
-  line: Pick<ConfirmationLine, "entry_id" | "verdict" | "check">,
+  line: Pick<ConfirmationLine, "entry_id" | "verdict" | "check"> &
+    Partial<Pick<ConfirmationLine, "attestation_version">>,
 ): string {
   const check =
     line.check.kind === "hash" ? line.check.value : `span-${line.check.value}`;
-  return `${CONFIRMATION_FORM_PREFIX} ${line.entry_id} ${line.verdict} ${check}`;
+  const base = `${CONFIRMATION_FORM_PREFIX} ${line.entry_id} ${line.verdict} ${check}`;
+  // The attestation token is part of the claim and so is inside the signature
+  // (D-138): a line that attests says more than a line that does not, and a
+  // confirmer must not be able to have their attestation added to or taken
+  // away from a sentence they already signed. A line carrying none is the
+  // string it always was, byte for byte, so every fingerprint sealed under
+  // D-136 stays valid.
+  const version = line.attestation_version ?? null;
+  if (version === null) return base;
+  return `${base} ${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${version}`;
 }
 
 /**
@@ -213,7 +262,8 @@ export function canonicalConfirmationLine(
  * anything else this record hashes.
  */
 export async function confirmationFingerprint(
-  line: Pick<ConfirmationLine, "entry_id" | "verdict" | "check">,
+  line: Pick<ConfirmationLine, "entry_id" | "verdict" | "check"> &
+    Partial<Pick<ConfirmationLine, "attestation_version">>,
 ): Promise<string> {
   return `sha256:${await sha256Hex(canonicalConfirmationLine(line))}`;
 }

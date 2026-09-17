@@ -85,6 +85,18 @@ const VERIFIED_FROM = "verified from";
 const MEMORY_SEAL = "memory.seal";
 
 /**
+ * The identity-event kind the registry writes when a citizen's key is bound to
+ * its handle: the event a `registry` binding names (decision D-138).
+ *
+ * A wire fact about somebody else's log, like `memory.seal` above it, and read
+ * the same way: matched exactly, never guessed at. A record that lists no such
+ * event on the page this adapter reads answers a null id rather than a made-up
+ * one — the key itself is the binding, and the event id is the pointer to where
+ * the registry said so.
+ */
+const KEY_BIND = "identity.key_bind";
+
+/**
  * How many pages of a citizen's record one lookup reads.
  *
  * The same bound the seal path keeps (src/adapters/witness.ts): a record that
@@ -125,6 +137,23 @@ export interface BoardSealProof {
 }
 
 /**
+ * A citizen's record, as much of it as a community operator's binding needs
+ * (decision D-138).
+ *
+ * `agent` is the citizen's own bound public key, written in the form every
+ * agent id in this record has (`1F916:<key>`, src/identity.ts), so an operator
+ * bound to it resolves through exactly the same table every other agent does.
+ * `key_bind_event_id` is the registry's own event that bound it, which is what
+ * a `registry` binding names — null when the record publishes the key but lists
+ * no binding event within the pages this adapter reads, which is a thinner
+ * binding rather than none.
+ */
+export interface BoardRecord {
+  readonly agent: string;
+  readonly key_bind_event_id: number | null;
+}
+
+/**
  * What the sweep's `confirmations` step asks of a board.
  *
  * Three questions, each answering null for "the board did not answer", which
@@ -148,6 +177,18 @@ export interface BoardAdapter {
    * treats the same way: uncounted, never counted on a guess).
    */
   sealProof(handle: string, fingerprint: string): Promise<BoardSealProof | null>;
+  /**
+   * The citizen's own key, as the registry's record publishes it, and the event
+   * that bound it — or null when the record does not answer or names no key
+   * (decision D-138).
+   *
+   * What a community operator is bound by. Section 5 makes the operator the
+   * unit of accountability and every agent belong to one; a handle on a board
+   * is neither until the founding registry says which key stands behind it, and
+   * this is the reading of that. Null is not a refusal of the line: the line is
+   * sealed as the confirmation it already was.
+   */
+  record(handle: string): Promise<BoardRecord | null>;
 }
 
 /**
@@ -277,6 +318,10 @@ export class UnavailableBoardAdapter implements BoardAdapter {
   async sealProof(): Promise<BoardSealProof | null> {
     return null;
   }
+
+  async record(): Promise<BoardRecord | null> {
+    return null;
+  }
 }
 
 /** What a fixture board is built from: threads, their comments, and the keys. */
@@ -286,6 +331,12 @@ export interface MockBoardOptions {
   readonly comments?: ReadonlyMap<number, readonly BoardComment[]> | null;
   /** Sealed fingerprints, keyed `<handle> <fingerprint>`. */
   readonly seals?: ReadonlyMap<string, BoardSealProof> | null;
+  /**
+   * The citizens' records, keyed by handle: which key the registry binds to
+   * each (decision D-138). A handle with no entry has no record, which is what
+   * a board that cannot say who is behind a handle answers.
+   */
+  readonly records?: ReadonlyMap<string, BoardRecord> | null;
 }
 
 /**
@@ -301,6 +352,7 @@ export class MockBoardAdapter implements BoardAdapter {
   readonly #threads: readonly number[] | null;
   readonly #comments: ReadonlyMap<number, readonly BoardComment[]> | null;
   readonly #seals: ReadonlyMap<string, BoardSealProof> | null;
+  readonly #records: ReadonlyMap<string, BoardRecord> | null;
   /** How many times each thread was read: what a "second run" test asserts on. */
   readonly reads: number[] = [];
 
@@ -309,6 +361,7 @@ export class MockBoardAdapter implements BoardAdapter {
     this.#threads = options.threads === undefined ? [] : options.threads;
     this.#comments = options.comments ?? new Map();
     this.#seals = options.seals ?? new Map();
+    this.#records = options.records ?? new Map();
   }
 
   async threads(): Promise<readonly number[] | null> {
@@ -335,6 +388,11 @@ export class MockBoardAdapter implements BoardAdapter {
   ): Promise<BoardSealProof | null> {
     if (this.#seals === null) return null;
     return this.#seals.get(`${handle} ${fingerprint}`) ?? null;
+  }
+
+  async record(handle: string): Promise<BoardRecord | null> {
+    if (this.#records === null) return null;
+    return this.#records.get(handle) ?? null;
   }
 }
 
@@ -600,6 +658,60 @@ export class RegistryBoardAdapter implements BoardAdapter {
         witnesses,
       },
     };
+  }
+
+  /**
+   * The citizen's own key, and the event that bound it (decision D-138).
+   *
+   * One bounded read of the same door `sealProof` pages through: the record
+   * publishes the citizen's public key and its identity events, and both halves
+   * of a community operator's binding are in that one answer. Only the first
+   * page is read — a key bind is the oldest thing in a record, not the newest —
+   * so a handle that has never confirmed anything costs one request.
+   *
+   * Nothing here is proved, and nothing here needs to be. What the binding
+   * carries is the registry's published word about who holds a handle, and the
+   * proof that travels on the validation is the confirmer's own seal of the
+   * line — which is proved, by the same path `sealProof` returns.
+   *
+   * Null on anything at all: a record that did not answer, a body that is not
+   * an object, a key that is not a string. A handle with no readable record is
+   * a line the door seals as the confirmation it already was.
+   */
+  async record(handle: string): Promise<BoardRecord | null> {
+    try {
+      const body = objectOf(
+        await this.#json(
+          `${this.#origin}/api/record/${encodeURIComponent(handle)}`,
+        ),
+      );
+      if (body === null) return null;
+
+      const citizen = objectOf(body["citizen"]);
+      const key =
+        stringOf(citizen === null ? undefined : citizen["public_key"]) ??
+        stringOf(body["public_key"]);
+      if (key === null || key === "") return null;
+
+      // The oldest binding the page lists, because that is the one that bound
+      // the key the record publishes now; a rotation is a later event about a
+      // later key and is not what this handle is bound by.
+      let bound: number | null = null;
+      const rows = body["events"];
+      if (Array.isArray(rows)) {
+        for (const each of rows) {
+          const event = objectOf(each);
+          if (event === null || event["kind"] !== KEY_BIND) continue;
+          const id = integerOf(event["id"]);
+          if (id === null) continue;
+          bound = bound === null ? id : Math.min(bound, id);
+        }
+      }
+
+      return { agent: AGENT_ID_PREFIX + key, key_bind_event_id: bound };
+    } catch {
+      return null;
+    }
   }
 
   /**

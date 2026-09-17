@@ -485,6 +485,7 @@ describe("operators and agents", () => {
     for (const [id, flags] of Object.entries(registry.operators)) {
       await putOperator(test.db, {
         id,
+        kind: "domain",
         maintainer: flags.maintainer,
         provider: flags.provider,
         registeredSeq: seq,
@@ -884,6 +885,7 @@ describe("migrations", () => {
       "0022_cosign.sql",
       "0023_money_removed.sql",
       "0024_derived_kernel.sql",
+      "0025_operator_kind.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -1082,6 +1084,7 @@ describe("migrations", () => {
       "0022_cosign.sql",
       "0023_money_removed.sql",
       "0024_derived_kernel.sql",
+      "0025_operator_kind.sql",
     ]);
   });
 });
@@ -1352,12 +1355,13 @@ describe("registry writes", () => {
   function operatorRecord(overrides: Partial<OperatorRecord> = {}): OperatorRecord {
     return {
       id: OPERATOR,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 0,
       details: { payout: { reference: "acct_123" } },
       ...overrides,
-    };
+    } as OperatorRecord;
   }
 
   function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
@@ -4253,6 +4257,7 @@ describe("standing writes", () => {
   function operator(id: string, trusted: boolean): OperatorRecord {
     return {
       id,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 0,
@@ -4390,6 +4395,7 @@ describe("standing reads past the leaderboard's limit", () => {
     for (let index = 0; index < POOL; index += 1) {
       await putOperator(store.db, {
         id: id(index),
+        kind: "domain",
         maintainer: false,
         provider: false,
         registeredSeq: index,
@@ -4424,6 +4430,7 @@ describe("standing reads past the leaderboard's limit", () => {
   it("answers null for an operator whose standing was never computed", async () => {
     await putOperator(store.db, {
       id: "uncomputed.example",
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: POOL,
@@ -4601,6 +4608,7 @@ describe("domains in the store", () => {
       events: log.slice(-2),
       operator: {
         id: OPERATOR,
+        kind: "domain",
         maintainer: false,
         provider: false,
         registeredSeq,
@@ -4671,6 +4679,7 @@ describe("domains in the store", () => {
     const unsigned = "pre-0012-unsigned.example";
     await putOperator(store.db, {
       id: signed,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 3,
@@ -4678,6 +4687,7 @@ describe("domains in the store", () => {
     });
     await putOperator(store.db, {
       id: unsigned,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 4,

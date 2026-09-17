@@ -303,6 +303,42 @@ export function isOperatorDomain(value: unknown): value is string {
 }
 
 /**
+ * A community operator's id: the venue it spoke on and the handle it spoke as
+ * (decision D-138).
+ *
+ * `<venue>:<handle>`, and the colon is what keeps the one registry unambiguous:
+ * `isOperatorDomain` refuses a colon in every label, so no community operator
+ * id can ever be read as a domain and no domain as a community operator id.
+ * Two kinds of operator, one namespace, no collision possible.
+ */
+export function communityOperatorId(venue: string, handle: string): string {
+  return `${venue}:${handle}`;
+}
+
+/** Whether an id is a community operator's, by that one separator. */
+export function isCommunityOperatorId(id: string): boolean {
+  return parseCommunityOperatorId(id) !== null;
+}
+
+/**
+ * The venue and handle inside a community operator id, or null.
+ *
+ * Exactly one colon, and neither half empty: an id with two colons is not one
+ * this record minted, and repairing it rather than refusing it would let two
+ * spellings become one operator.
+ */
+export function parseCommunityOperatorId(
+  id: string,
+): { venue: string; handle: string } | null {
+  if (typeof id !== "string") return null;
+  const parts = id.split(":");
+  if (parts.length !== 2) return null;
+  const [venue, handle] = parts as [string, string];
+  if (venue === "" || handle === "") return null;
+  return { venue, handle };
+}
+
+/**
  * Whether an operator domain belongs to a party excluded from a record's
  * domain, itself or as a subdomain.
  *

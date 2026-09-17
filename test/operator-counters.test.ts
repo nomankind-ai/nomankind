@@ -122,6 +122,7 @@ beforeAll(async () => {
   for (const id of OPERATORS) {
     await putOperator(db, {
       id,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 0,

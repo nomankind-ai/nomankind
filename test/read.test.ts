@@ -57,6 +57,9 @@ describe("parseReadQuery", () => {
       by: "subject",
       subject: "openai/gpt-5",
       category: "pricing",
+      // No demand about who decided it (D-138): null rather than absent, so
+      // the shape of the query never depends on whether it was written.
+      min_class: null,
     });
     expect(
       accepted(
@@ -67,6 +70,7 @@ describe("parseReadQuery", () => {
       subject: "openai/gpt-5",
       category: "pricing",
       min_tier: "observed",
+      min_class: null,
       max_age: 30,
     });
     expect(accepted("subject=x&category=behavior&max_age=0")).toMatchObject({
@@ -121,7 +125,7 @@ describe("parseReadQuery", () => {
     );
   });
 
-  it("names its eleven refusals in the order it checks them", () => {
+  it("names its twelve refusals in the order it checks them", () => {
     expect(READ_QUERY_REFUSALS).toEqual([
       "unknown_parameter",
       "repeated_parameter",
@@ -133,6 +137,8 @@ describe("parseReadQuery", () => {
       "unknown_domain",
       "bad_min_tier",
       "bad_min_source",
+      // Who decided the entry (D-138), read after the source and before the age.
+      "bad_min_class",
       "bad_max_age",
     ]);
   });
@@ -357,7 +363,13 @@ function candidate(
 describe("chooseReadable", () => {
   const now = new Date("2026-09-09T12:00:00.000Z");
 
-  const bare: ReadQuery = { by: "subject", subject: "x", category: "pricing" };
+  const bare: ReadQuery = {
+    by: "subject",
+    subject: "x",
+    category: "pricing",
+    // The reader made no demand about who decided the entry (D-138).
+    min_class: null,
+  };
 
   it("takes the first candidate, the caller having sorted newest first", () => {
     const newest = candidate("nmk_new", "verified", "2026-09-08", "observed");

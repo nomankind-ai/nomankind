@@ -465,6 +465,7 @@ describe("the counter migration on a log that has already served reads", () => {
         "0022_cosign.sql",
         "0023_money_removed.sql",
         "0024_derived_kernel.sql",
+        "0025_operator_kind.sql",
       ]);
 
       // The row stands at the largest counter already issued, so the next
@@ -499,6 +500,7 @@ describe("the counter migration on a log that has already served reads", () => {
         "0022_cosign.sql",
         "0023_money_removed.sql",
         "0024_derived_kernel.sql",
+        "0025_operator_kind.sql",
       ]);
       expect(await nextReadCounter(migrated.db)).toBe(1);
       expect(await allocateReadCounter(migrated.db)).toBe(1);

@@ -528,6 +528,11 @@ function validator(
 ): ValidatorEntry {
   return {
     operator,
+    // A domain operator, which is what every validator in these cases is
+    // (D-138): the community half has its own tests.
+    kind: "domain",
+    venue: null,
+    handle: null,
     trusted: true,
     maintainer: false,
     provider: false,

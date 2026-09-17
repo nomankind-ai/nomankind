@@ -37,6 +37,7 @@ beforeAll(async () => {
   for (let index = 0; index < IDS; index += 1) {
     await putOperator(store.db, {
       id: id(index),
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: index + 1,

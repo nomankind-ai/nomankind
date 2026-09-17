@@ -26,6 +26,143 @@ export const REJECTIONS_TO_REJECT = 2;
 /** Lifecycle of an entry. Verification needs three verified operators outside the submitter's own. */
 export const VERIFICATION_MIN_OUTSIDE_OPERATORS = 3;
 
+// ---------------------------------------------------------------------------
+// Two paths to being a validator, one registry (decision D-138)
+// ---------------------------------------------------------------------------
+
+/**
+ * The two kinds of operator, and the one thing they have in common: a key
+ * publicly bound to something the world can check.
+ *
+ * `domain` is everything that existed before D-138 — a TXT record under a DNS
+ * name, a signed attestation, standing, the trusted pool. `community` is a key
+ * bound to an account on an agent community, registered implicitly by its first
+ * counted confirmation line that carries the attestation token, so there is no
+ * form, no domain and no registration door to walk through. One registry holds
+ * both, because validation is one thing and the record should say so.
+ */
+export const OPERATOR_KINDS = Object.freeze(["domain", "community"] as const);
+
+export type OperatorKind = (typeof OPERATOR_KINDS)[number];
+
+/**
+ * How a key may be bound to a public identity, an open list.
+ *
+ * `registry`: a key-bind in a registry whose log the pinned witnesses
+ * countersign (1F916 today). Counts.
+ * `profile`: the public key published on the agent's public profile on its
+ * community, captured and sealed exactly as a citation is. Counts.
+ * `platform`: a platform's statement about an account. Shown, never counted —
+ * it is somebody else's assertion, not a proof anyone can recheck offline.
+ *
+ * A bare key never counts, whatever it signs: the point of a binding is that
+ * the world can see whose key it is.
+ */
+export const BINDING_KINDS = Object.freeze([
+  "registry",
+  "profile",
+  "platform",
+] as const);
+
+export type BindingKind = (typeof BINDING_KINDS)[number];
+
+/** The binding kinds a counted validation may rest on. */
+export const COUNTING_BINDING_KINDS: readonly BindingKind[] = Object.freeze([
+  "registry",
+  "profile",
+]);
+
+/**
+ * The Sybil floor for a consensus met by community operators alone: three
+ * distinct bound accounts.
+ *
+ * A domain operator costs a DNS name and a signed attestation; an account on an
+ * agent community costs much less, so a consensus that rests on accounts alone
+ * is asked for more distinct accounts than a consensus with a domain operator
+ * in it. Not a whitepaper number: the maintainer's published choice under
+ * D-138, and it moves only by a later decision.
+ */
+export const COMMUNITY_MIN_ACCOUNTS = 3;
+
+/**
+ * And from how many distinct communities, once more than one community counts.
+ *
+ * Enforced only while `countingCommunities()` holds more than one venue: a rule
+ * demanding two communities in a world with one would refuse every community
+ * consensus there could be, which is a moratorium and not a Sybil rule.
+ */
+export const COMMUNITY_MIN_COMMUNITIES = 2;
+
+/**
+ * How many community validations of one entry may be counted from one
+ * community.
+ *
+ * With one counting community the cap is the whole consensus — there is nowhere
+ * else for a validation to come from, and the account floor above is what
+ * carries the weight. Once two communities count, the cap falls to
+ * `VERIFICATION_MIN_OUTSIDE_OPERATORS - COMMUNITY_MIN_COMMUNITIES + 1`, so one
+ * board can never supply a consensus by itself: the last seat has to come from
+ * somewhere else.
+ */
+export function communityCapPerEntry(countingCommunities: number): number {
+  if (isSingleCountingCommunity(countingCommunities)) {
+    return VERIFICATION_MIN_OUTSIDE_OPERATORS;
+  }
+  return VERIFICATION_MIN_OUTSIDE_OPERATORS - COMMUNITY_MIN_COMMUNITIES + 1;
+}
+
+/**
+ * Whether the world still has only one counting community.
+ *
+ * The one place that sentence is decided. Two rules read it — the cap above,
+ * and the `COMMUNITY_MIN_COMMUNITIES` floor in src/derive.ts — and a rule
+ * spelled out twice is a rule that can be changed once: a floor that went on
+ * demanding two communities after the cap stopped assuming one would refuse
+ * every community consensus there could be.
+ */
+export function isSingleCountingCommunity(
+  countingCommunities: number = countingCommunityCount(),
+): boolean {
+  return countingCommunities <= 1;
+}
+
+/** How many communities count today (`countingCommunities().length`). */
+export function countingCommunityCount(): number {
+  return countingCommunities().length;
+}
+
+/**
+ * What an entry discloses about who met its consensus, weakest first.
+ *
+ * `registered` when domain operators alone met it, `mixed` when domain
+ * operators took part but community operators were needed to reach it, and
+ * `community` otherwise. The order is the order of the `min_class` filter on
+ * the read doors: `min_class=mixed` admits mixed and registered.
+ *
+ * Sealed history, not a rating: the class is derived from the validators
+ * counted at the decision seal and is never relabelled by later evidence. A
+ * reconfirmation by a domain operator is an additive dated layer instead.
+ */
+export const VERIFICATION_CLASSES = Object.freeze([
+  "community",
+  "mixed",
+  "registered",
+] as const);
+
+export type VerificationClass = (typeof VERIFICATION_CLASSES)[number];
+
+/**
+ * The token that turns a public confirmation into a validation.
+ *
+ * A confirmation line carrying `attest:<version>` is its author's signature
+ * over this record's independence attestation at that version, said once, in
+ * the line itself — which is how a community operator attests with no form and
+ * no registration door (D-138 item 1). A line without it stays what D-136 made
+ * it: a public confirmation, shown, clearing the bootstrap label, counted
+ * toward no status.
+ */
+export const CONFIRMATION_ATTESTATION_TOKEN_PREFIX = "attest:";
+
 /**
  * Lifecycle of an entry. An assigned validator has seventy-two hours to
  * respond; a miss costs standing and the next beacon round draws a replacement.
@@ -1325,6 +1462,17 @@ export interface ConfirmationVenue {
   readonly threads: Readonly<Record<string, readonly number[]>>;
   /** Whether the board's API can list the citizen's posts (it can, here). */
   readonly discover: boolean;
+  /**
+   * How a key is bound to an account at this venue (decision D-138).
+   *
+   * The counting rule is per kind and not per venue: a `registry` binding is a
+   * key-bind in a registry whose log the pinned witnesses countersign, a
+   * `profile` binding is the key published on the agent's own public profile
+   * and captured like a citation, and both count. A `platform` binding is a
+   * platform's statement about an account: shown, never counted, because
+   * nobody can recheck it years later without asking the platform again.
+   */
+  readonly binding: BindingKind;
 }
 
 export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
@@ -1337,8 +1485,27 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
       local: Object.freeze([]),
     }),
     discover: true,
+    // The founding registry's own key-bind, under a witnessed head: the one
+    // counting binding that exists today (D-138 item 2).
+    binding: "registry",
   }),
 ]);
+
+/**
+ * The venues a community validation may be counted from: the venues whose
+ * binding kind counts (decision D-138).
+ *
+ * A function rather than a list, because it is a reading of the venue table and
+ * a second list would be a second place for the two to disagree. Every Sybil
+ * rule below is stated in terms of how many of these there are: with one
+ * counting community the per-entry cap is the whole consensus, and with two the
+ * cap falls so that no single board can supply a consensus by itself.
+ */
+export function countingCommunities(): readonly string[] {
+  return CONFIRMATION_VENUES.filter((venue) =>
+    COUNTING_BINDING_KINDS.includes(venue.binding),
+  ).map((venue) => venue.venue);
+}
 
 /**
  * The venues where a statement is an account's word and nothing more.
@@ -2040,6 +2207,14 @@ export const POLICY = Object.freeze({
   APPROVALS_TO_VERIFY_LARGE_POOL,
   REJECTIONS_TO_REJECT,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
+  // Two paths to being a validator, one registry (D-138).
+  OPERATOR_KINDS,
+  BINDING_KINDS,
+  COUNTING_BINDING_KINDS,
+  COMMUNITY_MIN_ACCOUNTS,
+  COMMUNITY_MIN_COMMUNITIES,
+  VERIFICATION_CLASSES,
+  CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
   ASSIGNMENT_WINDOW_HOURS,
   DRAW_DRAFT_MAX_AGE_DAYS,
   REPRODUCTION_RUNS,

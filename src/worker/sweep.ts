@@ -120,6 +120,7 @@ import { coreVersion, domainOf, extractCore } from "../core.js";
 import type { BountyAccrual } from "../bounty.js";
 import {
   DERIVATION_VERSION,
+  communityLineDisposition,
   deriveEntry,
   mayValidateEntry,
   operatorDomainsAt,
@@ -127,6 +128,7 @@ import {
   type EntryStatus,
   type Sidecar,
 } from "../derive.js";
+import { communityOperatorId } from "../registry.js";
 import { openRevalidation, revalidationDrawExclusions } from "../dispute.js";
 import { duplicateKey, sameDuplicateKey } from "../duplicate.js";
 import { recordMeasured } from "../evidence.js";
@@ -154,12 +156,17 @@ import {
   SWEEP_INTERVAL_MINUTES,
   WITNESSES_REQUIRED,
 } from "../policy.js";
-import type { BoardAdapter, BoardComment } from "../adapters/board.js";
+import type {
+  BoardAdapter,
+  BoardComment,
+  BoardSealProof,
+} from "../adapters/board.js";
 import {
   confirmationFingerprint,
   parseConfirmationComment,
   pinnedConfirmationTrust,
   verifyConfirmationProof,
+  type ConfirmationLine,
   type ConfirmationTrust,
 } from "../confirm.js";
 import {
@@ -251,6 +258,9 @@ import {
   recordAssignment,
   recordAssignmentMissed,
   recordAttestationExpired,
+  recordCommunityOperatorJoinedDomain,
+  recordCommunityOperatorRegistered,
+  recordCommunityValidation,
   recordPoolSnapshot,
   recordPublicConfirmation,
   recordRevalidationAssignment,
@@ -306,11 +316,13 @@ import {
 import type { Env } from "./env.js";
 import {
   entryWorld,
+  eventsOf,
   expiredByClock,
   rederive,
   registryEvents,
   worldAt,
   worldCache,
+  type EntryWorld,
   type WorldCache,
 } from "./world.js";
 import type { DerivedEntry } from "../derive.js";
@@ -486,6 +498,19 @@ export interface SweepRevalidationDraw {
 interface ConfirmationsRead {
   readonly sealed: SweepConfirmation[];
   readonly read: { threads: number; comments: number };
+  /** The community validations this run sealed off token lines (D-138). */
+  readonly validations: SweepCommunityValidation[];
+  /**
+   * Why a token line was sealed as a plain confirmation after all, by the pure
+   * rule's own word, counted (D-138).
+   *
+   * A reader of the status board needs this one to read the door at all: a
+   * community operator whose validations the cap has stopped, a handle saying
+   * the same thing twice, and an author confirming their own entry all look
+   * identical in a count of what was sealed, and each of them is a different
+   * thing happening.
+   */
+  readonly fallbacks: Record<string, number>;
 }
 
 /**
@@ -507,6 +532,35 @@ export interface SweepConfirmation {
   /** Whether the confirmer's own key sealed this line's fingerprint (D-136). */
   readonly counted: boolean;
   /** Position of the `public_confirmation` event this run appended. */
+  readonly seq: number;
+}
+
+/**
+ * One community validation this run sealed (decision D-138).
+ *
+ * A counted confirmation line that carried the attestation token, from a handle
+ * the founding registry binds a key to: Section 5's operator, registered by its
+ * own first line rather than by a door. The comment and the line travel beside
+ * it for the reason they travel on a confirmation — they are the dedup key, and
+ * a reader of the report can go and read the line the door acted on.
+ *
+ * `registered` and `joined` say whether this validation also brought the
+ * operator into the registry, and whether it took on this entry's domain: at
+ * most once each, ever, and both of them are events of their own.
+ */
+export interface SweepCommunityValidation {
+  readonly entry_id: string;
+  readonly venue: string;
+  readonly handle: string;
+  /** The community operator id, `<venue>:<handle>` (src/registry.ts). */
+  readonly operator: string;
+  readonly thread: number;
+  readonly comment_id: number;
+  readonly line: number;
+  readonly verdict: "approve" | "reject";
+  readonly registered: boolean;
+  readonly joined: boolean;
+  /** Position of the `community_validation` event this run appended. */
   readonly seq: number;
 }
 
@@ -627,6 +681,20 @@ export interface SweepReport {
     readonly threads: number;
     readonly comments: number;
   };
+  /**
+   * The community validations this run sealed, oldest comment first (D-138).
+   *
+   * One row per counted line that carried the attestation token and that the
+   * pure rule read as a validation. A token line the rule sent back to the
+   * confirmation path is in `confirmations` like any other, and why it went
+   * there is counted in `confirmation_fallbacks`.
+   */
+  readonly community_validations: readonly SweepCommunityValidation[];
+  /**
+   * Why token lines fell back to plain confirmations, by the rule's own word
+   * and how many of each (D-138). Empty on a run where none did.
+   */
+  readonly confirmation_fallbacks: Readonly<Record<string, number>>;
   /**
    * The days whose read count this run published, oldest first, and empty when
    * nothing was owed. One `read_count` event each.
@@ -1136,6 +1204,17 @@ async function readsOn(
  * (comment, line) key — so a run killed after sealing and before the cursor
  * moved repairs itself on the next run instead of duplicating.
  *
+ * Decision D-138 adds one outcome and takes none away. A counted line that
+ * carries the attestation token is a validation by a community operator rather
+ * than a confirmation — registered by that first line, bound by the founding
+ * registry's own binding of the handle's key, and sealed as its own event with
+ * the operator's registration and domain join before it. Whether a given line
+ * is one is the kernel's to say; a line it sends back is sealed as the
+ * confirmation it always was, with the reason counted in the step's detail. An
+ * uncounted line is an account statement whether it carries the token or not:
+ * a claim nobody sealed is not a validation, and a word in it cannot make it
+ * one.
+ *
  * Bounded by `CONFIRMATIONS_PER_RUN` across every thread, and by
  * `CONFIRMATION_COMMENTS_PER_THREAD` within one; nothing is dropped, because
  * each thread's cursor stops exactly where its run did.
@@ -1152,18 +1231,26 @@ async function confirmationsStep(
   skip: Skip,
 ): Promise<ConfirmationsRead> {
   const sealed: SweepConfirmation[] = [];
+  const validations: SweepCommunityValidation[] = [];
+  const fallbacks: Record<string, number> = {};
   const read = { threads: 0, comments: 0 };
+  const nothing = (): ConfirmationsRead => ({
+    sealed,
+    read,
+    validations,
+    fallbacks,
+  });
   if (board === undefined) {
     skip("board_unavailable");
-    return { sealed, read };
+    return nothing();
   }
 
   const threads = await board.threads();
   if (threads === null) {
     skip("board_unavailable");
-    return { sealed, read };
+    return nothing();
   }
-  if (threads.length === 0) return { sealed, read };
+  if (threads.length === 0) return nothing();
 
   // What the log already holds, keyed by the comment and the line, and whether
   // that line has been counted yet. Read once per run.
@@ -1180,9 +1267,18 @@ async function confirmationsStep(
     const key = `${String(payload["venue"])}:${String(payload["comment_id"])}:${String(payload["line"])}`;
     already.set(key, (already.get(key) ?? false) || payload["counted"] === true);
   }
+  // The community validations are the same key's third outcome (D-138), and a
+  // line sealed as one is finished: it was counted, and nothing about it can
+  // change afterwards. Read into the same map so a re-read of a thread cannot
+  // seal a validation twice, nor seal a confirmation over one.
+  for (const event of await eventsOfType(db, "community_validation", -1, SEAL_MAX_EVENTS)) {
+    const payload = event.payload as unknown as Record<string, unknown>;
+    const key = `${String(payload["venue"])}:${String(payload["comment_id"])}:${String(payload["line"])}`;
+    already.set(key, true);
+  }
 
   for (const thread of threads) {
-    if (sealed.length >= CONFIRMATIONS_PER_RUN) break;
+    if (sealed.length + validations.length >= CONFIRMATIONS_PER_RUN) break;
 
     const cursor = (await readConfirmationCursor(db, board.venue, thread)) ?? 0;
     const comments = await board.comments(
@@ -1203,7 +1299,7 @@ async function confirmationsStep(
 
     let through = cursor;
     for (const comment of comments) {
-      if (sealed.length >= CONFIRMATIONS_PER_RUN) break;
+      if (sealed.length + validations.length >= CONFIRMATIONS_PER_RUN) break;
       const read = await confirmationsInComment(
         db,
         board,
@@ -1216,6 +1312,10 @@ async function confirmationsStep(
         comment,
       );
       sealed.push(...read.taken);
+      validations.push(...read.validations);
+      for (const [reason, count] of Object.entries(read.fallbacks)) {
+        fallbacks[reason] = (fallbacks[reason] ?? 0) + count;
+      }
       // A conflicting write is the one refusal that might pass: the cursor
       // stays behind this comment and the thread stops here, so the next run
       // reads it again and seals the line it could not.
@@ -1231,7 +1331,7 @@ async function confirmationsStep(
     }
   }
 
-  return { sealed, read };
+  return nothing();
 }
 
 /**
@@ -1252,14 +1352,22 @@ async function confirmationsInComment(
   skip: Skip,
   already: Map<string, boolean>,
   comment: BoardComment,
-): Promise<{ taken: SweepConfirmation[]; halted: boolean }> {
+): Promise<{
+  taken: SweepConfirmation[];
+  validations: SweepCommunityValidation[];
+  fallbacks: Record<string, number>;
+  halted: boolean;
+}> {
   const taken: SweepConfirmation[] = [];
+  const validations: SweepCommunityValidation[] = [];
+  const fallbacks: Record<string, number> = {};
+  const stop = (halted: boolean) => ({ taken, validations, fallbacks, halted });
 
   // The form first, the entries second: parsing costs nothing and most comments
   // hold no line at all, so the index is asked only about comments that named
   // an entry in the published form.
   const offered = parseConfirmationComment(comment.body, () => true);
-  if (offered.length === 0) return { taken, halted: false };
+  if (offered.length === 0) return stop(false);
 
   const known = await existingEntryIds(db, [
     ...new Set(offered.map((line) => line.entry_id)),
@@ -1269,7 +1377,7 @@ async function confirmationsInComment(
     skip("confirmation_unknown_entry");
     return false;
   });
-  if (lines.length === 0) return { taken, halted: false };
+  if (lines.length === 0) return stop(false);
 
   for (const line of lines) {
     const entryId = line.entry_id;
@@ -1303,6 +1411,38 @@ async function confirmationsInComment(
     if (held !== undefined && (held || !counted)) continue;
 
     const world = await entryWorld(db, entryId, cache);
+
+    // (D-138) A counted line that carries the attestation token is not a
+    // confirmation at all: it is a validation by a community operator, bound by
+    // the founding registry's own binding of the handle's key. Whether it is
+    // one here and now is the kernel's to say (`communityLineDisposition`), and
+    // a line it sends back — a second line from the same handle, an author
+    // confirming their own entry, a cap already met — is sealed below exactly
+    // as it would have been before this decision, with the reason counted.
+    if (counted && sealedFingerprint !== null && line.attestation_version !== null) {
+      const outcome = await communityLine(
+        db,
+        board,
+        now,
+        at,
+        cache,
+        world,
+        entryId,
+        line,
+        comment,
+        sealedFingerprint,
+        fingerprint,
+        skip,
+      );
+      if (outcome.kind === "halted") return stop(true);
+      if (outcome.kind === "sealed") {
+        already.set(key, true);
+        validations.push(outcome.row);
+        continue;
+      }
+      fallbacks[outcome.reason] = (fallbacks[outcome.reason] ?? 0) + 1;
+    }
+
     try {
       const event = await recordPublicConfirmation(db, {
         event: {
@@ -1355,13 +1495,215 @@ async function confirmationsInComment(
         // step makes: this run stops confirming and carries on to its later
         // steps, and the next run reads the same comment and seals the line.
         skip("confirmation_conflict");
-        return { taken, halted: true };
+        return stop(true);
       }
       throw error;
     }
   }
 
-  return { taken, halted: false };
+  return stop(false);
+}
+
+/**
+ * What became of one token-bearing line: a validation, a confirmation after
+ * all, or a run that stopped confirming.
+ */
+type CommunityOutcome =
+  | { readonly kind: "sealed"; readonly row: SweepCommunityValidation }
+  | { readonly kind: "confirmation"; readonly reason: string }
+  | { readonly kind: "halted" };
+
+/**
+ * The entry's own domain, off the signed core of its submission.
+ *
+ * Read from the core rather than from the derived entry because that is where
+ * it is signed (decision D-071, src/core.ts `domainOf`), and an entry whose
+ * submission is not in the world it was gathered for has the default domain,
+ * which is what a v0.6 core means anyway.
+ */
+function domainOfWorld(world: EntryWorld, entryId: string): string {
+  const submitted = world.entryEvents.find(
+    (event) => event.type === "entry_submitted" && event.entry_id === entryId,
+  );
+  if (submitted === undefined) return DEFAULT_DOMAIN;
+  return domainOf((submitted.payload as EventPayloads["entry_submitted"]).core);
+}
+
+/**
+ * One counted line that carries the attestation token, decided and sealed
+ * (decision D-138).
+ *
+ * Whitepaper Section 5: the operator is the unit of accountability and every
+ * agent belongs to one. A handle on a public board is neither — until the
+ * founding registry says which key stands behind it, which is what
+ * `BoardAdapter.record` reads and what the `registry` binding names. A handle
+ * the registry binds no key to is not refused: its line is sealed as the
+ * confirmation it already was, and the fallback is counted as `unbound`.
+ *
+ * Whether the line is a validation at all is not decided here. That is
+ * `communityLineDisposition`'s, in the kernel, off the events alone — the cap
+ * per entry, a handle that has already validated this entry, an author
+ * validating their own — and this function does exactly what it answers.
+ *
+ * Three events at most, in this order and each at most once ever: the
+ * registration, when the log holds no such operator; the domain join, when it
+ * does but has not attested this entry's domain; and the validation itself.
+ * They are separate appends because each is a separate fact, and the one that
+ * loses a race to another writer stops the run exactly as a confirmation does —
+ * the cursor stays behind the comment and the next run reads it again.
+ *
+ * Every event sealed here is handed to the rederivation as an extra, because
+ * the registration is a registry event and the world was gathered before it
+ * existed: a validation folded against a registry that does not hold its
+ * operator yet would be a row the next run disagreed with.
+ */
+async function communityLine(
+  db: D1Like,
+  board: BoardAdapter,
+  now: Date,
+  at: string,
+  cache: WorldCache,
+  world: EntryWorld,
+  entryId: string,
+  line: ConfirmationLine,
+  comment: BoardComment,
+  sealedFingerprint: BoardSealProof,
+  fingerprint: string,
+  skip: Skip,
+): Promise<CommunityOutcome> {
+  const bound = await board.record(comment.handle);
+  if (bound === null) return { kind: "confirmation", reason: "unbound" };
+
+  const disposition = communityLineDisposition(
+    eventsOf(world),
+    entryId,
+    line,
+    comment.handle,
+    board.venue,
+    bound.agent,
+    at,
+  );
+  if (disposition.kind !== "validation") {
+    return { kind: "confirmation", reason: disposition.reason };
+  }
+
+  const operator = communityOperatorId(board.venue, comment.handle);
+  const domain = domainOfWorld(world, entryId);
+  const version = line.attestation_version ?? "";
+  const binding = {
+    kind: "registry",
+    registry: board.venue,
+    key_bind_event_id: bound.key_bind_event_id,
+  } as const;
+  const attestation = { version, domain };
+  const extra: Event[] = [];
+
+  try {
+    let registered = false;
+    let joined = false;
+
+    const record = await getOperator(db, operator);
+    if (record === null) {
+      extra.push(
+        await recordCommunityOperatorRegistered(db, {
+          at,
+          type: "community_operator_registered",
+          entry_id: null,
+          payload: {
+            operator,
+            venue: board.venue,
+            handle: comment.handle,
+            agent: bound.agent,
+            binding,
+            attestation,
+            fingerprint,
+            registry_event_id: sealedFingerprint.registry_event_id,
+          },
+        }),
+      );
+      registered = true;
+      // The run's own reading of the registry is now one event out of date, and
+      // every line after this one would be folded against a registry that does
+      // not hold this operator — a row saying `draft` written over the row this
+      // very line promoted. So the cache is dropped and the next world gathers
+      // the registry again.
+      cache.registry = null;
+    } else {
+      const held = await operatorDomains(db, operator);
+      if (!held.some((row) => row.domain === domain)) {
+        extra.push(
+          await recordCommunityOperatorJoinedDomain(db, {
+            at,
+            type: "community_operator_joined_domain",
+            entry_id: null,
+            payload: {
+              operator,
+              domain,
+              attestation: { version },
+              fingerprint,
+            },
+          }),
+        );
+        joined = true;
+        cache.registry = null;
+      }
+    }
+
+    const validated = await recordCommunityValidation(db, {
+      event: {
+        at,
+        type: "community_validation",
+        entry_id: entryId,
+        payload: {
+          entry_id: entryId,
+          operator,
+          venue: board.venue,
+          handle: comment.handle,
+          agent: bound.agent,
+          decision: line.verdict,
+          check: line.check,
+          reason: line.reason,
+          attestation_version: version,
+          fingerprint,
+          binding_proof: { kind: "registry", proof: sealedFingerprint.proof },
+          comment_id: comment.id,
+          line: line.line,
+          posted_at: comment.posted_at,
+        },
+      },
+      stored: (event): StoredEntryInput => {
+        const derived = rederive(world, entryId, now, [...extra, event]);
+        return {
+          entry: derived.entry,
+          sidecar: derived.sidecar,
+          derivedThroughSeq: event.seq,
+        };
+      },
+    });
+
+    return {
+      kind: "sealed",
+      row: {
+        entry_id: entryId,
+        venue: board.venue,
+        handle: comment.handle,
+        operator,
+        thread: comment.thread,
+        comment_id: comment.id,
+        line: line.line,
+        verdict: line.verdict,
+        registered,
+        joined,
+        seq: validated.seq,
+      },
+    };
+  } catch (error) {
+    if (error instanceof EventAppendError) {
+      skip("confirmation_conflict");
+      return { kind: "halted" };
+    }
+    throw error;
+  }
 }
 
 /**
@@ -2179,13 +2521,21 @@ async function allOperators(db: D1Like): Promise<MirrorOperator[]> {
     for (const record of page) {
       const agents = await agentsForOperator(db, record.id, LIST_PAGE_LIMIT);
       const domains = await operatorDomains(db, record.id);
+      // D-138: the kind off the row's own column, and a community operator's
+      // binding off the details its registration event wrote. A domain
+      // operator has no binding and carries none.
+      const binding = record.details["binding"];
       operators.push({
         operator: record.id,
+        kind: record.kind,
         maintainer: record.maintainer,
         provider: record.provider,
         trusted: record.details["trusted"] === true,
         domains: domains.map((row) => row.domain),
         agents: agents.map((row) => row.agentId),
+        ...(typeof binding === "object" && binding !== null
+          ? { binding: binding as MirrorOperator["binding"] }
+          : {}),
       });
     }
     if (page.length < LIST_PAGE_LIMIT) break;
@@ -3913,6 +4263,8 @@ export async function runSweep(
       rederived,
       confirmations,
       confirmations_read: confirmed.read,
+      community_validations: confirmed.validations,
+      confirmation_fallbacks: confirmed.fallbacks,
       published,
       attestations,
       sealed,
@@ -4009,6 +4361,8 @@ function nothingSwept(
     rederived: [],
     confirmations: [],
     confirmations_read: { threads: 0, comments: 0 },
+    community_validations: [],
+    confirmation_fallbacks: {},
     published: [],
     attestations: { expired: [] },
     sealed: null,
@@ -4152,6 +4506,18 @@ function stepRows(
             counted: report.confirmations.filter((one) => one.counted).length,
             threads_read: report.confirmations_read.threads,
             comments_read: report.confirmations_read.comments,
+            // D-138: what the same door took as community validations, how
+            // many of those registered an operator or took on a domain, and
+            // why the token lines that did not become one fell back. A count
+            // of seals alone cannot tell a door nobody attested through from
+            // one whose every line is being sent back by a rule.
+            validations: report.community_validations.length,
+            registered: report.community_validations.filter(
+              (one) => one.registered,
+            ).length,
+            joined: report.community_validations.filter((one) => one.joined)
+              .length,
+            fell_back: { ...report.confirmation_fallbacks },
           },
           publish: {
             published: report.published.length,

@@ -12,6 +12,12 @@ import type { Entry } from "../src/schema.js";
 const NOW = "2026-09-10T12:00:00.000Z";
 
 const SIDECAR: Sidecar = {
+  // Who met the consensus (D-138): this fixture stands for an entry decided
+  // by registered operators, with no community validator and no later layer.
+  verification_class: "registered",
+  verification_communities: [],
+  verification_single_venue: false,
+  verification_layers: [],
   // Nobody outside has confirmed this fixture in public (D-136).
   confirmations: [],
   // No bootstrap label on this fixture (D-128): the entry it stands for

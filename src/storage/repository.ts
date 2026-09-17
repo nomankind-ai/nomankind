@@ -29,6 +29,7 @@ import {
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
   SWEEP_BATCH_STATEMENTS,
+  type OperatorKind,
 } from "../policy.js";
 import type { DerivedAttestation } from "../attest.js";
 import type { BountyAccrual } from "../bounty.js";
@@ -1202,15 +1203,34 @@ export async function submitEntry(
  */
 export interface OperatorRecord {
   readonly id: string;
+  /**
+   * Which kind of operator this is (0025, decision D-138): the `domain`
+   * operators Section 5 has always had, and the `community` operators a
+   * confirmer's own attested line registers.
+   *
+   * A copy of which event put the row there and never a second source of truth
+   * — `operatorKindsAt` (src/derive.ts) folds the same answer out of the log.
+   * A row written before 0025 is a domain operator, because a community one
+   * could not be registered at all.
+   */
+  readonly kind: OperatorKind;
   readonly maintainer: boolean;
   readonly provider: boolean;
   readonly registeredSeq: number;
   readonly details: Record<string, unknown>;
 }
 
+/** The kind a row written before 0025 carries, which is the column's default. */
+const DEFAULT_OPERATOR_KIND: OperatorKind = "domain";
+
 function toOperator(row: Row): OperatorRecord {
+  // Read nullably and defaulted, for the one case SQLite can still serve: a
+  // row read through a connection whose schema predates 0025. The column is
+  // NOT NULL with the same default, so the two paths agree.
+  const kind = readNullableText(row, "kind");
   return {
     id: readText(row, "id"),
+    kind: (kind ?? DEFAULT_OPERATOR_KIND) as OperatorKind,
     maintainer: readBoolean(row, "maintainer"),
     provider: readBoolean(row, "provider"),
     registeredSeq: readInteger(row, "registered_seq"),
@@ -1218,7 +1238,7 @@ function toOperator(row: Row): OperatorRecord {
   };
 }
 
-const OPERATOR_COLUMNS = `id, maintainer, provider, registered_seq, operator_json`;
+const OPERATOR_COLUMNS = `id, kind, maintainer, provider, registered_seq, operator_json`;
 
 /** What a write stores, which is the read's columns and the materialised one. */
 const OPERATOR_WRITE_COLUMNS = `${OPERATOR_COLUMNS}, trusted`;
@@ -1254,8 +1274,9 @@ function operatorStatement(
 ): D1LikeStatement {
   return db
     .prepare(
-      `INSERT INTO operators (${OPERATOR_WRITE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO operators (${OPERATOR_WRITE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
+         kind = excluded.kind,
          maintainer = excluded.maintainer,
          provider = excluded.provider,
          registered_seq = excluded.registered_seq,
@@ -1264,6 +1285,7 @@ function operatorStatement(
     )
     .bind(
       operator.id,
+      operator.kind,
       writeBoolean(operator.maintainer),
       writeBoolean(operator.provider),
       operator.registeredSeq,
@@ -7646,5 +7668,143 @@ export async function recordPublicConfirmation(
   db: D1Like,
   input: RevalidationWrite<"public_confirmation">,
 ): Promise<Event<"public_confirmation">> {
+  return recordRevalidationEvent(db, input);
+}
+
+// ---------------------------------------------------------------------------
+// Community operators (decision D-138)
+// ---------------------------------------------------------------------------
+
+/** The kind a community operator's row carries, spelled once (0025). */
+const COMMUNITY: OperatorKind = "community";
+
+/**
+ * Register a community operator: append the event and write its rows,
+ * atomically, for the reason `registerOperator` is atomic.
+ *
+ * Decision D-138. A counted confirmation line that carries the attestation
+ * token is a validation by somebody outside the maintainer's perimeter, and the
+ * first such line from a handle registers the operator behind it. There is no
+ * door for this and there never will be: the id carries a colon
+ * (`<venue>:<handle>`), which every registration door refuses, so the only
+ * writer is the sweep's confirmations step and the only evidence is the
+ * registry's own binding of that handle's key.
+ *
+ * Every row is built from the sealed payload rather than handed in beside it,
+ * so the index can say nothing the event does not: the operators row, the
+ * agents row that binds the citizen's key to it, and the (operator, domain) row
+ * for the domain the line attested in.
+ *
+ * Nothing about a community operator is trusted, and nothing about one is paid:
+ * `trusted` is false on the row and no payout field is written at all, because
+ * D-127 left no money anywhere in this record.
+ */
+export async function recordCommunityOperatorRegistered(
+  db: D1Like,
+  input: EventInput<"community_operator_registered">,
+): Promise<Event<"community_operator_registered">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  const registered = event as Event<"community_operator_registered">;
+  const payload = registered.payload;
+  const domain = payload.attestation.domain;
+  statements.push(
+    operatorStatement(db, {
+      id: payload.operator,
+      kind: COMMUNITY,
+      // Neither flag can ever be true here: the maintainer's own operators are
+      // registered by the genesis door, and no provider is registered at all.
+      maintainer: false,
+      provider: false,
+      registeredSeq: registered.seq,
+      details: {
+        kind: COMMUNITY,
+        venue: payload.venue,
+        handle: payload.handle,
+        agent: payload.agent,
+        binding: payload.binding,
+        attestation: payload.attestation,
+        domains: [domain],
+        trusted: false,
+      },
+    }),
+  );
+  statements.push(
+    agentStatement(db, {
+      agentId: payload.agent,
+      operatorId: payload.operator,
+      registeredSeq: registered.seq,
+    }),
+  );
+  statements.push(
+    operatorDomainStatement(db, {
+      operator: payload.operator,
+      domain,
+      seq: registered.seq,
+      // The row carries no signed attestation because a community operator
+      // signs none: what it attested to is the token on its own line, and the
+      // event is where that lives.
+      attestation: null,
+    }),
+  );
+  await db.batch(statements);
+  return registered;
+}
+
+/**
+ * Record a community operator's second domain: append the event and write its
+ * (operator, domain) row, atomically.
+ *
+ * The community twin of `recordDomainJoin`, and the same rule: eligibility per
+ * domain has to be recomputable from the log alone, so the join is an event and
+ * this row is only the index into it. The operators row's `domains` is kept in
+ * step for the pages that read the record rather than the table.
+ */
+export async function recordCommunityOperatorJoinedDomain(
+  db: D1Like,
+  input: EventInput<"community_operator_joined_domain">,
+): Promise<Event<"community_operator_joined_domain">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  const joined = event as Event<"community_operator_joined_domain">;
+  const payload = joined.payload;
+  statements.push(
+    operatorDomainStatement(db, {
+      operator: payload.operator,
+      domain: payload.domain,
+      seq: joined.seq,
+      attestation: null,
+    }),
+  );
+  const record = await getOperator(db, payload.operator);
+  if (record !== null) {
+    const held = record.details["domains"];
+    const domains = Array.isArray(held)
+      ? held.filter((one): one is string => typeof one === "string")
+      : [];
+    if (!domains.includes(payload.domain)) {
+      statements.push(
+        operatorStatement(db, {
+          ...record,
+          details: { ...record.details, domains: [...domains, payload.domain] },
+        }),
+      );
+    }
+  }
+  await db.batch(statements);
+  return joined;
+}
+
+/**
+ * Seal one community validation and rewrite the entry it is about.
+ *
+ * The entry row is rewritten in the same batch for the reason a public
+ * confirmation's is: the validation is a derived field of it — the sidecar's
+ * verification class, its communities and its layers all move with it, and the
+ * bootstrap label may clear. What it never does is write any of those here.
+ * Derivation decides them, and this stores what it decided.
+ */
+export async function recordCommunityValidation(
+  db: D1Like,
+  input: RevalidationWrite<"community_validation">,
+): Promise<Event<"community_validation">> {
   return recordRevalidationEvent(db, input);
 }

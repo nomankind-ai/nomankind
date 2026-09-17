@@ -48,14 +48,20 @@ import { mirrorKindFor } from "../adapters/mirror.js";
 import { domainOf, extractCore } from "../core.js";
 import { confidenceInputs } from "../confidence.js";
 import { independenceReport, witnessAgentId } from "../independence.js";
-import type { Event } from "../events.js";
+import type { CommunityBinding, Event } from "../events.js";
 import { ledgerBalance } from "../ledger.js";
 import {
   ATTESTATION_TEXT,
   ATTESTATION_VERSION,
+  isCommunityOperatorId,
+  parseCommunityOperatorId,
   perimeterOf,
   TXT_RECORD_PREFIX,
 } from "../registry.js";
+// The class a listing may be floored at, and the rule that compares two of them
+// (decision D-138). The comparison is the kernel's: a page that decided for
+// itself that mixed satisfies community would be a second copy of the order.
+import { classSatisfies } from "../derive.js";
 import {
   disclosureWindowDays,
   DOMAIN_SLUGS,
@@ -161,6 +167,7 @@ import { ENTRY_DOMAINS, parseEntriesQuery } from "../ui/query.js";
 import { APP_CSS } from "../ui/styles.js";
 import type {
   ApproverRow,
+  CommunityOperator,
   DomainCounts,
   DomainsData,
   EntriesFilter,
@@ -321,6 +328,9 @@ function toRow(stored: StoredEntry, now: Date): EntryRow {
     domain: field(entry, "domain"),
     claim: field(entry, "claim"),
     tier: stored.sidecar.effective_tier,
+    // Who met this entry's consensus (decision D-138), as derivation sealed it.
+    // Null while the entry is draft or rejected, exactly as the tier is.
+    verification_class: stored.sidecar.verification_class,
     last_confirmed: field(entry, "last_confirmed"),
     expires_at: typeof expires === "string" ? expires : null,
     stale: entry["stale"] === true,
@@ -365,6 +375,32 @@ function sealedAtOf(seals: readonly Seal[], position: number): string | null {
  * the formula run for it, which is a different fact from a standing of zero and
  * is shown differently.
  */
+/**
+ * The account behind a community operator (decision D-138), or null.
+ *
+ * Read off the registry row and nothing else: the venue and the handle are the
+ * id's own halves through `parseCommunityOperatorId`, and the agent and the
+ * binding are the details the registration event wrote. A row whose kind is
+ * community but whose details are missing either is carried as null rather than
+ * half a record — a page that invented a binding would be publishing a proof
+ * nobody made.
+ */
+function communityOf(record: OperatorRecord): CommunityOperator | null {
+  if (record.kind !== "community") return null;
+  const parsed = parseCommunityOperatorId(record.id);
+  if (parsed === null) return null;
+  const agent = record.details["agent"];
+  const binding = record.details["binding"];
+  if (typeof agent !== "string") return null;
+  if (binding === null || typeof binding !== "object") return null;
+  return {
+    venue: parsed.venue,
+    handle: parsed.handle,
+    agent,
+    binding: binding as CommunityBinding,
+  };
+}
+
 function toOperatorRow(
   record: OperatorRecord,
   agents: number,
@@ -376,6 +412,12 @@ function toOperatorRow(
   const trustedSeq = record.details["trusted_seq"];
   return {
     id: record.id,
+    // The kind the registry row carries (decision D-138), and the account
+    // behind it when it is a community one. Both are readings of the row: the
+    // venue and the handle are the id's own two halves, parsed by the registry's
+    // own parser, and the agent and the binding are stored details.
+    kind: record.kind,
+    community: communityOf(record),
     maintainer: record.maintainer,
     provider: record.provider,
     trusted: record.details["trusted"] === true,
@@ -568,10 +610,23 @@ async function entries(
   // `json_extract(sidecar_json, '$.source.class')` would read null on every one
   // of those rows and quietly drop entries that do have a class — so the filter
   // reads the sidecar the store handed back, which is the defaulted one.
-  const kept =
+  const bySource =
     filter.source === null
       ? page
       : page.filter((stored) => stored.sidecar.source.class === filter.source);
+
+  // The class floor (decision D-138), applied over the page for the reason the
+  // source filter is: the class is a sidecar field a row stored before the
+  // decision does not carry, and a `json_extract` would read null on every one
+  // of those and drop entries that do have a class. An entry with no class is
+  // a draft or a rejected one, which has met no consensus and so satisfies no
+  // floor; the comparison itself is the kernel's `classSatisfies`.
+  const kept =
+    filter.min_class === null
+      ? bySource
+      : bySource.filter((stored) =>
+          classSatisfies(stored.sidecar.verification_class, filter.min_class),
+        );
 
   const rows = kept.map((stored) => toRow(stored, now));
   // The cursor is the last row *read*, not the last row kept: a page whose
@@ -706,9 +761,18 @@ async function entry(
     const reason = each["reason"];
     const hash = each["snapshot_hash"];
     const accepted = each["test_accepted"];
+    // Which kind of operator signed, off the id's own shape (decision D-138):
+    // a community operator's id is `<venue>:<handle>` and a domain operator's
+    // is a DNS name, so the registry's parser decides it and this never guesses.
+    const account = parseCommunityOperatorId(operator);
     approvers.push({
       agent: field(each, "agent"),
       operator,
+      operatorKind: isCommunityOperatorId(operator) ? "community" : "domain",
+      community:
+        account === null
+          ? null
+          : { venue: account.venue, handle: account.handle },
       operatorTrusted: await trust.of(operator),
       decision: field(each, "decision"),
       reason: typeof reason === "string" ? reason : null,
@@ -1269,6 +1333,12 @@ async function independence(db: D1Like): Promise<IndependenceData> {
     report: independenceReport({
       validators: records.map((record) => ({
         operator: record.id,
+        // The kind, and the account when it is a community one (decision
+        // D-138). No extra read: the directory page already carries the row,
+        // and the venue and the handle are the id's own halves.
+        kind: record.kind,
+        venue: parseCommunityOperatorId(record.id)?.venue ?? null,
+        handle: parseCommunityOperatorId(record.id)?.handle ?? null,
         trusted: record.details["trusted"] === true,
         maintainer: record.maintainer,
         provider: record.provider,
@@ -1839,6 +1909,11 @@ async function route(
 
   if (path === "/operators") return wants ? operators(db, ctx) : null;
 
+  // One operator, of either kind (decision D-138). A community operator's id is
+  // `<venue>:<handle>`, and `segmentAfter` decodes the segment, so the encoded
+  // colon and the bare one are one address: `/operators/1f916%3Aalice` and
+  // `/operators/1f916:alice` reach the same record, which is what a link built
+  // with encodeURIComponent and a link written by hand both have to do.
   const operatorId = segmentAfter(path, "/operators/");
   if (operatorId !== null) {
     return wants ? operator(db, ctx, operatorId, now) : null;

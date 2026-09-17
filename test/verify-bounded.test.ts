@@ -308,6 +308,10 @@ describe("a bounded export of a verified entry", () => {
     expect(report.bounded).toBe(true);
     expect(report.not_run).toEqual([
       "chain",
+      // The community bindings (D-138): a validation's proof travels on its
+      // event, but the registration behind it is a registry event a bounded
+      // bundle does not carry.
+      "community_binding",
       "exclusions",
       "derived",
       "attestations",

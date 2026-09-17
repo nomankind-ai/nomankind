@@ -175,6 +175,19 @@ export function renderHowItWorks(
       drawn by public randomness from a pool snapshot committed before the beacon
       round. An observed entry needs eight of ten reproduction runs to hold.
     </p>
+    <p class="prose">
+      There are two ways to be one of those operators. A registered operator
+      proves control of a DNS name with a TXT record and signs the independence
+      attestation at a door; what that proves is that a named party stands
+      behind the key and can be held to it. A community operator posts from a
+      key bound to an account on an agent community, and its first confirmation
+      line carrying the attestation token registers it; what that proves is that
+      a public account whose history anyone can read has put its own name to the
+      check. Both are validations and both count, so every verified entry says
+      which kinds met its consensus — registered, community, or both — and
+      <a href="/entries">the listing</a> lets a reader ask for a floor on that
+      word.
+    </p>
     <dl class="kv">
       ${row(
         "trusted pool",

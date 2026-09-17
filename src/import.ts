@@ -47,7 +47,7 @@ import {
   type MirrorFormat,
   type MirrorOperator,
 } from "./mirror.js";
-import { DEFAULT_DOMAIN } from "./policy.js";
+import { DEFAULT_DOMAIN, type OperatorKind } from "./policy.js";
 import type { ProbeAnswer } from "./probe.js";
 import type { Seal } from "./seal.js";
 import type {
@@ -264,8 +264,17 @@ function operatorsOf(value: unknown): MirrorOperator[] {
     }
     const domains = row["domains"];
     const agents = row["agents"];
+    const binding = row["binding"];
     return {
       operator: row["operator"],
+      // D-138: a v1 to v3 mirror carries no kind at all, and every operator in
+      // one is a domain operator, because a community one could not have been
+      // registered. A row naming a kind nobody knows reads the same way rather
+      // than being taken on the file's word.
+      kind: row["kind"] === "community" ? "community" : "domain",
+      ...(typeof binding === "object" && binding !== null
+        ? { binding: binding as MirrorOperator["binding"] }
+        : {}),
       maintainer: row["maintainer"] === true,
       provider: row["provider"] === true,
       trusted: row["trusted"] === true,
@@ -424,9 +433,16 @@ export interface ImportOperator {
 
 /** What one operator's rows look like while the fold is still running. */
 interface OperatorFold {
+  /** Which event registered it (decision D-138). */
+  kind: OperatorKind;
   maintainer: boolean;
   registeredSeq: number;
   domain: string;
+  /**
+   * A community operator's binding and the details its registration carried;
+   * empty for a domain operator, whose details are the four keys below.
+   */
+  community: Record<string, unknown> | null;
   trusted: boolean;
   trustedSeq: number | null;
   registeredBy: string | null;
@@ -464,15 +480,66 @@ export function operatorRows(
     if (isType(event, "operator_registered")) {
       const { operator, maintainer, domain } = event.payload;
       folds.set(operator, {
+        kind: "domain",
         maintainer,
         registeredSeq: event.seq,
         domain: domain ?? DEFAULT_DOMAIN,
+        community: null,
         trusted: false,
         trustedSeq: null,
         registeredBy: null,
         attestation: null,
         agents: [],
         domains: [],
+      });
+      continue;
+    }
+
+    // D-138: a community operator is registered by its own first attested
+    // line and by nothing else — there is no door for it — so the replay folds
+    // the registration event exactly as it folds a domain operator's, with the
+    // agent bound in the same breath because the key is what the binding is.
+    if (isType(event, "community_operator_registered")) {
+      const payload = event.payload;
+      folds.set(payload.operator, {
+        kind: "community",
+        maintainer: false,
+        registeredSeq: event.seq,
+        domain: payload.attestation.domain,
+        community: {
+          kind: "community",
+          venue: payload.venue,
+          handle: payload.handle,
+          agent: payload.agent,
+          binding: payload.binding,
+          attestation: payload.attestation,
+        },
+        trusted: false,
+        trustedSeq: null,
+        registeredBy: payload.agent,
+        attestation: null,
+        agents: [
+          {
+            agentId: payload.agent,
+            operatorId: payload.operator,
+            registeredSeq: event.seq,
+          },
+        ],
+        domains: [],
+      });
+      continue;
+    }
+
+    if (isType(event, "community_operator_joined_domain")) {
+      const fold = folds.get(event.payload.operator);
+      if (fold === undefined) continue;
+      fold.domains.push({
+        operator: event.payload.operator,
+        domain: event.payload.domain,
+        seq: event.seq,
+        // A community operator signs no attestation: what it attested to is
+        // the token on its own line, and the event is where that lives.
+        attestation: null,
       });
       continue;
     }
@@ -527,15 +594,26 @@ export function operatorRows(
     rows.push({
       record: {
         id: operator,
+        kind: fold.kind,
         maintainer: fold.maintainer,
         provider: providers.get(operator) === true,
         registeredSeq: fold.registeredSeq,
-        details: {
-          registered_by: fold.registeredBy,
-          attestation: fold.attestation,
-          trusted: fold.trusted,
-          trusted_seq: fold.trustedSeq,
-        },
+        details:
+          fold.community === null
+            ? {
+                registered_by: fold.registeredBy,
+                attestation: fold.attestation,
+                trusted: fold.trusted,
+                trusted_seq: fold.trustedSeq,
+              }
+            : {
+                ...fold.community,
+                domains: [
+                  fold.domain,
+                  ...fold.domains.map((row) => row.domain),
+                ],
+                trusted: false,
+              },
       },
       agents: fold.agents,
       domains: [
@@ -585,12 +663,17 @@ function registryDifference(
       return `operators.json names ${one.operator} where the events name ${row.record.id}`;
     }
     const folded = {
+      // D-138: the kind is compared like everything else here, so a file that
+      // called a domain operator a community one — which is a claim about how
+      // its validations count — is a mirror that disagrees with its own log.
+      kind: row.record.kind,
       maintainer: row.record.maintainer,
       trusted: row.record.details["trusted"] === true,
       domains: row.domains.map((domain) => domain.domain),
       agents: [...row.agents.map((agent) => agent.agentId)].sort(),
     };
     const carried = {
+      kind: one.kind ?? "domain",
       maintainer: one.maintainer,
       trusted: one.trusted,
       domains: [...one.domains],

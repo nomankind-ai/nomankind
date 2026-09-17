@@ -18,11 +18,17 @@ import {
   type EvidenceTier,
   type TestVerdict,
 } from "./evidence.js";
-import { confirmationPayloadOf } from "./confirm.js";
+import { confirmationPayloadOf, type ConfirmationLine } from "./confirm.js";
 import {
   APPROVALS_TO_VERIFY_LARGE_POOL,
   APPROVALS_TO_VERIFY_SMALL_POOL,
+  attestationFor,
   authorityHostsFor,
+  communityCapPerEntry,
+  countingCommunities,
+  isSingleCountingCommunity,
+  COMMUNITY_MIN_ACCOUNTS,
+  COMMUNITY_MIN_COMMUNITIES,
   CONFIRMATION_VENUES,
   DEFAULT_DOMAIN,
   isRegisteredDomain,
@@ -31,9 +37,12 @@ import {
   stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
   versionedSubjectOf,
+  VERIFICATION_CLASSES,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
+  type OperatorKind,
+  type VerificationClass,
 } from "./policy.js";
-import { isExcludedParty } from "./registry.js";
+import { communityOperatorId, isExcludedParty } from "./registry.js";
 import type { Entry } from "./schema.js";
 import type { EntrySeal } from "./seal.js";
 import {
@@ -45,6 +54,7 @@ import { checkSupersedes } from "./supersede.js";
 import { eligibilityRefusal } from "./eligibility.js";
 import type {
   ApproverRecord,
+  CommunityBinding,
   ConfirmationCheck,
   ConfirmationVerdict,
   Event,
@@ -80,7 +90,7 @@ export interface Clock {
  * The value is the date the rules last moved and the decision that moved them,
  * which is the only thing a reader of a row ever has to compare.
  */
-export const DERIVATION_VERSION = "2026-09-16-d136";
+export const DERIVATION_VERSION = "2026-09-17-d138";
 
 /** The schema's status enum. */
 export type EntryStatus =
@@ -231,6 +241,67 @@ export interface Sidecar {
    * confirmations. Every reader takes it as `confirmations ?? []`.
    */
   readonly confirmations: readonly PublicConfirmationView[];
+  /**
+   * Who met this entry's consensus, disclosed in one word (decision D-138).
+   *
+   * `registered` when domain operators alone met it, `mixed` when domain
+   * operators took part and community operators were needed to reach it, and
+   * `community` otherwise. Null while the entry is draft or rejected: there is
+   * no consensus to be a statement about.
+   *
+   * Sealed history. It is derived from the validators counted at the decision
+   * seal and never relabelled: later, stronger evidence is an additive dated
+   * layer in `verification_layers`, because an entry that says `community`
+   * today and `registered` tomorrow would be a record editing what it already
+   * said. D-128's bootstrap label is one case of the same disclosure and is
+   * unchanged beside it.
+   */
+  readonly verification_class: VerificationClass | null;
+  /**
+   * The distinct communities among the counted community validators at the
+   * decision, in the order they were counted; empty when there were none.
+   */
+  readonly verification_communities: readonly string[];
+  /**
+   * Whether exactly one community signed this entry.
+   *
+   * Disclosed rather than punished: the class stays `community`, and the entry
+   * page reads "community (single venue)". A reader who thinks one board is
+   * one party can act on it; nothing in the rules does.
+   */
+  readonly verification_single_venue: boolean;
+  /**
+   * The dated layers of evidence behind this entry, oldest first (D-138 item
+   * 11): the decision itself, then one per reconfirmation by a domain operator
+   * on an entry whose decision class was `community` or `mixed`.
+   *
+   * Additive and never a relabel. A community-class entry a domain operator
+   * later reconfirms is still a community-class entry — that is what happened —
+   * with a registered layer dated after it, which is the honest shape of "the
+   * evidence got stronger later".
+   *
+   * Empty while the entry is draft or rejected.
+   */
+  readonly verification_layers: readonly VerificationLayer[];
+}
+
+/**
+ * One dated layer of evidence behind an entry (decision D-138 item 11).
+ *
+ * `kind` is `decision` for the consensus that promoted the entry and
+ * `reconfirmation` for a later check that added to it. `class` is what that
+ * layer was: the decision's own class, or `registered` for a reconfirmation by
+ * a domain operator, which is the stronger evidence the layer exists to record.
+ * `seq` and `at` are the position and the time of the event, so the layers read
+ * as a dated history rather than as a verdict. `operator` is who added the
+ * layer, and null on the decision, which was a set of validators and not one.
+ */
+export interface VerificationLayer {
+  readonly kind: "decision" | "reconfirmation";
+  readonly class: VerificationClass;
+  readonly seq: number;
+  readonly at: string;
+  readonly operator: string | null;
 }
 
 /**
@@ -484,6 +555,105 @@ export function operatorDomainsOf(
   return operatorDomainsAt(events, position).get(operator) ?? [];
 }
 
+// ---------------------------------------------------------------------------
+// The community operators (decision D-138)
+// ---------------------------------------------------------------------------
+
+/** One community operator, as the log registered it. */
+export interface CommunityOperator {
+  readonly operator: string;
+  readonly venue: string;
+  readonly handle: string;
+  /** The confirmer's key, in the form every agent id has. */
+  readonly agent: string;
+  readonly binding: CommunityBinding;
+  /** The domains it has attested in, registration first, in the log's order. */
+  readonly domains: readonly string[];
+  /** The position it registered at. */
+  readonly seq: number;
+}
+
+/**
+ * Every community operator the log has registered as of `position`, keyed by
+ * its operator id (decision D-138).
+ *
+ * The community twin of `registeredOperatorsAt` and `operatorDomainsAt` in one
+ * fold, because the two facts arrive on the same two events: the registration
+ * carries the binding and the domain its attestation named, and each join adds
+ * a domain. A second registration of the same operator replaces the binding and
+ * keeps the domains, because the fold runs in seq order and an operator does
+ * not un-attest a domain by binding its key again.
+ *
+ * Only events with seq <= position are folded, exactly as every other fold
+ * here, so a registration sealed later can never change what a past decision
+ * saw.
+ */
+export function communityOperatorsAt(
+  events: readonly Event[],
+  position: number,
+): Map<string, CommunityOperator> {
+  const operators = new Map<string, CommunityOperator>();
+  for (const event of inSeqOrder(events)) {
+    if (event.seq > position) break;
+    if (isType(event, "community_operator_registered")) {
+      const payload = event.payload;
+      const held = operators.get(payload.operator);
+      const domains = held === undefined ? [] : [...held.domains];
+      if (!domains.includes(payload.attestation.domain)) {
+        domains.push(payload.attestation.domain);
+      }
+      operators.set(payload.operator, {
+        operator: payload.operator,
+        venue: payload.venue,
+        handle: payload.handle,
+        agent: payload.agent,
+        binding: payload.binding,
+        domains,
+        seq: held?.seq ?? event.seq,
+      });
+      continue;
+    }
+    if (isType(event, "community_operator_joined_domain")) {
+      const payload = event.payload;
+      const held = operators.get(payload.operator);
+      // A join by an operator the log never registered is an event about
+      // nobody: derivation answers about the log it is given rather than
+      // inventing the registration that would make it mean something.
+      if (held === undefined) continue;
+      if (held.domains.includes(payload.domain)) continue;
+      operators.set(payload.operator, {
+        ...held,
+        domains: [...held.domains, payload.domain],
+      });
+    }
+  }
+  return operators;
+}
+
+/**
+ * What kind of operator each id in the registry is, as of `position`
+ * (decision D-138).
+ *
+ * One registry, two kinds: every `operator_registered` is a `domain` operator
+ * and every `community_operator_registered` a `community` one. The ids cannot
+ * collide — `isOperatorDomain` refuses the colon a community id is built
+ * around — so one map answers for both, which is the whole point of the
+ * decision: validation is one thing, and the record says so in one place.
+ */
+export function operatorKindsAt(
+  events: readonly Event[],
+  position: number,
+): ReadonlyMap<string, OperatorKind> {
+  const kinds = new Map<string, OperatorKind>();
+  for (const operator of registeredOperatorsAt(events, position).operators) {
+    kinds.set(operator, "domain");
+  }
+  for (const operator of communityOperatorsAt(events, position).keys()) {
+    kinds.set(operator, "community");
+  }
+  return kinds;
+}
+
 /** The outcome of folding an entry's validation events, and nothing else. */
 interface Consensus {
   readonly status: "draft" | "rejected" | "verified";
@@ -505,6 +675,119 @@ interface Consensus {
    * the moment the verdict lands, like the counts themselves.
    */
   readonly countedOperators: readonly string[];
+  /** The class the decision was met at, or null while draft or rejected. */
+  readonly verificationClass: VerificationClass | null;
+  /** The distinct communities among the counted community approvers. */
+  readonly verificationCommunities: readonly string[];
+  /** The `at` of the promoting decision's event; null unless it verified. */
+  readonly promotingAt: string | null;
+}
+
+/**
+ * One decision about an entry, whichever door it came in by (D-138).
+ *
+ * The consensus rule is one rule, so the fold below reads one list: a
+ * `validation` from a domain operator and a `community_validation` from a
+ * community operator are the same shape here, and the only thing that
+ * remembers which is which is `kind` — which is what the class, the Sybil
+ * floor and the per-community cap are about, and nothing else.
+ *
+ * `record` is what the evidence gate reads. A community validation carries no
+ * measurement and no test verdict, so its record is the honest empty one: it
+ * is an approval, and it says nothing about a test it did not run.
+ */
+interface Decision {
+  readonly seq: number;
+  readonly at: string;
+  readonly kind: OperatorKind;
+  readonly operator: string;
+  readonly venue: string | null;
+  readonly decision: "approve" | "reject";
+  readonly assignedRandom: boolean;
+  readonly signedAt: string;
+  readonly record: ApproverRecord;
+}
+
+/**
+ * Every decision about one entry, both kinds, in seq order.
+ *
+ * The `validation` events keep their records exactly as they were sealed; each
+ * `community_validation` is read into the same shape by name off its payload,
+ * so an event sealed by a build this one does not know is skipped rather than
+ * half-read.
+ */
+function decisionsFor(
+  events: readonly Event[],
+  entryId: string,
+): readonly Decision[] {
+  const decisions: Decision[] = [];
+  for (const event of inSeqOrder(events)) {
+    if (isType(event, "validation")) {
+      if (event.entry_id !== entryId) continue;
+      const record = stripSignature(event.payload.record);
+      const fields = record as unknown as DecisionFields;
+      decisions.push({
+        seq: event.seq,
+        at: event.at,
+        kind: "domain",
+        operator: fields.operator,
+        venue: null,
+        decision: fields.decision,
+        assignedRandom: fields.assigned_random === true,
+        signedAt: fields.signed_at,
+        record,
+      });
+      continue;
+    }
+    if (!isType(event, "community_validation")) continue;
+    const payload = event.payload as unknown as Record<string, unknown>;
+    // The envelope and the payload have to name the same entry. A
+    // `community_validation` carries the id twice — the scope every
+    // entry-scoped event has, and the payload's own, so a reader folding the
+    // payload alone knows what was validated — and an event whose two halves
+    // disagree is an event about two entries at once. It is counted by neither
+    // rather than by the half that happens to be read first: a decision that
+    // could be pointed at another entry by editing the field nobody checked
+    // would be a decision nobody signed.
+    if (event.entry_id !== entryId) continue;
+    if (payload["entry_id"] !== entryId) continue;
+    const operator = payload["operator"];
+    const venue = payload["venue"];
+    const agent = payload["agent"];
+    const decision = payload["decision"];
+    if (typeof operator !== "string" || operator === "") continue;
+    if (typeof venue !== "string" || venue === "") continue;
+    if (decision !== "approve" && decision !== "reject") continue;
+    // The token is what makes a counted line a validation (D-138 item 3); an
+    // event that names no version is not one this fold counts.
+    if (typeof payload["attestation_version"] !== "string") continue;
+    const postedAt = payload["posted_at"];
+    const signedAt = typeof postedAt === "string" ? postedAt : event.at;
+    const reason = payload["reason"];
+    decisions.push({
+      seq: event.seq,
+      at: event.at,
+      kind: "community",
+      operator,
+      venue,
+      decision,
+      assignedRandom: false,
+      signedAt,
+      record: {
+        agent: typeof agent === "string" ? agent : operator,
+        operator,
+        decision,
+        reason: typeof reason === "string" ? reason : null,
+        snapshot_hash: null,
+        assigned_random: false,
+        test_accepted: null,
+        reproduction: null,
+        observation: null,
+        signed_at: signedAt,
+      } as ApproverRecord,
+    });
+  }
+  return decisions;
 }
 
 /**
@@ -551,6 +834,18 @@ function consensusFor(
   // evidence gate reads exactly what consensus counted.
   const countedRecords: ApproverRecord[] = [];
   const countedOperators = new Set<string>();
+  // The counted approvers, by kind and by community (D-138): what the class,
+  // the Sybil floor and the per-community cap are all read off.
+  const approvingDomain = new Set<string>();
+  const approvingCommunity = new Set<string>();
+  const approvingVenues: string[] = [];
+  /** How many counted decisions this entry has taken from each community. */
+  const countedPerVenue = new Map<string, number>();
+  // How many communities count at all, read once: the cap and the floor below
+  // are both functions of this one number, and src/policy.ts is where each of
+  // them is decided.
+  const countingCommunityCount = countingCommunities().length;
+  const capPerEntry = communityCapPerEntry(countingCommunityCount);
   let hasRandomApproval = false;
   let status: "draft" | "rejected" | "verified" = "draft";
   let verifiedAt: string | null = null;
@@ -559,43 +854,67 @@ function consensusFor(
   let testVerdictAtDecision: TestVerdict | null = null;
   let needsReplacement = false;
   let promotingSeq: number | null = null;
+  let promotingAt: string | null = null;
+  let verificationClass: VerificationClass | null = null;
+  let verificationCommunities: readonly string[] = [];
 
-  for (const event of inSeqOrder(events)) {
-    if (!isType(event, "validation")) continue;
-    if (event.entry_id !== entryId) continue;
-
-    const record = stripSignature(event.payload.record);
-    approvers.push(record);
+  for (const decision of decisionsFor(events, entryId)) {
+    if (decision.kind === "domain") approvers.push(decision.record);
 
     // Once verified or rejected the verdict stands: later decisions still land
     // in approvers[], but change nothing.
     if (status !== "draft") continue;
 
-    const position = event.seq;
-    const decision = record as unknown as DecisionFields;
+    const position = decision.seq;
 
     // Who may validate at all: `mayValidateEntry`'s seven exclusions, the same
     // seven the door applies, asked here because the log is append-only and
     // derivation must stay safe against a record the door would have refused.
     // Such a record stays in approvers[] — nothing is ever removed — and is
     // counted by nobody. Eligibility is read at the record's own position, like
-    // every other rule here.
+    // every other rule here, and it is one predicate for both kinds of operator
+    // (D-138): a community operator is registered in the same registry and is
+    // excluded by the same seven rules.
     if (!mayValidateEntry(events, position, target, decision.operator)) {
       continue;
+    }
+
+    // The per-community cap (D-138 item 10): only so many of one entry's
+    // counted decisions may come from one community, so a single board cannot
+    // supply a consensus by itself once a second community signs. Counted per
+    // community and not per key, because the accounts on one board are as cheap
+    // as each other.
+    const venue = decision.venue;
+    if (decision.kind === "community" && venue !== null) {
+      const taken = countedPerVenue.get(venue) ?? 0;
+      if (!countedOperators.has(decision.operator) && taken >= capPerEntry) {
+        continue;
+      }
     }
 
     // The first record from an operator is the one that counts, here as in the
     // distinct-operator sets below.
     if (!countedOperators.has(decision.operator)) {
       countedOperators.add(decision.operator);
-      countedRecords.push(record);
+      countedRecords.push(decision.record);
+      if (decision.kind === "community" && venue !== null) {
+        countedPerVenue.set(venue, (countedPerVenue.get(venue) ?? 0) + 1);
+      }
     }
 
     if (decision.decision === "approve") {
       // Distinct operators: a second record from the same operator is kept but
       // adds no count.
       approvingOperators.add(decision.operator);
-      if (decision.assigned_random) hasRandomApproval = true;
+      if (decision.kind === "domain") {
+        approvingDomain.add(decision.operator);
+      } else {
+        approvingCommunity.add(decision.operator);
+        if (venue !== null && !approvingVenues.includes(venue)) {
+          approvingVenues.push(venue);
+        }
+      }
+      if (decision.assignedRandom) hasRandomApproval = true;
     } else {
       rejectingOperators.add(decision.operator);
     }
@@ -613,11 +932,27 @@ function consensusFor(
       // approvals. The paper says exactly one; "at least one" is what the
       // replacement-draw path can satisfy (retrospective GAPS M9).
       const randomSatisfied = largePool ? hasRandomApproval : true;
+      // The Sybil floor, and only where it is the whole of the consensus
+      // (D-138 item 10): a consensus met by community operators alone is asked
+      // for `COMMUNITY_MIN_ACCOUNTS` distinct bound accounts, and for
+      // `COMMUNITY_MIN_COMMUNITIES` distinct communities once more than one
+      // community counts at all. A consensus a domain operator took part in is
+      // judged exactly as it always was.
+      const communityFloorMet =
+        approvingDomain.size > 0 ||
+        approvingCommunity.size === 0 ||
+        (approvingCommunity.size >= COMMUNITY_MIN_ACCOUNTS &&
+          // "Only while more than one counting community exists" is one
+          // sentence and lives in one place, beside the cap it is the twin of
+          // (src/policy.ts, `isSingleCountingCommunity`).
+          (isSingleCountingCommunity(countingCommunityCount) ||
+            approvingVenues.length >= COMMUNITY_MIN_COMMUNITIES));
       // Two tiers of evidence: the count says the validators agree, the gate
       // says whether what they brought is enough, and at which tier. The gate is
       // asked only where the count would promote, over exactly the decisions
       // counted so far.
-      const countMet = approvals >= approvalsToVerify && randomSatisfied;
+      const countMet =
+        approvals >= approvalsToVerify && randomSatisfied && communityFloorMet;
       const gate = countMet ? evidenceGate(core, countedRecords) : null;
       // A gate refusal is never itself a rejection: it only means the approvals
       // do not promote at this position, so this decision is judged as any
@@ -627,11 +962,25 @@ function consensusFor(
       // at the next counted decision.
       if (countMet && gate !== null && gate.verifiable) {
         status = "verified";
-        verifiedAt = decision.signed_at;
+        verifiedAt = decision.signedAt;
         trustedCountAtDecision = trustedCount;
         effectiveTier = gate.effective_tier;
         testVerdictAtDecision = gate.test_verdict;
         promotingSeq = position;
+        promotingAt = decision.at;
+        // The class, sealed here and never recomputed later (D-138 item 11):
+        // domain operators alone is `registered`, community operators alone is
+        // `community`, and both is `mixed` — which is the only case where a
+        // community approval was *needed*, because domain approvals that met
+        // the count on their own would have promoted the entry at an earlier
+        // decision, with no community approval counted yet.
+        verificationClass =
+          approvingCommunity.size === 0
+            ? "registered"
+            : approvingDomain.size === 0
+              ? "community"
+              : "mixed";
+        verificationCommunities = [...approvingVenues];
       } else if (rejections >= REJECTIONS_TO_REJECT) {
         status = "rejected";
         trustedCountAtDecision = trustedCount;
@@ -660,6 +1009,9 @@ function consensusFor(
     approvers,
     promotingSeq,
     countedOperators: [...countedOperators],
+    verificationClass,
+    verificationCommunities,
+    promotingAt,
   };
 }
 
@@ -760,10 +1112,16 @@ export function mayValidateEntry(
   operator: string,
 ): boolean {
   const registered = registeredOperatorsAt(events, position);
+  // One registry, two kinds of operator (D-138): a community operator is
+  // registered by the log like any other and is judged by the same seven
+  // exclusions. Its domains are the ones its attestation token named — the
+  // registration's domain and every domain it has since joined — which is
+  // rule 7 asked of it exactly as it is asked of a domain operator.
+  const community = communityOperatorsAt(events, position).get(operator);
   return (
     eligibilityRefusal(operator, {
       // 1.
-      registered: registered.operators.has(operator),
+      registered: registered.operators.has(operator) || community !== undefined,
       // 2.
       authorOperator: target.authorOperator,
       // 3. A thunk, because answering it means walking the challenged entry and
@@ -788,7 +1146,10 @@ export function mayValidateEntry(
       // v0.7 carries no domain and reads as the default one, as
       // `operatorDomainsAt` says.
       domain: target.domain,
-      attestedIn: operatorDomainsAt(events, position).get(operator),
+      attestedIn:
+        community === undefined
+          ? operatorDomainsAt(events, position).get(operator)
+          : community.domains,
     }) === null
   );
 }
@@ -872,7 +1233,16 @@ function preconditionsMet(
   if (trustedCount === 0) return false;
   const registered = registeredOperatorsAt(events, position);
   let outside = 0;
-  for (const operator of registered.operators) {
+  // Both kinds of operator (D-138): the precondition counts the operators that
+  // could actually sign this entry, and a community operator can. Counting only
+  // the domain ones would say three signers do not exist in a world where they
+  // do, which is the same miscount the QA of 2026-09-12 found from the other
+  // side.
+  const candidates = new Set<string>([
+    ...registered.operators,
+    ...communityOperatorsAt(events, position).keys(),
+  ]);
+  for (const operator of candidates) {
     if (!mayValidateEntry(events, position, target, operator)) continue;
     outside += 1;
   }
@@ -1398,6 +1768,20 @@ function bootstrapLabelOf(
       continue;
     }
 
+    // A community operator's validation clears the label too (D-138), and for
+    // the same reason a counted confirmation does: it is a signature by
+    // somebody outside. Community operators have no perimeter at all — nobody
+    // named them into one — so an approving validation that reproduces the
+    // entry is exactly the outside look the label was waiting for.
+    if (isType(event, "community_validation")) {
+      const payload = event.payload as unknown as Record<string, unknown>;
+      if (event.entry_id !== entryId) continue;
+      if (payload["entry_id"] !== entryId) continue;
+      if (payload["decision"] !== "approve") continue;
+      if (!confirmationReproduces(payload["check"], snapshotHash)) continue;
+      return null;
+    }
+
     // The seam: every other event type is read by name off the payload and
     // ignored unless it is the one the door seals.
     if ((event.type as string) !== PUBLIC_CONFIRMATION_EVENT) continue;
@@ -1480,6 +1864,339 @@ export function confirmationsFor(
     });
   }
   return order.map((key) => byLine.get(key)!);
+}
+
+// ---------------------------------------------------------------------------
+// The community validations, the class and the layers (decision D-138)
+// ---------------------------------------------------------------------------
+
+/** One community validation, as the entry's readers carry it. */
+export interface CommunityValidationView {
+  readonly operator: string;
+  readonly venue: string;
+  readonly handle: string;
+  readonly agent: string;
+  readonly decision: "approve" | "reject";
+  readonly check: ConfirmationCheck;
+  readonly reason: string | null;
+  readonly attestation_version: string;
+  readonly fingerprint: string;
+  readonly posted_at: string;
+  /** Position of the event in the log, so a reader can go and look at it. */
+  readonly seq: number;
+}
+
+/**
+ * Every community validation of one entry, oldest first (decision D-138).
+ *
+ * A fold and nothing more: the payloads are read by name, so an event sealed by
+ * a build this one does not know is skipped rather than half-read, and nothing
+ * here is judged. Which of them the consensus counted is `consensusFor`'s
+ * answer, and which of their proofs hold is the verifier's — a synchronous fold
+ * has no business deciding a question about cryptography.
+ *
+ * One row per line of per comment, like the confirmations beside them: a line
+ * the door read twice is the newer of the two, in the place the first took.
+ */
+export function communityValidationsFor(
+  events: readonly Event[],
+  entryId: string,
+): CommunityValidationView[] {
+  const byLine = new Map<string, CommunityValidationView>();
+  const order: string[] = [];
+  for (const event of inSeqOrder(events)) {
+    if (!isType(event, "community_validation")) continue;
+    const payload = event.payload as unknown as Record<string, unknown>;
+    // Both halves, agreeing, exactly as the fold above asks (D-138).
+    if (event.entry_id !== entryId) continue;
+    if (payload["entry_id"] !== entryId) continue;
+    const operator = payload["operator"];
+    const venue = payload["venue"];
+    const handle = payload["handle"];
+    const decision = payload["decision"];
+    const version = payload["attestation_version"];
+    const fingerprint = payload["fingerprint"];
+    const check = payload["check"];
+    if (typeof operator !== "string" || typeof venue !== "string") continue;
+    if (typeof handle !== "string") continue;
+    if (decision !== "approve" && decision !== "reject") continue;
+    if (typeof version !== "string" || typeof fingerprint !== "string") continue;
+    if (!isCheckShape(check)) continue;
+    const agent = payload["agent"];
+    const reason = payload["reason"];
+    const postedAt = payload["posted_at"];
+    const commentId = payload["comment_id"];
+    const line = payload["line"];
+    const key = `${venue}:${typeof commentId === "number" ? commentId : -1}:${
+      typeof line === "number" ? line : 0
+    }`;
+    if (!byLine.has(key)) order.push(key);
+    byLine.set(key, {
+      operator,
+      venue,
+      handle,
+      agent: typeof agent === "string" ? agent : operator,
+      decision,
+      check,
+      reason: typeof reason === "string" ? reason : null,
+      attestation_version: version,
+      fingerprint,
+      posted_at: typeof postedAt === "string" ? postedAt : event.at,
+      seq: event.seq,
+    });
+  }
+  return order.map((key) => byLine.get(key)!);
+}
+
+/** Whether a value is one of the two checks the form accepts. */
+function isCheckShape(value: unknown): value is ConfirmationCheck {
+  if (typeof value !== "object" || value === null) return false;
+  const fields = value as Record<string, unknown>;
+  if (typeof fields["value"] !== "string") return false;
+  if (fields["kind"] === "hash") return true;
+  return (
+    fields["kind"] === "span" &&
+    (fields["value"] === "present" || fields["value"] === "absent")
+  );
+}
+
+/**
+ * Whether an entry's class meets a reader's demand (decision D-138 item 12).
+ *
+ * The order is `VERIFICATION_CLASSES`, weakest first, so `min_class=mixed`
+ * admits mixed and registered and refuses community. A null demand is no
+ * demand. A null class fails every demand, for the reason a null effective tier
+ * does (src/read.ts): the entry never verified, so there is nothing to promise,
+ * and answering "probably" to a reader who asked is the one thing these
+ * functions must never do.
+ */
+export function classSatisfies(
+  entryClass: VerificationClass | null,
+  minClass: VerificationClass | null,
+): boolean {
+  // Absent is no demand, exactly as null is: a caller holding a query written
+  // before the decision has no field here at all, and reading that as "the
+  // weakest class only" would filter a stream nobody asked to filter. The same
+  // tolerance `sourceClassSatisfies` has for the same reason.
+  if (minClass === null || minClass === undefined) return true;
+  if (entryClass === null) return false;
+  return (
+    VERIFICATION_CLASSES.indexOf(entryClass) >=
+    VERIFICATION_CLASSES.indexOf(minClass)
+  );
+}
+
+/**
+ * The dated layers behind one entry (decision D-138 item 11).
+ *
+ * The decision first, then one layer per reconfirmation by a *domain* operator
+ * on an entry whose decision class was `community` or `mixed`. That is the
+ * whole of "later stronger evidence is additive": the class the entry was
+ * decided at never moves, and what a later domain check adds is a dated line
+ * under it.
+ *
+ * A reconfirmation on a `registered` entry adds no layer: it is a
+ * reconfirmation, which the freshness rules already record, and a second
+ * registered layer would say nothing the first did not.
+ */
+function verificationLayersOf(
+  events: readonly Event[],
+  entryId: string,
+  consensus: Consensus,
+): readonly VerificationLayer[] {
+  if (consensus.promotingSeq === null) return EMPTY_LAYERS;
+  if (consensus.verificationClass === null) return EMPTY_LAYERS;
+  const layers: VerificationLayer[] = [
+    {
+      kind: "decision",
+      class: consensus.verificationClass,
+      seq: consensus.promotingSeq,
+      at: consensus.promotingAt ?? (consensus.verifiedAt as string),
+      operator: null,
+    },
+  ];
+  if (consensus.verificationClass === "registered") return layers;
+
+  const kinds = operatorKindsAt(events, Number.MAX_SAFE_INTEGER);
+  for (const event of inSeqOrder(events)) {
+    if (!isType(event, "reconfirmation")) continue;
+    if (event.entry_id !== entryId) continue;
+    const operator = (event.payload.record as unknown as { operator: string })
+      .operator;
+    // A domain operator, and only one: a community operator reconfirming a
+    // community-class entry adds evidence of the kind the entry already has.
+    if ((kinds.get(operator) ?? "domain") !== "domain") continue;
+    layers.push({
+      kind: "reconfirmation",
+      // What this layer is, not what the entry becomes: a domain operator's
+      // signature is registered evidence, and the entry's own class above it
+      // stays exactly where the decision left it.
+      class: "registered",
+      seq: event.seq,
+      at: event.at,
+      operator,
+    });
+  }
+  return layers;
+}
+
+/** The one empty list every unpromoted entry's layers are. */
+const EMPTY_LAYERS: readonly VerificationLayer[] = Object.freeze([]);
+
+/**
+ * Every reason a counted, token-carrying line is sealed as a confirmation
+ * rather than as a validation.
+ *
+ * Words and not sentences: the sweep seals one of these on the confirmation it
+ * falls back to, and the entry page prints it beside the line.
+ */
+export const COMMUNITY_LINE_REFUSALS = [
+  "no_attestation",
+  "unknown_entry",
+  "domain_unattested",
+  "own_entry",
+  "original_signer",
+  "maintainer_operator",
+  "excluded_party",
+  "subject_authority",
+  "entry_closed",
+  "already_validated",
+  "community_cap",
+] as const;
+
+export type CommunityLineRefusal = (typeof COMMUNITY_LINE_REFUSALS)[number];
+
+/** What one counted line is: a validation, or a confirmation and why. */
+export type CommunityLineDisposition =
+  | { kind: "validation" }
+  | { kind: "confirmation"; reason: CommunityLineRefusal };
+
+/**
+ * Whether one counted, token-carrying line is a validation by a community
+ * operator, or a public confirmation after all (decision D-138).
+ *
+ * The one pure rule the sweep asks before it seals such a line, so the door and
+ * the fold cannot drift: everything the door needs to decide is here, in one
+ * function, over the log and the line alone.
+ *
+ * A validation when the community operator — registered already, or about to be
+ * by this very line — may validate this entry:
+ *
+ * - the token attests the entry's own domain, which is what the version says;
+ * - the author's own key is not its own judge, whichever end it speaks from;
+ * - a party this domain excludes, or the authority its subject names, is
+ *   refused exactly as a domain operator is;
+ * - an entry that is closed takes no further decision;
+ * - one counted validation per account per entry;
+ * - and the per-community cap for this entry is not reached.
+ *
+ * Otherwise a confirmation, with the word that says which rule it fell under.
+ * A confirmation is not a refusal of the line: it is sealed, shown, and clears
+ * the bootstrap label exactly as D-136 says. What it does not do is count.
+ */
+export function communityLineDisposition(
+  events: readonly Event[],
+  entryId: string,
+  line: ConfirmationLine,
+  handle: string,
+  venue: string,
+  agent: string,
+  at: string,
+): CommunityLineDisposition {
+  const no = (reason: CommunityLineRefusal): CommunityLineDisposition => ({
+    kind: "confirmation",
+    reason,
+  });
+
+  if (line.attestation_version === null) return no("no_attestation");
+
+  const submission = submissionOf(events, entryId);
+  if (submission === null) return no("unknown_entry");
+  const core = submission.core;
+  const target = eligibilityTargetOf(core);
+
+  // The token attests one version of one text, and the text is per domain
+  // (D-071). A line that carries this build's version attests every domain
+  // whose published attestation is at that version, and nothing else: an entry
+  // in a domain whose attestation moved on is a confirmation, not a validation,
+  // because nobody signed the words that domain asks for.
+  const attested = isRegisteredDomain(target.domain)
+    ? attestationFor(target.domain).version === line.attestation_version
+    : false;
+  if (!attested) return no("domain_unattested");
+
+  const operator = communityOperatorId(venue, handle);
+  const position = Number.MAX_SAFE_INTEGER;
+
+  // The author's own key is not its own judge, said of both ends of the key:
+  // the id it speaks under, and the agent the log may already know as the
+  // author's own.
+  const agentOperators = agentOperatorsAt(events, position);
+  if (
+    target.authorOperator !== null &&
+    (target.authorOperator === operator ||
+      agentOperators.get(agent) === target.authorOperator)
+  ) {
+    return no("own_entry");
+  }
+
+  // An entry that is closed takes no further decision. Asked before the
+  // exclusions, because "this entry is decided" is a fact about the entry and
+  // the exclusions are facts about the speaker.
+  const consensus = consensusFor(events, entryId, core);
+  if (consensus.status !== "draft") return no("entry_closed");
+
+  // The remaining exclusions, through the one predicate every door asks
+  // (src/eligibility.ts), with the two facts this line establishes supplied:
+  // the operator is registered — by this line, if it was not already — and it
+  // is attested in this entry's domain, by the token.
+  const registered = registeredOperatorsAt(events, position);
+  const refusal = eligibilityRefusal(operator, {
+    registered: true,
+    authorOperator: target.authorOperator,
+    originalSigners: () => originalSignersAt(events, position, target.id),
+    maintainer: registered.maintainers.has(operator),
+    provider:
+      isRegisteredDomain(target.domain) &&
+      isExcludedParty(target.domain, operator),
+    authorityHosts: authorityHostsFor(target.domain, target.subject),
+    domain: target.domain,
+    attestedIn: [target.domain],
+  });
+  if (refusal !== null) {
+    switch (refusal) {
+      case "submitter_operator":
+        return no("own_entry");
+      case "original_signer":
+        return no("original_signer");
+      case "maintainer_operator":
+        return no("maintainer_operator");
+      case "provider_operator":
+        return no("excluded_party");
+      case "subject_authority":
+        return no("subject_authority");
+      default:
+        return no("own_entry");
+    }
+  }
+
+  // One counted validation per account per entry, and the per-community cap
+  // (D-138 item 10), both read off the validations already sealed.
+  const already = communityValidationsFor(events, entryId);
+  if (already.some((each) => each.operator === operator)) {
+    return no("already_validated");
+  }
+  const cap = communityCapPerEntry(countingCommunities().length);
+  const fromVenue = new Set(
+    already.filter((each) => each.venue === venue).map((each) => each.operator),
+  );
+  if (fromVenue.size >= cap) return no("community_cap");
+
+  // `at` is the sweep's own clock, carried so the rule has the same shape every
+  // other rule here has and so a later rule that needs the moment has it. No
+  // clause above reads it: nothing about who may validate depends on when.
+  void at;
+  return { kind: "validation" };
 }
 
 /**
@@ -1617,6 +2334,14 @@ export function deriveEntry(
     // counted into a status: the list and the label below are the whole of
     // what a confirmation does to a record.
     confirmations: confirmationsFor(events, entryId),
+    // Who met the consensus, off the same fold the counts came from (D-138).
+    // Null while draft or rejected: there is no decision to disclose.
+    verification_class: consensus.verificationClass,
+    verification_communities: consensus.verificationCommunities,
+    // Disclosed, never enforced: one community is still a community class, and
+    // the page says "community (single venue)" beside it.
+    verification_single_venue: consensus.verificationCommunities.length === 1,
+    verification_layers: verificationLayersOf(events, entryId, consensus),
     // Off the consensus already folded above, so the label and the counts it
     // is a statement about can never come from two readings of the log.
     bootstrap: bootstrapLabelOf(

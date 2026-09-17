@@ -17,7 +17,8 @@
 import type { DerivedAttestation } from "../attest.js";
 import type { ConfidenceInputs } from "../confidence.js";
 import type { Sidecar } from "../derive.js";
-import type { Event } from "../events.js";
+import type { CommunityBinding, Event } from "../events.js";
+import type { OperatorKind, VerificationClass } from "../policy.js";
 import type { IndependenceReport } from "../independence.js";
 import type { LedgerBalance, LedgerRow } from "../ledger.js";
 import type { Seal } from "../seal.js";
@@ -87,6 +88,17 @@ export interface EntryRow {
   claim: string;
   /** The sidecar's `effective_tier`, null while the entry is draft or rejected. */
   tier: string | null;
+  /**
+   * The sidecar's `verification_class` (decision D-138): who met this entry's
+   * consensus — registered, community or mixed — null while the entry is draft
+   * or rejected, exactly as the tier is.
+   *
+   * Carried on the row because the listing prints it per row: a reader looking
+   * at a page of verified entries can otherwise only learn which of them rest
+   * on community validators by opening each one. Null is rendered as nothing
+   * rather than a word, because a draft has no consensus to have a class.
+   */
+  verification_class: VerificationClass | null;
   last_confirmed: string;
   expires_at: string | null;
   stale: boolean;
@@ -138,6 +150,18 @@ export interface EntriesFilter {
   source: string | null;
   tier: string | null;
   fresh: "fresh" | "stale" | null;
+  /**
+   * The weakest verification class the listing will show (decision D-138), null
+   * for every class. `min_class=mixed` admits mixed and registered, because
+   * VERIFICATION_CLASSES is ordered weakest first and the filter is a floor and
+   * not an exact value — which is the same reading `min_class` has on the read
+   * and sync doors, so one word means one thing everywhere.
+   *
+   * A field like every other one here, read by the same parser and carried the
+   * same way, so the chip group, the "all" links and the keyset pager all keep
+   * it without knowing anything about it.
+   */
+  min_class: VerificationClass | null;
 }
 
 export interface EntriesData {
@@ -158,6 +182,18 @@ export interface ApproverRow {
   agent: string;
   operator: string;
   operatorTrusted: boolean | null;
+  /**
+   * Which kind of operator signed this decision (decision D-138). Read off the
+   * operator id's own shape by the registry's parser, never guessed here: a
+   * community operator's id is `<venue>:<handle>` and a domain operator's is a
+   * DNS name, and the two alphabets do not overlap.
+   */
+  operatorKind: OperatorKind;
+  /**
+   * The account behind a community validator — the venue and the handle a
+   * reader recognises it by — or null when a domain operator signed.
+   */
+  community: { readonly venue: string; readonly handle: string } | null;
   decision: string;
   reason: string | null;
   snapshot_hash: string | null;
@@ -282,8 +318,38 @@ export interface StandingCache {
   seq: number;
 }
 
+/**
+ * What a community operator is, beside its id (decision D-138).
+ *
+ * The account the key is bound to, and the binding itself, carried verbatim off
+ * the registry row: the venue and the handle are what a reader recognises the
+ * validator by, the agent is the key its lines are signed under, and the
+ * binding is the thing anybody can go and check. Null on a domain operator,
+ * which is bound by a DNS record and has no account anywhere.
+ */
+export interface CommunityOperator {
+  readonly venue: string;
+  readonly handle: string;
+  /** The agent id the community operator's validations are signed under. */
+  readonly agent: string;
+  readonly binding: CommunityBinding;
+}
+
 export interface OperatorRow {
   id: string;
+  /**
+   * Which kind of operator this row is (decision D-138): `domain` for a key
+   * bound by a DNS record under a registered name, `community` for a key bound
+   * to an account on an agent community. One registry holds both, because
+   * validation is one thing; the column says which path the operator came in
+   * by, and nothing else follows from it.
+   */
+  kind: OperatorKind;
+  /**
+   * The account behind a community operator, or null for a domain one. Off the
+   * registry row's own details, never assembled here.
+   */
+  community: CommunityOperator | null;
   maintainer: boolean;
   provider: boolean;
   trusted: boolean;
