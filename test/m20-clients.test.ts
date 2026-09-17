@@ -655,6 +655,9 @@ describe("register: arguments", () => {
       join: null,
       bindKeyPath: null,
       genesisKeyPath: null,
+      // Decision D-128: no perimeter is disclosed unless one is named, and it
+      // can only be named beside a genesis naming.
+      perimeter: null,
     });
   });
 
@@ -670,6 +673,46 @@ describe("register: arguments", () => {
     );
   });
 
+  it("reads the perimeter --perimeter names, beside a genesis naming", () => {
+    const plan = registerPlan([
+      ...good,
+      "--genesis",
+      "m.json",
+      "--perimeter",
+      "nomankind",
+    ]);
+    expect(plan?.perimeter).toBe("nomankind");
+    expect(plan?.genesisKeyPath).toBe("m.json");
+  });
+
+  it("refuses a perimeter with no naming to disclose it at", () => {
+    // The word belongs to the naming and to no other request this command
+    // makes, so a run that named one without --genesis is a usage error rather
+    // than a flag quietly dropped.
+    expect(registerPlan([...good, "--perimeter", "nomankind"])).toBeNull();
+    expect(
+      registerPlan([...good, "--join", DEFAULT_DOMAIN, "--perimeter", "nomankind"]),
+    ).toBeNull();
+    expect(
+      registerPlan([...good, "--bind", "new.json", "--perimeter", "nomankind"]),
+    ).toBeNull();
+  });
+
+  it("refuses a word the door would refuse, before any signature", () => {
+    for (const word of [
+      "Nomankind",
+      "nomankind.ai",
+      "-nomankind",
+      "nomankind-",
+      "no man kind",
+      "x".repeat(64),
+    ]) {
+      expect(
+        registerPlan([...good, "--genesis", "m.json", "--perimeter", word]),
+      ).toBeNull();
+    }
+  });
+
   for (const args of [
     [],
     ["key.json", BASE],
@@ -679,6 +722,8 @@ describe("register: arguments", () => {
     [...good, "--genesis", "a.json", "--genesis", "b.json"],
     [...good, "--bind"],
     [...good, "--trusted"],
+    [...good, "--genesis", "m.json", "--perimeter"],
+    [...good, "--genesis", "m.json", "--perimeter", "a", "--perimeter", "b"],
   ]) {
     it(`refuses before any I/O: ${JSON.stringify(args)}`, () => {
       expect(registerPlan(args)).toBeNull();
@@ -722,7 +767,37 @@ describe("register: what one run asks for", () => {
     const attestation = body["attestation"] as Record<string, unknown>;
     expect(typeof attestation["signature"]).toBe("string");
     expect(attestation["signed_at"]).toBe(NOW.toISOString());
+    // No perimeter was disclosed, so the naming body is the one this command
+    // has always sent: the key is absent rather than null.
     expect(http.asked[1]!.body).toEqual({ operator: OPERATOR });
+  });
+
+  it("puts the disclosed perimeter in the naming body, and nowhere else", async () => {
+    const printed = printer();
+    const http = new FakeHttp((path) =>
+      path === "/operators"
+        ? { status: 201, body: { id: OPERATOR } }
+        : { status: 200, body: { operator: OPERATOR, trusted: true } },
+    );
+
+    const run = await runRegister({
+      key: await key(),
+      baseUrl: BASE,
+      domain: OPERATOR,
+      genesisKey: await key(),
+      perimeter: "nomankind",
+      deps: { http, now: NOW, io: printed.io },
+    });
+
+    expect(run.ok).toBe(true);
+    expect(http.asked[1]!.body).toEqual({
+      operator: OPERATOR,
+      perimeter: "nomankind",
+    });
+    // The registration says nothing about a perimeter: the disclosure is the
+    // maintainer's and travels only in the request the maintainer signs.
+    expect(http.asked[0]!.body).not.toHaveProperty("perimeter");
+    expect(printed.out).toContain(`genesis ${OPERATOR} nomankind 200`);
   });
 
   it("does not name an operator whose registration was refused", async () => {
