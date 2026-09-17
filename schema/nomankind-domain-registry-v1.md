@@ -147,7 +147,7 @@ decision adds the row.
 | anthropic | anthropic.com, docs.anthropic.com, status.anthropic.com, claude.com, docs.claude.com |
 | google | google.com, ai.google.dev, cloud.google.com, status.cloud.google.com, deepmind.google, blog.google |
 | meta | meta.com, ai.meta.com, llama.com |
-| microsoft | microsoft.com, azure.microsoft.com, learn.microsoft.com |
+| microsoft | microsoft.com, azure.microsoft.com, learn.microsoft.com, microsoft.ai |
 | xai | x.ai, docs.x.ai, status.x.ai |
 | mistral | mistral.ai, docs.mistral.ai, status.mistral.ai |
 | cohere | cohere.com, docs.cohere.com, status.cohere.com |

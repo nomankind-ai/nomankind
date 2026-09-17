@@ -79,11 +79,15 @@ async function registration(
   });
 }
 
-/** One signed genesis naming. */
-function naming(agent: TestAgent, operator: string): Promise<Request> {
+/** One signed genesis naming, with the perimeter it discloses or none. */
+function naming(
+  agent: TestAgent,
+  operator: string,
+  perimeter?: string | number,
+): Promise<Request> {
   return signedPost(agent, {
     path: "/genesis",
-    body: { operator },
+    body: perimeter === undefined ? { operator } : { operator, perimeter },
     timestamp: AT,
   });
 }
@@ -340,9 +344,22 @@ describe("joining", () => {
 });
 
 describe("genesis naming", () => {
-  it("names the outside operator to the trusted pool", async () => {
+  it("refuses a perimeter that is not a perimeter word, and names nobody", async () => {
+    // Decision D-128: the disclosure is a lowercase DNS label and the door
+    // refuses anything else before it names anyone, so a spelling nobody else
+    // would write is never sealed into the log.
+    for (const bad of ["Nomankind", "nomankind.ai", "", 7]) {
+      await refused(await naming(maintainer, OUTSIDE, bad), 400, "bad_body");
+    }
+  });
+
+  it("names the outside operator to the trusted pool, inside a disclosed perimeter", async () => {
     const before = (await head()) as number;
-    const response = await handleRequest(await naming(maintainer, OUTSIDE), env, deps);
+    const response = await handleRequest(
+      await naming(maintainer, OUTSIDE, "nomankind"),
+      env,
+      deps,
+    );
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
@@ -352,13 +369,41 @@ describe("genesis naming", () => {
     expect(body.id).toBe(OUTSIDE);
     expect(body.details.trusted).toBe(true);
     expect(body.details.named_by).toBe(maintainer.agentId);
+    expect(body.details.perimeter).toBe("nomankind");
 
     const seq = (await head()) as number;
     expect(seq).toBe(before + 1);
     const event = await eventBySeq(store.db, seq);
     expect(event?.type).toBe("operator_trusted");
-    expect(event?.payload).toEqual({ operator: OUTSIDE });
+    // Section 11's naming and the maintainer's disclosure travel together, in
+    // the one event, so the perimeter is re-derivable from the log alone.
+    expect(event?.payload).toEqual({ operator: OUTSIDE, perimeter: "nomankind" });
     expect(body.details.trusted_seq).toBe(seq);
+  });
+
+  it("carries the perimeter into the directory and the independence report", async () => {
+    const listed = (await (
+      await handleRequest(get("/operators"), env, deps)
+    ).json()) as { operators: { id: string; details: Record<string, unknown> }[] };
+    const row = listed.operators.find((each) => each.id === OUTSIDE)!;
+    expect(row.details.perimeter).toBe("nomankind");
+
+    const report = (await (
+      await handleRequest(
+        new Request(`${TEST_ORIGIN}/independence`, {
+          headers: { accept: "application/json" },
+        }),
+        env,
+        deps,
+      )
+    ).json()) as {
+      validator_perimeters: Record<string, string[]>;
+      validator_set: { operator: string; perimeter: string | null }[];
+    };
+    expect(report.validator_perimeters["nomankind"]).toEqual([OUTSIDE]);
+    expect(
+      report.validator_set.find((each) => each.operator === OUTSIDE)!.perimeter,
+    ).toBe("nomankind");
   });
 
   it("shows the trust on the operator's own page", async () => {

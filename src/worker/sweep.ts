@@ -141,6 +141,8 @@ import {
 } from "../events.js";
 import type { LedgerRow } from "../ledger.js";
 import {
+  CONFIRMATION_COMMENTS_PER_THREAD,
+  CONFIRMATIONS_PER_RUN,
   DEFAULT_DOMAIN,
   DOMAIN_SLUGS,
   DRAW_DRAFT_MAX_AGE_DAYS,
@@ -152,6 +154,14 @@ import {
   SWEEP_INTERVAL_MINUTES,
   WITNESSES_REQUIRED,
 } from "../policy.js";
+import type { BoardAdapter, BoardComment } from "../adapters/board.js";
+import {
+  confirmationFingerprint,
+  parseConfirmationComment,
+  pinnedConfirmationTrust,
+  verifyConfirmationProof,
+  type ConfirmationTrust,
+} from "../confirm.js";
 import {
   MirrorError,
   buildMirror,
@@ -242,8 +252,12 @@ import {
   recordAssignmentMissed,
   recordAttestationExpired,
   recordPoolSnapshot,
+  recordPublicConfirmation,
   recordRevalidationAssignment,
   recordRevalidationMissed,
+  readConfirmationCursor,
+  writeConfirmationCursor,
+  existingEntryIds,
   recordSeal,
   recordTrustChange,
   recordVersionStale,
@@ -337,6 +351,20 @@ export interface SweepDeps {
    */
   readonly mirror?: MirrorAdapter;
   /**
+   * Where the public-confirmation door listens (D-136). Optional like the
+   * mirror adapter and for the same reason: a caller that asks for the sweep
+   * without one gets a `confirmations` step that counts `board_unavailable`
+   * rather than one that pretends to have read a board.
+   */
+  readonly board?: BoardAdapter;
+  /**
+   * Who a confirmation's registry proof is judged against. The pinned registry
+   * and the pinned witnesses when a caller says nothing; injectable so a test
+   * can prove a leaf under keys it actually holds, exactly as the beacon and
+   * the witness set are injectable.
+   */
+  readonly confirmationTrust?: ConfirmationTrust;
+  /**
    * Which timer ran this sweep (M23, decision D-076). There is one: the Sweeper
    * Durable Object's alarm. The cron trigger arms that alarm and never sweeps,
    * so `alarm` is the only value a run writes, and the column stays because the
@@ -380,6 +408,7 @@ export const SWEEP_STEPS: readonly string[] = Object.freeze([
   "revalidation",
   "staleness",
   "rederive",
+  "confirmations",
   "publish",
   "seal",
   "witness",
@@ -443,6 +472,28 @@ export interface SweepRevalidationDraw {
   readonly agent: string;
   readonly beacon_round: number;
   /** Position of the `revalidation_assigned` event this run appended. */
+  readonly seq: number;
+}
+
+/**
+ * One public confirmation this run sealed (decision D-136).
+ *
+ * The comment and the line it was read from travel beside the entry, because
+ * those two are the dedup key: a thread re-read after a crashed run seals
+ * nothing it already sealed, and a reader of the report can go and look at the
+ * line the door acted on.
+ */
+export interface SweepConfirmation {
+  readonly entry_id: string;
+  readonly venue: string;
+  readonly handle: string;
+  readonly thread: number;
+  readonly comment_id: number;
+  readonly line: number;
+  readonly verdict: "approve" | "reject";
+  /** Whether the confirmer's own key sealed this line's fingerprint (D-136). */
+  readonly counted: boolean;
+  /** Position of the `public_confirmation` event this run appended. */
   readonly seq: number;
 }
 
@@ -543,6 +594,16 @@ export interface SweepReport {
    * appended, so there is no position to report.
    */
   readonly rederived: readonly string[];
+  /**
+   * The public confirmations this run sealed, oldest comment first (D-136).
+   *
+   * One row per well-formed line the door took from a batch thread. What the
+   * run refused is in `skipped`, by rule rather than by error:
+   * `confirmation_proof_invalid` for a handle whose key could not be proved,
+   * `confirmation_unknown_entry` for a line naming an entry the log does not
+   * hold, and `board_unavailable` for a board that did not answer.
+   */
+  readonly confirmations: readonly SweepConfirmation[];
   /**
    * The days whose read count this run published, oldest first, and empty when
    * nothing was owed. One `read_count` event each.
@@ -1016,6 +1077,261 @@ async function readsOn(
   }
 
   return { rows, paid: { reads: paidRows, keys }, duplicates };
+}
+
+/**
+ * (d3) The public-confirmation door (decision D-136).
+ *
+ * Whitepaper Section 11: genesis is "a bootstrap exception to the earned-record
+ * rule, stated as such", and this step is how the record hears that somebody
+ * outside the maintainer's perimeter has looked at an entry. It reads the batch
+ * threads the venue names, verifies that each commenter's handle is a key the
+ * founding registry's log carries under a witnessed head, parses the published
+ * form out of the comment, and seals one `public_confirmation` per well-formed
+ * line.
+ *
+ * What it does NOT do, and cannot: change a status. A confirmation clears a
+ * bootstrap label (src/derive.ts) and is shown on the entry; the counted
+ * validators' decisions are what a status is, and a comment is not one of them.
+ *
+ * Four rules, in the order they bite:
+ *
+ * The board is read only where the door is open. An environment whose venue
+ * pins no thread has no adapter (src/adapters/board.ts, `boardAdapterFor`) and
+ * this step counts `board_unavailable` and reads nothing.
+ *
+ * The text is untrusted. It is parsed line by line and strictly: an off-form
+ * line is prose and is ignored silently, a line naming an entry the log does
+ * not hold is refused and counted, and nothing in a comment is ever followed.
+ *
+ * A proof that does not verify is never sealed. It is counted
+ * (`confirmation_proof_invalid`) and the comment is passed over, because an
+ * unverifiable claim about who spoke is not a confirmation at all.
+ *
+ * A re-read seals nothing twice. Each thread keeps a cursor on the board's own
+ * comment id, and every line already in the log is skipped by its
+ * (comment, line) key — so a run killed after sealing and before the cursor
+ * moved repairs itself on the next run instead of duplicating.
+ *
+ * Bounded by `CONFIRMATIONS_PER_RUN` across every thread, and by
+ * `CONFIRMATION_COMMENTS_PER_THREAD` within one; nothing is dropped, because
+ * each thread's cursor stops exactly where its run did.
+ *
+ * Never throws. A public board is weather.
+ */
+async function confirmationsStep(
+  db: D1Like,
+  board: BoardAdapter | undefined,
+  trust: ConfirmationTrust,
+  now: Date,
+  at: string,
+  cache: WorldCache,
+  skip: Skip,
+): Promise<SweepConfirmation[]> {
+  const sealed: SweepConfirmation[] = [];
+  if (board === undefined) {
+    skip("board_unavailable");
+    return sealed;
+  }
+
+  const threads = await board.threads();
+  if (threads === null) {
+    skip("board_unavailable");
+    return sealed;
+  }
+  if (threads.length === 0) return sealed;
+
+  // What the log already holds, keyed by the comment and the line, and whether
+  // that line has been counted yet. Read once per run.
+  //
+  // The key is the comment and the line and not the registry event, because the
+  // registry event is the *seal* of one line's fingerprint and a line that was
+  // never sealed has none at all. The counted flag rides on the key for the one
+  // case where a line may be sealed twice: an uncounted statement whose author
+  // seals its fingerprint afterwards. Nothing else reseals — a re-read of a
+  // thread finds every key already there.
+  const already = new Map<string, boolean>();
+  for (const event of await eventsOfType(db, "public_confirmation", -1, SEAL_MAX_EVENTS)) {
+    const payload = event.payload as unknown as Record<string, unknown>;
+    const key = `${String(payload["venue"])}:${String(payload["comment_id"])}:${String(payload["line"])}`;
+    already.set(key, (already.get(key) ?? false) || payload["counted"] === true);
+  }
+
+  for (const thread of threads) {
+    if (sealed.length >= CONFIRMATIONS_PER_RUN) break;
+
+    const cursor = (await readConfirmationCursor(db, board.venue, thread)) ?? 0;
+    const comments = await board.comments(
+      thread,
+      cursor,
+      CONFIRMATION_COMMENTS_PER_THREAD,
+    );
+    if (comments === null) {
+      skip("board_unavailable");
+      continue;
+    }
+
+    let through = cursor;
+    for (const comment of comments) {
+      if (sealed.length >= CONFIRMATIONS_PER_RUN) break;
+      const read = await confirmationsInComment(
+        db,
+        board,
+        trust,
+        now,
+        at,
+        cache,
+        skip,
+        already,
+        comment,
+      );
+      sealed.push(...read.taken);
+      // A conflicting write is the one refusal that might pass: the cursor
+      // stays behind this comment and the thread stops here, so the next run
+      // reads it again and seals the line it could not.
+      if (read.halted) break;
+      // Otherwise the cursor moves past a comment the door read, whatever it
+      // made of it: a comment of prose, or one whose proof did not verify, is
+      // not work this run failed to do.
+      through = Math.max(through, comment.id);
+    }
+
+    if (through > cursor) {
+      await writeConfirmationCursor(db, board.venue, thread, through, at);
+    }
+  }
+
+  return sealed;
+}
+
+/**
+ * Every confirmation one comment carries, sealed.
+ *
+ * The comment's body is a stranger's text and is treated as data throughout:
+ * parsed for the published form, checked against the entries the log holds, and
+ * never read as anything else. A comment holding no well-formed line costs one
+ * parse and no read at all — which is what most of a public thread is.
+ */
+async function confirmationsInComment(
+  db: D1Like,
+  board: BoardAdapter,
+  trust: ConfirmationTrust,
+  now: Date,
+  at: string,
+  cache: WorldCache,
+  skip: Skip,
+  already: Map<string, boolean>,
+  comment: BoardComment,
+): Promise<{ taken: SweepConfirmation[]; halted: boolean }> {
+  const taken: SweepConfirmation[] = [];
+
+  // The form first, the entries second: parsing costs nothing and most comments
+  // hold no line at all, so the index is asked only about comments that named
+  // an entry in the published form.
+  const offered = parseConfirmationComment(comment.body, () => true);
+  if (offered.length === 0) return { taken, halted: false };
+
+  const known = await existingEntryIds(db, [
+    ...new Set(offered.map((line) => line.entry_id)),
+  ]);
+  const lines = offered.filter((line) => {
+    if (known.has(line.entry_id)) return true;
+    skip("confirmation_unknown_entry");
+    return false;
+  });
+  if (lines.length === 0) return { taken, halted: false };
+
+  for (const line of lines) {
+    const entryId = line.entry_id;
+    const key = `${board.venue}:${comment.id}:${line.line}`;
+    const held = already.get(key);
+
+    // What the confirmer would have sealed to make this line count: the
+    // canonical form of their own line, digested (src/confirm.ts). The reason
+    // is not in it, so a sentence rewritten between two reads is the same
+    // statement.
+    const fingerprint = await confirmationFingerprint(line);
+
+    // Whether they did. One record read per line, bounded inside the adapter;
+    // a handle that sealed nothing, a seal for another line, or a proof that
+    // does not verify all answer the same way — the statement stands, as an
+    // account statement, and counts towards nothing.
+    const sealedFingerprint = await board.sealProof(comment.handle, fingerprint);
+    const counted =
+      sealedFingerprint !== null &&
+      (await verifyConfirmationProof(sealedFingerprint.proof, trust, {
+        handle: comment.handle,
+        fingerprint,
+      }));
+    if (sealedFingerprint !== null && !counted) {
+      skip("confirmation_proof_invalid");
+    }
+    if (!counted) skip("confirmation_unsealed");
+
+    // A line already in the log is sealed again only to say the thing that
+    // changed: that it is now counted. Everything else is a re-read.
+    if (held !== undefined && (held || !counted)) continue;
+
+    const world = await entryWorld(db, entryId, cache);
+    try {
+      const event = await recordPublicConfirmation(db, {
+        event: {
+          at,
+          type: "public_confirmation",
+          entry_id: entryId,
+          payload: {
+            entry_id: entryId,
+            venue: board.venue,
+            handle: comment.handle,
+            comment_id: comment.id,
+            registry_event_id: counted
+              ? (sealedFingerprint?.registry_event_id ?? null)
+              : null,
+            registry_proof: counted ? (sealedFingerprint?.proof ?? null) : null,
+            fingerprint,
+            counted,
+            verdict: line.verdict,
+            check: line.check,
+            reason: line.reason,
+            posted_at: comment.posted_at,
+            line: line.line,
+          },
+        },
+        stored: (confirmed): StoredEntryInput => {
+          const derived = rederive(world, entryId, now, [confirmed]);
+          return {
+            entry: derived.entry,
+            sidecar: derived.sidecar,
+            derivedThroughSeq: confirmed.seq,
+          };
+        },
+      });
+
+      already.set(key, counted);
+      taken.push({
+        entry_id: entryId,
+        venue: board.venue,
+        handle: comment.handle,
+        thread: comment.thread,
+        comment_id: comment.id,
+        line: line.line,
+        verdict: line.verdict,
+        counted,
+        seq: event.seq,
+      });
+    } catch (error) {
+      if (error instanceof EventAppendError) {
+        // Another writer reached the head first. The same refusal the publish
+        // step makes: this run stops confirming and carries on to its later
+        // steps, and the next run reads the same comment and seals the line.
+        skip("confirmation_conflict");
+        return { taken, halted: true };
+      }
+      throw error;
+    }
+  }
+
+  return { taken, halted: false };
 }
 
 /**
@@ -3400,6 +3716,21 @@ export async function runSweep(
     // be handed a row the kernel that built the clone disagrees with.
     const rederived = await rederiveStep(db, cache, deps.now, skip);
 
+    enter("confirmations");
+    // (d3) What the outside said in public (D-136). After the rederive, so a
+    // row this run rewrote is the row a confirmation is added to, and before
+    // the seal, so a confirmation sealed here is committed to by this same
+    // run's seal rather than a cycle later.
+    const confirmations = await confirmationsStep(
+      db,
+      deps.board,
+      deps.confirmationTrust ?? pinnedConfirmationTrust(),
+      deps.now,
+      at,
+      cache,
+      skip,
+    );
+
     enter("publish");
     // (e) The day's read counts. Before the seal on purpose: the count this run
     // publishes is sealed by this same run, which is what Section 9's "each day's
@@ -3549,6 +3880,7 @@ export async function runSweep(
       revalidation_missed: revalidationMissed,
       staled,
       rederived,
+      confirmations,
       published,
       attestations,
       sealed,
@@ -3643,6 +3975,7 @@ function nothingSwept(
     revalidation_missed: [],
     staled: [],
     rederived: [],
+    confirmations: [],
     published: [],
     attestations: { expired: [] },
     sealed: null,
@@ -3776,6 +4109,14 @@ function stepRows(
           },
           staleness: { staled: report.staled.length },
           rederive: { rederived: report.rederived.length },
+          // What the door took, and off how many threads (D-136). The refusals
+          // — an unverifiable proof, a line naming no known entry, a board that
+          // did not answer — are counted in `skipped` like every other rule's.
+          confirmations: {
+            sealed: report.confirmations.length,
+            counted: report.confirmations.filter((one) => one.counted).length,
+            threads: new Set(report.confirmations.map((one) => one.thread)).size,
+          },
           publish: {
             published: report.published.length,
             date:

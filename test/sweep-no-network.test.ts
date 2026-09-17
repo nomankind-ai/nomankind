@@ -346,6 +346,10 @@ describe("a sweep with work in every step and a network that never answers", () 
       mirror_failed: 1,
       read_counts_current: 1,
       anchor_pending: 1,
+      // D-136: this run was given no board, which is what an environment the
+      // confirmation door is not open on looks like. It says so rather than
+      // reading one.
+      board_unavailable: 1,
     });
   });
 

@@ -53,6 +53,20 @@ export interface ValidatorEntry {
   readonly provider: boolean;
   /** Every registered domain this operator is attested in, in the log's order. */
   readonly domains: readonly string[];
+  /**
+   * The perimeter the maintainer disclosed when it named this operator into the
+   * trusted pool, or null (decision D-128).
+   *
+   * Section 11's genesis is "a bootstrap exception to the earned-record rule,
+   * stated as such". Stating it is what this field is for: the maintainer's own
+   * grouping is published beside the operator rather than left for a reader to
+   * infer from the domain names, so a set that looks like six independent
+   * parties and is one is readable as one.
+   *
+   * Disclosed and never enforced. No rule anywhere refuses a validation because
+   * of a perimeter; what it changes is what the record is willing to claim.
+   */
+  readonly perimeter: string | null;
 }
 
 /** The head a countersignature covered: the registry's tree, at a size. */
@@ -99,12 +113,41 @@ export interface CoveredObjectEntry {
   readonly note: string;
 }
 
+/** Where one part of this report is computed from. Data, not policy. */
+export interface DerivedFromEntry {
+  /** The published rows the answer is folded out of, named as rows. */
+  readonly rows: readonly string[];
+  /** Where a reader can fetch those rows for themselves. */
+  readonly published_at: readonly string[];
+  readonly note: string;
+}
+
 /** The whole answer, and the JSON twin's exact shape. */
 export interface IndependenceReport {
   readonly validator_set: readonly ValidatorEntry[];
+  /**
+   * The disclosed perimeters, each naming the operators inside it, in the
+   * validator set's own order (decision D-128).
+   *
+   * Beside the two sets rather than folded into the claim, because it is the
+   * fact the claim is a reading of: a reader who disagrees with the words below
+   * can see the grouping and decide for themselves. An empty object is the
+   * ordinary case — no perimeter disclosed on any operator — and not a
+   * statement that none exists.
+   */
+  readonly validator_perimeters: Readonly<Record<string, readonly string[]>>;
   readonly witness_set: readonly WitnessEntry[];
   readonly intersection: readonly OverlapEntry[];
   readonly covered_object: Readonly<Record<string, CoveredObjectEntry>>;
+  /**
+   * Which published rows each part of this report was computed from (D-132).
+   *
+   * The page asserted two sets and a verdict and left a reader to find out for
+   * themselves where either came from. This is the answer, per set, in the
+   * names of the rows and the addresses they are published at, so
+   * `npm run independence` and a reader with curl are doing the same thing.
+   */
+  readonly derived_from: Readonly<Record<string, DerivedFromEntry>>;
   readonly external_witness_outside_validator_and_subject_provider_control: boolean;
   /** The claim the record will make out loud, in the words below. */
   readonly claim: string;
@@ -113,7 +156,7 @@ export interface IndependenceReport {
 }
 
 /**
- * The three claims, and the rule that picks one.
+ * The four claims, and the rule that picks one.
  *
  * A non-empty intersection is the strongest thing that can be said about it and
  * it is not "independent": the keys are still distinct keys, and the perimeter
@@ -121,10 +164,23 @@ export interface IndependenceReport {
  * exactly that and no more. An empty intersection with a live outside witness
  * is the claim the design is for. An empty intersection with nothing counted is
  * neither, and the record says so rather than borrowing the first label.
+ *
+ * The fourth is M25e's (decision D-128) and is about the other set. A witness
+ * outside the validators says the seal is countersigned from outside; it says
+ * nothing about who judged the facts under it, and at genesis the answer to
+ * that is "the operators the maintainer named, all of them inside one
+ * perimeter it disclosed". That is a weaker record than external independent
+ * confirmation and the label has to be able to say so, which is why this claim
+ * is picked ahead of CLAIM_EXTERNAL rather than beside it.
+ *
+ * The flag is untouched by any of this: it answers exactly the question
+ * morty-synctzn asked, about the witness set, and it goes on answering it.
  */
 export const CLAIM_EXTERNAL = "external independent confirmation";
 export const CLAIM_SHARED_PERIMETER =
   "confirmation by independent keys under a disclosed shared perimeter";
+export const CLAIM_SINGLE_PERIMETER =
+  "every validator inside one disclosed perimeter";
 export const CLAIM_NONE_COUNTED = "no external countersignature counted yet";
 
 /** What each kind of signature in this record is made over. Data, not policy. */
@@ -176,6 +232,77 @@ export const COVERED_OBJECT: Readonly<Record<string, CoveredObjectEntry>> =
       fields: Object.freeze(["date", "roots", "hash", "calendar", "receipt"]),
       signed_by: "an external timestamping calendar",
       note: "One UTC day of roots offered to OpenTimestamps, which is what makes the existence proof independent of the identity layer.",
+    }),
+  });
+
+/**
+ * Where each part of this report comes from, named row by row (D-132).
+ *
+ * The page published two sets and a verdict and said nothing about what they
+ * were computed from, which made it an assertion in exactly the place an
+ * assertion is worth least. These are the rows, and the addresses they are
+ * published at, so `npm run independence -- <mirror>` and a reader with curl
+ * recompute the same answer from the same bytes.
+ *
+ * Data and not policy: every number the rules use is src/policy.ts's, and
+ * nothing here is read by any rule. It is a map of the record, kept beside the
+ * code that draws it so the two move together.
+ */
+export const DERIVED_FROM: Readonly<Record<string, DerivedFromEntry>> =
+  Object.freeze({
+    validator_set: Object.freeze({
+      rows: Object.freeze([
+        "operator_registered",
+        "agent_bound",
+        "operator_joined_domain",
+        "operator_trusted (the genesis naming)",
+      ]),
+      published_at: Object.freeze([
+        "/operators",
+        "/operators/{id}",
+        "the mirror's operators.json",
+      ]),
+      note: "Every registered operator, trusted or not. The rows are the log's own registry events; the directory and the mirror are the same rows indexed.",
+    }),
+    validator_perimeters: Object.freeze({
+      rows: Object.freeze(["operator_trusted.perimeter"]),
+      published_at: Object.freeze([
+        "/operators",
+        "/operators/{id}",
+        "the mirror's operators.json",
+      ]),
+      note: "The perimeter the maintainer disclosed when it named an operator into the trusted pool (decision D-128). Sealed in the naming event, so it is re-derivable from the log and is not a row anybody could edit.",
+    }),
+    witness_set: Object.freeze({
+      rows: Object.freeze(["WITNESS_PIN"]),
+      published_at: Object.freeze(["src/policy.ts", "/policy"]),
+      note: "A module constant and not a table: the pin is the maintainer's published choice, it costs no query, and a reader checks it against the repository.",
+    }),
+    counted_and_head: Object.freeze({
+      rows: Object.freeze([
+        "witnesses",
+        "head",
+        "leaf_index",
+        "proof",
+        "proved_at",
+        "consistency_proof",
+      ]),
+      published_at: Object.freeze(["/seals/{seq}", "the mirror's seals.jsonl"]),
+      note: "The newest seal's own countersignature rows. A witness is counted when that seal carries its countersignature; the head is the (tree_size, root) it covered, and the evidence beside it is what proves our seal event is included under that head.",
+    }),
+    intersection: Object.freeze({
+      rows: Object.freeze(["agent_bound_to_operator", "handle_is_operator_id"]),
+      published_at: Object.freeze(["/operators/{id}", "src/independence.ts"]),
+      note: "The two checks, and only those two. A shared owner behind two names is not a row anywhere, so it is not in the intersection and the page says so in words.",
+    }),
+    claim_and_flag: Object.freeze({
+      rows: Object.freeze([
+        "intersection",
+        "validator_perimeters",
+        "witness_set[].counted",
+      ]),
+      published_at: Object.freeze(["/independence", "src/independence.ts"]),
+      note: "By the published rule and nothing else: claimFor picks the claim from the three above, and the flag is true while a pinned witness outside the intersection has a countersignature the newest seal counted.",
     }),
   });
 
@@ -242,9 +369,57 @@ function overlap(
   return null;
 }
 
-/** The claim, from the intersection and the flag. */
-export function claimFor(overlaps: number, external: boolean): string {
+/**
+ * The perimeters the validator set discloses, each naming its operators.
+ *
+ * Keyed by the word the maintainer published and never by anything derived
+ * from it, so the page groups by the same string the naming event carries. An
+ * operator with no perimeter is in no group, which is the ordinary case and is
+ * not a group of its own.
+ */
+export function validatorPerimeters(
+  validators: readonly ValidatorEntry[],
+): Record<string, string[]> {
+  const grouped: Record<string, string[]> = {};
+  for (const validator of validators) {
+    const perimeter = validator.perimeter;
+    if (perimeter === null) continue;
+    (grouped[perimeter] ??= []).push(validator.operator);
+  }
+  return grouped;
+}
+
+/**
+ * The one perimeter every validator sits inside, or null.
+ *
+ * Null when the set is empty, when any operator has no perimeter, and when two
+ * of them have different ones — three different facts that are the same answer
+ * to the only question asked here, which is whether the whole validator set is
+ * one disclosed grouping.
+ */
+export function singleValidatorPerimeter(
+  validators: readonly ValidatorEntry[],
+): string | null {
+  if (validators.length === 0) return null;
+  const first = validators[0]!.perimeter;
+  if (first === null) return null;
+  return validators.every((each) => each.perimeter === first) ? first : null;
+}
+
+/**
+ * The claim, from the intersection, the flag and the disclosed perimeters.
+ *
+ * In that order, strongest fact about the record first: a witness that is also
+ * an operator, then a validator set that is one disclosed grouping, then a live
+ * outside countersignature, then nothing counted at all.
+ */
+export function claimFor(
+  overlaps: number,
+  external: boolean,
+  singlePerimeter: string | null = null,
+): string {
   if (overlaps > 0) return CLAIM_SHARED_PERIMETER;
+  if (singlePerimeter !== null) return CLAIM_SINGLE_PERIMETER;
   return external ? CLAIM_EXTERNAL : CLAIM_NONE_COUNTED;
 }
 
@@ -287,11 +462,17 @@ export function independenceReport(
 
   return {
     validator_set: input.validators,
+    validator_perimeters: validatorPerimeters(input.validators),
     witness_set: witnesses,
     intersection,
     covered_object: COVERED_OBJECT,
+    derived_from: DERIVED_FROM,
     external_witness_outside_validator_and_subject_provider_control: external,
-    claim: claimFor(intersection.length, external),
+    claim: claimFor(
+      intersection.length,
+      external,
+      singleValidatorPerimeter(input.validators),
+    ),
     seal_seq: input.sealSeq,
   };
 }

@@ -132,6 +132,11 @@ const unsealedRow: EntryRow = {
 };
 
 const sidecar: Sidecar = {
+  // Nobody outside has confirmed this fixture in public (D-136).
+  confirmations: [],
+  // No bootstrap label on this fixture (D-128): the entry it stands for
+  // was not decided by one disclosed perimeter's operators.
+  bootstrap: null,
   needs_replacement: false,
   effective_tier: "stated",
   test_verdict: "rejected",
@@ -527,6 +532,9 @@ const operatorRow: OperatorRow = {
   maintainer: false,
   provider: false,
   trusted: true,
+  // Named into a disclosed perimeter (D-128), so the directory and the
+  // operator page both have a word to print.
+  perimeter: "fixtures",
   trustedSeq: 5,
   registeredSeq: 2,
   agents: 2,

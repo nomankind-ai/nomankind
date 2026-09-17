@@ -358,9 +358,10 @@ const WRITE_PATH: readonly Endpoint[] = [
   {
     method: "POST",
     path: "/genesis",
-    parameters: "operator; signed by the maintainer's agent",
+    parameters:
+      "operator, and optionally perimeter (one lowercase DNS label: the grouping the maintainer discloses at the naming, decision D-128); signed by the maintainer's agent",
     answers:
-      "The maintainer's one-time naming of a founding trusted operator, as the public event operator_trusted. 200 with the record.",
+      "The maintainer's one-time naming of a founding trusted operator, as the public event operator_trusted, with the perimeter sealed into that event's own payload when one was given. 200 with the record.",
     refusals:
       "503 maintainer_not_configured; 403 not_maintainer; 422 unregistered_operator; 403 maintainer_operator, provider_operator; 409 already_trusted.",
   },

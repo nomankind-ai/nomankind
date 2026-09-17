@@ -375,6 +375,54 @@ export interface AgentBindBody {
 /** What a genesis naming carries. */
 export interface GenesisBody {
   readonly operator: string;
+  /**
+   * The disclosed perimeter this operator is named inside, or null when the
+   * maintainer names none (decision D-128).
+   *
+   * Section 11's genesis is a bootstrap exception stated as such: the
+   * maintainer names the first trusted operators, and the honest thing to
+   * publish beside that power is which of them the maintainer already stands
+   * behind. A perimeter is exactly that and nothing more — a word the
+   * maintainer discloses at the moment of naming, e.g. "nomankind" for the
+   * operators it runs itself — so a reader can see when an entry's whole
+   * validator set came from inside one grouping rather than from the world.
+   *
+   * It is a disclosure and never a permission: no rule anywhere reads it to
+   * allow or refuse anything. `isPerimeter` is the whole of its syntax.
+   */
+  readonly perimeter: string | null;
+}
+
+/**
+ * Whether a value is a perimeter word: one DNS label, lowercase.
+ *
+ * The same shape a domain's label has (RFC 1035 section 2.3.4), for the reason
+ * the operator id is lowercase ASCII — the word is a key the independence page
+ * groups by, and two spellings of one perimeter must never be two perimeters.
+ * A label rather than a name because a perimeter is a grouping the maintainer
+ * invents, not a host anybody proves control of; it is deliberately not
+ * required to be a registrable domain, and nothing resolves it.
+ */
+export function isPerimeter(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value.length === 0 || value.length > DNS_LABEL_MAX_LENGTH) return false;
+  return LABEL.test(value);
+}
+
+/**
+ * The perimeter an operator's stored details name, or null.
+ *
+ * One reader for every place that asks — the directory, the operator page, the
+ * independence report, the mirror — so a row written before D-128, a row whose
+ * details hold something that is not a perimeter word, and a row that was
+ * never named at all all read the same: no perimeter disclosed. The details
+ * are an index into the naming event and not a second source of truth, so a
+ * value that is not a perimeter is ignored rather than published.
+ */
+export function perimeterOf(details: unknown): string | null {
+  if (typeof details !== "object" || details === null) return null;
+  const value = (details as Record<string, unknown>)["perimeter"];
+  return isPerimeter(value) ? value : null;
 }
 
 /** A parse either produced a body or refused it; there is no partial result. */
@@ -492,15 +540,31 @@ export function parseAgentBindBody(body: unknown): ParseResult<AgentBindBody> {
   return { ok: true, value: { agent, attestation } };
 }
 
-/** Read a genesis naming body: an operator, and nothing else. */
+/**
+ * Read a genesis naming body: an operator, and the perimeter it is named
+ * inside.
+ *
+ * An absent or null `perimeter` is not a parse failure and not a default — it
+ * is the maintainer naming no grouping, which reads as null everywhere after
+ * this. A perimeter that is present but is not a perimeter word is bad_body,
+ * for the reason a malformed attestation is: the caller sent something this
+ * door would otherwise have sealed into the log under a spelling nobody else
+ * would ever write.
+ */
 export function parseGenesisBody(body: unknown): ParseResult<GenesisBody> {
   const refused = { ok: false, reason: "bad_body" } as const;
   const object = asObject(body);
   if (object === null) return refused;
-  if (!hasKeys(object, ["operator"])) return refused;
+  if (!hasKeys(object, ["operator"], ["perimeter"])) return refused;
   const operator = object["operator"];
   if (typeof operator !== "string") return refused;
-  return { ok: true, value: { operator } };
+  const supplied = object["perimeter"];
+  if (supplied !== undefined && supplied !== null && !isPerimeter(supplied)) {
+    return refused;
+  }
+  const perimeter =
+    supplied === undefined || supplied === null ? null : supplied;
+  return { ok: true, value: { operator, perimeter } };
 }
 
 // ---------------------------------------------------------------------------

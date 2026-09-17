@@ -108,6 +108,11 @@ function entryOf(fixture: Fixture): Entry {
 
 function sidecarOf(fixture: Fixture): Sidecar {
   return {
+    // Nobody outside has confirmed this fixture in public (D-136).
+    confirmations: [],
+    // No bootstrap label on this fixture (D-128): the entry it stands for
+    // was not decided by one disclosed perimeter's operators.
+    bootstrap: null,
     needs_replacement: false,
     effective_tier: fixture.effectiveTier,
     test_verdict: null,

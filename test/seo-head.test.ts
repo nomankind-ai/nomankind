@@ -124,6 +124,11 @@ const entryRecord: Record<string, unknown> = {
 };
 
 const sidecar: Sidecar = {
+  // Nobody outside has confirmed this fixture in public (D-136).
+  confirmations: [],
+  // No bootstrap label on this fixture (D-128): the entry it stands for
+  // was not decided by one disclosed perimeter's operators.
+  bootstrap: null,
   needs_replacement: false,
   effective_tier: "stated",
   test_verdict: null,

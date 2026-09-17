@@ -34,6 +34,13 @@ import {
   type AttestationStatus,
   type DerivedAttestation,
 } from "./attest.js";
+import {
+  confirmationFingerprint,
+  confirmationPayloadOf,
+  pinnedConfirmationTrust,
+  verifyConfirmationProof,
+  type ConfirmationTrust,
+} from "./confirm.js";
 import { CORE_KEYS, coreVersion, domainOf, extractCore } from "./core.js";
 import { deriveEntry, registeredOperatorsAt } from "./derive.js";
 import { disputeExclusions } from "./dispute.js";
@@ -817,9 +824,60 @@ function checkCore(entry: Json, logCore: Json, report: Report): void {
 async function checkRecords(
   bundle: LogBundle,
   entryId: string,
+  trust: ConfirmationTrust,
   report: Report,
 ): Promise<void> {
   for (const event of inSeqOrder(bundle.events)) {
+    // A public confirmation carries no record and no record signature. What a
+    // *counted* one carries is the proof that the confirmer's own key sealed
+    // this line's fingerprint into the founding registry's log, under a head
+    // the pinned witnesses countersigned (decision D-136). So it is checked
+    // here, beside the signatures, by the same rule the door applied before it
+    // sealed it, and in three parts:
+    //
+    // The fingerprint is recomputed from the line's own fields — the entry, the
+    // verdict, the check — and must be the one the event carries. A proof of a
+    // seal of some other sentence is not a proof of this one.
+    //
+    // A counted event's proof must verify. A line the reader cannot recheck is
+    // a line they must not take as outside confirmation of anything, whatever
+    // the log says about it.
+    //
+    // An uncounted event is valid with no proof at all, and only with none: it
+    // is an account statement, the board's word for who typed it, and it clears
+    // nothing. Evidence hanging off a statement that claims not to count would
+    // be evidence nothing checks, so it is refused rather than ignored.
+    if ((event?.type as string) === "public_confirmation") {
+      const confirmation = confirmationPayloadOf(event);
+      if (confirmation === null) {
+        report.add("records", `/events/${event.seq}`, "confirmation_proof_invalid");
+        continue;
+      }
+      if (event.entry_id !== entryId && confirmation.entry_id !== entryId) {
+        continue;
+      }
+
+      const expected = await confirmationFingerprint(confirmation);
+      const wrongFingerprint = confirmation.fingerprint !== expected;
+      // Bound to the handle that spoke and to the line it spoke about, both
+      // read off this event: a valid proof of some other leaf in the
+      // registry's log — another citizen's seal, or a seal of another line —
+      // is a proof of something else and is refused here.
+      const proved = confirmation.counted
+        ? await verifyConfirmationProof(confirmation.registry_proof, trust, {
+            handle: confirmation.handle,
+            fingerprint: expected,
+          })
+        : confirmation.registry_proof === null;
+      if (wrongFingerprint || !proved) {
+        report.add(
+          "records",
+          `/events/${event.seq}`,
+          "confirmation_proof_invalid",
+        );
+      }
+      continue;
+    }
     if (event?.type !== "validation" && event?.type !== "reconfirmation") {
       continue;
     }
@@ -1252,6 +1310,19 @@ async function checkEntrySeal(
 }
 
 /**
+ * What a caller may hand the verifier besides the two files.
+ *
+ * One thing, and it is not a knob: who a public confirmation's registry proof
+ * is judged against (decision D-136). Absent — which is every caller in src/,
+ * the CLI included — it is the pin in src/policy.ts and nothing else. It exists
+ * because a test cannot forge the founding registry's key, and a check nobody
+ * can test a refusal of is a check nobody has checked.
+ */
+export interface VerifyOptions {
+  readonly confirmations?: ConfirmationTrust;
+}
+
+/**
  * Check one entry against the log bundle beside it, offline.
  *
  * The checks run in CHECKS order and each appends its own diffs; a check that
@@ -1261,9 +1332,10 @@ async function checkEntrySeal(
 export async function verifyOffline(
   entry: unknown,
   bundle: unknown,
+  options: VerifyOptions = {},
 ): Promise<VerifyReport> {
   try {
-    return await runChecks(entry, bundle);
+    return await runChecks(entry, bundle, options);
   } catch (error) {
     // The promise holds even for a case nobody thought of: a stranger's file
     // can always be answered with a verdict, never with a stack trace.
@@ -1290,6 +1362,7 @@ export async function verifyOffline(
 async function runChecks(
   entry: unknown,
   bundle: unknown,
+  options: VerifyOptions,
 ): Promise<VerifyReport> {
   const report = new Report();
 
@@ -1389,7 +1462,12 @@ async function runChecks(
 
   // f. Every record signature on this entry. A bounded bundle carries the
   // decisions' own events (D-120), so this runs on both.
-  await checkRecords(readable, entryId, report);
+  await checkRecords(
+    readable,
+    entryId,
+    options.confirmations ?? pinnedConfirmationTrust(),
+    report,
+  );
 
   // g. The exclusions, replayed at each decision's position.
   //

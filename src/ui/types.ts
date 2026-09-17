@@ -311,6 +311,16 @@ export interface OperatorRow {
    * operator that has signed alone every time has co-signed with nobody.
    */
   cosigners: number;
+  /**
+   * The perimeter the maintainer disclosed when it named this operator into the
+   * trusted pool, or null (decision D-128).
+   *
+   * Shown in the directory and on the operator page because Section 11's
+   * genesis is a bootstrap exception "stated as such": the maintainer's own
+   * grouping belongs beside the operator it named, not only on the page that
+   * adds them up.
+   */
+  perimeter: string | null;
 }
 
 export interface OperatorsData {

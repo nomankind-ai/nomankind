@@ -53,6 +53,7 @@ import { ledgerBalance } from "../ledger.js";
 import {
   ATTESTATION_TEXT,
   ATTESTATION_VERSION,
+  perimeterOf,
   TXT_RECORD_PREFIX,
 } from "../registry.js";
 import {
@@ -379,6 +380,10 @@ function toOperatorRow(
     provider: record.provider,
     trusted: record.details["trusted"] === true,
     trustedSeq: typeof trustedSeq === "number" ? trustedSeq : null,
+    // The perimeter the genesis naming disclosed beside the trust it granted
+    // (decision D-128). Null on every operator named before the decision and
+    // on every one the maintainer named no grouping for.
+    perimeter: perimeterOf(record.details),
     registeredSeq: record.registeredSeq,
     agents,
     validations,
@@ -1268,6 +1273,10 @@ async function independence(db: D1Like): Promise<IndependenceData> {
         maintainer: record.maintainer,
         provider: record.provider,
         domains: domains.get(record.id) ?? [],
+        // The perimeter the genesis naming disclosed (D-128), off the row the
+        // registry writes it into. No extra read: the directory page already
+        // carries every operator's details.
+        perimeter: perimeterOf(record.details),
       })),
       pin: WITNESS_PIN,
       counted: (seal?.witnesses ?? []).map((witness) => ({

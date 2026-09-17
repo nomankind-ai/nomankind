@@ -870,6 +870,7 @@ describe("validate --duplicate-of", () => {
       entryId: id,
       assigned: false,
       duplicateOf: null,
+      quote: false,
     });
 
     // The flag's value is the flag's, never a fourth positional argument.
@@ -880,6 +881,7 @@ describe("validate --duplicate-of", () => {
         entryId: id,
         assigned: true,
         duplicateOf: id,
+        quote: false,
       },
     );
 

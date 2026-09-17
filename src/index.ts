@@ -7,6 +7,7 @@ export * from "./assign.js";
 export * from "./attest.js";
 export * from "./bounty.js";
 export * from "./confidence.js";
+export * from "./confirm.js";
 export * from "./core.js";
 export * from "./derive.js";
 export * from "./dispute.js";

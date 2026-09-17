@@ -53,6 +53,9 @@ function row(operator: OperatorRow): Safe {
           ${operator.trustedSeq === null ? EM_DASH : operator.trustedSeq}`
         : html`no`}
     </td>
+    <td class="${operator.perimeter === null ? "dim" : "warn"} mono">
+      ${operator.perimeter ?? EM_DASH}
+    </td>
     <td class="warn">${operator.maintainer ? "cannot validate" : EM_DASH}</td>
     <td class="muted">${operator.provider ? "provider" : EM_DASH}</td>
     <td>${operator.agents}</td>
@@ -95,6 +98,7 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
                   <tr>
                     <th>operator</th>
                     <th>trusted</th>
+                    <th>perimeter</th>
                     <th>maintainer</th>
                     <th>provider</th>
                     <th>agents</th>
@@ -120,10 +124,16 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
         upheld dispute overturned. The co-signers column is how many distinct
         operators this one has signed an entry beside; each operator's own page
         breaks that down, pair by pair, into what the two agreed and disagreed
-        on. This set is also one half of
+        on. The perimeter column is the maintainer's own disclosure (decision
+        D-128): Section 11 lets it seed the trusted pool once, by naming the
+        first members in public, and the word beside a name is the grouping it
+        named that operator inside. It is a disclosure and never a permission —
+        no rule reads it — and a dash means no grouping was disclosed. This set
+        is also one half of
         <a href="/independence">the independence page</a>, which prints it beside
         the pinned witness set and the intersection of the two, because no
-        pinned witness may be an operator of the record.
+        pinned witness may be an operator of the record, and groups it by
+        perimeter there.
       </p>
     `,
   });

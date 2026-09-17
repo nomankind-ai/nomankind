@@ -242,6 +242,22 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
           </table>
         </div>
         <p class="note">${maintainerLine}</p>
+        <p class="note">
+          The naming itself carries one more thing since decision D-128: an
+          optional <span class="mono">perimeter</span>, a single lowercase word
+          the maintainer discloses at the moment it names an operator, for a
+          grouping it already stands behind — the operators it runs itself, say.
+          It travels inside the
+          <span class="mono">operator_trusted</span> event, so anyone can fold
+          it back out of the log, and it appears on
+          <a href="/operators">the directory</a>, on the operator's own page and
+          on <a href="/independence">the independence page</a>, which groups the
+          validator set by it. It is a disclosure and never a permission: no
+          rule refuses anything because of a perimeter. What it changes is what
+          this record is willing to claim — an entry every one of whose
+          validators sat inside one perimeter says so on its own page, until
+          somebody outside that perimeter confirms the fact.
+        </p>
       </section>
 
       <section class="panel">
