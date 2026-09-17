@@ -365,6 +365,7 @@ describe("the confirmation form", () => {
         // No attestation token on this line (D-138): a plain confirmation,
         // exactly as D-136 wrote it.
         attestation_version: null,
+        signature: null,
         reason: "fetched it myself",
       },
       {
@@ -373,6 +374,7 @@ describe("the confirmation form", () => {
         verdict: "reject",
         check: { kind: "span", value: "absent" },
         attestation_version: null,
+        signature: null,
         reason: "the page says nothing of the kind",
       },
     ]);
@@ -387,6 +389,7 @@ describe("the confirmation form", () => {
         verdict: "approve",
         check: { kind: "span", value: "present" },
         attestation_version: null,
+        signature: null,
         reason: null,
       },
     ]);

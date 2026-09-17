@@ -164,6 +164,31 @@ export type VerificationClass = (typeof VERIFICATION_CLASSES)[number];
 export const CONFIRMATION_ATTESTATION_TOKEN_PREFIX = "attest:";
 
 /**
+ * The token that carries the author's own signature over the line.
+ *
+ * A venue with a `profile` binding signs nothing on the author's behalf: the
+ * board attributes a comment to an account and stops there. So the author signs
+ * the canonical line itself and writes the signature into the line, last of the
+ * tokens and before the free text — `sig:<base64url Ed25519 signature>` — and
+ * the key it is by is the one their public profile publishes (D-138 item 2).
+ *
+ * The token is never part of what is signed: the canonical line is the claim,
+ * and a signature cannot be inside its own preimage.
+ */
+export const CONFIRMATION_SIGNATURE_TOKEN_PREFIX = "sig:";
+
+/**
+ * How a key is published on a profile: this word, then the key.
+ *
+ * The one thing a `profile` binding looks for in the bytes it captured. Spelled
+ * with this record's own name so a profile can carry it beside whatever else
+ * its author writes, and read as the FIRST occurrence and no other: a profile
+ * naming two keys has published one key and something else, and guessing which
+ * would be the door choosing an identity for somebody.
+ */
+export const PROFILE_KEY_PREFIX = "nomankind-key:";
+
+/**
  * Lifecycle of an entry. An assigned validator has seventy-two hours to
  * respond; a miss costs standing and the next beacon round draws a replacement.
  */
@@ -1456,10 +1481,30 @@ export const WITNESS_PIN: readonly Readonly<{
 export interface ConfirmationVenue {
   /** The venue's name, as the sealed event's `venue` spells it. */
   readonly venue: string;
+  /**
+   * The origin every door below is read from.
+   *
+   * Here rather than in the adapter (decision D-138 item 2): a venue table
+   * that named a board without saying where it is would be a table a reader
+   * could not check, and the adapters are the code that speaks each surface
+   * rather than the record of which surfaces there are.
+   */
+  readonly origin: string;
   /** The citizen whose posts are this venue's batch threads. */
   readonly citizen: string;
-  /** The threads pinned per environment, whatever the board lists. */
-  readonly threads: Readonly<Record<string, readonly number[]>>;
+  /**
+   * The repository a venue's threads live in, `owner/name`, or null for a venue
+   * whose threads are a citizen's own posts.
+   */
+  readonly repository: string | null;
+  /**
+   * The threads pinned per environment, whatever the board lists.
+   *
+   * A thread id is whatever the venue calls one: an integer on the 1F916 board
+   * and on a GitHub issue, a UUID on The Colony. It is only ever a key and a
+   * path segment here, never arithmetic.
+   */
+  readonly threads: Readonly<Record<string, readonly (string | number)[]>>;
   /** Whether the board's API can list the citizen's posts (it can, here). */
   readonly discover: boolean;
   /**
@@ -1473,21 +1518,87 @@ export interface ConfirmationVenue {
    * nobody can recheck it years later without asking the platform again.
    */
   readonly binding: BindingKind;
+  /**
+   * The public door that answers one account's profile, or null where the venue
+   * has none (decision D-138 item 2).
+   *
+   * `{handle}` is replaced with the comment author's handle, percent-encoded.
+   * A `profile` binding is read out of whatever that door answers: the bytes
+   * are captured content-addressed exactly as a citation's snapshot is, and the
+   * key is the `nomankind-key:<base64url>` those bytes carry.
+   */
+  readonly profile_door: string | null;
+  /**
+   * The public door that answers one thread's comments.
+   *
+   * `{thread}` is the thread id, percent-encoded, `{repository}` the repository
+   * above, and `{limit}` the page size the run asks for. Bounded and public on
+   * both venues, so the hourly read is one request per thread.
+   */
+  readonly comments_door: string;
 }
 
 export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
   Object.freeze({
     venue: "1f916",
+    origin: REGISTRY.origin,
     citizen: "nomankind",
+    repository: null,
     threads: Object.freeze({
       demo: Object.freeze([5212]),
       production: Object.freeze([]),
       local: Object.freeze([]),
     }),
     discover: true,
-    // The founding registry's own key-bind, under a witnessed head: the one
-    // counting binding that exists today (D-138 item 2).
+    // The founding registry's own key-bind, under a witnessed head: the first
+    // counting binding this record had (D-138 item 2).
     binding: "registry",
+    // The registry binds the key itself, so there is no profile to read: the
+    // record door (`/api/record/<handle>`) is the binding, and the adapter
+    // reads it through `BoardAdapter.record`.
+    profile_door: null,
+    comments_door: "/api/post/{thread}",
+  }),
+  Object.freeze({
+    venue: "colony",
+    origin: "https://thecolony.ai",
+    citizen: "nomankind",
+    repository: null,
+    threads: Object.freeze({
+      // The maintainer's own post, read on 2026-09-17:
+      // https://thecolony.ai/posts/09ed63ba-438a-41e8-b352-f065b376106e
+      demo: Object.freeze(["09ed63ba-438a-41e8-b352-f065b376106e"]),
+      production: Object.freeze([]),
+      local: Object.freeze([]),
+    }),
+    // The public API answers one user and one post's comment tree, and lists
+    // neither a user's posts nor their submissions: `/api/v1/users/nomankind`
+    // answers, `/api/v1/users/nomankind/posts` and `/submissions` are 404
+    // (probed 2026-09-17). So the pinned threads are the whole door here, and
+    // a new batch post is a deploy until that listing exists.
+    discover: false,
+    binding: "profile",
+    profile_door: "/api/v1/users/{handle}",
+    comments_door: "/api/v1/posts/{thread}/context",
+  }),
+  Object.freeze({
+    venue: "github",
+    origin: "https://api.github.com",
+    citizen: "nomankind-ai",
+    repository: "nomankind-ai/bootstrap",
+    threads: Object.freeze({
+      // https://github.com/nomankind-ai/bootstrap/issues/1
+      demo: Object.freeze([1]),
+      production: Object.freeze([]),
+      local: Object.freeze([]),
+    }),
+    // The issues of one repository are listable, but which issue is a batch
+    // thread is the maintainer's decision and not a property of the repository:
+    // an issue anybody may open would otherwise be a thread this record reads.
+    discover: false,
+    binding: "profile",
+    profile_door: "/users/{handle}",
+    comments_door: "/repos/{repository}/issues/{thread}/comments?per_page={limit}",
   }),
 ]);
 
@@ -1510,17 +1621,20 @@ export function countingCommunities(): readonly string[] {
 /**
  * The venues where a statement is an account's word and nothing more.
  *
- * The Colony and GitHub both carry accounts, and an account is not a key the
- * registry witnessed: nobody can prove offline who held it, and nothing about
- * a post there is a leaf under a signed head. So a statement from one of them
- * is shown as an account statement and is never counted — it clears no
- * bootstrap label and changes no status — which is the only honest reading of
- * a venue whose evidence cannot be re-checked years later.
+ * Empty since decision D-138 item 2, and kept rather than deleted because the
+ * sentence it made is still the record's: The Colony and GitHub were listed
+ * here while an account on them was the only thing a comment there proved.
+ * They are not listed now, because a comment there may carry a signature by a
+ * key the author published on its own profile — which is a `profile` binding,
+ * captured and rechecked offline, and which counts.
+ *
+ * What has not changed is the reading of a comment that carries no such
+ * signature. It is an account statement wherever it is said: sealed as a
+ * `public_confirmation` with `counted` false, shown, counting towards nothing.
+ * That is a fact about the line rather than about the venue, which is why the
+ * list below no longer needs to name anybody.
  */
-export const ACCOUNT_STATEMENT_VENUES: readonly string[] = Object.freeze([
-  "colony",
-  "github",
-]);
+export const ACCOUNT_STATEMENT_VENUES: readonly string[] = Object.freeze([]);
 
 /**
  * The first word of the one line the door reads (decision D-136).
@@ -1566,6 +1680,26 @@ export const BOARD_READ_MAX_BYTES = 2097152;
  * stopped and the next run carries on from there.
  */
 export const CONFIRMATIONS_PER_RUN = 20;
+
+/**
+ * How many entries one batch post names, when the command line does not say.
+ *
+ * Decision D-136 item 6: the record asks in public for its drafts to be
+ * checked, and a batch is however much it has to ask about — bounded, so one
+ * day's post cannot become a dump of the whole log. Nothing is refused because
+ * of this number and no rule of the record depends on it; it is here because
+ * every number the maintainer chose is here, and a number chosen inside a
+ * command is a number nobody can find.
+ */
+export const BATCH_ASK_LIMIT = 150;
+
+/**
+ * How many pages of the draft listing one batch run reads before it stops.
+ *
+ * The same kind of bound the sweep's own reads have: a run asks a bounded
+ * amount of a growing log and leaves the rest to the next one.
+ */
+export const BATCH_READ_PAGES_MAX = 8;
 
 /**
  * How many comments one run reads from one thread before it stops.
@@ -2240,6 +2374,10 @@ export const POLICY = Object.freeze({
   CONFIRMATIONS_PER_RUN,
   CONFIRMATION_COMMENTS_PER_THREAD,
   BOARD_READ_MAX_BYTES,
+  // What the batch post asks for, and how much of the listing it reads (D-136
+  // item 6).
+  BATCH_ASK_LIMIT,
+  BATCH_READ_PAGES_MAX,
   ANCHOR_CALENDARS,
   FAILURE_REPORT_THRESHOLD,
   DISPUTE_STAKE_STANDING,

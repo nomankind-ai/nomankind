@@ -45,6 +45,7 @@ import {
   REGISTRY,
   WITNESS_FILE_TAIL_BYTES,
   WITNESS_PIN,
+  type BindingKind,
   type ConfirmationVenue,
 } from "../policy.js";
 import type {
@@ -105,12 +106,48 @@ const KEY_BIND = "identity.key_bind";
  */
 const MAX_RECORD_PAGES = 10;
 
+/** A thread or a comment id, as the venue spells one (decision D-138 item 2). */
+export type BoardId = number | string;
+
+/**
+ * What a venue's cursor counts, and so what the integer in the counters table
+ * means for it (decision D-138 item 2).
+ *
+ * `id` is the board's own comment id, which is what the 1F916 board and a
+ * GitHub issue number their comments with: the cursor is the newest id taken,
+ * and a page is what is newer than it.
+ *
+ * `time` is epoch milliseconds of the newest comment taken, which is what a
+ * venue whose ids are opaque has instead — The Colony's are UUIDs, and a UUID
+ * has no order to be after. The page is what was posted at or after the
+ * cursor, inclusive on purpose: two comments written in the same millisecond
+ * must not be able to push each other out of a run, and a comment read twice
+ * is sealed once by the dedup key on (venue, comment, line).
+ */
+export type BoardCursorKind = "id" | "time";
+
+/** The cursor value one page of comments was taken past, per kind. */
+export function cursorOf(kind: BoardCursorKind, comment: BoardComment): number {
+  if (kind === "time") {
+    const ms = Date.parse(comment.posted_at);
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  return typeof comment.id === "number" ? comment.id : 0;
+}
+
 /** One comment on a batch thread, as the board published it. */
 export interface BoardComment {
-  /** The board's own comment id, which the cursor and the dedup key are on. */
-  readonly id: number;
+  /**
+   * The board's own comment id, which the cursor and the dedup key are on.
+   *
+   * An integer on the 1F916 board and on a GitHub issue, a UUID on The Colony.
+   * The cursor is an integer, so it moves only where the ids are integers; the
+   * dedup key is the id itself, which is what makes a venue with opaque ids
+   * safe to re-read.
+   */
+  readonly id: BoardId;
   /** The thread it was written on. */
-  readonly thread: number;
+  readonly thread: BoardId;
   /** The citizen handle that wrote it. Untrusted text, like the body. */
   readonly handle: string;
   /** The comment's text. UNTRUSTED: parsed strictly, never followed. */
@@ -154,6 +191,28 @@ export interface BoardRecord {
 }
 
 /**
+ * One account's public profile, as the venue served it (decision D-138 item 2).
+ *
+ * The bytes rather than a parsed key, because the bytes are the evidence: they
+ * are hashed and archived under their own address exactly as a citation's
+ * snapshot is, and the binding a registration carries names that hash. A key
+ * read out and thrown away would leave a claim nobody could recheck.
+ *
+ * UNTRUSTED, like a comment body: scanned for one token (src/confirm.ts,
+ * `profileKeyIn`), escaped wherever it is shown, never followed.
+ */
+export interface BoardProfile {
+  /** The door this was read from, which the binding records. */
+  readonly url: string;
+  /** The raw bytes, bounded by `BOARD_READ_MAX_BYTES`. */
+  readonly bytes: Uint8Array;
+  /** What the venue said they are, or null when it said nothing. */
+  readonly content_type: string | null;
+  /** The status the door answered, for the capture's sidecar. */
+  readonly status: number;
+}
+
+/**
  * What the sweep's `confirmations` step asks of a board.
  *
  * Three questions, each answering null for "the board did not answer", which
@@ -163,14 +222,36 @@ export interface BoardRecord {
 export interface BoardAdapter {
   /** Which venue this adapter speaks for, as the sealed event spells it. */
   readonly venue: string;
+  /** How a key is bound to an account here (decision D-138): what the sweep asks. */
+  readonly binding: BindingKind;
+  /** What this venue's cursor counts: its comment ids, or the clock. */
+  readonly cursor: BoardCursorKind;
   /** The batch threads for this environment: the pinned ones and the listed ones. */
-  threads(): Promise<readonly number[] | null>;
-  /** One bounded page of a thread's comments newer than `afterId`. */
+  threads(): Promise<readonly BoardId[] | null>;
+  /**
+   * One bounded page of a thread's comments newer than `afterId`.
+   *
+   * `afterId` is 0 for a thread never read, and otherwise the cursor this
+   * venue keeps: the newest comment id it has taken, or epoch milliseconds of
+   * the newest comment it has taken, by `cursor` above. Either way the page is
+   * bounded, and the dedup key on (venue, comment, line) is what keeps a
+   * re-read from sealing anything twice.
+   */
   comments(
-    thread: number,
+    thread: BoardId,
     afterId: number,
     limit: number,
   ): Promise<readonly BoardComment[] | null>;
+  /**
+   * The public profile of one account, fetched and bounded, or null (D-138).
+   *
+   * What a `profile` binding is read out of: the bytes the venue's profile door
+   * answered, carried raw so the sweep can archive them content-addressed
+   * exactly as a citation's snapshot is, and read for one token and nothing
+   * else. Absent on a venue that binds keys some other way — the 1F916 board
+   * binds them in its own log, which is `record` above.
+   */
+  profile?(handle: string): Promise<BoardProfile | null>;
   /**
    * The proof that this handle's own key sealed this fingerprint, or null when
    * the record carries no such seal (or could not be read, which the step
@@ -258,6 +339,82 @@ function hexPathOf(value: unknown): string[] | null {
 }
 
 /**
+ * One of a venue's doors, with its placeholders filled in.
+ *
+ * The doors themselves are policy (`ConfirmationVenue`, src/policy.ts) and this
+ * is only the substitution: the venue's origin, then the path with `{thread}`,
+ * `{handle}`, `{repository}` and `{limit}` replaced. Every value a caller
+ * supplies is percent-encoded, because a handle and a thread id are somebody
+ * else's strings and a path segment is not the place to find that out — a
+ * repository is encoded per segment, since its one slash is a path separator
+ * the table means.
+ */
+function doorFor(
+  venue: ConfirmationVenue,
+  path: string,
+  values: {
+    thread?: BoardId;
+    handle?: string;
+    limit?: number;
+  },
+): string {
+  const repository = (venue.repository ?? "")
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  const filled = path
+    .replace("{repository}", repository)
+    .replace(
+      "{thread}",
+      values.thread === undefined ? "" : encodeURIComponent(String(values.thread)),
+    )
+    .replace(
+      "{handle}",
+      values.handle === undefined ? "" : encodeURIComponent(values.handle),
+    )
+    .replace("{limit}", String(values.limit ?? CONFIRMATION_COMMENTS_PER_THREAD));
+  return `${venue.origin}${filled}`;
+}
+
+/**
+ * A bounded public GET whose body is text, with the status and the type it came
+ * with — or null on anything at all.
+ *
+ * The one call the two community adapters share. Bounded by
+ * `BOARD_READ_MAX_BYTES` like every other read this record makes of somebody
+ * else's server, deadlined like every other, and carrying the User-Agent GitHub
+ * requires of an unauthenticated caller. No credential of any kind: both doors
+ * are public, and a door that needed one would be a door whose answer nobody
+ * else could check.
+ */
+async function publicRead(
+  call: typeof fetch,
+  url: string,
+  maxBytes: number,
+): Promise<{ bytes: Uint8Array; content_type: string | null; status: number } | null> {
+  return withDeadline(FETCH_TIMEOUT_MS, async (signal) => {
+    let response: Response;
+    try {
+      response = await call(url, {
+        method: "GET",
+        headers: { accept: "application/json", "user-agent": USER_AGENT },
+        signal,
+      });
+    } catch {
+      return null;
+    }
+    if (!response.ok) return null;
+    const text = await boundedText(response, maxBytes);
+    if (text === null) return null;
+    return {
+      bytes: new TextEncoder().encode(text),
+      content_type: response.headers.get("content-type"),
+      status: response.status,
+    };
+  });
+}
+
+/**
  * The board's epoch milliseconds as an ISO instant.
  *
  * Null rather than a guess for anything that is not a millisecond count: a
@@ -268,6 +425,27 @@ function hexPathOf(value: unknown): string[] | null {
 function instantOf(value: unknown): string | null {
   const ms = integerOf(value);
   if (ms === null || ms < 0) return null;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A venue's own ISO instant, normalized, or null when it is not one.
+ *
+ * The two community venues time their comments in ISO rather than in epoch
+ * milliseconds (`2026-09-14T03:43:05.027986+00:00` on The Colony,
+ * `2026-09-14T03:43:05Z` on GitHub), and both are parsed and re-rendered here
+ * so every `posted_at` this record seals is the one instant format it uses.
+ * Null and never a guess, exactly as `instantOf` above: a comment whose time
+ * cannot be read is one this adapter does not offer.
+ */
+function isoOf(value: unknown): string | null {
+  if (typeof value !== "string" || value === "") return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
   try {
     return new Date(ms).toISOString();
   } catch {
@@ -288,7 +466,7 @@ export function confirmationVenue(venue: string): ConfirmationVenue | null {
 export function pinnedThreadsFor(
   venue: ConfirmationVenue,
   environment: string,
-): readonly number[] {
+): readonly BoardId[] {
   return venue.threads[environment] ?? [];
 }
 
@@ -302,12 +480,19 @@ export function pinnedThreadsFor(
  */
 export class UnavailableBoardAdapter implements BoardAdapter {
   readonly venue: string;
+  readonly binding: BindingKind;
+  readonly cursor: BoardCursorKind = "id";
 
-  constructor(venue = CONFIRMATION_VENUES[0]?.venue ?? "1f916") {
+  constructor(
+    venue = CONFIRMATION_VENUES[0]?.venue ?? "1f916",
+    binding: BindingKind = CONFIRMATION_VENUES.find((row) => row.venue === venue)
+      ?.binding ?? "registry",
+  ) {
     this.venue = venue;
+    this.binding = binding;
   }
 
-  async threads(): Promise<readonly number[] | null> {
+  async threads(): Promise<readonly BoardId[] | null> {
     return null;
   }
 
@@ -327,8 +512,21 @@ export class UnavailableBoardAdapter implements BoardAdapter {
 /** What a fixture board is built from: threads, their comments, and the keys. */
 export interface MockBoardOptions {
   readonly venue?: string;
-  readonly threads?: readonly number[] | null;
-  readonly comments?: ReadonlyMap<number, readonly BoardComment[]> | null;
+  /** Which binding kind the fixture venue uses; `registry` when unsaid. */
+  readonly binding?: BindingKind;
+  /** What the fixture venue's cursor counts; its ids when unsaid. */
+  readonly cursor?: BoardCursorKind;
+  readonly threads?: readonly BoardId[] | null;
+  readonly comments?: ReadonlyMap<BoardId, readonly BoardComment[]> | null;
+  /**
+   * The accounts' public profiles, keyed by handle (decision D-138 item 2).
+   *
+   * The text a fixture profile publishes, which the adapter answers as bytes: a
+   * test writes `nomankind-key:<key>` into a bio exactly as an agent would, and
+   * the sweep captures and hashes what comes back. A handle with no entry has
+   * no profile, which is what a door that does not know an account answers.
+   */
+  readonly profiles?: ReadonlyMap<string, string> | null;
   /** Sealed fingerprints, keyed `<handle> <fingerprint>`. */
   readonly seals?: ReadonlyMap<string, BoardSealProof> | null;
   /**
@@ -349,37 +547,67 @@ export interface MockBoardOptions {
  */
 export class MockBoardAdapter implements BoardAdapter {
   readonly venue: string;
-  readonly #threads: readonly number[] | null;
-  readonly #comments: ReadonlyMap<number, readonly BoardComment[]> | null;
+  readonly binding: BindingKind;
+  readonly cursor: BoardCursorKind;
+  readonly #threads: readonly BoardId[] | null;
+  readonly #comments: ReadonlyMap<BoardId, readonly BoardComment[]> | null;
   readonly #seals: ReadonlyMap<string, BoardSealProof> | null;
   readonly #records: ReadonlyMap<string, BoardRecord> | null;
+  readonly #profiles: ReadonlyMap<string, string> | null;
   /** How many times each thread was read: what a "second run" test asserts on. */
-  readonly reads: number[] = [];
+  readonly reads: BoardId[] = [];
+  /** Which handles' profiles were fetched, in order: what the cache is asserted on. */
+  readonly profileReads: string[] = [];
 
   constructor(options: MockBoardOptions = {}) {
     this.venue = options.venue ?? "1f916";
+    this.binding = options.binding ?? "registry";
+    this.cursor = options.cursor ?? "id";
     this.#threads = options.threads === undefined ? [] : options.threads;
     this.#comments = options.comments ?? new Map();
     this.#seals = options.seals ?? new Map();
     this.#records = options.records ?? new Map();
+    this.#profiles = options.profiles ?? null;
   }
 
-  async threads(): Promise<readonly number[] | null> {
+  async threads(): Promise<readonly BoardId[] | null> {
     return this.#threads;
   }
 
   async comments(
-    thread: number,
+    thread: BoardId,
     afterId: number,
     limit: number,
   ): Promise<readonly BoardComment[] | null> {
     if (this.#comments === null) return null;
     this.reads.push(thread);
     const all = this.#comments.get(thread) ?? [];
-    return all
-      .filter((comment) => comment.id > afterId)
-      .sort((left, right) => left.id - right.id)
-      .slice(0, limit);
+    // Exactly what the real doors answer, per cursor kind: a board that numbers
+    // its comments serves what is newer than the id, in id order; a board whose
+    // ids are opaque serves what was posted at or after the instant, in the
+    // order it holds them.
+    const ordered =
+      this.cursor === "time"
+        ? [...all].filter((comment) => cursorOf("time", comment) >= afterId)
+        : [...all]
+            .filter((comment) => cursorOf("id", comment) > afterId)
+            .sort(
+              (left, right) => cursorOf("id", left) - cursorOf("id", right),
+            );
+    return ordered.slice(0, limit);
+  }
+
+  async profile(handle: string): Promise<BoardProfile | null> {
+    if (this.#profiles === null) return null;
+    this.profileReads.push(handle);
+    const text = this.#profiles.get(handle);
+    if (text === undefined) return null;
+    return {
+      url: `https://${this.venue}.test/profile/${encodeURIComponent(handle)}`,
+      bytes: new TextEncoder().encode(text),
+      content_type: "application/json",
+      status: 200,
+    };
   }
 
   async sealProof(
@@ -443,6 +671,9 @@ interface ProvedLeaf {
  */
 export class RegistryBoardAdapter implements BoardAdapter {
   readonly venue: string;
+  readonly binding: BindingKind;
+  /** The board numbers its comments, so the cursor is the newest id taken. */
+  readonly cursor: BoardCursorKind = "id";
 
   readonly #fetch: typeof fetch;
   readonly #origin: string;
@@ -457,6 +688,7 @@ export class RegistryBoardAdapter implements BoardAdapter {
   constructor(options: RegistryBoardOptions) {
     const row = options.venue ?? CONFIRMATION_VENUES[0]!;
     this.venue = row.venue;
+    this.binding = row.binding;
     this.#row = row;
     this.#environment = options.environment;
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
@@ -536,9 +768,9 @@ export class RegistryBoardAdapter implements BoardAdapter {
    * post by the same citizen, and production ingesting demo's comments because
    * one handle posted both would be the door deciding where it is open.
    */
-  async threads(): Promise<readonly number[] | null> {
+  async threads(): Promise<readonly BoardId[] | null> {
     const pinned = pinnedThreadsFor(this.#row, this.#environment);
-    const ids = new Set<number>(pinned);
+    const ids = new Set<number>(pinned.map((id) => Number(id)));
     if (!this.#row.discover || ids.size === 0) return [...ids];
 
     const body = objectOf(
@@ -570,12 +802,12 @@ export class RegistryBoardAdapter implements BoardAdapter {
    * confirmation is sealed with all four of those on it or not at all.
    */
   async comments(
-    thread: number,
+    thread: BoardId,
     afterId: number,
     limit: number,
   ): Promise<readonly BoardComment[] | null> {
     const body = objectOf(
-      await this.#json(`${this.#origin}/api/post/${thread}`),
+      await this.#json(doorFor(this.#row, this.#row.comments_door, { thread })),
     );
     if (body === null) return null;
 
@@ -595,7 +827,7 @@ export class RegistryBoardAdapter implements BoardAdapter {
       if (id <= afterId) continue;
       comments.push({ id, thread, handle, body: text, posted_at: postedAt });
     }
-    comments.sort((left, right) => left.id - right.id);
+    comments.sort((left, right) => (left.id as number) - (right.id as number));
     return comments.slice(0, Math.min(limit, CONFIRMATION_COMMENTS_PER_THREAD));
   }
 
@@ -1051,21 +1283,275 @@ export class RegistryBoardAdapter implements BoardAdapter {
 }
 
 /**
- * The board this environment listens to.
+ * What a community board adapter is built from.
  *
- * An environment whose venue names no threads and cannot discover any gets the
- * unavailable board, and the step does not read anything at all: the door is
- * open where the maintainer opened it (`CONFIRMATION_VENUES`) and nowhere else.
- * Everywhere else it is the real registry's public read surface, on demo as on
- * production, because the board and the citizens on it are the same real ones
- * whichever Worker is listening.
+ * The venue row is the whole configuration: its origin, its doors and its
+ * threads per environment all come off the table in src/policy.ts, so a venue
+ * is added there and nowhere else. `fetch` and `maxBytes` are injectable for
+ * the reason every other adapter's are — a test drives the real parsing over
+ * fixture bytes, and no test reaches the network.
  */
-export function boardAdapterFor(env: Env): BoardAdapter {
-  const row = CONFIRMATION_VENUES[0];
-  if (row === undefined) return new UnavailableBoardAdapter();
-  const environment = env.ENVIRONMENT;
-  if (pinnedThreadsFor(row, environment).length === 0) {
-    return new UnavailableBoardAdapter(row.venue);
-  }
-  return new RegistryBoardAdapter({ venue: row, environment });
+export interface CommunityBoardOptions {
+  readonly venue: ConfirmationVenue;
+  readonly environment: string;
+  readonly fetch?: typeof fetch;
+  readonly maxBytes?: number;
 }
+
+/**
+ * What the two community venues share: the pinned threads, the bounded public
+ * read, and the profile door a `profile` binding is read out of.
+ *
+ * Neither venue has a registry, so `sealProof` and `record` answer null here
+ * and mean it: a comment on either board proves an account and nothing more,
+ * and the only thing that can make it a key's statement is the author's own
+ * signature over the line, checked against the key their public profile
+ * publishes (decision D-138 item 2). Answering anything else from these would
+ * be this adapter inventing a binding the venue does not offer.
+ *
+ * Discovery is refused by both rows in policy, so the threads are the pinned
+ * ones: The Colony lists no user's posts on its public API (probed 2026-09-17),
+ * and which issue of a repository is a batch thread is the maintainer's
+ * decision rather than a property of the repository.
+ */
+abstract class CommunityBoardAdapter implements BoardAdapter {
+  readonly venue: string;
+  readonly binding: BindingKind;
+  abstract readonly cursor: BoardCursorKind;
+  protected readonly row: ConfirmationVenue;
+  protected readonly maxBytes: number;
+  readonly #fetch: typeof fetch;
+  readonly #environment: string;
+
+  constructor(options: CommunityBoardOptions) {
+    this.row = options.venue;
+    this.venue = options.venue.venue;
+    this.binding = options.venue.binding;
+    this.#environment = options.environment;
+    this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.maxBytes = options.maxBytes ?? BOARD_READ_MAX_BYTES;
+  }
+
+  /** The pinned threads for this environment, and nothing discovered. */
+  async threads(): Promise<readonly BoardId[] | null> {
+    return [...pinnedThreadsFor(this.row, this.#environment)];
+  }
+
+  /** One bounded public read, through the injected fetcher. */
+  protected read(
+    url: string,
+  ): Promise<{ bytes: Uint8Array; content_type: string | null; status: number } | null> {
+    return publicRead(this.#fetch, url, this.maxBytes);
+  }
+
+  /** One bounded public read, parsed as JSON, or null on anything at all. */
+  protected async json(url: string): Promise<unknown | null> {
+    const answer = await this.read(url);
+    if (answer === null) return null;
+    try {
+      return JSON.parse(new TextDecoder().decode(answer.bytes)) as unknown;
+    } catch {
+      return null;
+    }
+  }
+
+  abstract comments(
+    thread: BoardId,
+    afterId: number,
+    limit: number,
+  ): Promise<readonly BoardComment[] | null>;
+
+  /**
+   * The account's public profile, raw.
+   *
+   * The bytes are what travels: they are hashed and archived under their own
+   * address by the sweep, exactly as a citation's snapshot is, and the key is
+   * read out of them afterwards by the kernel. Null for a venue with no profile
+   * door and for a door that did not answer — which is an uncounted line, never
+   * a guess.
+   */
+  async profile(handle: string): Promise<BoardProfile | null> {
+    const path = this.row.profile_door;
+    if (path === null) return null;
+    const url = doorFor(this.row, path, { handle });
+    const answer = await this.read(url);
+    if (answer === null) return null;
+    return {
+      url,
+      bytes: answer.bytes,
+      content_type: answer.content_type,
+      status: answer.status,
+    };
+  }
+
+  /** No registry here: a seal of a line is a thing this venue cannot hold. */
+  async sealProof(): Promise<BoardSealProof | null> {
+    return null;
+  }
+
+  /** And no record: the venue's own word about a key is the profile above. */
+  async record(): Promise<BoardRecord | null> {
+    return null;
+  }
+}
+
+/**
+ * The Colony: an agent community whose public API answers one post's whole
+ * comment tree.
+ *
+ * Read from its own published surface on 2026-09-17:
+ * `GET /api/v1/posts/<id>/context` answers `{post, author, comments[...]}` where
+ * each comment carries `id` (a UUID), `author_username`, `body` and
+ * `created_at` (an ISO instant); `GET /api/v1/users/<username>` answers the
+ * account, whose `bio` is where an agent publishes its key.
+ *
+ * The ids are UUIDs, so there is no cursor to move and no order to take them
+ * in: the tree is read whole, bounded, once per run, and the dedup key on
+ * (venue, comment, line) is what keeps a re-read from sealing anything twice.
+ * The tree is flat on this surface — every comment carries `parent_id` and the
+ * list holds replies too — so a reply is a comment like any other, which is
+ * exactly what it is.
+ */
+export class ColonyBoardAdapter extends CommunityBoardAdapter {
+  /**
+   * The ids are UUIDs, so the cursor is the clock: the newest `created_at` this
+   * door has taken, and the page is what was posted at or after it. Inclusive,
+   * so two comments written in the same millisecond cannot push each other out
+   * of a run; a comment read twice is sealed once by the dedup key.
+   */
+  readonly cursor: BoardCursorKind = "time";
+
+  async comments(
+    thread: BoardId,
+    afterId: number,
+    limit: number,
+  ): Promise<readonly BoardComment[] | null> {
+    const body = objectOf(
+      await this.json(doorFor(this.row, this.row.comments_door, { thread })),
+    );
+    if (body === null) return null;
+
+    const rows = body["comments"];
+    if (!Array.isArray(rows)) return [];
+
+    const comments: BoardComment[] = [];
+    for (const each of rows) {
+      const row = objectOf(each);
+      if (row === null) continue;
+      const id = stringOf(row["id"]);
+      // The username and never the display name: a display name is not an
+      // identity anywhere, and the profile door is by username.
+      const handle = stringOf(row["author_username"]);
+      const text = stringOf(row["body"]);
+      const postedAt = isoOf(row["created_at"]);
+      if (id === null || id === "" || handle === null || text === null) continue;
+      if (postedAt === null) continue;
+      const comment: BoardComment = {
+        id,
+        thread,
+        handle,
+        body: text,
+        posted_at: postedAt,
+      };
+      if (cursorOf("time", comment) < afterId) continue;
+      comments.push(comment);
+    }
+    // Oldest first, so a page cut short by the per-thread bound leaves the
+    // newest comments to the next run rather than the oldest, and the cursor
+    // only ever moves forward over comments this run actually read.
+    comments.sort(
+      (left, right) => cursorOf("time", left) - cursorOf("time", right),
+    );
+    return comments.slice(0, Math.min(limit, CONFIRMATION_COMMENTS_PER_THREAD));
+  }
+}
+
+/**
+ * GitHub: an issue in the bootstrap repository, read through the public API.
+ *
+ * `GET /repos/<owner>/<repo>/issues/<n>/comments?per_page=100` answers the
+ * comments of one issue, each with an integer `id`, a `user.login` and a
+ * `body`; `GET /users/<login>` answers the account, whose `bio` is where an
+ * agent publishes its key. Both are public and unauthenticated, and the
+ * User-Agent header GitHub requires of an unauthenticated caller is on every
+ * call (`publicRead`).
+ *
+ * One request per thread per run: the page is a hundred comments, which is the
+ * per-thread ceiling this record reads anyway, and the integer ids give the
+ * cursor something to move on so a run that has read a thread reads the same
+ * bounded page and seals nothing.
+ */
+export class GitHubBoardAdapter extends CommunityBoardAdapter {
+  /** An issue numbers its comments, so the cursor is the newest id taken. */
+  readonly cursor: BoardCursorKind = "id";
+
+  async comments(
+    thread: BoardId,
+    afterId: number,
+    limit: number,
+  ): Promise<readonly BoardComment[] | null> {
+    const body = await this.json(
+      doorFor(this.row, this.row.comments_door, {
+        thread,
+        limit: Math.min(limit, CONFIRMATION_COMMENTS_PER_THREAD),
+      }),
+    );
+    if (!Array.isArray(body)) return null;
+
+    const comments: BoardComment[] = [];
+    for (const each of body) {
+      const row = objectOf(each);
+      if (row === null) continue;
+      const id = integerOf(row["id"]);
+      const user = objectOf(row["user"]);
+      const handle = stringOf(user === null ? undefined : user["login"]);
+      const text = stringOf(row["body"]);
+      const postedAt = isoOf(row["created_at"]);
+      if (id === null || handle === null || text === null) continue;
+      if (postedAt === null) continue;
+      if (id <= afterId) continue;
+      comments.push({ id, thread, handle, body: text, posted_at: postedAt });
+    }
+    comments.sort((left, right) => (left.id as number) - (right.id as number));
+    return comments.slice(0, Math.min(limit, CONFIRMATION_COMMENTS_PER_THREAD));
+  }
+}
+
+/**
+ * The boards this environment listens to: one per venue in policy.
+ *
+ * A venue whose row names no thread for this environment gets the unavailable
+ * board rather than being left out, so the step counts `board_unavailable` and
+ * says why: the door is open where the maintainer opened it
+ * (`CONFIRMATION_VENUES`) and nowhere else, and an environment that reads a
+ * board it was never opened on would be the adapter deciding that.
+ *
+ * Everywhere else it is the venue's own public read surface, on demo as on
+ * production, because the boards and the accounts on them are the same real
+ * ones whichever Worker is listening.
+ */
+export function boardAdaptersFor(env: Env): readonly BoardAdapter[] {
+  const environment = env.ENVIRONMENT;
+  return CONFIRMATION_VENUES.map((row) => {
+    if (pinnedThreadsFor(row, environment).length === 0) {
+      return new UnavailableBoardAdapter(row.venue, row.binding);
+    }
+    switch (row.venue) {
+      case "colony":
+        return new ColonyBoardAdapter({ venue: row, environment });
+      case "github":
+        return new GitHubBoardAdapter({ venue: row, environment });
+      default:
+        return new RegistryBoardAdapter({ venue: row, environment });
+    }
+  });
+}
+
+/**
+ * The same seam under the name it had while there was one venue.
+ *
+ * Kept so a caller written before decision D-138 item 2 goes on compiling and
+ * goes on reading every venue: the door became plural, and a factory that
+ * answered one board would now be a factory that quietly closed two.
+ */
+export const boardAdapterFor = boardAdaptersFor;

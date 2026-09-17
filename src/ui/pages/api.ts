@@ -20,8 +20,11 @@ import {
   ALERT_KINDS,
   ALERT_RETRY_MINUTES,
   ALERT_TIMEOUT_MS,
+  BINDING_KINDS,
   CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
   CONFIRMATION_FORM_PREFIX,
+  CONFIRMATION_SIGNATURE_TOKEN_PREFIX,
+  CONFIRMATION_VENUES,
   DISPUTE_STAKE_STANDING,
   DRAW_DRAFT_MAX_AGE_DAYS,
   FREE_READS_PER_DAY_GLOBAL,
@@ -40,6 +43,17 @@ import { EXERCISED_COUNT, STAGE_COUNT } from "../../status.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
 import type { PageContext } from "../types.js";
+
+/**
+ * The venues whose keys are bound by a public profile (decision D-138).
+ *
+ * Read off the venue table rather than named here, for the reason every other
+ * list on this page is read off the module that publishes it: a venue whose
+ * binding kind changes changes this sentence in the same commit.
+ */
+const PROFILE_BOUND_VENUES: readonly string[] = CONFIRMATION_VENUES.filter(
+  (venue) => venue.binding === "profile",
+).map((venue) => venue.venue);
 
 /** One endpoint: how it is called, what it answers, how it refuses. */
 interface Endpoint {
@@ -224,7 +238,7 @@ const READ_PATH: readonly Endpoint[] = [
     parameters:
       "category=<c>, status=<s>, domain=<slug>, source=official|recognized|other, tier=stated|observed, min_class=community|mixed|registered, fresh=fresh|stale, before=<position>",
     answers:
-      "An HTML page and nothing else: this path has no JSON twin, so it answers HTML whatever the Accept header says, and Accept: application/json is answered with the page. It is the browsing listing, newest sealed position first, one keyset page. A chip group carries each filter, domain and source among them, and every chip and the pager keep the rest of the query as it stands; each row shows the entry's registered domain beside its category, on every page and under every filter. The n-of-m line counts by status and domain, which are indexed columns; category, source, tier and freshness narrow the page rather than the total, and the line says so. The page size is the published one and is not a parameter: limit is refused as unknown_parameter, answered as the Bad query page with 400, rather than honored or ignored.",
+      "A page for a reader and a listing for a program: with Accept: application/json it answers { entries, next, as_of } — one row per entry carrying id, status, domain, subject, category, effective_at, submitted_at, sealed_position, verification_class and bootstrap, newest sealed position first, one keyset page, with next the before cursor for the page after it and null at the end — and everything else gets the browsing page. The rows are the same rows under either Accept, narrowed by the same filters, so a program and a reader are looking at one listing. A chip group carries each filter, domain and source among them, and every chip and the pager keep the rest of the query as it stands; each row shows the entry's registered domain beside its category, on every page and under every filter. The n-of-m line counts by status and domain, which are indexed columns; category, source, tier and freshness narrow the page rather than the total, and the line says so. The page size is the published one and is not a parameter: limit is refused as unknown_parameter, answered as the Bad query page with 400, rather than honored or ignored.",
     refusals:
       "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_source, bad_tier, bad_min_class, bad_fresh, bad_before. An empty value (?category= or ?min_class=) is a refusal and not an absence.",
   },
@@ -953,7 +967,46 @@ POST
           counted toward no status. A line with it, from a venue whose binding
           kind counts, is a validation.
         </p>
-        <pre class="block mono">${CONFIRMATION_FORM_PREFIX} &lt;entry id&gt; &lt;approve|reject&gt; &lt;sha256:&lt;hex&gt;|span-present|span-absent&gt; [${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}&lt;version&gt;] [reason]</pre>
+        <pre class="block mono">${CONFIRMATION_FORM_PREFIX} &lt;entry id&gt; &lt;approve|reject&gt; &lt;sha256:&lt;hex&gt;|span-present|span-absent&gt; [${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}&lt;version&gt;] [${CONFIRMATION_SIGNATURE_TOKEN_PREFIX}&lt;signature&gt;] [reason]</pre>
+        <p class="note">
+          <span class="mono">${CONFIRMATION_SIGNATURE_TOKEN_PREFIX}&lt;signature&gt;</span>
+          is how a key says the line where no registry seals anything: the
+          author's Ed25519 signature over the canonical line — the form above
+          with single spaces, without its reason and without the
+          <span class="mono">${CONFIRMATION_SIGNATURE_TOKEN_PREFIX}</span> token
+          itself, which cannot be inside what it signs. It is read against the
+          key that venue's profile binding publishes, and a line whose signature
+          does not verify is refused by name rather than counted quietly.
+        </p>
+        <p class="note">
+          Which of the two a venue takes is the venue's own binding kind
+          (${BINDING_KINDS.join(", ")}), published per venue in
+          <span class="mono">CONFIRMATION_VENUES</span> on
+          <a href="/policy">the policy page</a>. A
+          <span class="mono">registry</span> venue is the founding registry:
+          the confirmer seals the canonical line's fingerprint under its own
+          citizen key and the comment is the pointer. The two
+          <span class="mono">profile</span> venues —
+          ${PROFILE_BOUND_VENUES.join(" and ")} — bind the other way round:
+          the confirmer publishes
+          <span class="mono">nomankind-key:&lt;base64url Ed25519 public key&gt;</span>
+          in its own profile bio, this record captures that profile exactly as
+          it captures a cited page, and every line from that account carries
+          <span class="mono">${CONFIRMATION_SIGNATURE_TOKEN_PREFIX}</span>. Both
+          count; a platform's word about an account does not.
+        </p>
+        <p class="note">
+          Asking is this record's own work (decision D-138 item 6). Once per UTC
+          day nomankind posts one batch to each community — the entries waiting
+          on an outside check, drafts first and then the verified entries still
+          carrying a bootstrap label, with the line form and that community's
+          binding instructions — and every one of those posts names every
+          community the same batch went to, so an entry nobody answered anywhere
+          is visibly unanswered rather than quietly dropped. The command is
+          <span class="mono">npm run batch-post -- &lt;venue|all&gt; &lt;base url&gt;</span>,
+          and it reads the record through the doors on this page like anybody
+          else.
+        </p>
         <p class="note">
           Three event types carry it, and every one of them is sealed and
           public like the rest of the log:

@@ -1005,7 +1005,24 @@ export interface CaptureRecord {
     | "receipt"
     | "statement"
     | "disclosure"
-    | `report:${number}`;
+    | `report:${number}`
+    /**
+     * The public profile page a community operator's key was published on
+     * (decision D-138 item 2), by the operator it bound.
+     *
+     * A `profile` binding is a key on a page, and the page is evidence like any
+     * other citation: the bytes are archived content-addressed and the
+     * registration names their hash, so an offline reader rechecks the binding
+     * from the bundle rather than by visiting the venue again. This row is what
+     * makes those bytes reachable — `GET /captures/{hash}` answers the earliest
+     * row for a hash whatever entry it sits under, so one row serves every
+     * bundle that ever names it.
+     *
+     * The operator is in the role because the table's key is (entry_id, role):
+     * two community operators may validate one entry, and a plain "profile"
+     * would have each overwriting the other's page.
+     */
+    | `profile:${string}`;
   readonly contentHash: string;
   readonly archiveHash: string;
   readonly normVersion: string;
@@ -7579,7 +7596,11 @@ export async function cosignerCountsForOperators(
  */
 export const CONFIRMATION_COUNTER_PREFIX = "confirmation:";
 
-function confirmationCursorName(venue: string, thread: number): string {
+function confirmationCursorName(
+  venue: string,
+  /** Whatever the venue calls a thread: an integer, or a UUID (D-138 item 2). */
+  thread: number | string,
+): string {
   return `${CONFIRMATION_COUNTER_PREFIX}${venue}:${thread}`;
 }
 
@@ -7594,7 +7615,7 @@ function confirmationCursorName(venue: string, thread: number): string {
 export async function readConfirmationCursor(
   db: D1Like,
   venue: string,
-  thread: number,
+  thread: number | string,
 ): Promise<number | null> {
   const row = await db
     .prepare(`SELECT value FROM counters WHERE name = ? ${ONE_ROW}`)
@@ -7612,7 +7633,7 @@ export async function readConfirmationCursor(
 export async function writeConfirmationCursor(
   db: D1Like,
   venue: string,
-  thread: number,
+  thread: number | string,
   through: number,
   at: string,
 ): Promise<void> {

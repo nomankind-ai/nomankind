@@ -129,12 +129,14 @@ import {
   type Sidecar,
 } from "../derive.js";
 import { communityOperatorId } from "../registry.js";
+import { AGENT_ID_PREFIX } from "../identity.js";
 import { openRevalidation, revalidationDrawExclusions } from "../dispute.js";
 import { duplicateKey, sameDuplicateKey } from "../duplicate.js";
 import { recordMeasured } from "../evidence.js";
 import {
   appendEvent,
   eventHash,
+  type CommunityBinding,
   type Event,
   type EventPayloads,
   type EventType,
@@ -151,21 +153,28 @@ import {
   DUPLICATE_BACKFILL_PER_RUN,
   LEDGER_ENTRIES_PER_RUN,
   LIST_PAGE_LIMIT,
+  NORM_VERSION,
   RELEASE_WINDOW_DAYS,
   SEAL_MAX_EVENTS,
   SWEEP_INTERVAL_MINUTES,
   WITNESSES_REQUIRED,
 } from "../policy.js";
+import { cursorOf } from "../adapters/board.js";
 import type {
   BoardAdapter,
   BoardComment,
+  BoardId,
+  BoardProfile,
   BoardSealProof,
 } from "../adapters/board.js";
 import {
+  canonicalConfirmationLine,
   confirmationFingerprint,
   parseConfirmationComment,
   pinnedConfirmationTrust,
+  profileKeyIn,
   verifyConfirmationProof,
+  verifyLineSignature,
   type ConfirmationLine,
   type ConfirmationTrust,
 } from "../confirm.js";
@@ -177,6 +186,8 @@ import {
   type MirrorOperator,
 } from "../mirror.js";
 import { entryHash } from "../hash.js";
+import { archiveAddress } from "../normalize.js";
+import { archiveCapture, type R2Like } from "../storage/r2.js";
 import { buildReadCountPayload, type PaidReadCounts } from "../receipt.js";
 import { validateEntry, type Entry } from "../schema.js";
 import {
@@ -247,6 +258,7 @@ import {
   operatorDomains,
   pendingAnchorsAfter,
   putAnchor,
+  putCapture,
   putEntry,
   putLedgerRows,
   putMirror,
@@ -368,7 +380,7 @@ export interface SweepDeps {
    * without one gets a `confirmations` step that counts `board_unavailable`
    * rather than one that pretends to have read a board.
    */
-  readonly board?: BoardAdapter;
+  readonly board?: BoardAdapter | readonly BoardAdapter[];
   /**
    * Who a confirmation's registry proof is judged against. The pinned registry
    * and the pinned witnesses when a caller says nothing; injectable so a test
@@ -525,8 +537,8 @@ export interface SweepConfirmation {
   readonly entry_id: string;
   readonly venue: string;
   readonly handle: string;
-  readonly thread: number;
-  readonly comment_id: number;
+  readonly thread: BoardId;
+  readonly comment_id: BoardId;
   readonly line: number;
   readonly verdict: "approve" | "reject";
   /** Whether the confirmer's own key sealed this line's fingerprint (D-136). */
@@ -554,8 +566,8 @@ export interface SweepCommunityValidation {
   readonly handle: string;
   /** The community operator id, `<venue>:<handle>` (src/registry.ts). */
   readonly operator: string;
-  readonly thread: number;
-  readonly comment_id: number;
+  readonly thread: BoardId;
+  readonly comment_id: BoardId;
   readonly line: number;
   readonly verdict: "approve" | "reject";
   readonly registered: boolean;
@@ -1223,7 +1235,8 @@ async function readsOn(
  */
 async function confirmationsStep(
   db: D1Like,
-  board: BoardAdapter | undefined,
+  boards: readonly BoardAdapter[],
+  captures: R2Like | undefined,
   trust: ConfirmationTrust,
   now: Date,
   at: string,
@@ -1240,17 +1253,10 @@ async function confirmationsStep(
     validations,
     fallbacks,
   });
-  if (board === undefined) {
+  if (boards.length === 0) {
     skip("board_unavailable");
     return nothing();
   }
-
-  const threads = await board.threads();
-  if (threads === null) {
-    skip("board_unavailable");
-    return nothing();
-  }
-  if (threads.length === 0) return nothing();
 
   // What the log already holds, keyed by the comment and the line, and whether
   // that line has been counted yet. Read once per run.
@@ -1277,61 +1283,255 @@ async function confirmationsStep(
     already.set(key, true);
   }
 
-  for (const thread of threads) {
+  // The keys the log has already registered community operators under, by
+  // operator id (D-138 item 2). Read once per run, for the one thing a later
+  // line needs from an earlier registration: a `profile` binding's signature is
+  // judged by the key the operator REGISTERED under and by no other, exactly as
+  // the offline verifier judges it (src/verify.ts). A key that has changed on
+  // the profile since is not a new key for an old operator — it is a rotation,
+  // and this build has no rule for one.
+  const registeredProfiles = new Map<string, ProfileRegistration>();
+  for (const event of await eventsOfType(
+    db,
+    "community_operator_registered",
+    -1,
+    SEAL_MAX_EVENTS,
+  )) {
+    const payload = event.payload as unknown as Record<string, unknown>;
+    const binding = payload["binding"];
+    if (typeof payload["operator"] !== "string") continue;
+    if (!isRecordValue(binding) || binding["kind"] !== "profile") continue;
+    const key = binding["public_key"];
+    const capture = binding["capture_hash"];
+    const url = binding["url"];
+    if (typeof key !== "string" || typeof capture !== "string") continue;
+    registeredProfiles.set(payload["operator"], {
+      public_key: key,
+      capture_hash: capture,
+      url: typeof url === "string" ? url : "",
+    });
+  }
+
+  // What this run has read of the outside world's profiles (D-138 item 2).
+  // A thread where one agent wrote ten lines costs one profile read, and a
+  // profile door that did not answer is not asked again inside the same run.
+  const profiles: ProfileRun = {
+    byAuthor: new Map<string, ProfileReadState>(),
+    archived: new Set<string>(),
+  };
+
+  for (const board of boards) {
     if (sealed.length + validations.length >= CONFIRMATIONS_PER_RUN) break;
 
-    const cursor = (await readConfirmationCursor(db, board.venue, thread)) ?? 0;
-    const comments = await board.comments(
-      thread,
-      cursor,
-      CONFIRMATION_COMMENTS_PER_THREAD,
-    );
-    if (comments === null) {
+    const threads = await board.threads();
+    if (threads === null) {
       skip("board_unavailable");
       continue;
     }
-    // Counted whatever came of them: this is the step saying it reached the
-    // board at all, which a count of what it sealed cannot say. A thread read
-    // and found unchanged and a thread never read look identical in a detail
-    // that reports only seals, and on 2026-09-17 they did.
-    read.threads += 1;
-    read.comments += comments.length;
+    if (threads.length === 0) continue;
 
-    let through = cursor;
-    for (const comment of comments) {
+    for (const thread of threads) {
       if (sealed.length + validations.length >= CONFIRMATIONS_PER_RUN) break;
-      const read = await confirmationsInComment(
-        db,
-        board,
-        trust,
-        now,
-        at,
-        cache,
-        skip,
-        already,
-        comment,
-      );
-      sealed.push(...read.taken);
-      validations.push(...read.validations);
-      for (const [reason, count] of Object.entries(read.fallbacks)) {
-        fallbacks[reason] = (fallbacks[reason] ?? 0) + count;
-      }
-      // A conflicting write is the one refusal that might pass: the cursor
-      // stays behind this comment and the thread stops here, so the next run
-      // reads it again and seals the line it could not.
-      if (read.halted) break;
-      // Otherwise the cursor moves past a comment the door read, whatever it
-      // made of it: a comment of prose, or one whose proof did not verify, is
-      // not work this run failed to do.
-      through = Math.max(through, comment.id);
-    }
 
-    if (through > cursor) {
-      await writeConfirmationCursor(db, board.venue, thread, through, at);
+      // The cursor, in whatever this venue counts (src/adapters/board.ts):
+      // the newest comment id it has taken where the board numbers its
+      // comments, and epoch milliseconds of the newest comment where the ids
+      // are opaque — The Colony's are UUIDs, and a UUID has no order to be
+      // after. One integer either way, in the counters row it always was, so a
+      // thread nobody has written on since the last run costs one read and
+      // answers nothing.
+      const cursor = (await readConfirmationCursor(db, board.venue, thread)) ?? 0;
+      const comments = await board.comments(
+        thread,
+        cursor,
+        CONFIRMATION_COMMENTS_PER_THREAD,
+      );
+      if (comments === null) {
+        skip("board_unavailable");
+        continue;
+      }
+      // Counted whatever came of them: this is the step saying it reached the
+      // board at all, which a count of what it sealed cannot say. A thread read
+      // and found unchanged and a thread never read look identical in a detail
+      // that reports only seals, and on 2026-09-17 they did.
+      read.threads += 1;
+      read.comments += comments.length;
+
+      let through = cursor;
+      for (const comment of comments) {
+        if (sealed.length + validations.length >= CONFIRMATIONS_PER_RUN) break;
+        const inComment = await confirmationsInComment(
+          db,
+          board,
+          captures,
+          trust,
+          now,
+          at,
+          cache,
+          skip,
+          already,
+          registeredProfiles,
+          profiles,
+          comment,
+        );
+        sealed.push(...inComment.taken);
+        validations.push(...inComment.validations);
+        for (const [reason, count] of Object.entries(inComment.fallbacks)) {
+          fallbacks[reason] = (fallbacks[reason] ?? 0) + count;
+        }
+        // A conflicting write is the one refusal that might pass: the cursor
+        // stays behind this comment and the thread stops here, so the next run
+        // reads it again and seals the line it could not.
+        if (inComment.halted) break;
+        // Otherwise the cursor moves past a comment the door read, whatever it
+        // made of it: a comment of prose, or one whose proof did not verify, is
+        // not work this run failed to do.
+        through = Math.max(through, cursorOf(board.cursor, comment));
+      }
+
+      if (through > cursor) {
+        await writeConfirmationCursor(db, board.venue, thread, through, at);
+      }
     }
   }
 
   return nothing();
+}
+
+/** A plain object off a stored payload, or null. */
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** What an operator's `profile` registration fixed: the key, and the page. */
+interface ProfileRegistration {
+  readonly public_key: string;
+  readonly capture_hash: string;
+  readonly url: string;
+}
+
+/**
+ * What one run has read of the profile doors (decision D-138 item 2).
+ *
+ * The bound the door promises, held in one place: at most two reads of one
+ * author's profile in a run — the first, and one more for the first line whose
+ * signature did not verify under the key that author registered — and at most
+ * one archive write per set of bytes. Both are per run and neither is a cache
+ * of anything: the next run reads the world again.
+ */
+interface ProfileRun {
+  readonly byAuthor: Map<string, ProfileReadState>;
+  /** The addresses this run has already written, so the same page is written once. */
+  readonly archived: Set<string>;
+}
+
+/** One author's profile as this run has it, and whether it was read twice. */
+interface ProfileReadState {
+  readonly taken: ProfileCapture | null;
+  readonly refetched: boolean;
+}
+
+/** One author's profile, fetched once in a run and archived under its hash. */
+interface ProfileCapture {
+  readonly url: string;
+  readonly capture_hash: string;
+  /** The key its bytes publish, or null when they publish none. */
+  readonly public_key: string | null;
+  /** What the venue said the bytes are, for the capture row beside them. */
+  readonly media_type: string;
+  readonly size: number;
+}
+
+/**
+ * One author's profile, fetched at most once per run and archived like a
+ * citation (decision D-138 item 2).
+ *
+ * The bytes that came back are stored content-addressed in the capture archive
+ * with the same helper and the same sidecar a submitted citation's snapshot
+ * gets (src/storage/r2.ts): the binding a registration carries names that hash,
+ * the export and the mirror carry the bytes under it, and the offline verifier
+ * reads the key out of them for itself. A key nobody archived would be a
+ * binding nobody could recheck, which is the whole of what this decision costs.
+ *
+ * Null for a venue with no profile door, a door that did not answer, or an
+ * archive this deployment has not bound — each of which is an uncounted line
+ * and never a guess.
+ */
+async function profileCaptureFor(
+  board: BoardAdapter,
+  captures: R2Like | undefined,
+  at: string,
+  run: ProfileRun,
+  handle: string,
+  refetch = false,
+): Promise<ProfileCapture | null> {
+  const key = `${board.venue}:${handle}`;
+  const held = run.byAuthor.get(key);
+  // Two reads of one author's profile in one run at the very most, and only
+  // ever two: the first, and one more for the first line whose signature did
+  // not verify under the key the operator registered — which is the only
+  // question a second read could answer. After that the author is held for the
+  // run whatever any later line says, so a thread carrying five bad lines by
+  // one account costs two reads rather than five.
+  if (held !== undefined && (!refetch || held.refetched)) return held.taken;
+
+  const taken = await takeProfile(board, captures, at, run, handle);
+  run.byAuthor.set(key, {
+    taken,
+    refetched: refetch || (held?.refetched ?? false),
+  });
+  return taken;
+}
+
+async function takeProfile(
+  board: BoardAdapter,
+  captures: R2Like | undefined,
+  at: string,
+  run: ProfileRun,
+  handle: string,
+): Promise<ProfileCapture | null> {
+  if (board.profile === undefined || captures === undefined) return null;
+  let answered: BoardProfile | null;
+  try {
+    answered = await board.profile(handle);
+  } catch {
+    // An adapter that broke its own contract is a board that did not answer.
+    return null;
+  }
+  if (answered === null) return null;
+
+  const captureHash = await archiveAddress(answered.bytes);
+  // Content addressed, so the same bytes are the same object: a page this run
+  // has already archived is not written again, and the archive's own
+  // head-then-put keeps a page an earlier run archived from being rewritten.
+  if (!run.archived.has(captureHash)) {
+    run.archived.add(captureHash);
+    await archiveCapture(captures, {
+      archiveHash: captureHash,
+      bytes: answered.bytes,
+      mediaType: answered.content_type ?? "application/json",
+      sidecar: {
+        final_url: answered.url,
+        status: answered.status,
+        headers:
+          answered.content_type === null
+            ? {}
+            : { "content-type": answered.content_type },
+        fetched_at: at,
+        // The Worker's own fetcher, which is what took these bytes. The same
+        // word a citation capture's sidecar carries for the same fact.
+        fetcher: "nomankind-worker",
+      },
+    });
+  }
+
+  return {
+    url: answered.url,
+    capture_hash: captureHash,
+    public_key: profileKeyIn(new TextDecoder().decode(answered.bytes)),
+    media_type: answered.content_type ?? "application/json",
+    size: answered.bytes.byteLength,
+  };
 }
 
 /**
@@ -1345,12 +1545,15 @@ async function confirmationsStep(
 async function confirmationsInComment(
   db: D1Like,
   board: BoardAdapter,
+  captures: R2Like | undefined,
   trust: ConfirmationTrust,
   now: Date,
   at: string,
   cache: WorldCache,
   skip: Skip,
   already: Map<string, boolean>,
+  registeredProfiles: Map<string, ProfileRegistration>,
+  profiles: ProfileRun,
   comment: BoardComment,
 ): Promise<{
   taken: SweepConfirmation[];
@@ -1384,31 +1587,73 @@ async function confirmationsInComment(
     const key = `${board.venue}:${comment.id}:${line.line}`;
     const held = already.get(key);
 
+    // What the log already holds about this line, asked BEFORE anything is
+    // asked of the outside world. Two lines of it, and they are the whole
+    // reason a thread can be re-read every hour for a year at no cost:
+    //
+    // A line already counted, or already sealed as a validation, is finished.
+    // Nothing a board, a registry or a profile door could say about it now
+    // would change what the log says, so nothing is asked of any of them.
+    //
+    // A line sealed as an account statement at a `profile` venue is finished
+    // too. Nothing about it can change: the event it would seal again is the
+    // same account statement (a confirmation's evidence is a registry proof and
+    // this venue has no registry), and it cannot become a validation either,
+    // because the key it would have to verify under is the one the operator
+    // registered and a key that has changed since is refused rather than
+    // rotated. So the line is passed over without a fetch — which is what keeps
+    // one bad line on a thread with no id cursor from re-reading a profile
+    // every hour forever.
+    //
+    // What that costs is stated rather than hidden: a line said while the
+    // author's profile door was down, or before they had published their key,
+    // is an account statement for good and is said again or not at all. A line
+    // at a `profile` venue is a claim about a key at the moment it was read.
+    if (held === true) continue;
+    if (held === false && board.binding === "profile") continue;
+
     // What the confirmer would have sealed to make this line count: the
     // canonical form of their own line, digested (src/confirm.ts). The reason
     // is not in it, so a sentence rewritten between two reads is the same
     // statement.
     const fingerprint = await confirmationFingerprint(line);
 
-    // Whether they did. One record read per line, bounded inside the adapter;
-    // a handle that sealed nothing, a seal for another line, or a proof that
-    // does not verify all answer the same way — the statement stands, as an
-    // account statement, and counts towards nothing.
-    const sealedFingerprint = await board.sealProof(comment.handle, fingerprint);
-    const counted =
-      sealedFingerprint !== null &&
-      (await verifyConfirmationProof(sealedFingerprint.proof, trust, {
-        handle: comment.handle,
-        fingerprint,
-      }));
-    if (sealedFingerprint !== null && !counted) {
-      skip("confirmation_proof_invalid");
-    }
+    // Whether the key behind the handle said it, which is the whole of what
+    // `counted` means and is asked per venue by the binding its policy row
+    // names (D-138 item 2).
+    //
+    // A `registry` binding asks the founding registry: did this handle's own
+    // key seal this line's fingerprint, under a witnessed head. A `profile`
+    // binding asks the line itself: is the signature it carries by the key the
+    // author's public profile publishes. A handle that sealed nothing, a seal
+    // of another line, a line with no signature, a profile with no key and a
+    // signature that does not verify all answer the same way — the statement
+    // stands, as an account statement, and counts towards nothing.
+    const bound =
+      board.binding === "profile"
+        ? await profileBindingFor(
+            board,
+            captures,
+            at,
+            skip,
+            registeredProfiles,
+            profiles,
+            comment.handle,
+            line,
+          )
+        : await registryBindingFor(board, trust, skip, comment.handle, fingerprint);
+    const counted = bound !== null;
     if (!counted) skip("confirmation_unsealed");
+    const sealedFingerprint = bound?.kind === "registry" ? bound.sealed : null;
 
-    // A line already in the log is sealed again only to say the thing that
-    // changed: that it is now counted. Everything else is a re-read.
-    if (held !== undefined && (held || !counted)) continue;
+    // And the rest of the same question, now that the binding is known: a line
+    // already in the log is sealed again only to say the thing that changed.
+    // There are exactly two such things — a statement whose author has since
+    // sealed its fingerprint in the registry (D-136), and a statement that can
+    // now be a validation (D-138) — and everything else is a re-read.
+    const wouldValidate = counted && line.attestation_version !== null;
+    const carriesRegistryProof = sealedFingerprint !== null;
+    if (held === false && !wouldValidate && !carriesRegistryProof) continue;
 
     const world = await entryWorld(db, entryId, cache);
 
@@ -1419,7 +1664,7 @@ async function confirmationsInComment(
     // a line it sends back — a second line from the same handle, an author
     // confirming their own entry, a cap already met — is sealed below exactly
     // as it would have been before this decision, with the reason counted.
-    if (counted && sealedFingerprint !== null && line.attestation_version !== null) {
+    if (counted && bound !== null && line.attestation_version !== null) {
       const outcome = await communityLine(
         db,
         board,
@@ -1430,8 +1675,9 @@ async function confirmationsInComment(
         entryId,
         line,
         comment,
-        sealedFingerprint,
+        bound,
         fingerprint,
+        registeredProfiles,
         skip,
       );
       if (outcome.kind === "halted") return stop(true);
@@ -1441,6 +1687,10 @@ async function confirmationsInComment(
         continue;
       }
       fallbacks[outcome.reason] = (fallbacks[outcome.reason] ?? 0) + 1;
+      // The line fell back to the confirmation it already was, and the log
+      // already holds that confirmation: the fallback is counted in this run's
+      // detail and nothing is sealed twice.
+      if (held === false && !carriesRegistryProof) continue;
     }
 
     try {
@@ -1454,12 +1704,22 @@ async function confirmationsInComment(
             venue: board.venue,
             handle: comment.handle,
             comment_id: comment.id,
-            registry_event_id: counted
-              ? (sealedFingerprint?.registry_event_id ?? null)
-              : null,
-            registry_proof: counted ? (sealedFingerprint?.proof ?? null) : null,
+            registry_event_id: sealedFingerprint?.registry_event_id ?? null,
+            registry_proof: sealedFingerprint?.proof ?? null,
             fingerprint,
-            counted,
+            // The token the line carried, when it carried one and was sealed
+            // here all the same (the cap was met, the author was its own
+            // judge). It is inside the fingerprint, so it has to travel beside
+            // it or nobody could recompute one (D-138).
+            attestation_version: line.attestation_version,
+            // A `public_confirmation`'s evidence is a registry proof and only
+            // that: the offline reader recomputes the fingerprint and rechecks
+            // the leaf (src/verify.ts), and a counted one with no such proof is
+            // a claim nothing checks. So a signed line at a `profile` venue is
+            // sealed here as the account statement it is, and its counting
+            // outcome is the `community_validation` above — which carries its
+            // own binding proof and is rechecked offline in full (D-138).
+            counted: sealedFingerprint !== null,
             verdict: line.verdict,
             check: line.check,
             reason: line.reason,
@@ -1477,7 +1737,7 @@ async function confirmationsInComment(
         },
       });
 
-      already.set(key, counted);
+      already.set(key, sealedFingerprint !== null);
       taken.push({
         entry_id: entryId,
         venue: board.venue,
@@ -1486,7 +1746,7 @@ async function confirmationsInComment(
         comment_id: comment.id,
         line: line.line,
         verdict: line.verdict,
-        counted,
+        counted: sealedFingerprint !== null,
         seq: event.seq,
       });
     } catch (error) {
@@ -1502,6 +1762,167 @@ async function confirmationsInComment(
   }
 
   return stop(false);
+}
+
+/**
+ * What a line's key-binding came to, per venue (decision D-138 item 2).
+ *
+ * The two kinds are the two kinds `COUNTING_BINDING_KINDS` names, and they
+ * carry exactly what the sealed validation has to carry to be rechecked
+ * offline: a registry binding carries the proof of the confirmer's seal, a
+ * profile binding carries the signature, the key, the archived page's hash and
+ * the door it was read from. Null, everywhere below, is an account statement.
+ */
+type LineBinding =
+  | { readonly kind: "registry"; readonly sealed: BoardSealProof }
+  | {
+      readonly kind: "profile";
+      readonly public_key: string;
+      readonly signature: string;
+      readonly capture_hash: string;
+      readonly url: string;
+      /**
+       * The page as this run fetched it, or null when this run did not fetch it
+       * — a registered operator's signature is judged by the key it registered
+       * under, and its page is already archived and already named.
+       */
+      readonly taken: ProfileCapture | null;
+    };
+
+/**
+ * The 1F916 binding: the confirmer's own seal of this line's fingerprint, in
+ * the registry's log, under a witnessed head (decision D-136).
+ *
+ * Unchanged by D-138 item 2 except in shape: one record read per line, bounded
+ * inside the adapter, and a proof this kernel rechecks for itself rather than
+ * taking the adapter's word for.
+ */
+async function registryBindingFor(
+  board: BoardAdapter,
+  trust: ConfirmationTrust,
+  skip: Skip,
+  handle: string,
+  fingerprint: string,
+): Promise<LineBinding | null> {
+  const sealed = await board.sealProof(handle, fingerprint);
+  if (sealed === null) return null;
+  const holds = await verifyConfirmationProof(sealed.proof, trust, {
+    handle,
+    fingerprint,
+  });
+  if (!holds) {
+    skip("confirmation_proof_invalid");
+    return null;
+  }
+  return { kind: "registry", sealed };
+}
+
+/**
+ * The profile binding: the author's own signature over the canonical line, by
+ * the key their public profile publishes (decision D-138 item 2).
+ *
+ * Neither The Colony nor GitHub signs anything on an author's behalf, so the
+ * author signs the line itself and publishes the key it is by where anybody can
+ * read it. Four ways this answers "an account statement", each counted by name:
+ * a line carrying no signature, a profile door that did not answer, a profile
+ * publishing no key, and a signature that does not verify.
+ *
+ * The key the signature is judged by is the one the operator REGISTERED under,
+ * whenever the log already holds a registration — which is the same key the
+ * offline verifier judges it by (src/verify.ts), and the reason the two agree.
+ * So a registered operator costs no profile read at all while its signatures
+ * verify; the page is fetched again only when one does not, because the one
+ * thing that could have changed is the key. A key that HAS changed is refused
+ * with `confirmation_key_changed` and registers nothing: one operator per venue
+ * account is what the registry holds, and rotating a community operator's key
+ * is a rule D-138 has not written. GAP: key rotation, for a later decision.
+ */
+async function profileBindingFor(
+  board: BoardAdapter,
+  captures: R2Like | undefined,
+  at: string,
+  skip: Skip,
+  registeredProfiles: Map<string, ProfileRegistration>,
+  profiles: ProfileRun,
+  handle: string,
+  line: ConfirmationLine,
+): Promise<LineBinding | null> {
+  const signature = line.signature;
+  if (signature === null) {
+    skip("confirmation_unsigned");
+    return null;
+  }
+  const canonical = canonicalConfirmationLine(line);
+  const registered = registeredProfiles.get(
+    communityOperatorId(board.venue, handle),
+  );
+
+  if (registered !== undefined) {
+    const signed = await verifyLineSignature(
+      registered.public_key,
+      canonical,
+      signature,
+    );
+    if (signed) {
+      return {
+        kind: "profile",
+        public_key: registered.public_key,
+        signature,
+        capture_hash: registered.capture_hash,
+        url: registered.url,
+        taken: null,
+      };
+    }
+    // It did not verify under the registered key, so the page is read again:
+    // either the key on it has changed, or the signature is simply bad.
+    const fresh = await profileCaptureFor(
+      board,
+      captures,
+      at,
+      profiles,
+      handle,
+      true,
+    );
+    if (fresh === null) skip("confirmation_profile_unavailable");
+    else if (fresh.public_key === null) skip("confirmation_profile_unkeyed");
+    else if (fresh.public_key !== registered.public_key) {
+      skip("confirmation_key_changed");
+    } else skip("confirmation_signature_invalid");
+    return null;
+  }
+
+  const profile = await profileCaptureFor(
+    board,
+    captures,
+    at,
+    profiles,
+    handle,
+  );
+  if (profile === null) {
+    skip("confirmation_profile_unavailable");
+    return null;
+  }
+  if (profile.public_key === null) {
+    skip("confirmation_profile_unkeyed");
+    return null;
+  }
+  const signed = await verifyLineSignature(
+    profile.public_key,
+    canonical,
+    signature,
+  );
+  if (!signed) {
+    skip("confirmation_signature_invalid");
+    return null;
+  }
+  return {
+    kind: "profile",
+    public_key: profile.public_key,
+    signature,
+    capture_hash: profile.capture_hash,
+    url: profile.url,
+    taken: profile,
+  };
 }
 
 /**
@@ -1567,12 +1988,20 @@ async function communityLine(
   entryId: string,
   line: ConfirmationLine,
   comment: BoardComment,
-  sealedFingerprint: BoardSealProof,
+  binding: LineBinding,
   fingerprint: string,
+  registeredProfiles: Map<string, ProfileRegistration>,
   skip: Skip,
 ): Promise<CommunityOutcome> {
-  const bound = await board.record(comment.handle);
-  if (bound === null) return { kind: "confirmation", reason: "unbound" };
+  // Who the line was by, in the form every agent id in this record has. A
+  // registry binding asks the registry, which is the only thing that can say
+  // which key stands behind a handle there; a profile binding already knows,
+  // because the key is what the signature was checked against (D-138 item 2).
+  const agent =
+    binding.kind === "profile"
+      ? AGENT_ID_PREFIX + binding.public_key
+      : ((await board.record(comment.handle))?.agent ?? null);
+  if (agent === null) return { kind: "confirmation", reason: "unbound" };
 
   const disposition = communityLineDisposition(
     eventsOf(world),
@@ -1580,7 +2009,7 @@ async function communityLine(
     line,
     comment.handle,
     board.venue,
-    bound.agent,
+    agent,
     at,
   );
   if (disposition.kind !== "validation") {
@@ -1590,11 +2019,24 @@ async function communityLine(
   const operator = communityOperatorId(board.venue, comment.handle);
   const domain = domainOfWorld(world, entryId);
   const version = line.attestation_version ?? "";
-  const binding = {
-    kind: "registry",
-    registry: board.venue,
-    key_bind_event_id: bound.key_bind_event_id,
-  } as const;
+  // What the world can check the key against, as the registration records it
+  // and as the offline verifier rereads it: the registry's own key-bind, or the
+  // profile page that published the key, by the hash its bytes are archived
+  // under (D-138).
+  const recorded: CommunityBinding =
+    binding.kind === "profile"
+      ? {
+          kind: "profile",
+          url: binding.url,
+          capture_hash: binding.capture_hash,
+          public_key: binding.public_key,
+        }
+      : {
+          kind: "registry",
+          registry: board.venue,
+          key_bind_event_id:
+            (await board.record(comment.handle))?.key_bind_event_id ?? null,
+        };
   const attestation = { version, domain };
   const extra: Event[] = [];
 
@@ -1613,15 +2055,51 @@ async function communityLine(
             operator,
             venue: board.venue,
             handle: comment.handle,
-            agent: bound.agent,
-            binding,
+            agent,
+            binding: recorded,
             attestation,
             fingerprint,
-            registry_event_id: sealedFingerprint.registry_event_id,
+            registry_event_id:
+              binding.kind === "registry"
+                ? binding.sealed.registry_event_id
+                : null,
           },
         }),
       );
       registered = true;
+      // The page the registration named, indexed so it can be served (D-138
+      // item 5). The bytes are already in the archive, content-addressed, and
+      // this row is what `GET /captures/{hash}` answers from — which is how the
+      // export bundle and the mirror come to carry the profile a reader needs
+      // to recheck the binding offline. One row per (entry, operator), and the
+      // door answers the earliest row for a hash whatever entry it sits under,
+      // so one row serves every bundle that names it.
+      if (binding.kind === "profile" && binding.taken !== null) {
+        await putCapture(db, {
+          entryId,
+          role: `profile:${operator}`,
+          // A profile page is not normalized and has no signed hash to be
+          // compared against: it is evidence, addressed by the digest of the
+          // bytes themselves, which is exactly what the binding names.
+          contentHash: binding.capture_hash,
+          archiveHash: binding.capture_hash,
+          normVersion: NORM_VERSION,
+          kind: "json",
+          mediaType: binding.taken.media_type,
+          size: binding.taken.size,
+          fetchedAt: at,
+        });
+      }
+      // The run's own reading of who is registered under which key moves with
+      // it: every later line by this account in this same run is judged by the
+      // key this registration fixed, exactly as the next run's will be.
+      if (recorded.kind === "profile") {
+        registeredProfiles.set(operator, {
+          public_key: recorded.public_key,
+          capture_hash: recorded.capture_hash,
+          url: recorded.url,
+        });
+      }
       // The run's own reading of the registry is now one event out of date, and
       // every line after this one would be folded against a registry that does
       // not hold this operator — a row saying `draft` written over the row this
@@ -1659,13 +2137,21 @@ async function communityLine(
           operator,
           venue: board.venue,
           handle: comment.handle,
-          agent: bound.agent,
+          agent,
           decision: line.verdict,
           check: line.check,
           reason: line.reason,
           attestation_version: version,
           fingerprint,
-          binding_proof: { kind: "registry", proof: sealedFingerprint.proof },
+          binding_proof:
+            binding.kind === "profile"
+              ? {
+                  kind: "profile",
+                  public_key: binding.public_key,
+                  signature: binding.signature,
+                  capture_hash: binding.capture_hash,
+                }
+              : { kind: "registry", proof: binding.sealed.proof },
           comment_id: comment.id,
           line: line.line,
           posted_at: comment.posted_at,
@@ -4103,7 +4589,14 @@ export async function runSweep(
     // run's seal rather than a cycle later.
     const confirmed = await confirmationsStep(
       db,
-      deps.board,
+      // One adapter or many: a caller from before D-138 item 2 hands in the one
+      // board it knows about, and the step reads whatever it is given.
+      deps.board === undefined
+        ? []
+        : Array.isArray(deps.board)
+          ? deps.board
+          : [deps.board as BoardAdapter],
+      env.CAPTURES,
       deps.confirmationTrust ?? pinnedConfirmationTrust(),
       deps.now,
       at,

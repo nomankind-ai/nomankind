@@ -1815,7 +1815,8 @@ function bootstrapLabelOf(
  */
 function confirmationKey(payload: {
   venue: string;
-  comment_id: number;
+  /** Integer or UUID, whatever the venue calls a comment (D-138 item 2). */
+  comment_id: number | string;
   line: number;
 }): string {
   return `${payload.venue}:${payload.comment_id}:${payload.line}`;
@@ -1927,9 +1928,15 @@ export function communityValidationsFor(
     const postedAt = payload["posted_at"];
     const commentId = payload["comment_id"];
     const line = payload["line"];
-    const key = `${venue}:${typeof commentId === "number" ? commentId : -1}:${
-      typeof line === "number" ? line : 0
-    }`;
+    // The comment id is whatever the venue calls one — an integer on the 1F916
+    // board, a UUID on The Colony (D-138 item 2) — and both spellings are kept
+    // whole here. Folding every string id to -1 would key two different
+    // comments the same way and lose one of them.
+    const key = `${venue}:${
+      typeof commentId === "number" || typeof commentId === "string"
+        ? commentId
+        : -1
+    }:${typeof line === "number" ? line : 0}`;
     if (!byLine.has(key)) order.push(key);
     byLine.set(key, {
       operator,

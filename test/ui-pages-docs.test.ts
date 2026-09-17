@@ -579,9 +579,11 @@ describe("renderApi", () => {
     // What is actually true of the route: /entries is not in NEGOTIATED_PATHS,
     // so it answers HTML whatever Accept says, and `limit` is not one of its
     // parameters, so it is refused as unknown_parameter with the Bad query page.
+    // D-138 item 9 gave the listing a JSON twin: the same rows under the same
+    // filters, for a program that would otherwise scrape the page.
     expect(words).toContain(
-      "An HTML page and nothing else: this path has no JSON twin, so it answers" +
-        " HTML whatever the Accept header says",
+      "A page for a reader and a listing for a program: with Accept:" +
+        " application/json it answers { entries, next, as_of }",
     );
     expect(words).toContain(
       "limit is refused as unknown_parameter, answered as the Bad query page" +
