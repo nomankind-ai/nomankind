@@ -389,12 +389,32 @@ export interface StoredEntry {
  * the key this code reads and not merely for a class. Such a row is recomputed
  * from its own core, which is what the old key held anyway, and the stale key
  * goes with the object it was on -- again no migration.
+ *
+ * `bootstrap` arrived in M25e (decision D-128) and is defaulted to null, which
+ * is the one default here that is also a fact: a row written before the key
+ * existed was written before any perimeter was ever disclosed, so there was no
+ * perimeter for its validators to have shared. Null, and never recomputed
+ * here, because the label is a fold of the naming events and a row is not the
+ * log -- a stored row that needs the label re-read is re-derived like any
+ * other.
  */
 function toSidecar(row: Row, entry: Entry): Sidecar {
   const stored = readJson<Sidecar>(row, "sidecar_json");
-  const sidecar = Array.isArray(stored.revalidations)
+  const withRevalidations = Array.isArray(stored.revalidations)
     ? stored
     : { ...stored, revalidations: [] };
+  const withBootstrap =
+    withRevalidations.bootstrap === undefined
+      ? { ...withRevalidations, bootstrap: null }
+      : withRevalidations;
+  // A row stored before the public-confirmation door (D-136) carries no list,
+  // which reads as what it is: nobody outside has said anything about this
+  // entry. Defaulted here for the reason the label is — a reader of a row must
+  // never have to ask whether a field is missing or empty.
+  const sidecar =
+    withBootstrap.confirmations === undefined
+      ? { ...withBootstrap, confirmations: [] }
+      : withBootstrap;
   const source = sidecar.source as SourceClassification | undefined;
   const usable =
     source !== undefined && isSourceClass(source.class) && "authority" in source;
@@ -7515,4 +7535,116 @@ export async function cosignerCountsForOperators(
     counts.set(readText(row, "operator_a"), readInteger(row, "n"));
   }
   return counts;
+}
+
+// ---------------------------------------------------------------------------
+// The public-confirmation door (decision D-136)
+// ---------------------------------------------------------------------------
+
+/**
+ * The counters row one thread's cursor lives on.
+ *
+ * The `counters` table and not a table of its own: a cursor is one integer per
+ * thread, the same shape the chain walk and the co-signature fold already keep
+ * there, and a migration for a column that holds a comment id would be a
+ * migration that bought nothing. The name carries the venue and the thread, so
+ * a second venue or a second thread is a row rather than a schema change.
+ *
+ * The prefix is not decoration: the counters step drops and rewrites every row
+ * whose name has no colon in it (`COUNTERS_STEP_ROWS`), so a cursor another
+ * step keeps has to be named like the chain's and the co-signature fold's or
+ * it would be deleted once a run.
+ */
+export const CONFIRMATION_COUNTER_PREFIX = "confirmation:";
+
+function confirmationCursorName(venue: string, thread: number): string {
+  return `${CONFIRMATION_COUNTER_PREFIX}${venue}:${thread}`;
+}
+
+/**
+ * How far the door has read one thread: the newest comment id it has taken, or
+ * null for a thread it has never read.
+ *
+ * Null and not zero, so "never read" and "read up to comment 0" stay different
+ * answers — the first is a thread the step starts at the beginning of, and the
+ * second could never happen but should not be spelled the same way if it did.
+ */
+export async function readConfirmationCursor(
+  db: D1Like,
+  venue: string,
+  thread: number,
+): Promise<number | null> {
+  const row = await db
+    .prepare(`SELECT value FROM counters WHERE name = ? ${ONE_ROW}`)
+    .bind(confirmationCursorName(venue, thread))
+    .first<Row>();
+  return row === null ? null : readInteger(row, "value");
+}
+
+/**
+ * Move one thread's cursor. Written after the events, never before: a run that
+ * sealed confirmations and died before the cursor moved re-reads the same
+ * comments next time and seals none of them again, because the dedup key is on
+ * the comment and the line (src/worker/sweep.ts).
+ */
+export async function writeConfirmationCursor(
+  db: D1Like,
+  venue: string,
+  thread: number,
+  through: number,
+  at: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO counters (name, value, position, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (name) DO UPDATE SET
+         value = excluded.value,
+         position = excluded.position,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(confirmationCursorName(venue, thread), through, through, at)
+    .run();
+}
+
+/**
+ * Which of these entry ids the log actually holds.
+ *
+ * The door's "an entry id must be a known entry id in the log" rule, asked of
+ * the index in one statement over exactly the ids a page of comments named. An
+ * id nobody submitted simply is not in the answer, and the line that named it
+ * is refused — a confirmation of a fact this record does not hold is not a fact
+ * about this record.
+ */
+export async function existingEntryIds(
+  db: D1Like,
+  ids: readonly string[],
+): Promise<Set<string>> {
+  const known = new Set<string>();
+  if (ids.length === 0) return known;
+  const marks = ids.map(() => "?").join(", ");
+  const rows = await db
+    .prepare(`SELECT id FROM entries WHERE id IN (${marks})`)
+    .bind(...ids)
+    .all<Row>();
+  for (const row of rows.results) known.add(readText(row, "id"));
+  return known;
+}
+
+/**
+ * Seal one public confirmation and rewrite the entry it is about.
+ *
+ * The entry row is rewritten in the same batch because the confirmation is a
+ * derived field of it: the sidecar's `confirmations` gains a row, and the
+ * bootstrap label may clear (src/derive.ts). What it never does is move the
+ * status — derivation decides that from the counted validators' decisions, and
+ * a confirmation is not one of those.
+ *
+ * `RevalidationWrite` is the shape every event-plus-row writer here takes; the
+ * name is the first caller's and not a claim about this one.
+ */
+export async function recordPublicConfirmation(
+  db: D1Like,
+  input: RevalidationWrite<"public_confirmation">,
+): Promise<Event<"public_confirmation">> {
+  return recordRevalidationEvent(db, input);
 }

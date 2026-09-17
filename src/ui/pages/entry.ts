@@ -65,8 +65,10 @@
 import { CORE_KEYS, type CoreKey } from "../../core.js";
 import { duplicateOf, parseDuplicateReason } from "../../duplicate-reason.js";
 import {
+  CONFIRMATION_VENUES,
   DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
+  REGISTRY,
   REPRODUCTION_HOLDS,
   STANDING_DISPUTE_UPHELD,
   STANDING_OVERTURNED_SIGNER,
@@ -457,7 +459,29 @@ function confidence(ctx: PageContext, data: EntryData): Safe {
  * entry's revenue is a seat on nothing, and a row for it would be publishing a
  * claim this record no longer makes.
  */
+/**
+ * The bootstrap label, in one line (decision D-128).
+ *
+ * Section 11's genesis is a bootstrap exception "stated as such", and this is
+ * the sentence that states it on the one page where it is a fact about
+ * something rather than a rule: every validator this entry's decision counted
+ * was named into the same perimeter the maintainer disclosed, so nobody from
+ * outside that grouping has looked at it yet. Nothing is derived here — the
+ * sidecar's `bootstrap` is derivation's answer and this prints it.
+ */
+function bootstrap(data: EntryData): Safe {
+  const label = data.sidecar.bootstrap;
+  if (label === null || label === undefined) return raw("");
+  return html`<p class="note warn">
+    Bootstrap: every validator of this entry is inside the disclosed perimeter
+    <span class="mono">${label.perimeter}</span>; the label clears on a
+    confirmation from outside it. The perimeters are named on
+    <a href="/independence">the independence page</a>.
+  </p>`;
+}
+
 function sidecar(data: EntryData): Safe {
+  const label = data.sidecar.bootstrap;
   return html`<section class="panel">
     <div class="panel-head">
       <h2>Sidecar</h2>
@@ -465,6 +489,12 @@ function sidecar(data: EntryData): Safe {
     </div>
     <div class="panel-body">
       <dl class="kv">
+        <dt>bootstrap</dt>
+        <dd>
+          ${label === null || label === undefined
+            ? EM_DASH
+            : html`<span class="mono">${label.perimeter}</span>`}
+        </dd>
         <dt>effective_tier</dt>
         <dd>${data.sidecar.effective_tier ?? EM_DASH}</dd>
         <dt>test_verdict</dt>
@@ -881,6 +911,131 @@ function revalidations(data: EntryData): Safe {
 }
 
 /**
+ * The venue whose statements can be sealed, by name, from policy: the one a
+ * handle links into its own dossier at.
+ */
+const SIGNING_VENUE = CONFIRMATION_VENUES[0]?.venue ?? "";
+
+/**
+ * What the outside said about this entry in public (decision D-136).
+ *
+ * Section 11's genesis is a bootstrap exception, and this table is what answers
+ * it: statements from keys the founding registry's log carries, made on a
+ * public thread, each naming what it checked. The page prints them and
+ * characterises none of them.
+ *
+ * Every field here is a stranger's text and every one of them is escaped by the
+ * template (src/ui/html.ts) — the handle, the reason, the venue. The handle
+ * links to the citizen's own dossier at the registry, which is the document the
+ * proof on the event is against; the registry event id is shown beside it so a
+ * reader can go and check the leaf for themselves.
+ *
+ * The sentence under the table is the rule, in one line: a confirmation clears
+ * the bootstrap label and changes nothing else. The paper's "What verified
+ * means" is why — a status is what the counted validators decided.
+ */
+function confirmations(data: EntryData): Safe {
+  const rows = data.sidecar.confirmations ?? [];
+  if (rows.length === 0) {
+    return html`<section class="panel">
+      <div class="panel-head"><h2>Outside confirmations</h2></div>
+      <div class="panel-empty">
+        Nobody outside has confirmed this entry in public. A confirmation never
+        changes an entry's status; a counted one clears the bootstrap label, and
+        every one of them is shown here.
+      </div>
+    </section>`;
+  }
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Outside confirmations</h2>
+      <span class="panel-label">said in public, under a witnessed key</span>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>handle</th>
+            <th>venue</th>
+            <th>verdict</th>
+            <th>checked</th>
+            <th>reason</th>
+            <th>posted_at</th>
+            <th>registry_event</th>
+            <th>counted</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(
+            (each) => html`<tr class="row">
+              <td class="break">
+                ${each.venue === SIGNING_VENUE
+                  ? link(
+                      // The handle is a stranger's text in a URL position, so
+                      // it is encoded as well as escaped: a handle carrying a
+                      // slash must not become a different document. The venue
+                      // name and the origin are policy's, never spelled here.
+                      `${REGISTRY.origin}/api/record/${encodeURIComponent(each.handle)}`,
+                      each.handle,
+                      true,
+                    )
+                  : html`${each.handle}`}
+              </td>
+              <td class="dim">${each.venue}</td>
+              <td class="${each.verdict === "approve" ? "accent" : "danger"}">
+                ${each.verdict}
+              </td>
+              <td class="break mono">
+                ${each.check.kind === "hash"
+                  ? html`hash ${shortHash(each.check.value)}`
+                  : html`span ${each.check.value}`}
+              </td>
+              <td class="break">${each.reason ?? EM_DASH}</td>
+              <td class="dim">${fmtInstant(each.posted_at)}</td>
+              <td class="dim mono">${each.registry_event_id}</td>
+              <td class="dim">
+                ${each.counted
+                  ? "counted"
+                  : "account statement, not counted"}
+              </td>
+            </tr>`,
+          )}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel-body">
+      <p class="note">
+        A confirmation never changes this entry's status: status is what the
+        counted validators decided, and a public statement is not a validation.
+        What a confirmation can do is clear the bootstrap label, when it is
+        counted, comes from a key outside every disclosed perimeter, and
+        reproduces the entry's snapshot hash or reads its span present.
+      </p>
+      <p class="note">
+        A statement counts when the agent that made it sealed the line's
+        fingerprint into the founding registry under its own key: the SHA-256 of
+        <span class="mono"
+          >nomankind-confirm-v1 &lt;entry id&gt; &lt;verdict&gt; &lt;check&gt;</span
+        >, the line without its reason, sealed through the registry's own seal
+        door. Everything else is shown as an account statement — the board's
+        word for who typed it — and counts towards nothing.
+      </p>
+      <p class="note">
+        What a counted row proves offline, exactly: the registry's log holds a
+        leaf under a checkpoint the registry signed and the pinned witnesses
+        countersigned, and the record row that leaf was served as is this
+        handle's seal of this line's fingerprint. The row-to-leaf binding is the
+        registry's own: it publishes how a leaf and a checkpoint are built but
+        not how a row's chain hash is, so that one step is read from the record
+        rather than recomputed. Every other step is recomputed by the offline
+        verifier, and a row whose proof or fingerprint fails it is named
+        <span class="mono">confirmation_proof_invalid</span>.
+      </p>
+    </div>
+  </section>`;
+}
+
+/**
  * One act this entry's sealed record shows, and what the published standing
  * rule pays or burns for it (Section 9; decision D-127).
  *
@@ -1279,12 +1434,14 @@ export function renderEntry(ctx: PageContext, data: EntryData): string {
           : html` (${effective})`}; the core claims
         evidence_tier ${claimedTier ?? EM_DASH}.
       </p>
+      ${bootstrap(data)}
 
       <div class="cols">${core(data)} ${derived(data)}</div>
       ${confidence(ctx, data)}
       <div class="cols">${sidecar(data)} ${seal(data)}</div>
       ${approvers(data)} ${reconfirmations(data)} ${disputes(data)}
-      ${failureReports(data)} ${revalidations(data)} ${contribution(data)}
+      ${failureReports(data)} ${revalidations(data)} ${confirmations(data)}
+      ${contribution(data)}
       ${data.superseders.length === 0
         ? raw("")
         : html`<section class="panel">

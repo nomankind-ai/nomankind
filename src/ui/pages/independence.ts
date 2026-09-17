@@ -26,6 +26,8 @@
 import { html, layout, link, raw, type Safe } from "../html.js";
 import {
   CLAIM_SHARED_PERIMETER,
+  CLAIM_SINGLE_PERIMETER,
+  type DerivedFromEntry,
   type IndependenceReport,
   type OverlapEntry,
   type ValidatorEntry,
@@ -42,12 +44,121 @@ function validatorRow(entry: ValidatorEntry): Safe {
     <td class="${entry.trusted ? "accent" : "dim"}">
       ${entry.trusted ? "trusted" : "no"}
     </td>
+    <td class="${entry.perimeter === null ? "dim" : "warn"} mono">
+      ${entry.perimeter ?? EM_DASH}
+    </td>
     <td class="warn">${entry.maintainer ? "cannot validate" : EM_DASH}</td>
     <td class="muted">${entry.provider ? "provider" : EM_DASH}</td>
     <td class="mono">
       ${entry.domains.length === 0 ? EM_DASH : entry.domains.join(" · ")}
     </td>
   </tr>`;
+}
+
+/**
+ * The disclosed perimeters, each naming the operators inside it (D-128).
+ *
+ * Beside the two sets and not folded into the claim, because it is the fact the
+ * claim reads: Section 11 lets the maintainer seed the trusted pool once, "a
+ * bootstrap exception to the earned-record rule, stated as such", and this is
+ * the table that states it. Empty is the ordinary case and says so rather than
+ * disappearing, because a missing table reads as a question nobody asked.
+ */
+function perimeters(report: IndependenceReport): Safe {
+  const groups = Object.entries(report.validator_perimeters);
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Validator perimeters</h2>
+      <span class="panel-label">what the maintainer disclosed at each naming</span>
+    </div>
+    ${groups.length === 0
+      ? html`<div class="panel-empty">
+          No perimeter is disclosed on any operator: no genesis naming on this
+          environment carried one.
+        </div>`
+      : html`<div class="table-wrap">
+          <table class="dense">
+            <thead>
+              <tr>
+                <th>perimeter</th>
+                <th>operators</th>
+                <th>of the validator set</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${groups.map(
+                ([perimeter, operators]) => html`<tr class="row">
+                  <td class="mono warn">${perimeter}</td>
+                  <td>
+                    ${operators.map(
+                      (operator) =>
+                        html`<a href="/operators/${operator}">${operator}</a> `,
+                    )}
+                  </td>
+                  <td class="mono">
+                    ${operators.length} of ${report.validator_set.length}
+                  </td>
+                </tr>`,
+              )}
+            </tbody>
+          </table>
+        </div>`}
+    <p class="note">
+      A perimeter is the maintainer's own word for a grouping it already stands
+      behind, disclosed in the genesis naming event itself and re-derivable from
+      the log by anybody. It is never a permission: no rule refuses a validation
+      because of one. What it changes is what this record is willing to claim,
+      and what an entry says about itself — an entry every one of whose
+      validators sat inside one perimeter carries a
+      <span class="mono">bootstrap</span> label until somebody outside it
+      confirms the fact.
+    </p>
+  </section>`;
+}
+
+/** Where each part of this page is computed from, row by row (D-132). */
+function derivedFrom(report: IndependenceReport): Safe {
+  const rows = Object.entries(report.derived_from).map(
+    ([part, each]: [string, DerivedFromEntry]) => html`<tr class="row">
+      <td class="mono">${part}</td>
+      <td class="mono break">${each.rows.join(", ")}</td>
+      <td class="mono break">${each.published_at.join(" · ")}</td>
+      <td class="note">${each.note}</td>
+    </tr>`,
+  );
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Derived from</h2>
+      <span class="panel-label">the published rows behind every set above</span>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>part</th>
+            <th>rows</th>
+            <th>published at</th>
+            <th>what that means</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows}
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Nothing on this page is a number only this record can compute. Anyone
+      holding a mirror export can run
+      <span class="mono">npm run independence -- &lt;mirror-dir&gt;</span>, which
+      recomputes both sets, the intersection, the flag and the claim from those
+      rows and this repository's own <span class="mono">src/policy.ts</span>,
+      and prints the JSON this page's twin answers. Add
+      <span class="mono">--compare &lt;served json&gt;</span> to hold the two
+      against each other: it exits 1 and prints one named difference per line,
+      and the seal position is the one field the two are expected to differ on,
+      because a mirror is a moment and the page is now.
+    </p>
+  </section>`;
 }
 
 /**
@@ -129,6 +240,39 @@ function claim(report: IndependenceReport): Safe {
         <span class="mono">${CLAIM_SHARED_PERIMETER}</span>. A pinned witness
         that has never countersigned is an intention, so it does not raise the
         flag.
+      </p>
+      <p class="note">
+        The two claims are about two different sets and the words keep them
+        apart (decision D-128).
+        <span class="mono">external independent confirmation</span> is about the
+        witnesses: somebody outside countersigned the head this record's seal
+        sits under. <span class="mono">${CLAIM_SINGLE_PERIMETER}</span> is about
+        the validators, and it wins over the first whenever it is true, because
+        a seal countersigned from outside says nothing about who judged the
+        facts underneath it — at genesis that is the operators the maintainer
+        named, every one of them inside one grouping it disclosed. The flag is
+        untouched by the distinction: it goes on answering the question it was
+        asked, about the witness set alone.
+      </p>
+      <p class="note">
+        Worked example, this environment's own most likely reading: the demo
+        counts no pinned witness at all. Its seals are countersigned by two mock
+        keys the deployment runs itself, which are not in
+        <span class="mono">WITNESS_PIN</span>, so every witness row reads
+        <span class="mono">counted false</span> with
+        <span class="mono">head null</span>, the intersection is empty because
+        no pinned key is bound to any registered operator, and the flag is
+        therefore <span class="mono">false</span> — not because a witness failed
+        a check, but because no pinned witness has ever signed here. What
+        changes it on production is a real countersignature: one of the pinned
+        witnesses signs a registry head, the seal stores that countersignature
+        and the head it covered, and the same code reads
+        <span class="mono">counted true</span>, a head with a
+        <span class="mono">tree_size</span> and a
+        <span class="mono">root</span>, and a flag of
+        <span class="mono">true</span>. The rule did not move; the log did. The
+        same example is worked through step by step in
+        <a href="/dry-run">the dry-run guide</a>.
       </p>
     </div>
   </section>`;
@@ -220,6 +364,7 @@ export function renderIndependence(
                   <tr>
                     <th>operator</th>
                     <th>trusted</th>
+                    <th>perimeter</th>
                     <th>maintainer</th>
                     <th>provider</th>
                     <th>domains</th>
@@ -302,7 +447,7 @@ export function renderIndependence(
             </div>`}
       </section>
 
-      ${covered(report)}
+      ${perimeters(report)} ${covered(report)} ${derivedFrom(report)}
     `,
   });
 }

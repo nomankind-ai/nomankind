@@ -34,8 +34,19 @@
  * rejection in the published form, `duplicate_claim:<entry-id>`. The mechanical
  * duplicate never reaches a validator: the submit door refuses it.
  *
+ * Decision D-128 item 3 adds `--quote`, the rule a public validating pool runs
+ * under: approve only when this validator's own fetch reproduces the entry's
+ * snapshot hash AND the normalized capture carries the entry's claim verbatim,
+ * and otherwise reject `quotation_not_reproduced: <hash mismatch | span
+ * absent>`. Both outcomes name the run they were decided in when the runner sets
+ * one, so the entry page -- which shows a decision's reason -- carries a link
+ * anyone can open and watch the check happen. Without the flag nothing about a
+ * run changes. The exclusions hold before any capture either way: the door's
+ * own, and here the one a client can see for itself, `legacy_entry`.
+ *
  * A private key is never printed. node:fs and node:path are allowed in this CLI
- * file only; everything it imports stays Workers-safe.
+ * file only; everything it imports stays Workers-safe. node:process is read only
+ * at the entry point, and only for the run URL the runner sets.
  */
 
 import { readFile } from "node:fs/promises";
@@ -47,7 +58,7 @@ import {
   type SnapshotFetcher,
 } from "../adapters/fetch.js";
 import { receiptArtifactHash } from "../artifact.js";
-import { domainOf, extractCore, type Core } from "../core.js";
+import { coreVersion, domainOf, extractCore, type Core } from "../core.js";
 import {
   DUPLICATE_REASON_PREFIX,
   parseDuplicateReason,
@@ -56,7 +67,7 @@ import { base64urlDecode } from "../encoding.js";
 import type { ApproverRecord } from "../events.js";
 import { isTranscriptCategory, proposedTest } from "../evidence.js";
 import { importPrivateKeyPkcs8 } from "../identity.js";
-import { snapshotHash } from "../normalize.js";
+import { normalizeText, snapshotHash } from "../normalize.js";
 import { NORM_VERSION, REPRODUCTION_RUNS } from "../policy.js";
 import { signRecord } from "../records.js";
 import { signRequest } from "../request.js";
@@ -69,10 +80,106 @@ export interface ValidatorIo {
 
 export const USAGE =
   "usage: validator <key.json> <base-url> <entry-id> [--assigned]" +
-  " [--duplicate-of <entry-id>]";
+  " [--duplicate-of <entry-id>] [--quote]";
 
 /** The reason a validator signs when the page no longer hashes to the entry's. */
 export const SNAPSHOT_MISMATCH = "snapshot_mismatch";
+
+// ---------------------------------------------------------------------------
+// The quotation rule (M25e, decision D-128 item 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * The reason a `--quote` run signs when its own fetch reproduced the entry.
+ *
+ * An approval may carry a reason and nothing forces it to; this one does,
+ * because the whole point of a public pool run is that the entry page says what
+ * was checked and where anyone can watch it being checked.
+ */
+export const QUOTATION_REPRODUCED = "quotation_reproduced";
+
+/** The reason a `--quote` run signs when it did not. The half is always named. */
+export const QUOTATION_NOT_REPRODUCED = "quotation_not_reproduced";
+
+/** Which half of the rule failed: the hash, or the passage. */
+export type QuotationFailure = "hash mismatch" | "span absent";
+
+/** The published form of a quotation rejection, built in one place. */
+export function quotationReason(failure: QuotationFailure): string {
+  return `${QUOTATION_NOT_REPRODUCED}: ${failure}`;
+}
+
+/**
+ * The stop a `--quote` run makes on a record sealed under schema v0.6.
+ *
+ * The door's own word (src/worker/validate.ts): such a core carries no domain,
+ * so nothing derived from it can ever validate. The draft listing already stops
+ * offering it as work, and a pool that fetched the page first would be spending
+ * a public run on an entry no decision can reach. It is asked before the fetch,
+ * with the rest of the exclusions the door applies.
+ */
+export const LEGACY_ENTRY = "legacy_entry";
+
+/**
+ * Does one capture carry this passage, verbatim?
+ *
+ * "Verbatim" is the norm rule's word. Both sides are read in the norm rule's own
+ * spelling -- the capture because `snapshotHash` extracted and normalized it,
+ * the passage because it is put through the same `normalizeText` here -- so the
+ * comparison is exact once whitespace has been folded the one way the rule folds
+ * it, and no looser. A capture with no extracted text carries no passage at all:
+ * a PDF or a binary decides nothing here, exactly as it decides no predicate.
+ *
+ * Exported because the seeder refuses a row on this same question before it
+ * submits it (src/cli/seed.ts), and a seeder that asked it differently from the
+ * validator would be a second rule for the one word.
+ */
+export function containsSpan(capture: CaptureFacts, span: string): boolean {
+  if (capture.text === null) return false;
+  const wanted = normalizeText(span);
+  if (wanted.length === 0) return false;
+  return capture.text.includes(wanted);
+}
+
+/**
+ * The public run this decision was made in, from the environment a runner sets:
+ * the composed URL when the workflow passes one, else the three parts GitHub
+ * Actions sets on every job.
+ *
+ * Pure, and takes the environment rather than reading it, so the composition is
+ * tested without a process -- node:process is the entry point's to read.
+ */
+export function runUrlFrom(
+  env: Record<string, string | undefined>,
+): string | null {
+  const given = env["GITHUB_RUN_URL"];
+  if (typeof given === "string" && given.length > 0) return given;
+  const server = env["GITHUB_SERVER_URL"];
+  const repository = env["GITHUB_REPOSITORY"];
+  const runId = env["GITHUB_RUN_ID"];
+  if (
+    server === undefined ||
+    repository === undefined ||
+    runId === undefined ||
+    server.length === 0 ||
+    repository.length === 0 ||
+    runId.length === 0
+  ) {
+    return null;
+  }
+  return `${server}/${repository}/actions/runs/${runId}`;
+}
+
+/**
+ * One reason, naming the run it was signed in when there is one.
+ *
+ * The URL goes last and the reason ends with it, so a reader of the entry page
+ * -- which shows the reason and has shown it since M21 -- finds the public run
+ * at the end of the sentence whatever the sentence was.
+ */
+export function withRun(reason: string, runUrl: string | null): string {
+  return runUrl === null ? reason : `${reason}; run: ${runUrl}`;
+}
 
 /**
  * The reason a validator signs when it judges an entry a duplicate: the
@@ -586,6 +693,45 @@ export function decideSnapshot(
 }
 
 /**
+ * The quotation rule: approved only when this validator's own fetch reproduces
+ * the entry's snapshot hash AND carries the entry's claim verbatim.
+ *
+ * Two demands and one decision, because they are one sentence of the paper: a
+ * validator approves what its own fetch reproduces. The hash says the page is
+ * the page that was submitted; the passage says the page says what the entry
+ * says. Either half failing is a rejection that names which half, so the entry
+ * page tells an author whether the source moved or the claim was never in it.
+ * The hash is asked first: a page that is not the submitted page decides nothing
+ * about a passage found in it.
+ *
+ * A claim that is not a string is a passage no capture contains, and is
+ * answered as one rather than as a crash.
+ */
+export function decideQuotation(
+  core: Core,
+  snapshot: Snapshot,
+  runUrl: string | null,
+): { decision: "approve" | "reject"; reason: string } {
+  if (snapshot.hash !== core["snapshot_hash"]) {
+    return {
+      decision: "reject",
+      reason: withRun(quotationReason("hash mismatch"), runUrl),
+    };
+  }
+  const claim = core["claim"];
+  if (typeof claim !== "string" || !containsSpan(snapshot, claim)) {
+    return {
+      decision: "reject",
+      reason: withRun(quotationReason("span absent"), runUrl),
+    };
+  }
+  return {
+    decision: "approve",
+    reason: withRun(QUOTATION_REPRODUCED, runUrl),
+  };
+}
+
+/**
  * The n-of-k rerun: REPRODUCTION_RUNS fetches of the citation, counting the runs
  * the predicate held in. A run whose fetch failed is a run the predicate did not
  * hold in, so a flapping source lowers the count rather than shortening it.
@@ -696,6 +842,14 @@ export async function runValidator(input: {
   readonly assigned?: boolean;
   /** The entry this one duplicates, when the operator judged it one. */
   readonly duplicateOf?: string | null;
+  /**
+   * Decide this entry under the quotation rule (D-128 item 3): approve only
+   * when this validator's own fetch reproduces the snapshot hash and carries
+   * the claim verbatim. Absent, the run is exactly what it always was.
+   */
+  readonly quote?: boolean;
+  /** The public run this decision is made in, when it is made in one. */
+  readonly runUrl?: string | null;
   readonly deps: ValidatorDeps;
   readonly io: ValidatorIo;
 }): Promise<ValidatorRun> {
@@ -721,6 +875,12 @@ export async function runValidator(input: {
   // another is refused rather than hashed under rules it never claimed.
   if (core["norm_version"] !== NORM_VERSION) {
     return stopped("unsupported_norm_version");
+  }
+  // The exclusions hold before any fetch, and this is the one of them a client
+  // can see for itself: a v0.6 core carries no domain, so the door refuses
+  // `legacy_entry` whatever the decision says. A pool run offers it to nobody.
+  if (input.quote === true && coreVersion(core) === "v0.6") {
+    return stopped(LEGACY_ENTRY);
   }
 
   const operator = await operatorFor(
@@ -756,7 +916,10 @@ export async function runValidator(input: {
     const attempt = await fetchAndHash(deps.fetcher, citation);
     if (!attempt.ok) return stopped(attempt.reason);
     own = attempt.snapshot;
-    decided = decideSnapshot(core, own.hash);
+    decided =
+      input.quote === true
+        ? decideQuotation(core, own, input.runUrl ?? null)
+        : decideSnapshot(core, own.hash);
   } else {
     decided = { decision: "reject", reason: duplicateReason(duplicateOf) };
   }
@@ -900,6 +1063,7 @@ export interface ValidatorArgs {
   readonly entryId: string;
   readonly assigned: boolean;
   readonly duplicateOf: string | null;
+  readonly quote: boolean;
 }
 
 /**
@@ -917,11 +1081,14 @@ export function parseValidatorArgs(
   const positional: string[] = [];
   let assigned = false;
   let duplicateOf: string | null = null;
+  let quote = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
     if (argument === "--assigned") {
       assigned = true;
+    } else if (argument === "--quote") {
+      quote = true;
     } else if (argument === "--duplicate-of") {
       const value = args[index + 1];
       if (value === undefined || !namesAnEntry(value)) return null;
@@ -939,11 +1106,16 @@ export function parseValidatorArgs(
     keyPath === undefined ||
     baseUrl === undefined ||
     entryId === undefined ||
-    positional.length > 3
+    positional.length > 3 ||
+    // Two different judgments about one entry: `--duplicate-of` says the
+    // operator decided this entry restates another and takes no capture at all,
+    // and `--quote` says the decision rests on nothing but a capture. A run
+    // asked for both has not said which decision it is making.
+    (quote && duplicateOf !== null)
   ) {
     return null;
   }
-  return { keyPath, baseUrl, entryId, assigned, duplicateOf };
+  return { keyPath, baseUrl, entryId, assigned, duplicateOf, quote };
 }
 
 /* c8 ignore start -- the process entry point, exercised by running the CLI. */
@@ -956,12 +1128,15 @@ if (
     console.error(USAGE);
     process.exit(2);
   }
-  const { keyPath, baseUrl, entryId, assigned, duplicateOf } = parsed;
+  const { keyPath, baseUrl, entryId, assigned, duplicateOf, quote } = parsed;
 
   const io: ValidatorIo = {
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
   };
+  // The one thing read from the environment here: the public run this decision
+  // is being made in, which the entry page then shows in the reason.
+  const runUrl = runUrlFrom(process.env);
   process.exit(
     await runCommand({ name: entryId, baseUrl, io }, async () => {
       const run = await runValidator({
@@ -969,6 +1144,8 @@ if (
         entryId,
         assigned,
         duplicateOf,
+        quote,
+        runUrl,
         io,
         deps: {
           http: new WebHttpClient(),

@@ -578,6 +578,10 @@ describe("the step's place in the run", () => {
       // D-135: the rows an older derivation wrote, rewritten beside the
       // staleness rewrites and before the mirror step that publishes them.
       "rederive",
+      // D-136: the public-confirmation door, after the rederive so a row this
+      // run rewrote is the row a confirmation is added to, and before the seal
+      // so the run that seals a confirmation commits to it.
+      "confirmations",
       "publish",
       "seal",
       "witness",

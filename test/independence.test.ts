@@ -32,6 +32,7 @@ import {
   CLAIM_EXTERNAL,
   CLAIM_NONE_COUNTED,
   CLAIM_SHARED_PERIMETER,
+  CLAIM_SINGLE_PERIMETER,
   witnessAgentId,
 } from "../src/independence.js";
 import { WITNESS_PIN } from "../src/policy.js";
@@ -60,6 +61,9 @@ const OPERATORS = [
   { id: "delta.example", trusted: false, maintainer: false, provider: false },
   { id: "nomankind.ai", trusted: false, maintainer: true, provider: false },
 ] as const;
+
+/** The perimeter the maintainer disclosed for one of them (decision D-128). */
+const PERIMETER = "nomankind";
 
 /** The two witnesses whose countersignatures the newest seal carries. */
 const WITH_HEAD = WITNESS_PIN[0]!;
@@ -167,7 +171,16 @@ beforeAll(async () => {
       provider: operator.provider,
       registeredSeq: seq,
       details: operator.trusted
-        ? { trusted: true, trusted_seq: seq }
+        ? {
+            trusted: true,
+            trusted_seq: seq,
+            // Decision D-128: one of the three trusted operators was named
+            // inside a disclosed perimeter and the other two were not, so the
+            // grouping is a real row here and the claim is still the external
+            // one -- a set that is only partly inside a perimeter is not one
+            // disclosed grouping.
+            ...(operator.id === "alpha.example" ? { perimeter: PERIMETER } : {}),
+          }
         : { trusted: false },
     });
     await putOperatorDomain(db, {
@@ -270,9 +283,11 @@ describe("the JSON twin", () => {
     const body = await report(db);
     expect(Object.keys(body)).toEqual([
       "validator_set",
+      "validator_perimeters",
       "witness_set",
       "intersection",
       "covered_object",
+      "derived_from",
       "external_witness_outside_validator_and_subject_provider_control",
       "claim",
       "seal_seq",
@@ -533,6 +548,76 @@ class TestCache implements CacheLike {
     });
   }
 }
+
+describe("perimeters and derived_from (D-128, D-132)", () => {
+  it("groups the validator set by the word each naming disclosed", async () => {
+    const body = await report(db);
+    expect(body["validator_perimeters"]).toEqual({
+      [PERIMETER]: ["alpha.example"],
+    });
+    const validators = body["validator_set"] as Record<string, unknown>[];
+    const alpha = validators.find((each) => each["operator"] === "alpha.example")!;
+    expect(alpha["perimeter"]).toBe(PERIMETER);
+    // Every other operator was named with no grouping, which is null and never
+    // a group of one.
+    for (const each of validators) {
+      if (each["operator"] === "alpha.example") continue;
+      expect(each["perimeter"]).toBeNull();
+    }
+  }, 120_000);
+
+  it("keeps the external claim while only part of the set is inside one", async () => {
+    const body = await report(db);
+    expect(body["claim"]).toBe(CLAIM_EXTERNAL);
+  }, 120_000);
+
+  it("shows the perimeter on the page, in the table and in the column", async () => {
+    const words = flat(await (await page("/independence", db)).text());
+    expect(words).toContain("Validator perimeters");
+    expect(words).toContain("what the maintainer disclosed at each naming");
+    expect(words).toContain("1 of 5");
+    expect(words).toContain("It is never a permission");
+  }, 120_000);
+
+  it("names the rows every set is computed from, and links the command", async () => {
+    const body = await report(db);
+    const derived = body["derived_from"] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(Object.keys(derived)).toContain("validator_set");
+    expect(derived["witness_set"]!["rows"]).toEqual(["WITNESS_PIN"]);
+    expect(derived["intersection"]!["rows"]).toEqual([
+      "agent_bound_to_operator",
+      "handle_is_operator_id",
+    ]);
+
+    const words = flat(await (await page("/independence", db)).text());
+    expect(words).toContain("Derived from");
+    expect(words).toContain("the published rows behind every set above");
+    expect(words).toContain("npm run independence -- &lt;mirror-dir&gt;");
+    expect(words).toContain("--compare &lt;served json&gt;");
+    // The seal position is the one field the two may disagree on, said here
+    // rather than discovered by whoever runs it.
+    expect(words).toContain("the seal position is the one field");
+  }, 120_000);
+
+  it("works the demo's false-flag case through, on the page", async () => {
+    const words = flat(await (await page("/independence", db)).text());
+    expect(words).toContain("the demo counts no pinned witness at all");
+    expect(words).toContain("counted false");
+    expect(words).toContain("head null");
+    expect(words).toContain("The rule did not move; the log did.");
+  }, 120_000);
+
+  it("keeps the two claims apart in words", async () => {
+    const words = flat(await (await page("/independence", db)).text());
+    expect(words).toContain(CLAIM_SINGLE_PERIMETER);
+    expect(words).toContain(
+      "says nothing about who judged the facts underneath it",
+    );
+  }, 120_000);
+});
 
 describe("the edge holds both twins apart", () => {
   it("never lets the JSON twin collide with the page", async () => {

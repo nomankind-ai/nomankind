@@ -99,6 +99,15 @@ const EXPECTED_POLICY_KEYS = [
   "WITNESS_FILE_TAIL_BYTES",
   "REGISTRY",
   "WITNESS_PIN",
+  // The public-confirmation door (D-136): where a confirmation may be said, in
+  // what words, and how much of a thread one run reads.
+  "CONFIRMATION_VENUES",
+  "ACCOUNT_STATEMENT_VENUES",
+  "CONFIRMATION_FORM_PREFIX",
+  "CONFIRMATION_REASON_MAX_CHARS",
+  "CONFIRMATIONS_PER_RUN",
+  "CONFIRMATION_COMMENTS_PER_THREAD",
+  "BOARD_READ_MAX_BYTES",
   "ANCHOR_CALENDARS",
   "FAILURE_REPORT_THRESHOLD",
   "DISPUTE_STAKE_STANDING",
@@ -552,15 +561,18 @@ describe("policy numbers", () => {
     }
   });
 
-  it("exports only numbers, four names, one flag, and frozen objects", () => {
+  it("exports only numbers, five names, one flag, and frozen objects", () => {
     for (const [key, value] of Object.entries(POLICY)) {
       expect(value).not.toBeNull();
       if (
         key === "NORM_VERSION" ||
         key === "SCHEMA_VERSION" ||
         // M24: the slug of the tier served without a key. A name, like the
-        // three above, and the fourth and last one.
-        key === "FREE_TIER"
+        // three above.
+        key === "FREE_TIER" ||
+        // D-136: the first word of the one line the confirmation door reads.
+        // A format constant, and the fifth and last name here.
+        key === "CONFIRMATION_FORM_PREFIX"
       ) {
         expect(typeof value).toBe("string");
         continue;

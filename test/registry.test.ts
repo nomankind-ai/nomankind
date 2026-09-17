@@ -39,6 +39,7 @@ import {
   isProviderDomain,
   parseAgentBindBody,
   parseGenesisBody,
+  perimeterOf,
   parseRegistrationBody,
   signAttestation,
   txtMatches,
@@ -373,7 +374,7 @@ describe("request bodies", () => {
   it("reads a genesis body, and refuses extra keys and wrong types", () => {
     expect(parseGenesisBody({ operator: OPERATOR })).toEqual({
       ok: true,
-      value: { operator: OPERATOR },
+      value: { operator: OPERATOR, perimeter: null },
     });
     for (const bad of [
       null,
@@ -385,6 +386,56 @@ describe("request bodies", () => {
       { operator: 42 },
     ]) {
       expect(parseGenesisBody(bad)).toEqual({ ok: false, reason: "bad_body" });
+    }
+  });
+
+  it("reads the optional perimeter, and refuses one that is not a word", () => {
+    // Decision D-128: the maintainer's disclosed grouping, named at the one
+    // moment it may name anybody, and absent on every naming before it.
+    expect(
+      parseGenesisBody({ operator: OPERATOR, perimeter: "nomankind" }),
+    ).toEqual({ ok: true, value: { operator: OPERATOR, perimeter: "nomankind" } });
+    // Absent and explicitly null are the same fact: no grouping disclosed.
+    expect(parseGenesisBody({ operator: OPERATOR, perimeter: null })).toEqual({
+      ok: true,
+      value: { operator: OPERATOR, perimeter: null },
+    });
+    for (const perimeter of [
+      "",
+      "Nomankind",
+      "nomankind.ai",
+      "-nomankind",
+      "nomankind-",
+      "no man kind",
+      "x".repeat(64),
+      42,
+      [],
+      {},
+    ]) {
+      expect(parseGenesisBody({ operator: OPERATOR, perimeter })).toEqual({
+        ok: false,
+        reason: "bad_body",
+      });
+    }
+  });
+
+  it("reads a perimeter off an operator's stored details, or nothing", () => {
+    expect(perimeterOf({ trusted: true, perimeter: "nomankind" })).toBe(
+      "nomankind",
+    );
+    // Every shape a row can hold that is not a disclosure: a row written
+    // before the decision, a row named with no grouping, a value that is not a
+    // perimeter word, and a details object that is not an object.
+    for (const details of [
+      { trusted: true },
+      { perimeter: null },
+      { perimeter: "NOT A WORD" },
+      { perimeter: 7 },
+      null,
+      undefined,
+      "perimeter",
+    ]) {
+      expect(perimeterOf(details)).toBeNull();
     }
   });
 });

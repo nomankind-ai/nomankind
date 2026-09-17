@@ -326,6 +326,12 @@ const AI_ECOSYSTEM: DomainPolicy = Object.freeze({
           "microsoft.com",
           "azure.microsoft.com",
           "learn.microsoft.com",
+          // Decision D-134: Microsoft publishes its AI conduct and model
+          // commitments under a second registrable domain, so a citation on it
+          // is as official as one on microsoft.com. Listed rather than
+          // pattern-matched, like every host here: an authority's official set
+          // is what the maintainer published, never what a suffix suggests.
+          "microsoft.ai",
         ]),
       }),
       xai: Object.freeze({
@@ -1290,6 +1296,120 @@ export const WITNESS_PIN: readonly Readonly<{
 ]);
 
 /**
+ * The public-confirmation door (decision D-136): where a confirmation may be
+ * said, and by whom the batch threads are posted.
+ *
+ * Whitepaper Section 11's genesis is a bootstrap exception "stated as such",
+ * and the way out of it is somebody outside the maintainer's own perimeter
+ * checking a fact in public. A venue is only usable for that when a statement
+ * made there carries a key the founding registry witnessed — which is what
+ * separates the two kinds of venue below.
+ *
+ * `citizen` is the handle whose posts are the batch threads. Every post by that
+ * citizen is a batch thread once the board's API lists it (it does:
+ * `GET /api/citizen/<handle>` answers that citizen's own posts), so M25g's
+ * daily batch posts need no deploy. `threads` is the pinned floor per
+ * environment, kept for two reasons: a board that stops listing posts still has
+ * the threads the maintainer pinned by decision, and production names none
+ * until the first production batch post exists.
+ *
+ * Not a whitepaper list. The maintainer's published choice; it moves only by a
+ * later decision.
+ */
+export interface ConfirmationVenue {
+  /** The venue's name, as the sealed event's `venue` spells it. */
+  readonly venue: string;
+  /** The citizen whose posts are this venue's batch threads. */
+  readonly citizen: string;
+  /** The threads pinned per environment, whatever the board lists. */
+  readonly threads: Readonly<Record<string, readonly number[]>>;
+  /** Whether the board's API can list the citizen's posts (it can, here). */
+  readonly discover: boolean;
+}
+
+export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
+  Object.freeze({
+    venue: "1f916",
+    citizen: "nomankind",
+    threads: Object.freeze({
+      demo: Object.freeze([5212]),
+      production: Object.freeze([]),
+      local: Object.freeze([]),
+    }),
+    discover: true,
+  }),
+]);
+
+/**
+ * The venues where a statement is an account's word and nothing more.
+ *
+ * The Colony and GitHub both carry accounts, and an account is not a key the
+ * registry witnessed: nobody can prove offline who held it, and nothing about
+ * a post there is a leaf under a signed head. So a statement from one of them
+ * is shown as an account statement and is never counted — it clears no
+ * bootstrap label and changes no status — which is the only honest reading of
+ * a venue whose evidence cannot be re-checked years later.
+ */
+export const ACCOUNT_STATEMENT_VENUES: readonly string[] = Object.freeze([
+  "colony",
+  "github",
+]);
+
+/**
+ * The first word of the one line the door reads (decision D-136).
+ *
+ * A comment on a batch thread is untrusted text written by strangers. The door
+ * reads it line by line and acts on exactly the lines that begin with this
+ * word in the published form
+ * `nomankind-confirm-v1 <entry id> <approve|reject> <sha256:<hex>|span-present|span-absent> [reason]`;
+ * everything else on the thread is prose it ignores. A format constant rather
+ * than a rule, and versioned so a second form can be added without the first
+ * one becoming ambiguous.
+ */
+export const CONFIRMATION_FORM_PREFIX = "nomankind-confirm-v1";
+
+/**
+ * The most characters of a confirmation's reason the door keeps.
+ *
+ * The rest of the line is a stranger's free text: it is stored, shown escaped,
+ * and never followed, so the only thing bounding it protects is the size of
+ * what the log carries forever. Two hundred and eighty, the length of one
+ * public sentence. Not a whitepaper number; it moves only by a later decision.
+ */
+export const CONFIRMATION_REASON_MAX_CHARS = 280;
+
+/**
+ * The most bytes one read of the board may hold.
+ *
+ * The board is somebody else's server and its answers are somebody else's
+ * bytes, so the door reads a bounded amount of them, exactly as a snapshot
+ * capture (`CAPTURE_MAX_BYTES`) and a witness file (`WITNESS_FILE_TAIL_BYTES`)
+ * are bounded. A thread bigger than this is refused rather than held: two
+ * mebibytes is far more than a page of comments, and far less than a Worker.
+ *
+ * Not a whitepaper number; operational, and it moves only by a later decision.
+ */
+export const BOARD_READ_MAX_BYTES = 2097152;
+/**
+ * How many confirmations one sweep run may seal, across every thread.
+ *
+ * Operational, like every other per-run ceiling here: the door reads a public
+ * board, and a thread somebody floods must cost one bounded run rather than an
+ * unbounded one. Nothing is dropped — each thread's cursor stays where the run
+ * stopped and the next run carries on from there.
+ */
+export const CONFIRMATIONS_PER_RUN = 20;
+
+/**
+ * How many comments one run reads from one thread before it stops.
+ *
+ * The same ceiling from the other end: a run reads a bounded page of each
+ * thread past its cursor, seals what it can of it, and leaves the rest to the
+ * next run.
+ */
+export const CONFIRMATION_COMMENTS_PER_THREAD = 100;
+
+/**
  * Lifecycle of an entry (Seal): "anchoring each day's batch hash into an
  * external timestamping chain makes the existence proof independent of the
  * identity layer". The OpenTimestamps calendars the day's hash is offered to,
@@ -1937,6 +2057,14 @@ export const POLICY = Object.freeze({
   WITNESS_FILE_TAIL_BYTES,
   REGISTRY,
   WITNESS_PIN,
+  // Where a public confirmation may be said, and in what words (D-136).
+  CONFIRMATION_VENUES,
+  ACCOUNT_STATEMENT_VENUES,
+  CONFIRMATION_FORM_PREFIX,
+  CONFIRMATION_REASON_MAX_CHARS,
+  CONFIRMATIONS_PER_RUN,
+  CONFIRMATION_COMMENTS_PER_THREAD,
+  BOARD_READ_MAX_BYTES,
   ANCHOR_CALENDARS,
   FAILURE_REPORT_THRESHOLD,
   DISPUTE_STAKE_STANDING,

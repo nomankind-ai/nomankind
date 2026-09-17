@@ -446,6 +446,13 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
               <dd class="break">${domains(data.domains)}</dd>
               <dt>named by</dt>
               <dd class="break">${data.namedBy ?? EM_DASH}</dd>
+              <dt>perimeter</dt>
+              <dd class="${row.perimeter === null ? "" : "warn"}">
+                ${row.perimeter === null
+                  ? EM_DASH
+                  : html`<span class="mono">${row.perimeter}</span> ·
+                      <a href="/independence">disclosed at the naming</a>`}
+              </dd>
               <dt>overturned</dt>
               <dd class="${row.overturned === 0 ? "" : "danger"}">
                 ${row.overturned}

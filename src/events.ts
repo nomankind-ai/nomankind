@@ -121,7 +121,20 @@ export type EventPayloads = {
     maintainer: boolean;
     domain?: string;
   };
-  operator_trusted: { operator: string };
+  /**
+   * The maintainer named an operator into the trusted pool.
+   *
+   * `perimeter` is the word the maintainer disclosed at the naming (decision
+   * D-128): Section 11's genesis is "a bootstrap exception to the earned-record
+   * rule, stated as such", and the perimeter is the second half of stating it.
+   * It is sealed into the event rather than kept in a row so that the bootstrap
+   * label is re-derivable from the log by anyone (src/derive.ts,
+   * `operatorPerimetersAt`).
+   *
+   * Optional, and absent on every naming sealed before the decision, which
+   * reads as exactly what it is: no perimeter disclosed.
+   */
+  operator_trusted: { operator: string; perimeter?: string };
   operator_untrusted: { operator: string };
   /**
    * An agent key bound to the operator that answers for it. Section 5: "Every
@@ -462,7 +475,187 @@ export type EventPayloads = {
    * by an expiry.
    */
   attestation_expired: { attestation: string; missing: readonly string[] };
+  /**
+   * Somebody outside the record checked one of its entries in public, and said
+   * so on a batch thread at the founding registry (decision D-136).
+   *
+   * Whitepaper Section 11: genesis is "a bootstrap exception to the
+   * earned-record rule, stated as such", and this is how the record hears that
+   * the exception no longer holds for an entry — a confirmation from a
+   * witnessed key outside every disclosed perimeter, reproducing the entry's
+   * snapshot hash or reading its span present, clears the bootstrap label
+   * (src/derive.ts, `bootstrapLabelFor`).
+   *
+   * It clears a label and nothing else. **A confirmation never changes an
+   * entry's status**: status is what the counted validators decided, and a
+   * comment on a public board is not a validation, has no assignment behind
+   * it, signs no record and stands under no stake. What the paper's "What
+   * verified means" promises is exactly that, and a door that let a stranger's
+   * comment promote an entry would be a door that unsaid it.
+   *
+   * Everything here comes off the comment, and the comment is untrusted text:
+   * the line was parsed strictly (src/confirm.ts), `reason` is bounded and
+   * escaped everywhere it is shown, and nothing in it is ever followed.
+   *
+   * `counted` is the whole difference between a statement and a proof, and it
+   * is a fact about this line rather than about the venue. The board attributes
+   * a comment to a handle and signs nothing, so a comment alone is an account
+   * statement. It counts when the confirmer's own key sealed this line's
+   * `fingerprint` into the founding registry's log through the registry's seal
+   * door — an identity event with a position and an inclusion proof under a
+   * signed, countersigned head, which is what `registry_event_id` names and
+   * `registry_proof` carries. Absent or unverifiable, the line is still sealed
+   * here, with `counted: false` and a null proof, and it is shown on the entry
+   * as an account statement and clears no label.
+   *
+   * `fingerprint` is derivable from the three fields above it
+   * (src/confirm.ts, `confirmationFingerprint`) and travels all the same, so a
+   * reader can see what was supposed to have been sealed without rebuilding the
+   * form, and the verifier recomputes it and compares.
+   *
+   * `comment_id` and `line` together say exactly which line of which comment
+   * this was sealed from, which is what the sweep deduplicates on so a re-read
+   * of a thread never seals the same line twice.
+   */
+  public_confirmation: {
+    entry_id: string;
+    venue: string;
+    handle: string;
+    /** The board's own comment id the line was read from. */
+    comment_id: number;
+    /** The identity event that carries the sealed fingerprint, or null. */
+    registry_event_id: number | null;
+    registry_proof: ConfirmationProof | null;
+    /** The canonical line's fingerprint, `sha256:<hex>`. */
+    fingerprint: string;
+    /** Whether that fingerprint was found sealed under the handle's own key. */
+    counted: boolean;
+    verdict: ConfirmationVerdict;
+    check: ConfirmationCheck;
+    /** The rest of the line, bounded by policy, or null when there was none. */
+    reason: string | null;
+    /** When the comment was posted, as the board timed it. */
+    posted_at: string;
+    /** Which line of the comment, zero-based. */
+    line: number;
+  };
 };
+
+/** A confirmation's verdict: the two words the form accepts. */
+export type ConfirmationVerdict = "approve" | "reject";
+
+/**
+ * What the confirmer says they checked, in the two forms the door accepts: the
+ * entry's snapshot hash, reproduced on their own fetch, or whether the claimed
+ * span was present in the source.
+ */
+export type ConfirmationCheck =
+  | { kind: "hash"; value: string }
+  | { kind: "span"; value: "present" | "absent" };
+
+/**
+ * A sealed confirmation's place in the founding registry's log, self-contained.
+ *
+ * The leaf is the confirmer's own `memory.seal` identity event, whose detail
+ * names the fingerprint of the line they confirmed.
+ *
+ * Self-contained on purpose: an offline reader holding only the log must be
+ * able to recheck it years later, so the leaf, the path, the head the registry
+ * signed and the witnesses' countersignatures all travel on the event. Nothing
+ * here is anybody's assertion — every field is checked, never read
+ * (src/confirm.ts, `verifyConfirmationProof`).
+ */
+export interface ConfirmationProof {
+  /** The registry origin this head belongs to; the pin decides if it counts. */
+  registry: string;
+  /** Which of the registry's logs, e.g. `identity_events`. */
+  log: string;
+  /** The registry's chain hash of the identity event: the leaf's preimage. */
+  event_hash: string;
+  /**
+   * The record row that hash belongs to, as the registry published it: whose
+   * record it was read from, which event it is, and what it says.
+   *
+   * This is what ties a leaf to a *confirmation* rather than to some other
+   * event of some other citizen. A reader checks that the row is a
+   * `memory.seal`, that its record is the handle that commented, and that its
+   * detail names the fingerprint this event carries; a proof that verifies
+   * against the log but names another citizen or another fingerprint is a
+   * proof of something else and is refused (src/confirm.ts).
+   *
+   * What a reader CANNOT do offline is recompute `event_hash` from these
+   * fields: the registry publishes its checkpoint and leaf construction (the
+   * protocol SPEC section 3 — leaves are the rows' lowercase-hex chain
+   * hashes as UTF-8 bytes) but not the construction of the chain hash itself,
+   * so the row-to-hash binding is the registry's assertion, read by the door
+   * at ingestion out of the same record response that carried the proof. The
+   * offline claim is therefore exactly this: a witnessed leaf exists in the
+   * registry's log, and the row the registry served it as is this handle's
+   * seal of this line. The entry page says so in those words.
+   */
+  leaf: ConfirmationLeaf;
+  /** The leaf's index in that log. */
+  leaf_index: number;
+  /** The audit path from the leaf to `checkpoint.root`. */
+  proof: readonly string[];
+  /** The head the inclusion proof was fetched against, as the registry signed it. */
+  checkpoint: {
+    tree_size: number;
+    root: string;
+    created_at: number;
+    registry_sig: string;
+  };
+  /** The pinned witnesses' countersignatures over their own heads. */
+  witnesses: readonly ConfirmationCountersignature[];
+}
+
+/**
+ * The record row a confirmation's leaf is, in the registry's own fields.
+ *
+ * Exactly what `GET /api/record/<handle>` publishes for one event, minus what
+ * the proof already holds: the row's id, its kind, its detail line and its
+ * time, plus the record it was read from.
+ */
+export interface ConfirmationLeaf {
+  /** The citizen whose record this row is in: the confirmer's handle. */
+  citizen: string;
+  /** The registry's own id for the event. */
+  event_id: number;
+  /** The event kind; only `memory.seal` can carry a confirmation. */
+  kind: string;
+  /**
+   * The detail line the registry writes for a seal:
+   * `label='<label>' sha256=<hex>, signed by <public key>`. The fingerprint
+   * is in it by name, which is what makes the row about this line.
+   */
+  detail: string;
+  /** When the registry recorded the row, in epoch milliseconds. */
+  created_at: number;
+}
+
+/**
+ * One witness's countersignature, and the bridge from its head to the head the
+ * inclusion proof was fetched against.
+ *
+ * The same shape src/seal.ts's `WitnessSignature` carries in its registry form,
+ * minus the fields the proof above already holds once: the witness rule
+ * (src/witness.ts) judges both through one code path, so a countersignature is
+ * worth exactly what it is worth on a seal.
+ */
+export interface ConfirmationCountersignature {
+  agent: string;
+  signature: string;
+  head: {
+    tree_size: number;
+    root: string;
+    created_at: number;
+    registry_sig: string;
+  };
+  /** The witness file line's consistency field, e.g. "verified from 9125". */
+  consistency: string;
+  /** Path between the countersigned head and the proof's head; empty when one head. */
+  consistency_proof: readonly string[];
+}
 
 /** One entry's reads on a published day. */
 export interface ReadCountRow {
@@ -509,6 +702,7 @@ export const EVENT_TYPES: readonly EventType[] = [
   "attestation_answered",
   "attestation_scored",
   "attestation_expired",
+  "public_confirmation",
 ] as const;
 
 /**
@@ -532,6 +726,12 @@ export const ENTRY_SCOPED_TYPES: readonly EventType[] = [
   "revalidation_missed",
   "revalidation_resolved",
   "failure_report",
+  // A confirmation is about one entry and nothing else, so it carries that
+  // entry's id like every other entry-scoped event (D-136). The payload names
+  // the entry too, because a reader folding the payload alone — the shape
+  // builder A's `bootstrapLabelFor` reads — must not have to look at the
+  // envelope to know what was confirmed.
+  "public_confirmation",
 ] as const;
 
 export type Event<T extends EventType = EventType> = {

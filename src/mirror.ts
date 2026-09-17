@@ -211,6 +211,16 @@ export interface MirrorOperator {
   readonly trusted: boolean;
   readonly domains: readonly string[];
   readonly agents: readonly string[];
+  /**
+   * The perimeter the maintainer disclosed when it named this operator into
+   * the trusted pool, or null/absent when it named none (decision D-128).
+   *
+   * In the mirror because the independence page's `validator_perimeters` is
+   * computed from it, and a page that could only be checked against the live
+   * record would be a page nobody could check. Optional, so a mirror built
+   * before the decision reads exactly as it always did.
+   */
+  readonly perimeter?: string | null;
 }
 
 /**
@@ -762,6 +772,12 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
         trusted: operator.trusted,
         domains: [...operator.domains],
         agents: [...operator.agents].sort(),
+        // Written only when one was disclosed, so an operator the maintainer
+        // named no grouping for has no key here, exactly as its naming event
+        // has none.
+        ...(operator.perimeter === null || operator.perimeter === undefined
+          ? {}
+          : { perimeter: operator.perimeter }),
       })),
       agents,
     }),

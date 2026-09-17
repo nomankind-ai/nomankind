@@ -18,10 +18,12 @@ import {
   type EvidenceTier,
   type TestVerdict,
 } from "./evidence.js";
+import { confirmationPayloadOf } from "./confirm.js";
 import {
   APPROVALS_TO_VERIFY_LARGE_POOL,
   APPROVALS_TO_VERIFY_SMALL_POOL,
   authorityHostsFor,
+  CONFIRMATION_VENUES,
   DEFAULT_DOMAIN,
   isRegisteredDomain,
   REJECTIONS_TO_REJECT,
@@ -43,6 +45,8 @@ import { checkSupersedes } from "./supersede.js";
 import { eligibilityRefusal } from "./eligibility.js";
 import type {
   ApproverRecord,
+  ConfirmationCheck,
+  ConfirmationVerdict,
   Event,
   EventType,
   ReconfirmationRecord,
@@ -76,7 +80,7 @@ export interface Clock {
  * The value is the date the rules last moved and the decision that moved them,
  * which is the only thing a reader of a row ever has to compare.
  */
-export const DERIVATION_VERSION = "2026-09-13-d111";
+export const DERIVATION_VERSION = "2026-09-16-d136";
 
 /** The schema's status enum. */
 export type EntryStatus =
@@ -189,6 +193,72 @@ export interface Sidecar {
    * it makes of it.
    */
   readonly source: SourceClassification;
+  /**
+   * The bootstrap label (decision D-128): `{ perimeter }` while every
+   * validator counted in this entry's decision was named inside one and the
+   * same disclosed perimeter, and null otherwise.
+   *
+   * A sidecar field and not a schema one, for the reason the effective tier is:
+   * the signed record says what was claimed, and the log says what it makes of
+   * it. Nothing signs this and nothing has to — it is folded from the naming
+   * events and the entry's own decisions, so every re-derivation, every mirror
+   * and the offline verifier arrive at the same word from the same bytes.
+   *
+   * Absent on a row stored before the decision, which reads as no label. Every
+   * reader takes it as `bootstrap ?? null`.
+   */
+  readonly bootstrap: BootstrapLabel | null;
+  /**
+   * What the outside said about this entry in public (decision D-136), oldest
+   * first: one row per `public_confirmation` event that names it.
+   *
+   * Shown and never counted into anything but the bootstrap label. Whitepaper,
+   * "What verified means": a status is what the counted validators decided
+   * under assignment, on signed records, at stake. A comment on a public board
+   * is none of those, so a confirmation moves no status, no tier and no count —
+   * it says, in the record, that somebody outside looked, which is exactly what
+   * the genesis exception was waiting for.
+   *
+   * `counted` says whether this row is the kind of statement that can clear the
+   * label: true for a signing venue, where the confirmer's key is a leaf in the
+   * founding registry's log and the proof travels on the event, and false for
+   * an account venue (`ACCOUNT_STATEMENT_VENUES`), where the statement is an
+   * account's word and nothing about it can be rechecked offline. An uncounted
+   * row is still shown — the record does not hide what was said — and it clears
+   * nothing.
+   *
+   * Absent on a row stored before the decision, which reads as no
+   * confirmations. Every reader takes it as `confirmations ?? []`.
+   */
+  readonly confirmations: readonly PublicConfirmationView[];
+}
+
+/**
+ * One public confirmation, as the entry page, the entry JSON, the sync items
+ * and the export all carry it.
+ *
+ * Off the event and nothing else: the handle and the reason are a stranger's
+ * text, kept as they were said, bounded when they were sealed, and escaped
+ * wherever they are shown.
+ */
+export interface PublicConfirmationView {
+  readonly venue: string;
+  readonly handle: string;
+  readonly verdict: ConfirmationVerdict;
+  readonly check: ConfirmationCheck;
+  readonly reason: string | null;
+  readonly posted_at: string;
+  /** The identity event that binds the confirmer's key, by the registry's id. */
+  readonly registry_event_id: number;
+  /**
+   * Whether this statement is of the kind that can clear a bootstrap label: the
+   * venue is a signing venue, and the proof on the event verified when the door
+   * sealed it (src/worker/sweep.ts seals no confirmation whose proof did not,
+   * and src/verify.ts rechecks every one of them offline).
+   */
+  readonly counted: boolean;
+  /** Position of the event in the log, so a reader can go and look at it. */
+  readonly seq: number;
 }
 
 /**
@@ -308,6 +378,43 @@ export function trustedOperatorsAt(
 }
 
 /**
+ * The perimeter each operator was named inside, as of `position` (D-128).
+ *
+ * Section 11's genesis is the maintainer naming the first trusted operators,
+ * "a bootstrap exception to the earned-record rule, stated as such". The
+ * perimeter is the second half of stating it: the word the maintainer
+ * disclosed at the naming, sealed into the `operator_trusted` event's own
+ * payload, so it is re-derivable from the log by anyone and is not a row
+ * somebody could edit.
+ *
+ * An untrusting does not clear it. Trust is a permission and can be withdrawn;
+ * the perimeter is a disclosure about a naming that happened, and unsaying it
+ * would make the record quieter than it was. A later naming of the same
+ * operator replaces it, because the fold runs in seq order and the newest
+ * disclosure is the one in force.
+ *
+ * The field is read off the payload object by name: it is absent on every
+ * naming sealed before the decision, which is exactly "no perimeter
+ * disclosed", and a payload carrying anything but a string is ignored rather
+ * than trusted.
+ */
+export function operatorPerimetersAt(
+  events: readonly Event[],
+  position: number,
+): Map<string, string> {
+  const perimeters = new Map<string, string>();
+  for (const event of inSeqOrder(events)) {
+    if (event.seq > position) break;
+    if (!isType(event, "operator_trusted")) continue;
+    const payload = event.payload as unknown as Record<string, unknown>;
+    const perimeter = payload["perimeter"];
+    if (typeof perimeter !== "string" || perimeter === "") continue;
+    perimeters.set(event.payload.operator, perimeter);
+  }
+  return perimeters;
+}
+
+/**
  * Which operator answers for each agent, as of `position`.
  *
  * Whitepaper Section 5: "Every agent belongs to an operator, the human or
@@ -388,6 +495,16 @@ interface Consensus {
   readonly approvers: readonly ApproverRecord[];
   /** seq of the decision that promoted the entry; null unless it verified. */
   readonly promotingSeq: number | null;
+  /**
+   * The distinct eligible operators whose decisions this verdict was counted
+   * from, in the order they were counted — never every operator in
+   * `approvers`, which holds the records nobody counted too.
+   *
+   * Kept because the bootstrap label (D-128) is a statement about exactly
+   * these: "every validator counted in the entry's decision". It stops growing
+   * the moment the verdict lands, like the counts themselves.
+   */
+  readonly countedOperators: readonly string[];
 }
 
 /**
@@ -542,6 +659,7 @@ function consensusFor(
     needsReplacement,
     approvers,
     promotingSeq,
+    countedOperators: [...countedOperators],
   };
 }
 
@@ -1131,6 +1249,263 @@ function revalidationsFor(
   );
 }
 
+// ---------------------------------------------------------------------------
+// The bootstrap label (decision D-128)
+// ---------------------------------------------------------------------------
+
+/**
+ * The event type the public-confirmation door seals, named here because the
+ * clearing rule below has to know it.
+ *
+ * It is deliberately a string and not an `EventType`. It was written before
+ * the type existed (D-128, one milestone ahead of D-136's door) and it stays a
+ * string now that it does: the fold reads every event's type as a string and
+ * ignores the ones it does not know, which is what let the door land without
+ * touching a line of this rule — and what will let the next one.
+ */
+export const PUBLIC_CONFIRMATION_EVENT = "public_confirmation";
+
+/** The bootstrap label: the one perimeter every counted validator sat inside. */
+export interface BootstrapLabel {
+  readonly perimeter: string;
+}
+
+/**
+ * Whether one public confirmation reproduces what it claims to have checked.
+ *
+ * The two forms the door will accept: a hash, which reproduces when it is the
+ * entry's own snapshot hash, and a span, which reproduces when the confirmer
+ * says the span was present. Anything else — an unknown kind, a hash that is
+ * not this entry's, a span read absent — reproduces nothing and clears
+ * nothing, because a confirmation that did not reproduce the fact is not
+ * outside confirmation of it.
+ */
+function confirmationReproduces(
+  check: unknown,
+  snapshotHash: string | null,
+): boolean {
+  if (typeof check !== "object" || check === null) return false;
+  const fields = check as Record<string, unknown>;
+  const value = fields["value"];
+  if (typeof value !== "string") return false;
+  if (fields["kind"] === "hash") {
+    return snapshotHash !== null && value === snapshotHash;
+  }
+  if (fields["kind"] === "span") return value === "present";
+  return false;
+}
+
+/**
+ * Whether a handle names somebody inside one of the disclosed perimeters.
+ *
+ * A confirmation from a key the maintainer already stands behind is not the
+ * outside confirmation the label is waiting for, so the handle is resolved two
+ * ways: as an operator id in its own right, and as an agent bound to one. Any
+ * other handle — a forum account, a name nobody registered — is outside every
+ * perimeter, which is the case the door exists for.
+ */
+function handleInsideAnyPerimeter(
+  handle: unknown,
+  perimeters: ReadonlyMap<string, string>,
+  agentOperators: ReadonlyMap<string, string>,
+): boolean {
+  if (typeof handle !== "string" || handle === "") return false;
+  if (perimeters.has(handle)) return true;
+  const operator = agentOperators.get(handle);
+  return operator !== undefined && perimeters.has(operator);
+}
+
+/**
+ * The entry's bootstrap label, or null.
+ *
+ * Decision D-128. Section 11's genesis is a bootstrap exception stated as
+ * such, and an entry every one of whose validators was named into the same
+ * disclosed perimeter is that exception showing up in a fact rather than in a
+ * policy: the keys are distinct keys and the decision is a real decision, but
+ * nobody from outside the maintainer's own grouping has looked at it yet. So
+ * the record says so, on the entry, in the word the maintainer disclosed.
+ *
+ * It clears — derives null — the moment somebody outside does look:
+ *
+ * - a reconfirmation sealed by an operator outside the perimeter,
+ * - a revalidation resolved by one,
+ * - or a counted `public_confirmation` from a handle inside no disclosed
+ *   perimeter that reproduces the entry (its snapshot hash, or the span read
+ *   present).
+ *
+ * The third is the public-confirmation door (D-136). Its rule was written a
+ * milestone before the door, because a label that could only ever be cleared by
+ * the record's own operators would be a label the outside world had no way to
+ * answer; the fold reads the event's type as a string and ignores every event
+ * type it does not know, so the door landed without touching this.
+ *
+ * "Counted" is the whole weight the third case carries. A comment on a public
+ * board is an account's word: anybody can type a hash. It counts only where the
+ * confirmer's own key sealed the line's fingerprint into the founding
+ * registry's log, proved on the event and rechecked offline — which is the same
+ * bar every other clause here meets, a signature by somebody outside.
+ *
+ * The perimeters are folded over the whole log rather than at the decision's
+ * position, unlike every count around it. That is on purpose: the perimeter is
+ * not a fact the decision was taken under — it is the maintainer's present
+ * disclosure about an operator — and the label reads in the present tense,
+ * "every validator of this entry is inside the disclosed perimeter", which is
+ * the sentence the entry page prints.
+ */
+function bootstrapLabelOf(
+  events: readonly Event[],
+  entryId: string,
+  consensus: Consensus,
+  snapshotHash: string | null,
+): BootstrapLabel | null {
+  // An entry nobody has decided has no validator set to be inside anything.
+  if (consensus.status === "draft") return null;
+  if (consensus.countedOperators.length === 0) return null;
+
+  const perimeters = operatorPerimetersAt(events, Number.MAX_SAFE_INTEGER);
+  let perimeter: string | null = null;
+  for (const operator of consensus.countedOperators) {
+    const named = perimeters.get(operator);
+    if (named === undefined) return null;
+    if (perimeter === null) perimeter = named;
+    else if (perimeter !== named) return null;
+  }
+  if (perimeter === null) return null;
+
+  const agentOperators = agentOperatorsAt(events, Number.MAX_SAFE_INTEGER);
+  const outside = (operator: string | null): boolean =>
+    operator !== null && perimeters.get(operator) !== perimeter;
+
+  for (const event of inSeqOrder(events)) {
+    if (isType(event, "reconfirmation")) {
+      if (event.entry_id !== entryId) continue;
+      const record = event.payload.record as unknown as { operator: string };
+      if (outside(record.operator)) return null;
+      continue;
+    }
+
+    if (isType(event, "revalidation_resolved")) {
+      if (event.entry_id !== entryId) continue;
+      // The operator the check was resolved by, or the one its checker answers
+      // for: an upgrade the requester made with no check behind it names
+      // neither, and confirms nothing.
+      const resolved =
+        event.payload.operator ??
+        (event.payload.checker === null
+          ? null
+          : (agentOperators.get(event.payload.checker) ?? null));
+      if (outside(resolved)) return null;
+      continue;
+    }
+
+    // The seam: every other event type is read by name off the payload and
+    // ignored unless it is the one the door seals.
+    if ((event.type as string) !== PUBLIC_CONFIRMATION_EVENT) continue;
+    const payload = event.payload as unknown as Record<string, unknown>;
+    const target = payload["entry_id"];
+    if (event.entry_id !== entryId && target !== entryId) continue;
+    // Counted, and nothing else clears anything (D-136 as amended). A comment
+    // is an account's word until its author seals the line's fingerprint into
+    // the registry's log under their own key, and the label is a statement
+    // about who has looked — not about who has typed.
+    if (payload["counted"] !== true) continue;
+    if (payload["verdict"] !== "approve") continue;
+    if (!confirmationReproduces(payload["check"], snapshotHash)) continue;
+    if (handleInsideAnyPerimeter(payload["handle"], perimeters, agentOperators)) {
+      continue;
+    }
+    return null;
+  }
+
+  return { perimeter };
+}
+
+/**
+ * Which line of which comment a confirmation is about.
+ *
+ * The door may seal one line twice, and exactly once: a statement first read
+ * with nothing sealed behind it, and the same statement again once its author
+ * seals its fingerprint (src/worker/sweep.ts). Both are in the log — the log
+ * never forgets what it knew — and the newer of the two is what the entry says
+ * about that line, which is what this key is for.
+ */
+function confirmationKey(payload: {
+  venue: string;
+  comment_id: number;
+  line: number;
+}): string {
+  return `${payload.venue}:${payload.comment_id}:${payload.line}`;
+}
+
+/**
+ * Every public confirmation about one entry, oldest first (decision D-136).
+ *
+ * A fold and nothing more: the events are read in seq order, each payload is
+ * read by name through src/confirm.ts — so an event sealed by a build this one
+ * does not know is skipped rather than half-read — and nothing is judged. One
+ * row per line of per comment: a line sealed twice, uncounted and then counted,
+ * shows as the newer of the two, in the place the first one took, so the order
+ * is the order the statements were made in and not the order they were proved
+ * in.
+ *
+ * `counted` is read off the event and never recomputed here. It is a fact
+ * established at ingestion — the confirmer's own key had sealed this line's
+ * fingerprint into the registry's log, with the proof on the event — and the
+ * offline verifier is what rechecks it (src/verify.ts). A derivation that
+ * decided it would be deciding a question about cryptography that it has no
+ * business asking in a synchronous fold.
+ */
+export function confirmationsFor(
+  events: readonly Event[],
+  entryId: string,
+): PublicConfirmationView[] {
+  const byLine = new Map<string, PublicConfirmationView>();
+  const order: string[] = [];
+  for (const event of inSeqOrder(events)) {
+    const payload = confirmationPayloadOf(event);
+    if (payload === null) continue;
+    if (event.entry_id !== entryId && payload.entry_id !== entryId) continue;
+    const key = confirmationKey(payload);
+    if (!byLine.has(key)) order.push(key);
+    byLine.set(key, {
+      venue: payload.venue,
+      handle: payload.handle,
+      verdict: payload.verdict,
+      check: payload.check,
+      reason: payload.reason,
+      posted_at: payload.posted_at,
+      registry_event_id: payload.registry_event_id,
+      counted: payload.counted,
+      seq: event.seq,
+    });
+  }
+  return order.map((key) => byLine.get(key)!);
+}
+
+/**
+ * The bootstrap label for one entry, folded from the log alone.
+ *
+ * The seam builder C's public-confirmation door plugs into, and the function
+ * every reader outside derivation should call: `deriveEntry` computes the same
+ * answer from the consensus it already holds, and this re-folds it for a
+ * caller that has only the events.
+ */
+export function bootstrapLabelFor(
+  events: readonly Event[],
+  entryId: string,
+): BootstrapLabel | null {
+  const submission = submissionOf(events, entryId);
+  if (submission === null) return null;
+  const core = submission.core;
+  const snapshotHash = core["snapshot_hash"];
+  return bootstrapLabelOf(
+    events,
+    entryId,
+    consensusFor(events, entryId, core),
+    typeof snapshotHash === "string" ? snapshotHash : null,
+  );
+}
+
 /**
  * Lifecycle of an entry, Dispute: "An upheld challenge ... overturns the entry
  * ... The original stays in the log, marked overturned, linked to its
@@ -1237,6 +1612,20 @@ export function deriveEntry(
       core["subject"],
       core["citation"],
       submission.final_url ?? null,
+    ),
+    // What the outside said in public about this entry (D-136). Shown, never
+    // counted into a status: the list and the label below are the whole of
+    // what a confirmation does to a record.
+    confirmations: confirmationsFor(events, entryId),
+    // Off the consensus already folded above, so the label and the counts it
+    // is a statement about can never come from two readings of the log.
+    bootstrap: bootstrapLabelOf(
+      events,
+      entryId,
+      consensus,
+      typeof core["snapshot_hash"] === "string"
+        ? (core["snapshot_hash"] as string)
+        : null,
     ),
   };
 

@@ -1102,7 +1102,7 @@ async function genesis(
 
   const parsed = parseGenesisBody(auth.body);
   if (!parsed.ok) return refuse(400, parsed.reason);
-  const { operator } = parsed.value;
+  const { operator, perimeter } = parsed.value;
 
   const record = await getOperator(env.DB, operator);
   const check = checkGenesisNaming({
@@ -1130,11 +1130,20 @@ async function genesis(
   // be sealed again rather than sent again.
   return await withChainRetry(async (): Promise<Response> => {
     const previous = await tail(env);
+    // The perimeter travels in the naming event and not beside it (D-128), so
+    // the disclosure is re-derivable from the log alone: src/derive.ts's
+    // `operatorPerimetersAt` folds it back out, and the row below is an index
+    // into the event rather than a second source of truth. A naming with no
+    // perimeter carries no key at all, so every event sealed before this
+    // decision means exactly what it always meant.
+    // The key is left out rather than set to null when nothing was disclosed:
+    // the payload type carries it as optional, and an absent key is exactly what
+    // every naming sealed before the decision means.
     const appended = await appendEvent(previous, {
       at: deps.now.toISOString(),
       type: "operator_trusted",
       entry_id: null,
-      payload: { operator },
+      payload: perimeter === null ? { operator } : { operator, perimeter },
     });
     const event = appended[appended.length - 1];
 
@@ -1147,6 +1156,7 @@ async function genesis(
         trusted: true,
         trusted_seq: event.seq,
         named_by: auth.agent,
+        ...(perimeter === null ? {} : { perimeter }),
       },
     };
     await trustOperator(env.DB, { event, operator: updated });

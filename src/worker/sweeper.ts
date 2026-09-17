@@ -41,6 +41,7 @@
 import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
 import { anchorAdapterFor } from "../adapters/anchor.js";
 import { mirrorAdapterFor, type MirrorAdapter } from "../adapters/mirror.js";
+import { boardAdapterFor, type BoardAdapter } from "../adapters/board.js";
 import {
   pinnedWitnessesFor,
   sealingAgentIdFor,
@@ -111,6 +112,7 @@ export interface SweeperDeps {
   readonly ineligibleAgents?: ReadonlySet<string>;
   readonly anchor?: AnchorAdapter;
   readonly mirror?: MirrorAdapter;
+  readonly board?: BoardAdapter;
 }
 
 /**
@@ -151,6 +153,12 @@ export async function sweepDepsFor(
     // secret decides the track, so an environment without one says so rather
     // than failing a call a day.
     mirror: deps?.mirror ?? mirrorAdapterFor(env),
+    // Where the public-confirmation door listens (D-136). Built here for the
+    // reason the mirror adapter is: an environment that read the board through
+    // `/run` and skipped it through the alarm would be two different sweeps.
+    // The venue's pinned threads decide whether there is a board at all, so an
+    // environment the door is not open on says so rather than reading one.
+    board: deps?.board ?? boardAdapterFor(env),
     // No alertFetch: the deployed step delivers through the platform's own.
   };
 }

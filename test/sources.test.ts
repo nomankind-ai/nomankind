@@ -333,6 +333,37 @@ describe("sourceClassOf", () => {
     });
   });
 
+  it("reads microsoft.ai as Microsoft's own official host (D-134)", () => {
+    // Decision D-134: Microsoft's conduct and model commitments are published
+    // under a second registrable domain, added to the one authorities table in
+    // src/policy.ts and mirrored in the registry document.
+    const subject = "microsoft/humanist-ai-code-of-conduct";
+    expect(
+      sourceClassOf(DEFAULT_DOMAIN, subject, "https://microsoft.ai/code-of-conduct"),
+    ).toEqual({
+      class: "official",
+      matched_host: "microsoft.ai",
+      authority: "microsoft",
+    });
+    // A subdomain of it is the same authority, like every other listed host.
+    expect(
+      sourceClassOf(DEFAULT_DOMAIN, subject, "https://www.microsoft.ai/principles")
+        .matched_host,
+    ).toBe("microsoft.ai");
+    // And a host that merely reads like Microsoft's is still refused: the rule
+    // is the published list plus the dot, never a resemblance.
+    for (const citation of [
+      "https://microsoft.ai.evil.tld/code-of-conduct",
+      "https://notmicrosoft.ai/code-of-conduct",
+      "https://microsoft-ai.com/code-of-conduct",
+      "https://microsoft.aid/code-of-conduct",
+    ]) {
+      const read = sourceClassOf(DEFAULT_DOMAIN, subject, citation);
+      expect(read.class).toBe("other");
+      expect(read.matched_host).toBeNull();
+    }
+  });
+
   it("prefers the subject's own authority over the recognized list", () => {
     // An authority's own page about its own product is the strongest source there
     // is for what that product costs, so official wins where both could match.

@@ -59,6 +59,7 @@ import {
   type MirrorOperator,
 } from "../mirror.js";
 import { LIST_PAGE_LIMIT, RELEASE_WINDOW_DAYS } from "../policy.js";
+import { perimeterOf } from "../registry.js";
 import { signRequest } from "../request.js";
 import type { Seal } from "../seal.js";
 import { readEvents, readSeals } from "./export.js";
@@ -207,6 +208,9 @@ export async function readMirrorOperators(
       maintainer: full["maintainer"] === true,
       provider: full["provider"] === true,
       trusted: isRecord(details) && details["trusted"] === true,
+      // The perimeter the genesis naming disclosed (D-128), off the same
+      // details the trusted flag is read from.
+      perimeter: perimeterOf(details),
       domains: Array.isArray(domains)
         ? domains.filter((one): one is string => typeof one === "string")
         : [],

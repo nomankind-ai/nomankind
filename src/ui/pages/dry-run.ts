@@ -226,6 +226,9 @@ export function renderDryRun(ctx: PageContext): string {
             <span class="mono">--duplicate-of</span> signs a rejection with the
             reason <span class="mono">duplicate_claim:&lt;entry id&gt;</span>. A
             rejection needs a reason, always, and the reason is public.
+            <span class="mono">--quote</span> approves only when the validator's
+            own fetch both reproduces the entry's snapshot hash and carries its
+            claim verbatim, and names the public run it decided in.
           </p>
           <p class="note">
             There are three answers to give, and the log takes all three.
@@ -380,6 +383,40 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
               Seals here are countersigned by a published mock pair and the daily
               anchor is a local record rather than an external timestamp, so a
               seal on demo proves the pipeline ran and not that the world saw it.
+            </dd>
+            <dt>
+              So <a href="/independence">the independence page</a> reads false
+              here, and it is right to
+            </dt>
+            <dd>
+              Worked through, because it is the one place on demo where the
+              honest answer looks like a failure (decision D-132). The mock pair
+              is not in <span class="mono">WITNESS_PIN</span>, so when
+              /independence walks the three pinned witnesses against the newest
+              seal's countersignature rows it finds none of them there: every
+              witness row reads <span class="mono">counted false</span> with
+              <span class="mono">head null</span>. The intersection is empty for
+              a different reason — no pinned key is bound as any registered
+              operator's agent — and the flag
+              <span class="mono"
+                >external_witness_outside_validator_and_subject_provider_control</span
+              >
+              is <span class="mono">false</span> because it asks for a pinned
+              witness outside the intersection with a countersignature this
+              record <em>counted</em>, and a pinned witness that has never
+              signed is an intention. The claim falls to
+              <span class="mono">no external countersignature counted yet</span>,
+              which is exactly what is true here. On production the same code
+              reads differently the moment a pinned witness signs a registry
+              head: the seal stores that countersignature and the head it
+              covered, the row reads <span class="mono">counted true</span> with
+              a <span class="mono">tree_size</span> and a
+              <span class="mono">root</span>, and the flag turns true. Nothing
+              in the rule moves; the log does. Check it yourself against a
+              mirror export with
+              <span class="mono">npm run independence -- &lt;mirror-dir&gt;</span>,
+              which recomputes both sets, the intersection, the flag and the
+              claim offline and prints the same JSON the page's twin answers.
             </dd>
             <dt>The maintainer key is a throwaway</dt>
             <dd>
