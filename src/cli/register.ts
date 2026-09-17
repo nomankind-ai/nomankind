@@ -16,7 +16,11 @@
  * `--genesis` is Section 11's other half: "the maintainer names the first
  * operators trusted, and after genesis trust is earned." Only the maintainer's
  * key can do it, so it is a second key file and a second signed request, made
- * after the registration and only when the registration held.
+ * after the registration and only when the registration held. `--perimeter`
+ * rides in that second request and nowhere else (decision D-128): it is the
+ * grouping the maintainer discloses at the moment it names, so without
+ * `--genesis` there is no naming for it to be part of and the invocation is a
+ * usage error rather than a flag quietly dropped.
  *
  * `--bind` is Section 5's: "an operator runs agents." A registered operator adds
  * a key by naming its file — the new key signs the attestation, the existing key
@@ -36,7 +40,7 @@
 import { resolve } from "node:path";
 
 import { DEFAULT_DOMAIN } from "../policy.js";
-import { signAttestation, txtRecordName } from "../registry.js";
+import { isPerimeter, signAttestation, txtRecordName } from "../registry.js";
 import { runCommand } from "./main.js";
 import {
   errorOf,
@@ -49,7 +53,7 @@ import {
 } from "./validator.js";
 
 const USAGE =
-  "usage: register <key.json> <base-url> <operator-domain> [--domain <slug>] [--genesis <maintainer-key.json>]\n" +
+  "usage: register <key.json> <base-url> <operator-domain> [--domain <slug>] [--genesis <maintainer-key.json>] [--perimeter <word>]\n" +
   "       register <key.json> <base-url> <operator-domain> --join <slug>\n" +
   "       register <existing-key.json> <base-url> <operator-domain> --bind <new-key.json> [--domain <slug>]";
 
@@ -83,6 +87,17 @@ export interface RegisterPlan {
   readonly bindKeyPath: string | null;
   /** The maintainer's key file, or null when this run only registers. */
   readonly genesisKeyPath: string | null;
+  /**
+   * `--perimeter <word>`: the grouping the maintainer discloses at the naming
+   * (decision D-128), or null when it discloses none.
+   *
+   * Only with `--genesis`, because it is part of the naming and there is no
+   * other request it could travel in: a registration does not name anybody, so
+   * a perimeter beside one would be a word the door never sees. Checked here
+   * with the door's own `isPerimeter`, so a spelling the door would refuse
+   * costs no request and no signature.
+   */
+  readonly perimeter: string | null;
 }
 
 /**
@@ -104,7 +119,8 @@ export function registerPlan(args: readonly string[]): RegisterPlan | null {
       argument !== "--genesis" &&
       argument !== "--domain" &&
       argument !== "--join" &&
-      argument !== "--bind"
+      argument !== "--bind" &&
+      argument !== "--perimeter"
     ) {
       return null;
     }
@@ -143,6 +159,17 @@ export function registerPlan(args: readonly string[]): RegisterPlan | null {
     return null;
   }
 
+  // The perimeter belongs to the naming and to nothing else (D-128): without
+  // `--genesis` there is no naming in this run to disclose it at, and a flag
+  // that was quietly dropped would be worse than one that is refused. The word
+  // itself is held to the door's own rule here, so a bad spelling never
+  // becomes a signed request.
+  const genesisKeyPath = flags.get("--genesis") ?? null;
+  const perimeter = flags.get("--perimeter") ?? null;
+  if (perimeter !== null && (genesisKeyPath === null || !isPerimeter(perimeter))) {
+    return null;
+  }
+
   return {
     keyPath,
     baseUrl,
@@ -150,7 +177,8 @@ export function registerPlan(args: readonly string[]): RegisterPlan | null {
     recordDomain: flags.get("--domain") ?? DEFAULT_DOMAIN,
     join,
     bindKeyPath,
-    genesisKeyPath: flags.get("--genesis") ?? null,
+    genesisKeyPath,
+    perimeter,
   };
 }
 
@@ -231,6 +259,12 @@ export async function runRegister(input: {
    */
   readonly recordDomain?: string;
   readonly genesisKey?: ValidatorKey | null;
+  /**
+   * The perimeter the maintainer discloses at the naming (decision D-128), or
+   * null/absent for none. Read only when a genesis key is given, because it is
+   * part of that request and of no other.
+   */
+  readonly perimeter?: string | null;
   readonly deps: RegisterDeps;
 }): Promise<RegisterRun> {
   const { deps } = input;
@@ -296,11 +330,16 @@ export async function runRegister(input: {
 
   // Section 11: "the maintainer names the first operators trusted." Only the
   // maintainer's key may, so this is a second signed request under a second key.
+  const perimeter = input.perimeter ?? null;
   const named = await post(
     deps,
     input.baseUrl,
     "/genesis",
-    { operator: input.domain },
+    // The key is absent rather than null when nothing was disclosed, so a
+    // naming with no perimeter is the body this command has always sent.
+    perimeter === null
+      ? { operator: input.domain }
+      : { operator: input.domain, perimeter },
     genesisKey,
   );
   const genesisError = errorOf(named.body);
@@ -309,7 +348,7 @@ export async function runRegister(input: {
   const trusted = named.status === 200 || alreadyTrusted;
 
   deps.io.stdout(
-    `genesis ${input.domain} ${named.status}${genesisError === null ? "" : ` ${genesisError}`}`,
+    `genesis ${input.domain}${perimeter === null ? "" : ` ${perimeter}`} ${named.status}${genesisError === null ? "" : ` ${genesisError}`}`,
   );
   if (!trusted) deps.io.stderr(`genesis: ${genesisError ?? "unknown error"}`);
 
@@ -458,6 +497,7 @@ if (
                   plan.genesisKeyPath === null
                     ? null
                     : await readKeyFile(plan.genesisKeyPath),
+                perimeter: plan.perimeter,
                 deps,
               })
             : await runJoin({
