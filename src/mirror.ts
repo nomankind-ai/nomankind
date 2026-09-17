@@ -63,7 +63,13 @@
  * src/policy.ts for the same reason no environment name is written into policy.
  */
 
-import { DOMAIN_SLUGS, MIRROR, NORM_VERSION, SCHEMA_VERSION } from "./policy.js";
+import {
+  DOMAIN_SLUGS,
+  MIRROR,
+  NORM_VERSION,
+  SCHEMA_VERSION,
+  type OperatorKind,
+} from "./policy.js";
 import { deriveAttestation, type DerivedAttestation } from "./attest.js";
 import { bountyAccrual } from "./bounty.js";
 import { deriveEntry, type Sidecar } from "./derive.js";
@@ -86,7 +92,7 @@ import {
   type StakeRecord,
 } from "./stake.js";
 import type { Anchor } from "./anchor.js";
-import type { Event, EventType } from "./events.js";
+import type { CommunityBinding, Event, EventType } from "./events.js";
 import type { ProbeAnswer } from "./probe.js";
 import type { Entry } from "./schema.js";
 import type { Seal } from "./seal.js";
@@ -206,6 +212,25 @@ export interface MirrorEntryRecord {
 /** One operator, with everything the verifier's `Registry` needs plus trusted. */
 export interface MirrorOperator {
   readonly operator: string;
+  /**
+   * Which kind of operator this is (decision D-138): `domain` for the
+   * operators Section 5 has always had, `community` for one a confirmer's own
+   * attested line registered.
+   *
+   * In the mirror because a clone rebuilding the registry has to rebuild it as
+   * the log has it — the two kinds count differently towards a verification
+   * class, and a clone that read every row as a domain operator would compute a
+   * class the record never gave. A v1 to v3 mirror, built before the decision,
+   * carries no such key, and every operator in one is read as a domain operator
+   * (src/import.ts) — which is what every operator in one is.
+   */
+  readonly kind: OperatorKind;
+  /**
+   * What binds a community operator's key to its handle, exactly as its
+   * registration event carries it (decision D-138). Absent for a domain
+   * operator, which is bound by an attestation its own agent signed.
+   */
+  readonly binding?: CommunityBinding | null;
   readonly maintainer: boolean;
   readonly provider: boolean;
   readonly trusted: boolean;
@@ -767,6 +792,12 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
     content: document({
       operators: operators.map((operator) => ({
         operator: operator.operator,
+        // D-138: which kind of operator the log registered. Written for every
+        // row, including the domain ones, because a clone has to read the kind
+        // off the file rather than off the shape of the id — and a mirror
+        // written before the decision has no key here at all, which reads as
+        // the only kind there was.
+        kind: operator.kind,
         maintainer: operator.maintainer,
         provider: operator.provider,
         trusted: operator.trusted,
@@ -778,6 +809,11 @@ export function buildMirror(input: MirrorInput): MirrorFile[] {
         ...(operator.perimeter === null || operator.perimeter === undefined
           ? {}
           : { perimeter: operator.perimeter }),
+        // Written only for an operator that has one, so a domain operator's row
+        // is byte-for-byte what it was before D-138.
+        ...(operator.binding === null || operator.binding === undefined
+          ? {}
+          : { binding: operator.binding }),
       })),
       agents,
     }),

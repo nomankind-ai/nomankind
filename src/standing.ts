@@ -46,6 +46,7 @@
 import type { ApproverRecord, Event, EventType } from "./events.js";
 import { recordMeasured } from "./evidence.js";
 import {
+  communityOperatorsAt,
   deriveEntry,
   operatorDomainsAt,
   registeredOperatorsAt,
@@ -300,6 +301,45 @@ function filingFor(
   return found;
 }
 
+/** The snapshot hash of one entry's signed core, or null when unknown. */
+function snapshotHashOf(
+  events: readonly Event[],
+  entryId: string | null,
+): string | null {
+  if (entryId === null) return null;
+  for (const event of events) {
+    if (!isType(event, "entry_submitted")) continue;
+    if (event.payload.core["id"] !== entryId) continue;
+    const hash = event.payload.core["snapshot_hash"];
+    return typeof hash === "string" ? hash : null;
+  }
+  return null;
+}
+
+/**
+ * Whether a community validation's check reproduced the entry (D-138).
+ *
+ * The two forms the line accepts: a hash, which reproduces when it is this
+ * entry's own snapshot hash, and a span, which reproduces when the span was
+ * read present. Read by name off the payload, so an event shaped by a build
+ * this one does not know earns the decision's credit and not the
+ * measurement's.
+ */
+function communityCheckReproduces(
+  check: unknown,
+  snapshotHash: string | null,
+): boolean {
+  if (typeof check !== "object" || check === null) return false;
+  const fields = check as Record<string, unknown>;
+  const value = fields["value"];
+  if (typeof value !== "string") return false;
+  if (fields["kind"] === "hash") {
+    return snapshotHash !== null && value === snapshotHash;
+  }
+  if (fields["kind"] === "span") return value === "present";
+  return false;
+}
+
 /** The `revalidation_requested` event at `requestSeq`, or null. */
 function requestAt(
   events: readonly Event[],
@@ -353,7 +393,12 @@ export function standingAfter(
   };
 
   // Registered but idle is a real answer, and a different one from unknown.
+  // Of both kinds (D-138): a community operator the log has registered has a
+  // record for the same reason a domain operator does.
   for (const operator of registeredOperatorsAt(events, position).operators) {
+    of(operator);
+  }
+  for (const operator of communityOperatorsAt(events, position).keys()) {
     of(operator);
   }
 
@@ -410,6 +455,33 @@ export function standingAfter(
       const submitter = of(author);
       submitter.earned += STANDING_SUBMISSION_VERIFIED;
       submitter.submissions_verified += 1;
+      continue;
+    }
+
+    // A community operator's validation, folded exactly like a volunteered one
+    // (decision D-138): the same work, the same credit, keyed by the community
+    // operator id. Nobody drew it, so it is never the assigned rate; a line
+    // that reproduces the entry — its snapshot hash recomputed, or the claimed
+    // span read present — earns the measurement credit beside it, which is
+    // Section 4's "the operators who measure are paid more than the operators
+    // who copy" said of the other path in.
+    if (isType(event, "community_validation")) {
+      if (!after) continue;
+      const payload = event.payload as unknown as Record<string, unknown>;
+      const operator = payload["operator"];
+      if (typeof operator !== "string" || operator === "") continue;
+      const validator = of(operator);
+      validator.earned += STANDING_VALIDATION_VOLUNTEERED;
+      validator.validations_volunteered += 1;
+      if (
+        communityCheckReproduces(
+          payload["check"],
+          snapshotHashOf(ordered, event.entry_id ?? (payload["entry_id"] as string | undefined) ?? null),
+        )
+      ) {
+        validator.earned += STANDING_VALIDATION_REPRODUCED;
+        validator.validations_reproduced += 1;
+      }
       continue;
     }
 
@@ -615,8 +687,10 @@ export function standingOf(
 function isExcludedPartyOfItsOwnDomain(
   domains: ReadonlyMap<string, readonly string[]>,
   operator: string,
+  communityDomains?: readonly string[],
 ): boolean {
-  const attestedIn = domains.get(operator) ?? [DEFAULT_DOMAIN];
+  const attestedIn =
+    communityDomains ?? domains.get(operator) ?? [DEFAULT_DOMAIN];
   return attestedIn.some((domain) => isExcludedParty(domain, operator));
 }
 
@@ -655,14 +729,33 @@ export function trustChangesAt(
   const standingOfOperator = (operator: string): number =>
     standings.get(operator)?.standing ?? 0;
 
+  // Both kinds of operator, one rule (decision D-138): a community operator
+  // enters the trusted pool and stays in it by the standing it earned, exactly
+  // as a domain operator does. Section 9 gates "everything discretionary" on
+  // standing and says nothing about how a key was bound, so a second rule for
+  // the second path would be a rule nobody published.
+  const community = communityOperatorsAt(events, position);
+  const candidates = new Set<string>([
+    ...registered.operators,
+    ...community.keys(),
+  ]);
+
   const trust: string[] = [];
-  for (const operator of registered.operators) {
+  for (const operator of candidates) {
     if (trusted.has(operator)) continue;
     if (registered.maintainers.has(operator)) continue;
     // Decision D-071: the exclusion is keyed by the domain the operator
     // registered into, so a party excluded there is never trusted, and a party
     // excluded somewhere else is untouched by that domain's list.
-    if (isExcludedPartyOfItsOwnDomain(domains, operator)) continue;
+    if (
+      isExcludedPartyOfItsOwnDomain(
+        domains,
+        operator,
+        community.get(operator)?.domains,
+      )
+    ) {
+      continue;
+    }
     if (standingOfOperator(operator) < STANDING_TRUSTED_ENTRY) continue;
     trust.push(operator);
   }

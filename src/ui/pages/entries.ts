@@ -29,6 +29,14 @@
  * it, and a reader who arrived from a chip had to trust the chip. Plain text and
  * not a link, because no filter value in this table is one.
  *
+ * Decision D-138, the class column and the `min_class` chips: every verified
+ * entry discloses who met its consensus — registered, community or mixed — so
+ * the listing prints that word per row and takes a floor on it. The chips read
+ * weakest first because `min_class` is a minimum everywhere it appears: asking
+ * for `mixed` admits `registered` too, exactly as it does on the read and sync
+ * doors. A row with no class is a draft or a rejected entry, which has no
+ * consensus to have one, and it prints an em dash rather than a word.
+ *
  * Pure: the rows, the total and the cursor were all decided by the route.
  */
 
@@ -37,6 +45,10 @@
 // chips come from the schema's own enums: a class added by decision appears as a
 // chip in the same commit it becomes a value the sidecar can carry.
 import { SOURCE_CLASSES } from "../../sources.js";
+// The verification classes come from the policy module that publishes them
+// (decision D-138), in its own order — weakest first — for the same reason the
+// source classes come from the kernel: the chips are the list, not a copy of it.
+import { VERIFICATION_CLASSES } from "../../policy.js";
 import {
   ENTRY_CATEGORIES,
   ENTRY_DOMAINS,
@@ -79,6 +91,11 @@ const GROUPS: readonly {
   { name: "domain", values: ENTRY_DOMAINS },
   { name: "source", values: SOURCE_CLASSES },
   { name: "tier", values: ENTRY_TIERS },
+  // The floor on who met an entry's consensus (decision D-138). A minimum and
+  // not an exact value, so the chips read weakest first and `mixed` admits
+  // `registered` too — the same reading `min_class` has on the read and sync
+  // doors, because one word must not mean two things.
+  { name: "min_class", values: VERIFICATION_CLASSES },
   { name: "fresh", values: FRESHNESS_VALUES },
 ];
 
@@ -100,7 +117,12 @@ function filterPairs(
   for (const group of GROUPS) {
     if (group.name === without) continue;
     const value = filter[group.name];
-    if (value !== null) pairs.push([group.name, value]);
+    // Absent and null are one thing here: `min_class` is an optional field of
+    // the filter and the other five are always present, so a group nobody asked
+    // for carries nothing into the query string either way.
+    if (value !== null && value !== undefined) {
+      pairs.push([group.name, value]);
+    }
   }
   return pairs;
 }
@@ -111,7 +133,7 @@ function group(
   name: keyof EntriesFilter,
   values: readonly string[],
 ): Safe {
-  const current = filter[name];
+  const current = filter[name] ?? null;
   const allClass = current === null ? "chip chip-on" : "chip";
   return html`<div class="filter-row">
     <span class="filter-name">${name}</span>
@@ -160,6 +182,7 @@ function row(entry: EntryRow): Safe {
     <td class="muted">${entry.domain === "" ? "—" : entry.domain}</td>
     <td class="prose">${claimCell(entry)}</td>
     <td class="muted">${entry.tier ?? "—"}</td>
+    <td class="muted">${entry.verification_class ?? "—"}</td>
     <td class="dim">${fmtDate(entry.last_confirmed)}</td>
     <td class="${expiresClass}">${fmtDate(entry.expires_at)}</td>
   </tr>`;
@@ -180,6 +203,7 @@ function table(rows: EntryRow[]): Safe {
           <th>domain</th>
           <th>claim</th>
           <th>tier</th>
+          <th>class</th>
           <th>confirmed</th>
           <th>expires</th>
         </tr>
@@ -207,7 +231,7 @@ export function renderEntries(ctx: PageContext, data: EntriesData): string {
         <h1>Entries</h1>
         <span
           class="mono note"
-          title="The total counts every entry with this status and in this domain; the category, source, tier and freshness filters narrow the page, not the total."
+          title="The total counts every entry with this status and in this domain; the category, source, tier, class and freshness filters narrow the page, not the total."
           >${data.rows.length} of ${data.total} · ordered by sealed
           position</span
         >

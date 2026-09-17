@@ -35,18 +35,22 @@
  * Pure: the route gathered all of it, the balance included.
  */
 
+import { REGISTRY } from "../../policy.js";
 import {
   badge,
   fmtDate,
   fmtInstant,
   html,
   layout,
+  link,
   raw,
+  safeHref,
   shortHash,
   type Safe,
 } from "../html.js";
 import type {
   AttestationRow,
+  CommunityOperator,
   OperatorData,
   OperatorDomainRow,
   PageContext,
@@ -76,6 +80,61 @@ function domains(rows: readonly OperatorDomainRow[]): Safe {
           >${each.attestationVersion ?? "no attestation stored"}</span
         >`,
   )}`;
+}
+
+/**
+ * What a community operator's binding points at (decision D-138).
+ *
+ * The three kinds are three different things a reader can go and check, so each
+ * is shown as the thing it is. A `registry` binding is a key-bind in the
+ * founding registry's log, and the reference is that citizen's own record at
+ * the registry — the document the proof on the event is against. A `profile`
+ * binding is the key published on the agent's public profile, so the reference
+ * is that page, run through `safeHref` like every other stranger's URL on these
+ * pages. A `platform` binding is a platform's statement about an account: it is
+ * named and never linked, because it is somebody else's assertion rather than
+ * something anyone can recheck offline, and it counts towards nothing.
+ */
+function bindingReference(account: CommunityOperator): Safe {
+  const binding = account.binding;
+  if (binding.kind === "registry") {
+    const href = `${REGISTRY.origin}/api/record/${encodeURIComponent(
+      account.handle,
+    )}`;
+    return html`${link(href, href, true)}`;
+  }
+  if (binding.kind === "profile") {
+    const href = safeHref(binding.url);
+    return href === null
+      ? html`<span class="break">${binding.url}</span>`
+      : html`${link(href, href, true)}`;
+  }
+  return html`<span class="break">${binding.platform}</span>`;
+}
+
+/**
+ * The account a community operator's key is bound to, as rows of the record
+ * panel (decision D-138).
+ *
+ * Nothing at all for a domain operator, which is bound by a DNS record and has
+ * no account anywhere: empty rows saying so would read as an account that went
+ * missing. Everything else on this page is the same for both kinds — the
+ * domains attested, the validations, the standing, the trust — because a
+ * community operator's lines are validations and count like any other's.
+ */
+function communityRows(account: CommunityOperator | null): Safe {
+  if (account === null) return raw("");
+  return html`<dt>venue</dt>
+    <dd class="mono">${account.venue}</dd>
+    <dt>handle</dt>
+    <dd class="mono break">${account.handle}</dd>
+    <dt>key</dt>
+    <dd class="mono break">${account.agent}</dd>
+    <dt>binding</dt>
+    <dd class="break">
+      <span class="mono">${account.binding.kind}</span> ·
+      ${bindingReference(account)}
+    </dd>`;
 }
 
 function attestation(record: Record<string, unknown> | null): Safe {
@@ -436,6 +495,9 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
             <dl class="kv">
               <dt>id</dt>
               <dd>${row.id}</dd>
+              <dt>kind</dt>
+              <dd class="mono">${row.kind}</dd>
+              ${communityRows(row.community)}
               <dt>flags</dt>
               <dd>${flags.length === 0 ? EM_DASH : flags.join(" · ")}</dd>
               <dt>registered seq</dt>
@@ -448,16 +510,32 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
               <dd class="break">${data.namedBy ?? EM_DASH}</dd>
               <dt>perimeter</dt>
               <dd class="${row.perimeter === null ? "" : "warn"}">
-                ${row.perimeter === null
-                  ? EM_DASH
-                  : html`<span class="mono">${row.perimeter}</span> ·
-                      <a href="/independence">disclosed at the naming</a>`}
+                ${row.kind === "community"
+                  ? html`outside every perimeter ·
+                      <a href="/independence">nobody named this key</a>`
+                  : row.perimeter === null
+                    ? EM_DASH
+                    : html`<span class="mono">${row.perimeter}</span> ·
+                        <a href="/independence">disclosed at the naming</a>`}
               </dd>
               <dt>overturned</dt>
               <dd class="${row.overturned === 0 ? "" : "danger"}">
                 ${row.overturned}
               </dd>
             </dl>
+            ${row.community === null
+              ? raw("")
+              : html`<p class="note">
+                  A community operator (decision D-138): a key bound to an
+                  account on an agent community, registered by its first counted
+                  confirmation line carrying the attestation token rather than
+                  through a registration door. Its lines are validations and
+                  count in consensus exactly as a domain operator's do, and it
+                  earns standing the same way. It sits outside every disclosed
+                  perimeter because a perimeter is the maintainer's own grouping
+                  of the operators it named at genesis, and nobody named this
+                  key.
+                </p>`}
           </div>
         </section>
         <section class="panel">

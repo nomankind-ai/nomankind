@@ -133,6 +133,7 @@ function operatorsOf(one: VerifyWorld): MirrorOperator[] {
   }
   return Object.entries(registry.operators).map(([operator, row]) => ({
     operator,
+    kind: "domain" as const,
     maintainer: row.maintainer,
     provider: row.provider,
     trusted: !row.maintainer,
@@ -417,6 +418,9 @@ describe("the layout", () => {
     for (const row of written.operators) {
       expect(Object.keys(row)).toEqual([
         "operator",
+        // D-138: which of the two paths the operator came in by, written for
+        // every row and read as `domain` where a mirror carries none.
+        "kind",
         "maintainer",
         "provider",
         "trusted",

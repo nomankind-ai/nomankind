@@ -19,6 +19,7 @@
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
 import { checkParameters, readPosition } from "../params.js";
+import { VERIFICATION_CLASSES, type VerificationClass } from "../policy.js";
 import { SOURCE_CLASSES } from "../sources.js";
 import type { EntriesFilter } from "./types.js";
 
@@ -65,6 +66,20 @@ export const FRESHNESS_VALUES: readonly ["fresh", "stale"] = Object.freeze([
   "stale",
 ]);
 
+/**
+ * The three verification classes, in the order the policy module publishes them
+ * — weakest first (decision D-138).
+ *
+ * Not a schema enum either: the class is derived from the validators counted at
+ * an entry's decision seal, so there is one list of it in src/policy.ts and this
+ * is not a second. Unlike the source chips, this one is a floor and not an exact
+ * value: `min_class=mixed` admits mixed and registered, which is the same
+ * reading `min_class` has on the read and the sync doors.
+ */
+export const ENTRY_MIN_CLASSES: readonly string[] = Object.freeze([
+  ...VERIFICATION_CLASSES,
+]);
+
 /** Every parameter an entries listing may carry, and nothing else. */
 export const ENTRIES_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "category",
@@ -72,6 +87,7 @@ export const ENTRIES_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "domain",
   "tier",
   "source",
+  "min_class",
   "fresh",
   "before",
 ]);
@@ -89,6 +105,7 @@ export const ENTRIES_QUERY_REFUSALS = [
   "unknown_domain",
   "bad_tier",
   "bad_source",
+  "bad_min_class",
   "bad_fresh",
   "bad_before",
 ] as const;
@@ -167,6 +184,8 @@ export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
   if (!tier.ok) return { ok: false, reason: "bad_tier" };
   const source = readEnum(params, "source", ENTRY_SOURCES);
   if (!source.ok) return { ok: false, reason: "bad_source" };
+  const minClass = readEnum(params, "min_class", ENTRY_MIN_CLASSES);
+  if (!minClass.ok) return { ok: false, reason: "bad_min_class" };
   const fresh = readEnum(params, "fresh", FRESHNESS_VALUES);
   if (!fresh.ok) return { ok: false, reason: "bad_fresh" };
 
@@ -190,6 +209,7 @@ export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
       domain: domain.value,
       tier: tier.value,
       source: source.value,
+      min_class: minClass.value as VerificationClass | null,
       fresh: fresh.value as "fresh" | "stale" | null,
     },
     before,

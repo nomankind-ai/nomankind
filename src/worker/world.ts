@@ -59,6 +59,14 @@ export const REGISTRY_EVENT_TYPES: readonly EventType[] = Object.freeze([
   // every door that no operator ever joined a domain -- and every validation
   // outside ai-ecosystem answers `operator_not_in_domain`.
   "operator_joined_domain",
+  // Decision D-138: one registry, two kinds of operator. A community
+  // operator's registration and its domain joins move eligibility exactly as a
+  // domain operator's do -- `operatorKindsAt` and `mayValidateEntry` fold them
+  // -- so a world without them would tell every door that no community
+  // operator has ever registered, and every community validation would be
+  // counted by nobody.
+  "community_operator_registered",
+  "community_operator_joined_domain",
   "pool_snapshot",
 ] as const);
 

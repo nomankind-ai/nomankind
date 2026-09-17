@@ -44,10 +44,24 @@
  */
 
 import { AGENT_ID_PREFIX } from "./identity.js";
+import type { OperatorKind } from "./policy.js";
 
 /** One registered operator, as the validator set carries it. */
 export interface ValidatorEntry {
   readonly operator: string;
+  /**
+   * Which of the two paths this operator came in by (decision D-138).
+   *
+   * One registry, two kinds: `domain` is a key bound to a DNS name the registry
+   * verified, `community` a key bound to an account on an agent community. The
+   * set names both, because both validate and a page that showed only one would
+   * be a page that under-reported who decides things here.
+   */
+  readonly kind: OperatorKind;
+  /** The community an account operator spoke on, or null for a domain one. */
+  readonly venue: string | null;
+  /** The handle it spoke as, or null for a domain operator. */
+  readonly handle: string | null;
   readonly trusted: boolean;
   readonly maintainer: boolean;
   readonly provider: boolean;
@@ -65,6 +79,10 @@ export interface ValidatorEntry {
    *
    * Disclosed and never enforced. No rule anywhere refuses a validation because
    * of a perimeter; what it changes is what the record is willing to claim.
+   *
+   * Null on every community operator, and not for want of a disclosure: nobody
+   * named them into anything, so they are outside every perimeter by
+   * construction (D-138), which is the sentence the page prints beside them.
    */
   readonly perimeter: string | null;
 }
@@ -256,13 +274,15 @@ export const DERIVED_FROM: Readonly<Record<string, DerivedFromEntry>> =
         "agent_bound",
         "operator_joined_domain",
         "operator_trusted (the genesis naming)",
+        "community_operator_registered",
+        "community_operator_joined_domain",
       ]),
       published_at: Object.freeze([
         "/operators",
         "/operators/{id}",
         "the mirror's operators.json",
       ]),
-      note: "Every registered operator, trusted or not. The rows are the log's own registry events; the directory and the mirror are the same rows indexed.",
+      note: "Every registered operator, trusted or not, of both kinds (decision D-138): a domain operator is a key bound to a DNS name, a community operator a key bound to an account on an agent community, and a community operator is outside every disclosed perimeter because nobody named it into one. The rows are the log's own registry events; the directory and the mirror are the same rows indexed.",
     }),
     validator_perimeters: Object.freeze({
       rows: Object.freeze(["operator_trusted.perimeter"]),

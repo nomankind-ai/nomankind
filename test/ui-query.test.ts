@@ -48,13 +48,15 @@ describe("the accepted values come from the schema", () => {
     expect([...ENTRY_TIERS]).toEqual(schema.properties.evidence_tier.enum);
   });
 
-  it("accepts exactly seven parameters", () => {
+  it("accepts exactly eight parameters", () => {
     expect([...ENTRIES_QUERY_PARAMETERS]).toEqual([
       "category",
       "status",
       "domain",
       "tier",
       "source",
+      // The class floor (D-138), beside the other chip groups.
+      "min_class",
       "fresh",
       "before",
     ]);
@@ -78,6 +80,7 @@ describe("the accepted values come from the schema", () => {
       "unknown_domain",
       "bad_tier",
       "bad_source",
+      "bad_min_class",
       "bad_fresh",
       "bad_before",
     ]);
@@ -94,6 +97,7 @@ describe("what parses", () => {
         domain: null,
         tier: null,
         source: null,
+        min_class: null,
         fresh: null,
       },
       before: null,
@@ -103,7 +107,7 @@ describe("what parses", () => {
   it("parses a full query", () => {
     expect(
       parse(
-        `category=pricing&status=verified&domain=${DEFAULT_DOMAIN}&tier=observed&source=official&fresh=stale&before=48213`,
+        `category=pricing&status=verified&domain=${DEFAULT_DOMAIN}&tier=observed&source=official&min_class=mixed&fresh=stale&before=48213`,
       ),
     ).toEqual({
       ok: true,
@@ -113,6 +117,7 @@ describe("what parses", () => {
         domain: DEFAULT_DOMAIN,
         tier: "observed",
         source: "official",
+        min_class: "mixed",
         fresh: "stale",
       },
       before: 48213,
@@ -162,6 +167,10 @@ describe("what is refused, and by which parameter", () => {
     ["tier=", "bad_tier"],
     ["source=trusted", "bad_source"],
     ["source=", "bad_source"],
+    // The class floor (D-138): a word that is not one of the three, and the
+    // empty value, which is a refusal and not an absence like every chip's.
+    ["min_class=trusted", "bad_min_class"],
+    ["min_class=", "bad_min_class"],
     ["fresh=all", "bad_fresh"],
     ["fresh=", "bad_fresh"],
     ["before=-1", "bad_before"],

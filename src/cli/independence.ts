@@ -46,7 +46,7 @@ import {
   type ValidatorEntry,
 } from "../independence.js";
 import { WITNESS_PIN } from "../policy.js";
-import { isPerimeter } from "../registry.js";
+import { isPerimeter, parseCommunityOperatorId } from "../registry.js";
 import { runCommand } from "./main.js";
 import type { ValidatorIo } from "./validator.js";
 
@@ -169,8 +169,19 @@ function validatorsOf(operators: unknown, path: string): ValidatorEntry[] {
   for (const row of operators["operators"]) {
     if (!isRecord(row) || typeof row["operator"] !== "string") continue;
     const perimeter = row["perimeter"];
+    // D-138: which of the two paths this operator came in by, and, for a
+    // community one, the community and the handle it speaks as — which are the
+    // two halves of its own id and are read off it rather than off a second
+    // field the file would have to be trusted about. A mirror built before the
+    // decision names no kind, and every operator in one is a domain operator.
+    const community = parseCommunityOperatorId(row["operator"]);
+    const kind = row["kind"] === "community" ? "community" : "domain";
     rows.push({
       operator: row["operator"],
+      kind,
+      venue: kind === "community" && community !== null ? community.venue : null,
+      handle:
+        kind === "community" && community !== null ? community.handle : null,
       trusted: row["trusted"] === true,
       maintainer: row["maintainer"] === true,
       provider: row["provider"] === true,

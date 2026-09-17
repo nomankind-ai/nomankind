@@ -23,7 +23,12 @@
 
 import { canonicalize, taggedSha256Hex } from "./hash.js";
 import { ASSIGNMENT_WINDOW_HOURS, TRUSTED_POOL_SWITCH } from "./policy.js";
-import { trustedOperatorsAt, type Clock, type EntryStatus } from "./derive.js";
+import {
+  communityOperatorsAt,
+  trustedOperatorsAt,
+  type Clock,
+  type EntryStatus,
+} from "./derive.js";
 import type { Event, EventInput, EventType } from "./events.js";
 import { underHost } from "./validate.js";
 
@@ -321,6 +326,18 @@ export function exclusionsFor(
   entryId: string,
 ): string[] {
   const excluded = new Set<string>();
+  // Every community operator, and the reading is stated because it is a
+  // reading (decision D-138). The decision makes one registry of two kinds of
+  // operator and says nothing about the beacon draw. A draw is an assignment
+  // with a deadline and a standing burn behind it, and a community operator has
+  // no door to be assigned through and no way to be told it was drawn: drawing
+  // one would be assigning work to somebody who cannot hear the assignment, and
+  // then burning their standing for missing it. So they are excluded from the
+  // draw and from nothing else — they validate, they earn standing, they enter
+  // the trusted pool — until a decision gives them an assignment door.
+  for (const operator of communityOperatorsAt(events, Number.MAX_SAFE_INTEGER).keys()) {
+    excluded.add(operator);
+  }
   for (const event of inSeqOrder(events)) {
     if (isType(event, "entry_submitted")) {
       if (event.payload.core["id"] !== entryId) continue;

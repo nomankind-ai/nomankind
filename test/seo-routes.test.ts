@@ -123,6 +123,7 @@ beforeAll(async () => {
   for (const [index, id] of ["k1.example", "k2.example", AWKWARD_OPERATOR].entries()) {
     await putOperator(store.db, {
       id,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: index,

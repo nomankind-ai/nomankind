@@ -41,6 +41,8 @@ function query(overrides: Partial<SyncQuery> = {}): SyncQuery {
     flatten: false,
     min_tier: null,
     min_source: null,
+    // No demand about who decided the entry (D-138).
+    min_class: null,
     domain: null,
     ...overrides,
   };
@@ -89,6 +91,8 @@ describe("parseSyncQuery", () => {
       "flatten",
       "min_tier",
       "min_source",
+      // Who decided the entry (D-138), beside the tier and the source.
+      "min_class",
       "domain",
     ]);
     expect(SYNC_QUERY_REFUSALS).toEqual([
@@ -98,6 +102,7 @@ describe("parseSyncQuery", () => {
       "bad_flatten",
       "bad_min_tier",
       "bad_min_source",
+      "bad_min_class",
       "unknown_domain",
     ]);
   });
@@ -109,6 +114,7 @@ describe("parseSyncQuery", () => {
       flatten: false,
       min_tier: null,
       min_source: null,
+      min_class: null,
       domain: null,
     });
   });
@@ -124,6 +130,7 @@ describe("parseSyncQuery", () => {
       flatten: true,
       min_tier: "observed",
       min_source: "official",
+      min_class: null,
       domain: DEFAULT_DOMAIN,
     });
     expect(parsed("flatten=false&min_tier=stated").flatten).toBe(false);

@@ -167,6 +167,7 @@ beforeAll(async () => {
   for (const operator of OPERATORS) {
     await putOperator(db, {
       id: operator.id,
+      kind: "domain",
       maintainer: operator.maintainer,
       provider: operator.provider,
       registeredSeq: seq,
@@ -377,6 +378,7 @@ describe("a log with nothing countersigned", () => {
     empty = await openTestDatabase();
     await putOperator(empty.db, {
       id: "alpha.example",
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 1,
@@ -408,6 +410,7 @@ describe("a pinned witness bound to a registered operator", () => {
     shared = await openTestDatabase();
     await putOperator(shared.db, {
       id: "alpha.example",
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 1,

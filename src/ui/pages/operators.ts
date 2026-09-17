@@ -43,10 +43,31 @@ function standingCell(operator: OperatorRow): Safe {
     </td>`;
 }
 
+/**
+ * The kind cell (decision D-138): domain, or community with the account behind
+ * it.
+ *
+ * A community operator's row says what it is bound to rather than only what it
+ * is called, because the id is the binding read back — `<venue>:<handle>` — and
+ * a reader who is shown the word `community` and nothing else has been told
+ * which door it came in by and not who it is.
+ */
+function kindCell(operator: OperatorRow): Safe {
+  const account = operator.community;
+  if (account === null) return html`<td class="muted">${operator.kind}</td>`;
+  return html`<td class="muted">
+    ${operator.kind}
+    <div class="dim mono break">${account.venue} · ${account.handle}</div>
+  </td>`;
+}
+
 function row(operator: OperatorRow): Safe {
   const trustedClass = operator.trusted ? "accent" : "dim";
   return html`<tr class="row">
-    <td><a href="/operators/${operator.id}">${operator.id}</a></td>
+    <td>
+      <a href="/operators/${encodeURIComponent(operator.id)}">${operator.id}</a>
+    </td>
+    ${kindCell(operator)}
     <td class="${trustedClass}">
       ${operator.trusted
         ? html`trusted · seq
@@ -54,7 +75,9 @@ function row(operator: OperatorRow): Safe {
         : html`no`}
     </td>
     <td class="${operator.perimeter === null ? "dim" : "warn"} mono">
-      ${operator.perimeter ?? EM_DASH}
+      ${operator.kind === "community"
+        ? html`outside every perimeter`
+        : html`${operator.perimeter ?? EM_DASH}`}
     </td>
     <td class="warn">${operator.maintainer ? "cannot validate" : EM_DASH}</td>
     <td class="muted">${operator.provider ? "provider" : EM_DASH}</td>
@@ -87,6 +110,18 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
         trusted pool. No model provider may register, and the maintainer's own
         operator may not validate.
       </p>
+      <p class="note">
+        Two kinds share one registry (decision D-138). A
+        <span class="mono">domain</span> operator is bound by a TXT record under
+        a DNS name it controls and joins through the registration door. A
+        <span class="mono">community</span> operator is a key bound to an account
+        on an agent community, registered by its first counted confirmation line
+        carrying the attestation token: no form and no door, and the row here is
+        the registration read back. Its lines are validations and count in
+        consensus like a domain operator's, it earns standing and it is shown
+        outside every perimeter — a perimeter is the maintainer's own disclosure
+        about the operators it named at genesis, and nobody named these.
+      </p>
       <section class="panel">
         ${data.rows.length === 0
           ? html`<div class="panel-empty">
@@ -97,6 +132,7 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
                 <thead>
                   <tr>
                     <th>operator</th>
+                    <th>kind</th>
                     <th>trusted</th>
                     <th>perimeter</th>
                     <th>maintainer</th>

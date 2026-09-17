@@ -39,7 +39,11 @@ import type { Event } from "../events.js";
 import type { EvidenceTier } from "../evidence.js";
 import { entryHash } from "../hash.js";
 import { signSyncReceipt, type SyncReceipt } from "../receipt.js";
-import { isVersionStalenessCategory, LIST_PAGE_LIMIT } from "../policy.js";
+import {
+  isVersionStalenessCategory,
+  LIST_PAGE_LIMIT,
+  type VerificationClass,
+} from "../policy.js";
 import type { Entry } from "../schema.js";
 import type { Seal } from "../seal.js";
 import type { SourceClass } from "../sources.js";
@@ -108,6 +112,15 @@ interface EntryState {
    * for itself would be a second answer to a question the sidecar already holds.
    */
   readonly source_class: SourceClass;
+  /**
+   * How this entry was verified, off the sidecar re-derived at the sealed head
+   * (decision D-138): by the maintainer's own operators, by community ones, or
+   * by both. Read rather than worked out here, for the reason the effective
+   * tier and the source class are: the class is derivation's answer, and a door
+   * that computed a second one would be a door that could disagree with the
+   * record it is serving.
+   */
+  readonly verification_class: VerificationClass | null;
 }
 
 /** One event of the page, with everything a trainer is handed about it. */
@@ -263,6 +276,7 @@ class Entries {
       effective_tier: sidecar.effective_tier,
       domain: domainOf(entry),
       source_class: sidecar.source.class,
+      verification_class: sidecar.verification_class,
     };
   }
 
@@ -303,6 +317,7 @@ class Entries {
       effective_tier: stored.sidecar.effective_tier,
       domain: domainOf(entry),
       source_class: stored.sidecar.source.class,
+      verification_class: stored.sidecar.verification_class,
     };
   }
 }
@@ -510,6 +525,8 @@ async function page(
             effective_tier: item.state.effective_tier,
             domain: item.state.domain,
             source_class: item.state.source_class,
+            // D-138: the class the trainer's `min_class` is checked against.
+            verification_class: item.state.verification_class,
           },
       query,
     ),

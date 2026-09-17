@@ -35,10 +35,15 @@
 
 import entrySchema from "../schema/nomankind-entry-schema.json" with { type: "json" };
 
-import type { EntryStatus } from "./derive.js";
+import { classSatisfies, type EntryStatus } from "./derive.js";
 import type { Event } from "./events.js";
 import type { EvidenceTier } from "./evidence.js";
-import { DEFAULT_DOMAIN, LIST_PAGE_LIMIT } from "./policy.js";
+import {
+  DEFAULT_DOMAIN,
+  LIST_PAGE_LIMIT,
+  VERIFICATION_CLASSES,
+  type VerificationClass,
+} from "./policy.js";
 import { tierSatisfies } from "./read.js";
 import {
   MIN_SOURCE_VALUES,
@@ -60,6 +65,10 @@ export const SYNC_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "flatten",
   "min_tier",
   "min_source",
+  // Who met the consensus (decision D-138), the reader's own demand carried
+  // into the stream: a trainer building a corpus of registered-class facts asks
+  // for one here and is handed nothing weaker.
+  "min_class",
   "domain",
 ]);
 
@@ -71,6 +80,7 @@ export const SYNC_QUERY_REFUSALS = [
   "bad_flatten",
   "bad_min_tier",
   "bad_min_source",
+  "bad_min_class",
   "unknown_domain",
 ] as const;
 
@@ -97,6 +107,13 @@ export interface SyncQuery {
    * building a corpus of provider-stated facts asks this one.
    */
   readonly min_source: SourceClass | null;
+  /**
+   * The weakest verification class the stream will carry (decision D-138):
+   * community, mixed, registered, weakest first, or null for no demand. The
+   * tier is how the claim was checked, the source who said it, and this who
+   * decided it.
+   */
+  readonly min_class: VerificationClass | null;
   /**
    * The registered domain to stream. Null means every domain, which is what a
    * trainer replaying the whole log asks for.
@@ -173,6 +190,15 @@ export function parseSyncQuery(params: URLSearchParams): SyncQueryResult {
     return { ok: false, refusal: "bad_min_source" };
   }
 
+  const minClass = params.getAll("min_class");
+  if (minClass.length > 1) return { ok: false, refusal: "bad_min_class" };
+  if (
+    minClass.length === 1 &&
+    !(VERIFICATION_CLASSES as readonly string[]).includes(minClass[0]!)
+  ) {
+    return { ok: false, refusal: "bad_min_class" };
+  }
+
   const domain = params.getAll("domain");
   if (domain.length > 1) return { ok: false, refusal: "unknown_domain" };
   if (domain.length === 1 && !DOMAINS.includes(domain[0]!)) {
@@ -188,6 +214,8 @@ export function parseSyncQuery(params: URLSearchParams): SyncQueryResult {
       min_tier: minTier.length === 0 ? null : (minTier[0] as EvidenceTier),
       min_source:
         minSource.length === 0 ? null : (minSource[0] as SourceClass),
+      min_class:
+        minClass.length === 0 ? null : (minClass[0] as VerificationClass),
       domain: domain.length === 0 ? null : (domain[0] as string),
     },
   };
@@ -231,6 +259,12 @@ export interface SyncEntryState {
    * it fails any demand — `sourceClassSatisfies` says why.
    */
   readonly source_class?: SourceClass | null;
+  /**
+   * The class the entry's consensus was met at, off the sidecar derivation
+   * wrote (decision D-138). Absent or null is a class the caller did not
+   * supply, and it fails any demand — `classSatisfies` says why.
+   */
+  readonly verification_class?: VerificationClass | null;
 }
 
 /**
@@ -291,6 +325,15 @@ export function keepSyncItem(
   if (query.min_source !== null) {
     if (state.status !== "verified") return false;
     if (!sourceClassSatisfies(state.source_class ?? null, query.min_source)) {
+      return false;
+    }
+  }
+  // And the class demand beside them (D-138), applied the same way and for the
+  // same reason: a trainer that asked who decided a fact is asking for facts to
+  // learn, and an unverified entry is not one of those whoever signed it.
+  if (query.min_class !== null) {
+    if (state.status !== "verified") return false;
+    if (!classSatisfies(state.verification_class ?? null, query.min_class)) {
       return false;
     }
   }

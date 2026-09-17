@@ -883,6 +883,10 @@ async function register(
 
     const record: OperatorRecord = {
       id: operator,
+      // Every operator this door registers is a domain operator (D-138): a
+      // community one is registered by its own attested line and by nothing
+      // else, and its id carries the colon `checkRegistration` refuses.
+      kind: "domain",
       maintainer: settled.maintainer,
       // Nobody registers as a provider: checkRegistration refuses the domain, so
       // the column exists for a later decision and is false at every door today.

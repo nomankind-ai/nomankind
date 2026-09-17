@@ -82,6 +82,17 @@ const EXPECTED_POLICY_KEYS = [
   "APPROVALS_TO_VERIFY_LARGE_POOL",
   "REJECTIONS_TO_REJECT",
   "VERIFICATION_MIN_OUTSIDE_OPERATORS",
+  // Two paths to being a validator, one registry (D-138): the two kinds of
+  // operator, the binding kinds and which of them count, the Sybil floor for a
+  // community consensus, the classes an entry discloses, and the token that
+  // turns a confirmation into a validation.
+  "OPERATOR_KINDS",
+  "BINDING_KINDS",
+  "COUNTING_BINDING_KINDS",
+  "COMMUNITY_MIN_ACCOUNTS",
+  "COMMUNITY_MIN_COMMUNITIES",
+  "VERIFICATION_CLASSES",
+  "CONFIRMATION_ATTESTATION_TOKEN_PREFIX",
   "ASSIGNMENT_WINDOW_HOURS",
   "DRAW_DRAFT_MAX_AGE_DAYS",
   "REPRODUCTION_RUNS",
@@ -561,7 +572,7 @@ describe("policy numbers", () => {
     }
   });
 
-  it("exports only numbers, five names, one flag, and frozen objects", () => {
+  it("exports only numbers, six names, one flag, and frozen objects", () => {
     for (const [key, value] of Object.entries(POLICY)) {
       expect(value).not.toBeNull();
       if (
@@ -571,8 +582,10 @@ describe("policy numbers", () => {
         // three above.
         key === "FREE_TIER" ||
         // D-136: the first word of the one line the confirmation door reads.
-        // A format constant, and the fifth and last name here.
-        key === "CONFIRMATION_FORM_PREFIX"
+        key === "CONFIRMATION_FORM_PREFIX" ||
+        // D-138: the token inside that line which makes it a validation. A
+        // format constant like the one above, and the sixth and last name here.
+        key === "CONFIRMATION_ATTESTATION_TOKEN_PREFIX"
       ) {
         expect(typeof value).toBe("string");
         continue;

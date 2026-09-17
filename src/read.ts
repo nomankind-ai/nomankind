@@ -29,10 +29,14 @@
 import entrySchema from "../schema/nomankind-entry-schema.json" with { type: "json" };
 
 import { utcDay } from "./anchor.js";
-import type { EntryStatus, Sidecar } from "./derive.js";
+import { classSatisfies, type EntryStatus, type Sidecar } from "./derive.js";
 import type { EvidenceTier } from "./evidence.js";
 import { checkParameters } from "./params.js";
-import type { Category } from "./policy.js";
+import {
+  VERIFICATION_CLASSES,
+  type Category,
+  type VerificationClass,
+} from "./policy.js";
 import type { Entry } from "./schema.js";
 import {
   MIN_SOURCE_VALUES,
@@ -58,6 +62,11 @@ export const READ_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "domain",
   "min_tier",
   "min_source",
+  // Who met the consensus (decision D-138): a fifth demand of the same kind as
+  // the tier and the source, and a different question from either. The tier
+  // says how the claim was checked, the source who said it, and this who
+  // decided it.
+  "min_class",
   "max_age",
 ]);
 
@@ -89,6 +98,13 @@ export type ReadQuery =
        * the tier asks how the claim was checked, this asks who said it.
        */
       readonly min_source?: SourceClass;
+      /**
+       * The weakest verification class the reader will accept (decision
+       * D-138): `community`, `mixed` or `registered`, weakest first, so
+       * `min_class=mixed` admits mixed and registered. Null means the reader
+       * made no demand about who decided the entry.
+       */
+      readonly min_class: VerificationClass | null;
       /** Whole calendar days. Absent means the reader set no age demand. */
       readonly max_age?: number;
     };
@@ -105,6 +121,7 @@ export const READ_QUERY_REFUSALS = [
   "unknown_domain",
   "bad_min_tier",
   "bad_min_source",
+  "bad_min_class",
   "bad_max_age",
 ] as const;
 
@@ -193,6 +210,14 @@ export function parseReadQuery(params: URLSearchParams): ReadQueryResult {
     return { ok: false, reason: "bad_min_source" };
   }
 
+  const minClass = params.get("min_class");
+  if (
+    minClass !== null &&
+    !(VERIFICATION_CLASSES as readonly string[]).includes(minClass)
+  ) {
+    return { ok: false, reason: "bad_min_class" };
+  }
+
   const maxAge = params.get("max_age");
   if (maxAge !== null && !MAX_AGE_PATTERN.test(maxAge)) {
     return { ok: false, reason: "bad_max_age" };
@@ -211,6 +236,7 @@ export function parseReadQuery(params: URLSearchParams): ReadQueryResult {
       ...(domain === null ? {} : { domain }),
       ...(minTier === null ? {} : { min_tier: minTier as EvidenceTier }),
       ...(minSource === null ? {} : { min_source: minSource as SourceClass }),
+      min_class: minClass === null ? null : (minClass as VerificationClass),
       ...(maxAgeDays === undefined ? {} : { max_age: maxAgeDays }),
     },
   };
@@ -289,8 +315,18 @@ export function withinMaxAge(
  * was found to have never been true. Section 8 promises the reader an answer
  * the log stands behind, and those four are exactly the states it does not.
  */
-export function isReadable(status: EntryStatus | string): boolean {
-  return status === "verified";
+export function isReadable(
+  status: EntryStatus | string,
+  entryClass: VerificationClass | null = null,
+  minClass: VerificationClass | null = null,
+): boolean {
+  if (status !== "verified") return false;
+  // Who decided it, when the reader asked (decision D-138). Asked here rather
+  // than beside the other filters because it is a question about the verdict
+  // itself: an entry a reader will not accept the deciders of is an entry this
+  // door has no answer from, exactly as an unverified one is. A caller that
+  // names no demand gets the answer it always got.
+  return classSatisfies(entryClass, minClass);
 }
 
 /** One entry the store offered, with the sidecar that carries its effective tier. */
@@ -316,11 +352,20 @@ export function chooseReadable(
 ): ReadCandidate | null {
   const minTier = query.by === "subject" ? query.min_tier : undefined;
   const minSource = query.by === "subject" ? query.min_source : undefined;
+  const minClass = query.by === "subject" ? query.min_class : null;
   const maxAge = query.by === "subject" ? query.max_age : undefined;
 
   for (const candidate of candidates) {
     const record = candidate.entry as unknown as Record<string, unknown>;
-    if (!isReadable(record["status"] as string)) continue;
+    if (
+      !isReadable(
+        record["status"] as string,
+        candidate.sidecar.verification_class ?? null,
+        minClass,
+      )
+    ) {
+      continue;
+    }
     if (!tierSatisfies(candidate.sidecar.effective_tier, minTier)) continue;
     if (
       !sourceClassSatisfies(candidate.sidecar.source?.class ?? null, minSource)

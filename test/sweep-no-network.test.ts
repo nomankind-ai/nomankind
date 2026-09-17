@@ -233,6 +233,7 @@ describe("a sweep with work in every step and a network that never answers", () 
     // doors still serve, and nothing for the sweep to do about it.
     await putOperator(store.db, {
       id: OPERATOR,
+      kind: "domain",
       maintainer: false,
       provider: false,
       registeredSeq: 0,

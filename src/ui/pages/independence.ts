@@ -40,12 +40,25 @@ const EM_DASH = "—";
 /** One registered operator: who it is, what it may do, where it is attested. */
 function validatorRow(entry: ValidatorEntry): Safe {
   return html`<tr class="row">
-    <td><a href="/operators/${entry.operator}">${entry.operator}</a></td>
-    <td class="${entry.trusted ? "accent" : "dim"}">
-      ${entry.trusted ? "trusted" : "no"}
+    <td>
+      <a href="/operators/${encodeURIComponent(entry.operator)}"
+        >${entry.operator}</a
+      >
+    </td>
+    <td class="muted">
+      ${entry.kind}${entry.venue === null
+        ? raw("")
+        : html`<div class="dim mono break">
+            ${entry.venue} · ${entry.handle ?? EM_DASH}
+          </div>`}
     </td>
     <td class="${entry.perimeter === null ? "dim" : "warn"} mono">
-      ${entry.perimeter ?? EM_DASH}
+      ${entry.kind === "community"
+        ? html`outside every perimeter`
+        : html`${entry.perimeter ?? EM_DASH}`}
+    </td>
+    <td class="${entry.trusted ? "accent" : "dim"}">
+      ${entry.trusted ? "trusted" : "no"}
     </td>
     <td class="warn">${entry.maintainer ? "cannot validate" : EM_DASH}</td>
     <td class="muted">${entry.provider ? "provider" : EM_DASH}</td>
@@ -146,6 +159,16 @@ function derivedFrom(report: IndependenceReport): Safe {
         </tbody>
       </table>
     </div>
+    <p class="note">
+      The operator rows above are folded from two published sources, not one
+      (decision D-138): the <span class="mono">operator_registered</span> events
+      and the registry rows they wrote, and the
+      <span class="mono">community_operator_registered</span> events beside
+      them, each of which is one community key's first counted confirmation line
+      read back as a registration. Both are sealed events in this log, so a
+      reader holding a mirror export folds the same validator set from the same
+      bytes, community operators included.
+    </p>
     <p class="note">
       Nothing on this page is a number only this record can compute. Anyone
       holding a mirror export can run
@@ -363,8 +386,9 @@ export function renderIndependence(
                 <thead>
                   <tr>
                     <th>operator</th>
-                    <th>trusted</th>
+                    <th>kind</th>
                     <th>perimeter</th>
+                    <th>trusted</th>
                     <th>maintainer</th>
                     <th>provider</th>
                     <th>domains</th>
@@ -380,6 +404,20 @@ export function renderIndependence(
           into it tomorrow and a set that showed only the pool would be the
           smaller claim. The full directory, with standing and co-signers, is
           <a href="/operators">the operators page</a>.
+        </p>
+        <p class="note">
+          The kind column is the two ways into this set (decision D-138). A
+          <span class="mono">domain</span> operator is bound by a TXT record
+          under a DNS name and named into the pool by the maintainer or earned
+          in; a <span class="mono">community</span> operator is a key bound to
+          an account on an agent community, registered by its first counted
+          confirmation line and shown here with the venue and handle that key
+          answers under. Every community operator is outside every disclosed
+          perimeter, and that is a fact about the perimeters rather than a
+          judgement about the key: a perimeter is the maintainer's own grouping
+          of the operators it named at genesis, and these keys were named by
+          nobody. That is exactly why a community validation can clear a
+          bootstrap label a genesis validator cannot.
         </p>
       </section>
 

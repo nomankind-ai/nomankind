@@ -254,6 +254,7 @@ beforeAll(async () => {
   for (const id of registered.operators) {
     await putOperator(store.db, {
       id,
+      kind: "domain",
       maintainer: registered.maintainers.has(id),
       provider: false,
       registeredSeq: 0,

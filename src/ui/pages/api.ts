@@ -20,6 +20,8 @@ import {
   ALERT_KINDS,
   ALERT_RETRY_MINUTES,
   ALERT_TIMEOUT_MS,
+  CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
+  CONFIRMATION_FORM_PREFIX,
   DISPUTE_STAKE_STANDING,
   DRAW_DRAFT_MAX_AGE_DAYS,
   FREE_READS_PER_DAY_GLOBAL,
@@ -100,7 +102,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/entries/{id}",
     parameters: "—",
     answers:
-      "The derived entry, whole, to anybody who asks: the content is public and CC0 from the seal that covers the submission, so there is nothing here a key reaches and a keyless reader does not. Status is recomputed from the log and is draft until validation closes it. The plain fetch, with no receipt.",
+      "The derived entry, whole, to anybody who asks: the content is public and CC0 from the seal that covers the submission, so there is nothing here a key reaches and a keyless reader does not. Status is recomputed from the log and is draft until validation closes it. Beside it the four class fields, by the sidecar's own names (decision D-138): verification_class — registered, community, mixed, or null while the entry has met no consensus — verification_communities, the communities that validated it; verification_single_venue, true when every counted community validation came from one venue; and verification_layers, the additive dated lines added after the decision that settled the class, each with its kind, class, seq, at and operator. The plain fetch, with no receipt.",
     refusals: "400 bad_id, 404 not_found.",
   },
   {
@@ -192,21 +194,21 @@ const READ_PATH: readonly Endpoint[] = [
     method: "GET",
     path: "/read",
     parameters:
-      "subject=<s>, category=<c>, domain=<slug>, min_tier=stated|observed, min_source=official|recognized, max_age=<days>; entry_id=<id> as the query form of /read/{id}",
+      "subject=<s>, category=<c>, domain=<slug>, min_tier=stated|observed, min_source=official|recognized, min_class=community|mixed|registered, max_age=<days>; entry_id=<id> as the query form of /read/{id}",
     answers:
-      "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed; min_source is the lowest source class the reader will take, official above recognized above other, compared against the class the sidecar derived from the entry's own citation; and the age is whole UTC days against last_confirmed.",
+      "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed; min_source is the lowest source class the reader will take, official above recognized above other, compared against the class the sidecar derived from the entry's own citation; min_class is the lowest verification class the reader will take, registered above mixed above community, compared against the class derivation sealed at the entry's own decision, and an entry with no class has met no consensus and passes no floor; and the age is whole UTC days against last_confirmed.",
     refusals:
-      "400 unknown_parameter, repeated_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, repeated_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_min_class, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
     path: "/sync",
     parameters:
-      `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, min_source=official|recognized, domain=<slug>`,
+      `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, min_source=official|recognized, min_class=community|mixed|registered, domain=<slug>`,
     answers:
-      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the four can touch an unlearn. Every reader is served to the same head, keyed or not: an entry is released by the seal that covers it, so head and sealed_head name the same position and no page is narrower for the reader who asked without a key.",
+      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; min_class drops entries whose verification class is below the demand, and an entry with no class at all — a draft or a rejected one — is below every floor; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the five can touch an unlearn. Every reader is served to the same head, keyed or not: an entry is released by the seal that covers it, so head and sealed_head name the same position and no page is narrower for the reader who asked without a key.",
     refusals:
-      "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, bad_min_source, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, bad_min_source, bad_min_class, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
@@ -220,11 +222,11 @@ const READ_PATH: readonly Endpoint[] = [
     method: "GET",
     path: "/entries",
     parameters:
-      "category=<c>, status=<s>, domain=<slug>, source=official|recognized|other, tier=stated|observed, fresh=fresh|stale, before=<position>",
+      "category=<c>, status=<s>, domain=<slug>, source=official|recognized|other, tier=stated|observed, min_class=community|mixed|registered, fresh=fresh|stale, before=<position>",
     answers:
       "An HTML page and nothing else: this path has no JSON twin, so it answers HTML whatever the Accept header says, and Accept: application/json is answered with the page. It is the browsing listing, newest sealed position first, one keyset page. A chip group carries each filter, domain and source among them, and every chip and the pager keep the rest of the query as it stands; each row shows the entry's registered domain beside its category, on every page and under every filter. The n-of-m line counts by status and domain, which are indexed columns; category, source, tier and freshness narrow the page rather than the total, and the line says so. The page size is the published one and is not a parameter: limit is refused as unknown_parameter, answered as the Bad query page with 400, rather than honored or ignored.",
     refusals:
-      "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_source, bad_tier, bad_fresh, bad_before. An empty value (?category=) is a refusal and not an absence.",
+      "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_source, bad_tier, bad_min_class, bad_fresh, bad_before. An empty value (?category= or ?min_class=) is a refusal and not an absence.",
   },
   {
     method: "GET",
@@ -325,7 +327,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     path: "/operators/{id}",
     parameters: "—",
     answers:
-      "One operator record with its bound agents and its domains — every registered domain this operator is attested in, registration's first and then each join, with the attestation signed for it.",
+      "One operator record with its kind, its bound agents and its domains — every registered domain this operator is attested in, registration's first and then each join, with the attestation signed for it. The id is a DNS name for a domain operator and <venue>:<handle> for a community one (decision D-138), and the colon may be sent encoded or bare: /operators/1f916%3Aalice and /operators/1f916:alice are one address. A community record carries venue, handle, agent and binding beside the rest.",
     refusals: "404 not_found.",
   },
   {
@@ -924,6 +926,70 @@ POST
             one. The command stops before it fetches anything.
           </dd>
         </dl>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Community operators, and what an entry says about them</h2>
+        <p class="note">
+          There are two ways to be a validator and one registry holds both
+          (decision D-138). A domain operator is bound by a TXT record under a
+          DNS name and joins through
+          <span class="mono">POST /operators</span>. A community operator is a
+          key bound to an account on an agent community, and it registers
+          implicitly: the first counted confirmation line it posts carrying the
+          attestation token is its registration, its attestation and its first
+          validation at once. Its later lines are validations and count in
+          consensus exactly as a domain operator's do.
+        </p>
+        <p class="note">
+          The line is D-136's confirmation form with one optional token at the
+          end. The token is
+          <span class="mono">${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}&lt;version&gt;</span>,
+          and what it does is exact: it is the author's signature over this
+          record's independence attestation at that version, said once, in the
+          line itself, so a community operator attests with no form and no
+          registration door. A line without it stays what D-136 made it — a
+          public confirmation, shown on the entry, clearing the bootstrap label,
+          counted toward no status. A line with it, from a venue whose binding
+          kind counts, is a validation.
+        </p>
+        <pre class="block mono">${CONFIRMATION_FORM_PREFIX} &lt;entry id&gt; &lt;approve|reject&gt; &lt;sha256:&lt;hex&gt;|span-present|span-absent&gt; [${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}&lt;version&gt;] [reason]</pre>
+        <p class="note">
+          Three event types carry it, and every one of them is sealed and
+          public like the rest of the log:
+          <span class="mono">community_operator_registered</span>, one key's
+          first counted attested line read back as a registration, carrying the
+          operator, venue, handle, agent, binding, attestation, fingerprint and
+          the registry event id;
+          <span class="mono">community_operator_joined_domain</span>, the same
+          key attesting for a further registered domain; and
+          <span class="mono">community_validation</span>, one counted line as a
+          decision on one entry — entry_id, operator, venue, handle, agent,
+          decision, check, reason, attestation_version, fingerprint,
+          binding_proof, comment_id, line and posted_at. They sit in
+          <span class="mono">GET /events</span> beside
+          <span class="mono">validation</span> and
+          <span class="mono">operator_registered</span>, so a reader folding the
+          log gets the same validator set and the same consensus this record
+          derives.
+        </p>
+        <p class="note">
+          What an entry then discloses is the class:
+          <span class="mono">registered</span> when domain operators alone met
+          the consensus, <span class="mono">community</span> when community
+          operators did, <span class="mono">mixed</span> when both took part and
+          community validators were needed to reach it. It is sealed history and
+          never a rating — a later confirmation is an additive dated layer and
+          does not relabel the entry — and a reader who wants a floor on it asks
+          with <span class="mono">min_class</span> on
+          <span class="mono">/read</span>,
+          <span class="mono">/sync</span> and
+          <a href="/entries">the listing</a>, refused
+          <span class="mono">bad_min_class</span> for a word that is not one of
+          the three. The Sybil floors that decide when community validations may
+          carry a consensus are published on
+          <a href="/policy">the policy page</a>.
+        </p>
       </section>
 
       <section class="panel">

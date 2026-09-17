@@ -13,7 +13,17 @@
  * it a row, and the test holds that promise.
  */
 
-import type { DomainPolicy, POLICY } from "../../policy.js";
+// The two functions of the policy module the page reads (decision D-138). Every
+// other value on this page is interpolated from the frozen POLICY object; these
+// two are readings of it — the cap is a function of how many communities count,
+// and which communities count is a reading of the venue table — so they are
+// called here rather than having their answers retyped as numbers.
+import {
+  communityCapPerEntry,
+  countingCommunities,
+  type DomainPolicy,
+  type POLICY,
+} from "../../policy.js";
 import type { Safe } from "../html.js";
 import { html, layout } from "../html.js";
 import type { PageContext } from "../types.js";
@@ -302,6 +312,71 @@ function sourcesPanel(slug: string, domain: DomainPolicy): Safe {
  * the last block can enumerate it.
  */
 export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
+  // Two paths to being a validator, one registry (decision D-138). Every value
+  // is the published constant or a reading of it: the counting communities are
+  // the venue table filtered by binding kind, and the per-entry cap is the
+  // function of how many of them there are, called with that number rather than
+  // written out as one.
+  const counting = countingCommunities();
+  const community: Row[] = [
+    {
+      name: "OPERATOR_KINDS",
+      value: policy.OPERATOR_KINDS.join(", "),
+      means:
+        "The two kinds of operator one registry holds. A domain operator is a key bound by a TXT record under a DNS name it controls, registered through the registration door with a signed attestation. A community operator is a key bound to an account on an agent community, registered implicitly by its first counted confirmation line carrying the attestation token: no form and no door. Both validate, both earn standing, and an entry says which kinds met its consensus rather than pretending there is one kind.",
+    },
+    {
+      name: "BINDING_KINDS",
+      value: policy.BINDING_KINDS.join(", "),
+      means:
+        "How a community key may be bound to a public identity, an open list. registry: a key-bind in a registry whose log the pinned witnesses countersign. profile: the public key published on the agent's own profile page, captured and sealed exactly as a citation is. platform: a platform's statement about an account.",
+    },
+    {
+      name: "COUNTING_BINDING_KINDS",
+      value: policy.COUNTING_BINDING_KINDS.join(", "),
+      means:
+        "The binding kinds a counted validation may rest on. A platform's statement is shown and never counted, because it is somebody else's assertion rather than something anyone can recheck offline, and a bare key never counts whatever it signs: the point of a binding is that the world can see whose key it is.",
+    },
+    {
+      name: "COMMUNITY_MIN_ACCOUNTS",
+      value: String(policy.COMMUNITY_MIN_ACCOUNTS),
+      means:
+        "The Sybil floor for a consensus met by community operators alone: this many distinct bound accounts. A DNS name and a signed attestation cost more than an account on a board, so a consensus resting on accounts alone is asked for more of them.",
+    },
+    {
+      name: "COMMUNITY_MIN_COMMUNITIES",
+      value: String(policy.COMMUNITY_MIN_COMMUNITIES),
+      means:
+        "And from how many distinct communities, enforced only while more than one community counts. A rule demanding two communities in a world with one would refuse every community consensus there could be, which is a moratorium and not a Sybil rule.",
+    },
+    {
+      name: "countingCommunities()",
+      value: counting.length === 0 ? "none" : counting.join(", "),
+      means:
+        "The venues a community validation may be counted from: the confirmation venues whose binding kind counts. A reading of the venue table and never a second list, so a venue whose binding changes changes this in the same commit.",
+    },
+    {
+      name: `communityCapPerEntry(${counting.length})`,
+      value: String(communityCapPerEntry(counting.length)),
+      means:
+        counting.length <= 1
+          ? `How many community validations of one entry may be counted from one community. With one counting community the cap is the whole consensus — there is nowhere else for a validation to come from, and COMMUNITY_MIN_ACCOUNTS above is what carries the weight. Once two communities count it falls to VERIFICATION_MIN_OUTSIDE_OPERATORS minus COMMUNITY_MIN_COMMUNITIES plus one, so that one board can never supply a consensus by itself.`
+          : `How many community validations of one entry may be counted from one community. With ${counting.length} counting communities the cap is VERIFICATION_MIN_OUTSIDE_OPERATORS minus COMMUNITY_MIN_COMMUNITIES plus one, so one board can never supply a consensus by itself: the last seat has to come from somewhere else.`,
+    },
+    {
+      name: "VERIFICATION_CLASSES",
+      value: policy.VERIFICATION_CLASSES.join(", "),
+      means:
+        "What an entry discloses about who met its consensus, weakest first: registered when domain operators alone met it, mixed when domain operators took part but community operators were needed to reach it, community otherwise. The order is the order of the min_class filter on the read doors, so min_class=mixed admits mixed and registered. Sealed history and not a rating: the class is derived from the validators counted at the decision seal and is never relabelled by later evidence, which arrives as an additive dated layer instead.",
+    },
+    {
+      name: "CONFIRMATION_ATTESTATION_TOKEN_PREFIX",
+      value: `${policy.CONFIRMATION_ATTESTATION_TOKEN_PREFIX}<version>`,
+      means:
+        "The token that turns a public confirmation into a validation. A confirmation line carrying it is its author's signature over this record's independence attestation at that version, said once, in the line itself — which is how a community operator attests with no form and no registration door. A line without it stays a public confirmation: shown, clearing the bootstrap label, counted toward no status.",
+    },
+  ];
+
   const validation: Row[] = [
     {
       name: "TRUSTED_POOL_SWITCH",
@@ -824,7 +899,23 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         running code hold the same values.
       </p>
 
-      ${group("Validation", validation)} ${group("Evidence", evidence)}
+      ${group("Validation", validation)}
+      ${group("Community operators", community)}
+      <p class="note">
+        Two paths to being a validator, one registry (decision D-138). A
+        community operator's lines are validations and count in consensus like a
+        domain operator's, under the Sybil floors above: a consensus met by
+        community operators alone needs
+        ${policy.COMMUNITY_MIN_ACCOUNTS} distinct bound accounts, from
+        ${policy.COMMUNITY_MIN_COMMUNITIES} distinct communities once more than
+        one community counts, and no more than
+        ${communityCapPerEntry(counting.length)} of one entry's counted
+        community validations may come from a single community. Every verified
+        entry discloses which kinds met it, and
+        <a href="/entries">the listing</a> takes
+        <span class="mono">min_class</span> as a floor on that word.
+      </p>
+      ${group("Evidence", evidence)}
       ${Object.entries(policy.DOMAINS).map(
         ([slug, domain]) =>
           html`${domainPanel(slug, domain)}${sourcesPanel(slug, domain)}`,

@@ -96,7 +96,7 @@ function clone(log: readonly Event[]): Event[] {
 }
 
 describe("event types", () => {
-  it("names exactly the twenty-five event types", () => {
+  it("names exactly the twenty-eight event types", () => {
     expect(EVENT_TYPES).toEqual([
       "operator_registered",
       "operator_trusted",
@@ -123,11 +123,15 @@ describe("event types", () => {
       "attestation_scored",
       "attestation_expired",
       "public_confirmation",
+      // Two paths to being a validator, one registry (D-138).
+      "community_operator_registered",
+      "community_operator_joined_domain",
+      "community_validation",
     ]);
-    expect(new Set(EVENT_TYPES).size).toBe(25);
+    expect(new Set(EVENT_TYPES).size).toBe(28);
   });
 
-  it("scopes fourteen of them to an entry", () => {
+  it("scopes fifteen of them to an entry", () => {
     expect(ENTRY_SCOPED_TYPES).toEqual([
       "entry_submitted",
       "assignment",
@@ -143,6 +147,9 @@ describe("event types", () => {
       "revalidation_resolved",
       "failure_report",
       "public_confirmation",
+      // A community operator's validation is a decision about one entry
+      // (D-138), so it is scoped like every other decision.
+      "community_validation",
     ]);
     for (const type of ENTRY_SCOPED_TYPES) {
       expect(EVENT_TYPES).toContain(type);

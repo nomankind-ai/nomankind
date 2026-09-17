@@ -362,6 +362,9 @@ describe("the confirmation form", () => {
         entry_id: ENTRY_ID,
         verdict: "approve",
         check: { kind: "hash", value: SNAPSHOT_HASH },
+        // No attestation token on this line (D-138): a plain confirmation,
+        // exactly as D-136 wrote it.
+        attestation_version: null,
         reason: "fetched it myself",
       },
       {
@@ -369,6 +372,7 @@ describe("the confirmation form", () => {
         entry_id: OTHER_ID,
         verdict: "reject",
         check: { kind: "span", value: "absent" },
+        attestation_version: null,
         reason: "the page says nothing of the kind",
       },
     ]);
@@ -382,6 +386,7 @@ describe("the confirmation form", () => {
         entry_id: ENTRY_ID,
         verdict: "approve",
         check: { kind: "span", value: "present" },
+        attestation_version: null,
         reason: null,
       },
     ]);
@@ -811,7 +816,7 @@ describe("the derived confirmations", () => {
   });
 
   it("is stamped by a derivation version that moved with the rule", () => {
-    expect(DERIVATION_VERSION).toBe("2026-09-16-d136");
+    expect(DERIVATION_VERSION).toBe("2026-09-17-d138");
   });
 });
 

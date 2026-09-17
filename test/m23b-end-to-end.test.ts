@@ -920,7 +920,7 @@ describe("the entries listing's source chip", () => {
     // the page over the sidecar the store handed back, and the line says so
     // rather than letting a reader read the total as a filtered count.
     expect(official.text).toContain(
-      "the category, source, tier and freshness filters narrow the page, not the total",
+      "the category, source, tier, class and freshness filters narrow the page, not the total",
     );
   });
 

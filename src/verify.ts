@@ -35,6 +35,7 @@ import {
   type DerivedAttestation,
 } from "./attest.js";
 import {
+  canonicalConfirmationLine,
   confirmationFingerprint,
   confirmationPayloadOf,
   pinnedConfirmationTrust,
@@ -44,7 +45,7 @@ import {
 import { CORE_KEYS, coreVersion, domainOf, extractCore } from "./core.js";
 import { deriveEntry, registeredOperatorsAt } from "./derive.js";
 import { disputeExclusions } from "./dispute.js";
-import { base64Decode } from "./encoding.js";
+import { base64Decode, base64urlDecode } from "./encoding.js";
 import { isTranscriptCategory } from "./evidence.js";
 import {
   eventHash,
@@ -70,6 +71,7 @@ import {
   verifySeal,
   type Seal,
 } from "./seal.js";
+import { verifyBytes } from "./identity.js";
 import { verifyEntrySignature } from "./sign.js";
 import { checkValidation, type OperatorInfo } from "./validate.js";
 import { verifyRecordSignature } from "./records.js";
@@ -168,6 +170,7 @@ export type EntryCheck =
   | "signature"
   | "core"
   | "records"
+  | "community_binding"
   | "exclusions"
   | "derived"
   | "snapshot"
@@ -221,6 +224,12 @@ export type SkippedCheck = EntryCheck | "attestations";
  */
 const BOUNDED_NOT_RUN: readonly SkippedCheck[] = Object.freeze([
   "chain",
+  // The community bindings (decision D-138) are the fifth: a validation's own
+  // proof travels on its event, but the registration that made its author an
+  // operator and the domain it attested in are registry events, which a bundle
+  // bounded to one entry does not carry. Half a check reported as a whole one
+  // would be worse than a named absence.
+  "community_binding",
   "exclusions",
   "derived",
   "attestations",
@@ -238,6 +247,7 @@ export const CHECKS: readonly EntryCheck[] = Object.freeze([
   "signature",
   "core",
   "records",
+  "community_binding",
   "exclusions",
   "derived",
   "snapshot",
@@ -896,6 +906,234 @@ async function checkRecords(
 }
 
 /**
+ * g (community_binding). Every community validation of this entry, rechecked
+ * from the bundle alone (decision D-138 item 5).
+ *
+ * "Verifiable by anyone" is the whole of this decision's cost: a key bound to
+ * an account on an agent community is a validator here, so a reader has to be
+ * able to check the binding for themselves, years later, offline, with no
+ * account anywhere. Four things are checked for each validation, and each of
+ * them is a way the claim could be false:
+ *
+ * The fingerprint is recomputed from the line's own fields — the entry, the
+ * decision, the check and the attestation token — and must be the one the event
+ * carries. The token is inside the preimage, so a validation cannot be made out
+ * of a confirmation that never attested, or the other way round.
+ *
+ * The binding proof holds. A `registry` binding is judged by exactly the rule a
+ * public confirmation's proof is judged by (src/confirm.ts): the leaf is this
+ * handle's `memory.seal` of this fingerprint, it is in the pinned registry's
+ * log, the registry signed the head and the pinned witnesses countersigned it.
+ * A `profile` binding is the agent's own Ed25519 signature over the canonical
+ * line's bytes, by the key the profile published — and the capture of that
+ * profile has to be in the bundle, under the hash the binding names, with the
+ * key in its bytes. Neither is anybody's assertion.
+ *
+ * The author was an operator before it validated: a
+ * `community_operator_registered` event for the same operator, naming the same
+ * agent and the same kind of binding, at a position before this validation.
+ *
+ * And it was attested in this entry's domain, by its registration or by a later
+ * join. `operator_not_in_domain` is the rule (D-071); this is the offline half
+ * of it.
+ */
+async function checkCommunityBindings(
+  bundle: LogBundle,
+  entryId: string,
+  entryDomain: string,
+  trust: ConfirmationTrust,
+  report: Report,
+): Promise<void> {
+  const ordered = inSeqOrder(bundle.events);
+  for (const event of ordered) {
+    if ((event?.type as string) !== "community_validation") continue;
+    const payload = isRecord(event.payload) ? (event.payload as Json) : {};
+    const target = payload["entry_id"];
+    if (event.entry_id !== entryId && target !== entryId) continue;
+    const field = `/events/${event.seq}`;
+
+    // Both halves have to name this entry. A `community_validation` carries the
+    // id twice — the envelope's scope and the payload's own — and an event
+    // whose halves disagree is an event about two entries at once: derivation
+    // counts it for neither (src/derive.ts) and the verifier says so rather
+    // than checking whichever half it happened to read first.
+    if (event.entry_id !== entryId || target !== entryId) {
+      report.add(
+        "community_binding",
+        field,
+        "community_binding_invalid",
+        briefValue(entryId),
+        briefValue(target),
+      );
+      continue;
+    }
+
+    const operator = payload["operator"];
+    const handle = payload["handle"];
+    const agent = payload["agent"];
+    const decision = payload["decision"];
+    const version = payload["attestation_version"];
+    const check = payload["check"];
+    if (
+      typeof operator !== "string" ||
+      typeof handle !== "string" ||
+      typeof agent !== "string" ||
+      typeof version !== "string" ||
+      (decision !== "approve" && decision !== "reject") ||
+      !isRecord(check)
+    ) {
+      report.add("community_binding", field, "community_binding_invalid");
+      continue;
+    }
+
+    const line: Parameters<typeof canonicalConfirmationLine>[0] = {
+      entry_id: entryId,
+      verdict: decision,
+      check: check as unknown as Parameters<
+        typeof canonicalConfirmationLine
+      >[0]["check"],
+      attestation_version: version,
+    };
+    const expected = await confirmationFingerprint(line);
+    if (payload["fingerprint"] !== expected) {
+      report.add(
+        "community_binding",
+        field,
+        "community_binding_invalid",
+        briefValue(expected),
+        briefValue(payload["fingerprint"]),
+      );
+      continue;
+    }
+
+    const proof = payload["binding_proof"];
+
+    // The registration comes first, because it is what the proof has to be a
+    // proof OF. Registered before it validated, under the same agent and the
+    // same kind of binding: a validation whose registration the log does not
+    // hold is a validation by nobody, whatever its own proof verifies.
+    let registration: Json | null = null;
+    for (const earlier of ordered) {
+      if (earlier.seq >= event.seq) break;
+      if ((earlier?.type as string) !== "community_operator_registered") {
+        continue;
+      }
+      const fields = isRecord(earlier.payload) ? (earlier.payload as Json) : {};
+      if (fields["operator"] !== operator) continue;
+      if (fields["agent"] !== agent) continue;
+      const binding = fields["binding"];
+      if (!isRecord(binding)) continue;
+      if (!isRecord(proof) || binding["kind"] !== proof["kind"]) continue;
+      registration = fields;
+    }
+    if (registration === null) {
+      report.add("community_binding", field, "community_operator_unregistered");
+      continue;
+    }
+    const registered = registration["binding"] as Json;
+
+    let bound = false;
+    if (isRecord(proof) && proof["kind"] === "registry") {
+      bound = await verifyConfirmationProof(proof["proof"], trust, {
+        handle,
+        fingerprint: expected,
+      });
+    } else if (isRecord(proof) && proof["kind"] === "profile") {
+      bound = await verifyProfileBinding(
+        bundle,
+        proof,
+        registered,
+        canonicalConfirmationLine(line),
+      );
+    }
+    if (!bound) {
+      report.add("community_binding", field, "community_binding_invalid");
+      continue;
+    }
+
+    const attestation = registration["attestation"];
+    let attested =
+      isRecord(attestation) && attestation["domain"] === entryDomain;
+    if (!attested) {
+      for (const earlier of ordered) {
+        if (earlier.seq >= event.seq) break;
+        if ((earlier?.type as string) !== "community_operator_joined_domain") {
+          continue;
+        }
+        const fields = isRecord(earlier.payload)
+          ? (earlier.payload as Json)
+          : {};
+        if (fields["operator"] !== operator) continue;
+        if (fields["domain"] !== entryDomain) continue;
+        attested = true;
+      }
+    }
+    if (!attested) {
+      report.add("community_binding", field, "community_domain_unattested");
+    }
+  }
+}
+
+/**
+ * A profile binding, rechecked against the key the *registration* bound.
+ *
+ * The key on the proof is the claimant's own word, and a check made against it
+ * would verify every forgery ever written: an attacker signs the line with a
+ * keypair it made a moment ago, offers that key beside the signature, hands in
+ * a page it fabricated naming the same key, and all three agree with each
+ * other and with nothing else. So the registration is what the signature is
+ * judged by. The key and the capture the operator was registered under are the
+ * fixed points; the proof must name both of them, and the signature must be
+ * that key's.
+ *
+ * Three things, all of which must hold:
+ *
+ * 1. The proof's `public_key` and `capture_hash` are the registration's own. A
+ *    proof naming another key is a proof about another operator.
+ * 2. The signature over the canonical line verifies under that registered key.
+ * 3. The capture the registration named is in the bundle and its bytes carry
+ *    that key — which is what makes the key public rather than merely claimed,
+ *    archived under its own hash exactly as a citation's snapshot is.
+ *
+ * Never throws: a stranger's proof is always answered with a verdict.
+ */
+async function verifyProfileBinding(
+  bundle: LogBundle,
+  proof: Json,
+  registered: Json,
+  canonicalLine: string,
+): Promise<boolean> {
+  try {
+    const publicKey = registered["public_key"];
+    const captureHash = registered["capture_hash"];
+    const signature = proof["signature"];
+    if (typeof publicKey !== "string") return false;
+    if (typeof captureHash !== "string") return false;
+    if (typeof signature !== "string") return false;
+    // The proof may not name a key or a page of its own: the operator was
+    // registered under these, and a validation is by the operator or by
+    // nobody.
+    if (proof["public_key"] !== publicKey) return false;
+    if (proof["capture_hash"] !== captureHash) return false;
+
+    const signed = await verifyBytes(
+      base64urlDecode(publicKey),
+      new TextEncoder().encode(canonicalLine),
+      base64urlDecode(signature),
+    );
+    if (!signed) return false;
+
+    const capture = bundle.captures?.[captureHash];
+    if (capture === undefined) return false;
+    const bytes = base64Decode(capture.body_base64);
+    const text = new TextDecoder().decode(bytes);
+    return text.includes(publicKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The dispute this entry was filed as, as it stood before `seq`, or null.
  *
  * The mirror of src/worker/validate.ts's `disputedTarget`, read off the events
@@ -1468,6 +1706,20 @@ async function runChecks(
     options.confirmations ?? pinnedConfirmationTrust(),
     report,
   );
+
+  // g (community_binding). Every community validation's binding, rechecked
+  // from the bundle alone (D-138 item 5). The whole log or nothing, for the
+  // reason the exclusions are: the registration that made the author an
+  // operator is a registry event.
+  if (!bounded) {
+    await checkCommunityBindings(
+      readable,
+      entryId,
+      domainOf(logCore as unknown as Parameters<typeof domainOf>[0]),
+      options.confirmations ?? pinnedConfirmationTrust(),
+      report,
+    );
+  }
 
   // g. The exclusions, replayed at each decision's position.
   //

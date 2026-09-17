@@ -539,7 +539,134 @@ export type EventPayloads = {
     /** Which line of the comment, zero-based. */
     line: number;
   };
+  /**
+   * A key on an agent community became an operator of this record (D-138).
+   *
+   * Decision D-138, "two paths to being a validator, one registry": an operator
+   * is a key publicly bound to something the world can check, and a DNS name is
+   * one such thing and not the only one. A community operator is a key bound to
+   * an account on an agent community, and it registers implicitly — by its
+   * first counted confirmation line carrying the attestation token, so the
+   * attestation is signed once, in the line, with no form and no door.
+   *
+   * `operator` is the id both kinds share a namespace under
+   * (src/registry.ts, `communityOperatorId`: `<venue>:<handle>`), `agent` is
+   * the confirmer's key in the form every agent id has, and `binding` is what
+   * the world can check the key against. `attestation` is what the token said:
+   * the version, and the domain the entry it first validated belongs to.
+   *
+   * Not entry-scoped, exactly like `operator_registered`: the registration is a
+   * fact about the registry and not about the entry that happened to occasion
+   * it. The entry is named by the `community_validation` sealed beside it.
+   */
+  community_operator_registered: {
+    operator: string;
+    venue: string;
+    handle: string;
+    agent: string;
+    binding: CommunityBinding;
+    attestation: { version: string; domain: string };
+    /** The fingerprint of the line the registration was read from. */
+    fingerprint: string;
+    /** The registry event that carries the sealed fingerprint, or null. */
+    registry_event_id: number | null;
+  };
+  /**
+   * A community operator attested in another domain (D-138, D-071).
+   *
+   * The community twin of `operator_joined_domain`: the independence
+   * attestation is per domain, so a community operator validating in a second
+   * domain says so in a second line, and the join is sealed for the same reason
+   * a domain operator's is — eligibility per domain has to be recomputable from
+   * the log alone.
+   */
+  community_operator_joined_domain: {
+    operator: string;
+    domain: string;
+    attestation: { version: string };
+    fingerprint: string;
+  };
+  /**
+   * A community operator validated an entry (D-138 item 3).
+   *
+   * Validation is one thing: the `nomankind-confirm-v1` line signed by the
+   * confirmer's key over the canonical line. On 1F916 the memory.seal under the
+   * citizen's key is that signature, verified exactly as src/confirm.ts already
+   * verifies a confirmation's; elsewhere the agent signs the line's bytes
+   * itself. What separates this from a public confirmation is the attestation
+   * token in the line: a counted line from a bound key that carries it is a
+   * validation by a community operator, with the same standing, the same marks
+   * and the same tiers on one surface. A counted line without it stays what
+   * D-136 made it — shown, clearing the bootstrap label, counted toward no
+   * status.
+   *
+   * Entry-scoped, because it is a decision about one entry.
+   *
+   * `binding_proof` is what a reader rechecks offline (src/verify.ts, the
+   * `community_binding` check): the registry proof for a registry binding, or
+   * the agent's own signature over the canonical line for a profile binding.
+   */
+  community_validation: {
+    entry_id: string;
+    operator: string;
+    venue: string;
+    handle: string;
+    agent: string;
+    decision: "approve" | "reject";
+    check: ConfirmationCheck;
+    reason: string | null;
+    /** The attestation version the line carried; never absent here. */
+    attestation_version: string;
+    /** The canonical line's fingerprint, token included, `sha256:<hex>`. */
+    fingerprint: string;
+    binding_proof: CommunityBindingProof;
+    comment_id: number;
+    line: number;
+    posted_at: string;
+  };
 };
+
+/**
+ * What a community operator's key is publicly bound to (decision D-138).
+ *
+ * An open list with a counting rule per kind, which is `COUNTING_BINDING_KINDS`
+ * in src/policy.ts and is asked there rather than restated here:
+ *
+ * `registry` — a key-bind in a registry whose log the pinned witnesses
+ * countersign. `registry` is the registry's origin and `key_bind_event_id` the
+ * registry's own id for the event, or null where the binding was read from a
+ * proof rather than from a numbered row.
+ *
+ * `profile` — the public key published on the agent's public profile on its
+ * community, captured and sealed exactly as a citation is: `url` is where it
+ * was published, `capture_hash` the hash of the bytes that were fetched, and
+ * `public_key` the key those bytes carried.
+ *
+ * `platform` — a platform's statement about an account. Shown, never counted.
+ */
+export type CommunityBinding =
+  | { kind: "registry"; registry: string; key_bind_event_id: number | null }
+  | { kind: "profile"; url: string; capture_hash: string; public_key: string }
+  | { kind: "platform"; platform: string; reference: string };
+
+/**
+ * The evidence one community validation travels with, self-contained.
+ *
+ * A registry binding carries the same `ConfirmationProof` a public confirmation
+ * carries, verified by the same code against the same pin. A profile binding
+ * carries the agent's own Ed25519 signature over the canonical line's bytes,
+ * the key it claims to be by, and the hash of the capture of the profile page
+ * that published that key — so a reader with the bundle checks both halves
+ * without asking anybody anything.
+ */
+export type CommunityBindingProof =
+  | { kind: "registry"; proof: ConfirmationProof }
+  | {
+      kind: "profile";
+      public_key: string;
+      signature: string;
+      capture_hash: string;
+    };
 
 /** A confirmation's verdict: the two words the form accepts. */
 export type ConfirmationVerdict = "approve" | "reject";
@@ -703,6 +830,10 @@ export const EVENT_TYPES: readonly EventType[] = [
   "attestation_scored",
   "attestation_expired",
   "public_confirmation",
+  // Two paths to being a validator, one registry (D-138).
+  "community_operator_registered",
+  "community_operator_joined_domain",
+  "community_validation",
 ] as const;
 
 /**
@@ -732,6 +863,10 @@ export const ENTRY_SCOPED_TYPES: readonly EventType[] = [
   // builder A's `bootstrapLabelFor` reads — must not have to look at the
   // envelope to know what was confirmed.
   "public_confirmation",
+  // A community validation is a decision about one entry (D-138), so it is
+  // scoped like every other decision. The two operator events beside it are
+  // about the registry and carry no entry id at all.
+  "community_validation",
 ] as const;
 
 export type Event<T extends EventType = EventType> = {
