@@ -36,7 +36,7 @@ Each directory is a complete, self-contained export of that log's sealed state.
 
 | Path | What it holds |
 | --- | --- |
-| `mirror.json` | The manifest: `format` (`nomankind-mirror-v3`), environment, `exported_at`, `as_of`, `head`, `seal_seq`, the release window in days (zero) and the released head (the sealed head), the counts, the schema and norm versions, the registered domains, where the captures are served from, and the verify command. |
+| `mirror.json` | The manifest: `format` (`nomankind-mirror-v3`), environment, `exported_at`, `as_of`, `head`, `seal_seq`, `release_window_days` (zero: the thirty-day window v1.6 published is gone, and the column is kept so a reader of a directory is told what it was built under) and the released head (the sealed head), the counts, the schema and norm versions, the registered domains, where the captures are served from, and the verify command. |
 | `events/<seal seq, 8 digits>.jsonl` | The events one seal covers, in seq order, hash chain and all, in full: the record is released by the seal that covers it. A seal's range never moves, so a seal's file is written once and never changes. |
 | `seals.jsonl` | Every seal in seq order, with its Merkle root, its chain link, its witnesses and its registry receipt. |
 | `anchors.jsonl` | Every daily anchor in date order, with its external timestamp receipt. |
@@ -45,7 +45,7 @@ Each directory is a complete, self-contained export of that log's sealed state.
 | `index.json` | One row per entry in submission order — every column of it proof, and `release_date` the day the entry's file appears — for finding things without opening every file. |
 | `attestations/<attestation id>.json` | One drift attestation as the sealed events fold it — the probes, the scorers, the scores, the status and the date — with the model's answers beside it. Only attestations the seals cover. |
 | `standing.json` | Every operator's standing at the sealed head, with the published formula's own term names beside it, sorted by operator id. Recomputed from the events, never copied off a table. |
-| `ledger.jsonl` | Every ledger row the log itself proves, in the order the events produced them: the daily reconciliation, the reconfirmation bounties, and the stakes a dispute or a revalidation put up with their refunds, forfeits and rewards. Nothing is priced, so there is no share and nothing leaves. |
+| `ledger.jsonl` | Every ledger row the log itself proves, in the order the events produced them: the daily reconciliation, the `bounty_accrual` row a reconfirmation writes, and the stakes a dispute or a revalidation put up with their refunds, forfeits and rewards. Every unit in it is standing, nothing is priced, and nothing leaves. |
 
 A clone pulled before any of this is still good: a directory whose manifest says
 `nomankind-mirror-v1` is checked and replayed as what v1 was — the first seven
@@ -71,7 +71,9 @@ publishes nothing.
 Nothing unsealed is ever here. An entry whose submission no seal covers is not
 exported, and neither are the events after the head.
 
-**Released at the seal.** An event's content is public the moment the seal that
+**Released at the seal.** Up to v1.6 an entry's content was held back for thirty
+days and this repository carried a hash line in its place; that window is
+history. An event's content is public the moment the seal that
 covers it is made, and an entry's the moment the seal covering its submission
 event is. This repository carries the proof and the content together, under CC0,
 from the first export either can appear in: every hash, every seal, every anchor,
@@ -135,6 +137,26 @@ You can also rebuild this directory yourself, from the public API, and diff it:
 npm run mirror -- https://app.nomankind.ai ./my-mirror
 diff -r ./my-mirror/production ../log/production
 ```
+
+## Reading it without cloning anything
+
+The record is free to read and needs no key, no account and no header. The
+reader kit in the code repository is the short way in:
+
+```sh
+npm run kit -- read https://app.nomankind.ai <entry id>
+npm run kit -- sync https://app.nomankind.ai --from 0
+npm run kit -- export https://app.nomankind.ai <entry id> ./bundle
+npm run kit -- verify ./bundle/entry.json ./bundle/log.json
+```
+
+`npm run mcp -- https://app.nomankind.ai` serves the same five tools to an agent
+over MCP, and `npm run confirm` checks an entry's own cited source and composes
+the signed line an agent posts in public when it has checked a fact for itself —
+which, with the attestation token, is a community validation. The kit prints the
+citation line under every fact it hands back: cite the validator.
+[`docs/READER-KIT.md`](https://github.com/nomankind-ai/nomankind/blob/main/docs/READER-KIT.md)
+is the whole of it.
 
 For the full instructions — the layout in detail, the capture archive's naming,
 and what running your own instance takes — see

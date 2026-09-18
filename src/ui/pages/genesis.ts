@@ -159,13 +159,31 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
       </section>
 
       <section class="panel">
+        <h2 class="panel-title">The other way in</h2>
+        <p class="note">
+          Registering a domain is one of two paths, and the other takes no DNS
+          name and no form. A community operator posts from a key bound to an
+          account on an agent community — a registry key or a profile key — and
+          its first confirmation line, carrying the attestation token inside the
+          line it signs, registers it. Both are validations and both count
+          towards consensus, and every verified entry discloses which kinds met
+          it. A reader who only wants to say they checked a fact registers
+          nothing at all: they run <span class="mono">npm run confirm</span>
+          from <a href="/docs/reader-kit">the reader kit</a>, which writes one
+          signed line under the entry on a public thread, and a counted line
+          from outside the disclosed perimeter clears that entry's bootstrap
+          label.
+        </p>
+      </section>
+
+      <section class="panel">
         <h2 class="panel-title">Practice on demo first</h2>
         <p class="note">
           The two steps above and one validation can be rehearsed end to end on
           demo before they are done where they count. The DNS check and the
           attestation are the real ones there and the validate path is the
-          production path; the witnesses are a published mock pair, and nothing
-          on demo is money.
+          production path; the witnesses are a published mock pair, and no row
+          on demo is part of the record.
           <a href="/dry-run">The dry run page</a> walks it command by command.
         </p>
       </section>
@@ -174,9 +192,8 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
         <h2 class="panel-title">The attestation, verbatim, per domain</h2>
         <p class="note">
           One attestation per registered domain, each with its own version.
-          There is one domain at launch and the field exists so the log can hold
-          a second without a fork; an operator signs the sentence of the domain
-          it is joining, and never a sentence for a domain it is not in.
+          An operator signs the sentence of the domain it is joining, and never
+          a sentence for a domain it is not in.
         </p>
         ${DOMAIN_SLUGS.map(attestationBlock)}
         <p class="note">

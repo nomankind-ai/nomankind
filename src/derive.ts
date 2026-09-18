@@ -328,6 +328,12 @@ export interface PublicConfirmationView {
    * and src/verify.ts rechecks every one of them offline).
    */
   readonly counted: boolean;
+  /**
+   * The attestation version the line carried, or null when it attested none
+   * (decision D-140 item 7). Inside the fingerprint the confirmer signed, so
+   * the entry page can say which sentence the line stood behind.
+   */
+  readonly attestation_version: string | null;
   /** Position of the event in the log, so a reader can go and look at it. */
   readonly seq: number;
 }
@@ -1861,6 +1867,7 @@ export function confirmationsFor(
       posted_at: payload.posted_at,
       registry_event_id: payload.registry_event_id,
       counted: payload.counted,
+      attestation_version: payload.attestation_version ?? null,
       seq: event.seq,
     });
   }

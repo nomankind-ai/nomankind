@@ -18,9 +18,9 @@
  * as the sweep folded them, and says in the same breath that anyone can
  * recompute the number — with the endpoint that serves it and the command that
  * checks it, because a claim of recomputability that does not say how is not
- * one. There is no money panel and no amount in any currency: no read of this
- * record is priced, so an operator is owed nothing and the only thing its work
- * moves is standing.
+ * one. Standing is the only quantity on the page: every read of this record is
+ * free, so an operator is owed nothing and the only thing its work moves is
+ * standing.
  *
  * Four panels are decision D-130's, and they are the whole of what standing
  * being an asset means on one page. The Tier says what this operator's standing
@@ -271,9 +271,9 @@ function cosigners(data: OperatorData): Safe {
  * Contribution (Section 9, as decision D-127 left it): standing, and how to
  * check it.
  *
- * One panel where the standing and the money were two. Nothing this operator
- * has done is owed anything in a currency — no read of this record is priced —
- * so what a page can honestly show is the work and what the published formula
+ * One panel where standing and the amounts owed were two. Nothing this
+ * operator has done is owed to it — every read of this record is free — so
+ * what a page can honestly show is the work and what the published formula
  * makes of it: the number, the position it was folded to, and the counts of the
  * acts the fold was over.
  *
@@ -365,8 +365,8 @@ function contributionPanel(ctx: PageContext, data: OperatorData): Safe {
     </p>
     <p class="note">
       Contribution is the whole of what this record counts (decision D-127). The
-      log is free to read from the seal that covers an entry, no read of it is
-      priced, and nothing here is owed to this operator in money: a decision, a
+      log is free to read from the seal that covers an entry, and nothing here
+      is owed to this operator: a decision, a
       reconfirmation, a measured record and an upheld challenge earn standing, a
       missed assignment and a signature on an overturned entry burn it, and an
       open stake locks it.
@@ -587,10 +587,10 @@ function tierPanel(data: OperatorData): Safe {
 }
 
 /**
- * The two non-monetary rewards an operator can take away with it (Incentives):
- * a signed certificate, and a badge.
+ * The two rewards an operator can take away with it (Incentives): a signed
+ * certificate, and a badge.
  *
- * Neither is money and neither is a claim on anything. The certificate is the
+ * Neither is a claim on anything. The certificate is the
  * log's own signature over what this operator has done, fetched from the door
  * below and checkable offline with the verify command; the badge is an image
  * this origin serves, shown here as it will look and printed underneath as the
@@ -607,7 +607,7 @@ function rewardsPanel(ctx: PageContext, data: OperatorData): Safe {
   return html`<section class="panel">
     <div class="panel-head">
       <h2>Certificate and badge</h2>
-      <span class="panel-label">what contribution is paid in</span>
+      <span class="panel-label">what contribution earns</span>
     </div>
     <div class="panel-body">
       <dl class="kv">
@@ -632,8 +632,8 @@ function rewardsPanel(ctx: PageContext, data: OperatorData): Safe {
       </div>
       <p class="note">
         The certificate is signed by the log and says what this operator did and
-        at which position; it is not money, it is not a claim on anything, and
-        nothing here is owed in any currency. Save it and check the signature
+        at which position; it is not a claim on anything, and nothing here is
+        owed to anybody. Save it and check the signature
         offline with
         <span class="mono">npm run verify -- --certificate &lt;file&gt;</span>,
         which reads the file, checks it against the key inside the issuer it

@@ -384,8 +384,23 @@ export function renderDomains(ctx: PageContext, data: DomainsData): string {
         entry names its domain in its signed core, so a fact can never be moved
         from one domain to another, by anyone. The record is free in every domain
         alike: an entry's proof is public from the first minute, and its content
-        is public and CC0 the moment it is sealed, with nothing to pay and no key
-        to hold (decisions D-100 and D-127).
+        is public and CC0 the moment it is sealed, served to anyone who asks and
+        with no key to hold (decisions D-100 and D-127).
+      </p>
+      <p class="note">
+        Two kinds of validator meet a domain's consensus, and the tables below
+        are the same for both: a registered domain operator, which proved
+        control of a DNS name and signed this domain's attestation, and a
+        community operator, bound by a registry or profile key and attesting in
+        the signed line itself. Every verified entry says which kinds met it —
+        <span class="mono">registered</span>,
+        <span class="mono">community</span> or
+        <span class="mono">mixed</span> — and
+        <a href="/entries">the listing</a> lets a reader ask for a floor on that
+        word. An entry every one of whose validators sat inside the maintainer's
+        own disclosed perimeter carries a
+        <span class="mono">bootstrap</span> label until somebody outside it
+        confirms the fact in public.
       </p>
 
       <div class="counters">

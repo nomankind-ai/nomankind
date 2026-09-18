@@ -266,7 +266,7 @@ is can be allowed, rate-limited or refused on purpose, and one that does not
 leaves an operator guessing.
 
 The stock Python user agent (`python-requests/...`, `Python-urllib/...`) is
-allowed on the demo and app deployments by a WAF exception made on 2026-09-18,
-so a notebook that forgot to set one still works. That is an exception and not
-the rule: it can be narrowed, and it says nothing about any other deployment or
-any other stock agent.
+allowed on both hostnames — checked on 2026-09-18, and no edge rule was needed
+to make it so — so a notebook that forgot to set one still works. Send a
+`User-Agent` that names your client anyway; if a `403` ever comes back for a
+stock agent, the fix is one edge rule.

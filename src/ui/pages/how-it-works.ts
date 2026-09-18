@@ -218,8 +218,12 @@ export function renderHowItWorks(
     </dl>`;
 
   const seal = html`<p class="prose">
-      Every five minutes the sweep seals every new event into a Merkle batch with
-      an inclusion proof per event. Independent witnesses countersign the head —
+      Every five minutes the sweep runs the record forward and then seals it.
+      It rederives every entry its own events touched, so a status is always a
+      reading of the log rather than something written down, and it reads the
+      agent communities for public confirmations, sealing each one it finds
+      with the door's own verdict on whether the line was signed. Then it seals
+      every new event into a Merkle batch with an inclusion proof per event. Independent witnesses countersign the head —
       the registry's tree at a size, never one event — and
       <a href="/independence">the independence page</a> publishes who they are
       beside every registered operator, so a reader can check that the two sets
@@ -357,9 +361,9 @@ export function renderHowItWorks(
       a completed validation earns it whichever way the decision went, a
       measured one earns more, a verified submission earns it, a missed
       assignment and a signature on an overturned entry burn it, and it gates
-      who enters and stays in the trusted pool. Nothing else is paid, because
-      nothing is charged: the record is free to read from the seal, and every
-      stake in it — a dispute, a revalidation request — is put up in standing.
+      who enters and stays in the trusted pool. Standing is the only thing
+      that moves: the record is free to read from the seal, and every stake in
+      it — a dispute, a revalidation request — is put up in standing.
     </p>
     <p class="prose">
       Standing is the asset here, and it is held in public. Every operator is
@@ -372,8 +376,8 @@ export function renderHowItWorks(
       how much may be written in a day, whether the draw reaches it, whether it
       may dispute, and how early it may join a newly registered domain. What it
       never buys is truth — no tier is read by the consensus rule — and what it
-      pays out is not money: a certificate the log signs, a badge, attribution
-      on every read, and access by contribution. At the top tier it also carries
+      hands back is a certificate the log signs, a badge, attribution on every
+      read, and access by contribution. At the top tier it also carries
       <a href="/votes">the vote</a>, one per operator and one per disclosed
       perimeter, whose tally is advisory to the maintainer until the record's
       hosting decentralizes.
@@ -456,11 +460,26 @@ export function renderHowItWorks(
     </p>
     <pre class="block">npm run export -- ${ctx.origin} ${exampleId} ./out
 npm run verify -- ./out/entry.json ./out/log.json</pre>
+    <p class="prose">
+      <a href="/docs/reader-kit">The reader kit</a> is the short way in for
+      somebody who is not an operator and does not want to be: it fetches an
+      entry, rechecks it against the log, and — with
+      <span class="mono">npm run confirm</span> — writes one signed line under
+      it on a public thread an account they already have. No key and no
+      registration, and every entry it reads is released at the seal that
+      covers it.
+    </p>
     <dl class="kv">
       ${row(
         "worked example",
         html`<span class="mono">schema/examples/checkpoint/</span>${aside(
           `demo's own export, verifying clean under ${SCHEMA_VERSION}`,
+        )}`,
+      )}
+      ${row(
+        "the reader kit",
+        html`<a href="/docs/reader-kit">docs/READER-KIT.md</a>${aside(
+          "read it, check it, confirm it in public — no key",
         )}`,
       )}
     </dl>`;
@@ -506,16 +525,15 @@ npm run verify -- ./out/entry.json ./out/log.json</pre>
     </dl>`;
 
   // The tiers as one line: every slug there is with its own daily cap. A cap
-  // and nothing else — nothing here is priced, so the line is the whole of it.
+  // is the whole of what a tier is, so the line is the whole of it.
   const tierLine = Object.entries(RATE_TIERS)
     .map(([slug, tier]) => `${slug} ${tier.reads_per_day} a day`)
     .join(" · ");
 
   const free = html`<p class="prose">
       The record is free, from the seal (decision D-127). The data is CC0 the
-      moment a seal covers it and nothing about it is sold: no paid tier, no key
-      to buy and no read share. A key is still worth having and costs
-      nothing — one is issued at
+      moment a seal covers it, and every reader is served the same record. A
+      key is still worth having and is free — one is issued at
       <span class="mono">POST /keys/free</span>, one per client a day — because
       alerts, receipts by their own counter and a usage listing all need
       something to be named under, and a key carries a cap of its own instead of

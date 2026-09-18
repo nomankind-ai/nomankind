@@ -283,13 +283,12 @@ describe("renderPolicy", () => {
     }
   });
 
-  it("says plainly that the record is free and nothing is staked in money", () => {
-    // Decision D-127. The seed-fee note and the read-revenue promise beside it
-    // went with the money they were about: what a contributor earns is standing,
-    // and a stake is contribution rather than a payment.
+  it("says plainly that the record is free, in the positive (M25f)", () => {
+    // Decision D-127, said the way D-131 item 1 asks for it: the page states
+    // what is true rather than listing what is not charged, because a page
+    // that keeps naming what it does not sell is still a page about selling.
     expect(page).toContain("The record is free (decision D-127).");
-    expect(page).toContain("no read-share slot and no fee");
-    expect(page).toContain("staked in money");
+    expect(page).toContain("every reader is served the same record");
     expect(page).not.toContain("seed fee");
     expect(page).not.toContain("read revenue");
   });
@@ -450,7 +449,7 @@ describe("renderPolicy", () => {
     // implying that a number nobody priced is a price. Nothing is staked in
     // money, because there is none (D-127).
     expect(page).toContain("Every stake above is standing");
-    expect(page).toContain("there is no money here to stake");
+    expect(page).toContain("both put up contribution");
     expect(page).not.toContain("DISPUTE_FILING_FEE_CENTS");
   });
 
@@ -569,7 +568,7 @@ describe("renderApi", () => {
       "A negative result is a first-class answer and earns what a positive one earns",
     );
     expect(words).toContain(
-      "STANDING_VALIDATION_REPRODUCED is paid beside it for a record carrying a passing measurement",
+      "STANDING_VALIDATION_REPRODUCED is earned beside it for a record carrying a passing measurement",
     );
     expect(words).not.toContain("the same standing whichever way");
   });
@@ -725,9 +724,11 @@ describe("renderApi", () => {
     // The ledger doors carry no money any more (D-127): a row's unit is
     // standing, and the reconciliations are the published counts against the
     // rows written for them.
-    expect(page).toContain("Nothing here is money and nothing is owed");
+    expect(page).toContain("Nothing here is owed to anybody");
     expect(page).toContain("reconciliations");
-    expect(page).toContain("no price and no share to reconcile against");
+    expect(page).toContain(
+      "standing is the whole of what those rows carry",
+    );
     for (const gone of [
       "READ_PRICE_MICROS_PER_READ",
       "PAYOUT_MINIMUM_MICROS",
@@ -913,8 +914,10 @@ describe("renderApi", () => {
   it("names the one unit there is, and says there is no other", () => {
     expect(page).toContain(">Units</h2>");
     expect(page).toContain("One unit appears on the ledger");
-    expect(page).toContain("Standing units, which are not money");
-    expect(page).toContain("There is no micro-USD");
+    expect(page).toContain("Standing units: earned and burned");
+    expect(page.replace(/\s+/g, " ")).toContain(
+      "Every row is denominated in standing and the ledger holds no other unit",
+    );
     expect(page).not.toContain("a millionth of a dollar: 1,000,000 to the dollar");
     expect(page).not.toContain("cents");
   });
@@ -1241,7 +1244,7 @@ describe("renderApi", () => {
     );
     expect(page).toContain("STANDING_DISPUTE_UPHELD");
     expect(page).toContain("STANDING_OVERTURNED_SIGNER");
-    expect(page).toContain("Nothing is clawed back");
+    expect(page.replace(/\s+/g, " ")).toContain("Nothing else is clawed back");
     expect(page).not.toContain("filing fee");
   });
 
@@ -1494,9 +1497,11 @@ describe("renderApi", () => {
     // page says now is what a contributor earns instead — standing, named on
     // the policy page — and every word of the split is gone.
     expect(page).toContain("What a contributor earns is standing and nothing else");
-    // The one place micro-USD is still named is the Units panel, saying there
-    // is no amount in one anywhere.
-    expect(page).toContain("There is no micro-USD");
+    // And the Units panel names the one unit there is rather than the one
+    // there is not (M25f).
+    expect(page.replace(/\s+/g, " ")).toContain(
+      "Every row is denominated in standing and the ledger holds no other unit",
+    );
     for (const gone of [
       "What the ledger pays, per evidence tier",
       "READ_SHARE_SPLIT",
@@ -1593,7 +1598,8 @@ describe("renderHowItWorks: free access, caps, and alerts", () => {
     // is looked for.
     const prose = page.replace(/\s+/g, " ");
     expect(prose).toContain("The record is free, from the seal (decision D-127)");
-    expect(prose).toContain("no paid tier, no key to buy and no read share");
+    expect(prose).toContain("every reader is served the same record");
+    expect(prose).toContain("A key is still worth having and is free");
     expect(prose).toContain("POST /keys/free");
     expect(prose).toContain("A tier is that daily cap and nothing else");
     expect(prose).toContain(
@@ -1987,11 +1993,12 @@ describe("renderDryRun", () => {
   it("says what demo is not, and what the dry run that counts is", () => {
     expect(page).not.toContain("payout");
     expect(page).toContain("mock");
-    expect(page).toContain("nothing on demo is money");
+    expect(page).toContain("no row on demo is part of the record");
     expect(squeeze(page)).toContain("Nothing here is the record");
     expect(squeeze(page)).toContain(
-      "the record is free to read from the seal, and the only thing anyone" +
-        " earns for this work is standing",
+      "the record is free to read from the seal, here and in production, and" +
+        " standing is the whole of what a decision, a reconfirmation or an" +
+        " upheld challenge moves",
     );
     expect(page).toContain("counts toward nothing");
   });
@@ -2221,7 +2228,9 @@ describe("renderDomains", () => {
     expect(recruited).toContain(
       `<span class="badge s-verified">recruited</span>`,
     );
-    expect(recruited).not.toContain(">registered<");
+    expect(recruited).not.toContain(
+      `<span class="badge s-draft">registered</span>`,
+    );
   });
 
   it("says how a domain is added, without making it a code change", () => {
@@ -2338,13 +2347,20 @@ describe("renderLanding", () => {
     expect(page).toContain("fonts.googleapis.com");
   });
 
-  it("leads with the hero line and the primary use case", () => {
+  it("leads with the hero line and the one sentence (D-131 item 1)", () => {
     expect(page).toContain("Proof-of-provenance.");
     expect(page).toContain("Proof-of-truth.");
-    expect(page).toContain("VERIFIED FACTS FOR MODELS THAT KEEP LEARNING");
-    expect(page).toContain("neutral trust substrate");
-    expect(page).not.toContain("where it cannot, the feed says so");
-    expect(page).toContain("Nothing enters the feed until its source is");
+    expect(page).toContain(
+      "FREE · TRUSTWORTHY · TAMPER-EVIDENT · POISON-FREE · LAB-INDEPENDENT",
+    );
+    expect(page).toContain(
+      '<p class="hero-sub">nomankind is a free, tamper-evident record of ' +
+        "verified facts about AI, independent of every lab, for models that " +
+        "keep learning.</p>",
+    );
+    expect(page).toContain(
+      "Three registered domains: AI safety, AI governance, and the AI ecosystem.",
+    );
   });
 
   it("names the three cards", () => {
@@ -2367,12 +2383,15 @@ describe("renderLanding", () => {
     }
   });
 
-  it("holds the five values", () => {
-    expect(page).toContain("Owned by no lab.");
-    expect(page).toContain("Facts, never opinions.");
-    expect(page).toContain("Credited for being right.");
-    expect(page).toContain("Checkable offline.");
-    expect(page).toContain("Forkable.");
+  it("holds the five words of the sentence, and who it is for", () => {
+    expect(page).toContain("Free.");
+    expect(page).toContain("Trustworthy.");
+    expect(page).toContain("Tamper-evident.");
+    expect(page).toContain("Poison-free.");
+    expect(page).toContain("Lab-independent.");
+    expect(page).toContain("For models that keep learning.");
+    expect(page).toContain("No lab funds, runs, or validates the record.");
+    expect(page).toContain("The pool that started it is nomankind&#39;s own");
   });
 
   // Both doors are still on the page; where each one leads depends on the
@@ -2616,39 +2635,37 @@ const readme = readFileSync(
 );
 
 describe("the paper and the README carry observed pays more (D-087)", () => {
-  it("states the money side in Section 9, after the promise it makes precise", () => {
-    const promise = whitepaper.indexOf(
-      "paid more than the operators who copy (Section 4).",
+  it("states it in Section 9 in standing, where the split used to be (M25f)", () => {
+    // D-087's rule survives D-127; what it is denominated in does not. The
+    // paper says the same thing about standing, in the section about
+    // incentives, and the split it used to publish is gone from it.
+    const incentives = whitepaper.indexOf(
+      "The second is that measuring earns more than copying.",
     );
-    const addition = whitepaper.indexOf(
-      "The split is published per evidence tier",
-    );
-    expect(promise).toBeGreaterThan(-1);
-    expect(addition).toBeGreaterThan(promise);
-    expect(whitepaper).toContain("READ_SHARE_SPLIT in the policy module");
-    expect(whitepaper).toContain("the tier is the one fixed when the entry verified");
+    expect(incentives).toBeGreaterThan(-1);
     expect(whitepaper).toContain(
-      "only when its own signed record carries a passing measurement",
+      "earns STANDING_VALIDATION_REPRODUCED beside what the validation itself earns",
     );
     expect(whitepaper).toContain(
-      "a validator who accepted the test without running it is paid at the stated rate",
+      "the pool that verifies tilts toward the operators who run the test rather than accept it",
     );
-    expect(whitepaper).toContain("rather than moving the reader's price");
+    expect(whitepaper).not.toContain("READ_SHARE_SPLIT");
+    expect(whitepaper).not.toContain("The split is published per evidence tier");
   });
 
   it("states the standing side in Section 4, beside the tier sentence", () => {
-    const tiers = whitepaper.indexOf("is paid more for it (Section 9)");
+    const tiers = whitepaper.indexOf("earns more standing for it (Section 9)");
     const standing = whitepaper.indexOf(
       "The standing side of the same rule is STANDING_VALIDATION_REPRODUCED",
     );
-    const money = whitepaper.indexOf(
-      "The split is published per evidence tier",
+    const incentives = whitepaper.indexOf(
+      "The second is that measuring earns more than copying.",
     );
     expect(tiers).toBeGreaterThan(-1);
     expect(standing).toBeGreaterThan(tiers);
     // Section 4 comes before Section 9, so the standing sentence comes first:
     // a paragraph landing in the wrong section would still contain the words.
-    expect(standing).toBeLessThan(money);
+    expect(standing).toBeLessThan(incentives);
     expect(whitepaper).toContain(
       "earns it beside the assigned or volunteered amount",
     );
@@ -2656,13 +2673,15 @@ describe("the paper and the README carry observed pays more (D-087)", () => {
 
   it("states the changed-check reward in Section 6, beside the promise (D-095)", () => {
     const promise = whitepaper.indexOf("plus a challenger-style reward.");
-    const labeled = whitepaper.indexOf("The reward is paid in standing");
+    const labeled = whitepaper.indexOf("The reward is standing");
     expect(promise).toBeGreaterThan(-1);
     expect(labeled).toBeGreaterThan(promise);
     expect(whitepaper).toContain("STANDING_REVALIDATION_CHANGED");
     expect(whitepaper).toContain("the currency the stake was in");
+    // Why it is the smaller of the two rewards, in standing rather than in the
+    // two currencies the paper used to have (M25f).
     expect(whitepaper).toContain(
-      "a dispute's reward is money because a dispute claws money back",
+      "it is smaller than a dispute's because a request carries no citation",
     );
     // The README says it too, in the section that names the stake. It is one
     // currency there now (D-127), so the reward is named where the rest of the
@@ -2749,7 +2768,7 @@ describe("the release window, as the pages publish it", () => {
 
   it("says in the Domains lede that the record is free from the seal", () => {
     expect(domains.replace(/\s+/g, " ")).toContain(
-      "its content is public and CC0 the moment it is sealed, with nothing to pay and no key to hold (decisions D-100 and D-127)",
+      "its content is public and CC0 the moment it is sealed, served to anyone who asks and with no key to hold (decisions D-100 and D-127)",
     );
   });
 
@@ -2783,7 +2802,7 @@ describe("renderDocs", () => {
     // One constant, named in src/ui/pages/document.ts beside the document it is
     // the version of: the hub's head line, its whitepaper card, the document
     // page's note and the how-it-works head line all read it.
-    expect(WHITEPAPER_VERSION).toBe("v1.6");
+    expect(WHITEPAPER_VERSION).toBe("v1.7");
     expect(WHITEPAPER_DOCUMENT.note).toContain(WHITEPAPER_VERSION);
   });
 

@@ -310,7 +310,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/operators/{id}/certificate",
     parameters: "—",
     answers:
-      "The operator's standing certificate (decision D-130): what this operator has done, at the position the fold reached, signed by the log — operator, tier, standing, position, the counts behind it and the marks against it, with the log's signature over the canonical form. One of the two non-monetary rewards and never a claim on anything: no read of this record is priced, so a certificate says what happened and promises nothing. Check it with npm run verify -- --certificate, which folds the sealed events itself and compares.",
+      "The operator's standing certificate (decision D-130): what this operator has done, at the position the fold reached, signed by the log — operator, tier, standing, position, the counts behind it and the marks against it, with the log's signature over the canonical form. One of the two rewards an operator takes away with it, and never a claim on anything: a certificate says what happened and promises nothing. Check it with npm run verify -- --certificate, which folds the sealed events itself and compares.",
     refusals: "400 bad_query for any parameter at all; 404 not_found.",
   },
   {
@@ -358,7 +358,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/operators/{id}/ledger",
     parameters: "—",
     answers:
-      `One operator's ledger rows: operator, balance and rows — the newest ${LIST_PAGE_LIMIT} of them, newest first, each with id, kind, entry_id, operator, role, date, unit, amount, seq, at and ref. Nothing here is money and nothing is owed: no read is priced, so what the rows carry is the standing a stake put up and gave back, and the amounts are in the unit the row itself names.`,
+      `One operator's ledger rows: operator, balance and rows — the newest ${LIST_PAGE_LIMIT} of them, newest first, each with id, kind, entry_id, operator, role, date, unit, amount, seq, at and ref. Nothing here is owed to anybody: what the rows carry is the standing a stake put up and gave back, and the amounts are in the unit the row itself names.`,
     refusals: "400 bad_query for any parameter at all; 404 not_found.",
   },
   {
@@ -366,7 +366,7 @@ const READ_PATH: readonly Endpoint[] = [
     path: "/ledger",
     parameters: "—",
     answers:
-      "The ledger as a whole: the reconciliations, one per published day, which hold that day's sealed read count against the rows written for it. The counts are evidence that the record is used and buy nobody anything — there is no price and no share to reconcile against.",
+      "The ledger as a whole: the reconciliations, one per published day, which hold that day's sealed read count against the rows written for it. The counts are evidence that the record is used and buy nobody anything: what a reconciliation holds a day's reads against is the rows that day wrote, and standing is the whole of what those rows carry.",
     refusals: "400 bad_query for any parameter at all; 405 with Allow: GET.",
   },
 ];
@@ -450,7 +450,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     parameters:
       "record (exactly the schema's approvers item) and signature (nomankind-record-v1, kind validation); signed by the record's own agent",
     answers:
-      `201 with the derived entry. A draft is drawn a validator by the sweep only while it is within DRAW_DRAFT_MAX_AGE_DAYS of its own submitted_at — ${DRAW_DRAFT_MAX_AGE_DAYS} days: past that it leaves the draw queue, and it is still a draft, still readable, and still open to a volunteer — a validation makes it draw-eligible again only if it is inside the window, because the cutoff is on submitted_at and nothing moves that. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation. A validator that judges the entry a duplicate of one it does not supersede rejects in the published form, the reason duplicate_claim:<entry id>, which is taken as any other reason is: nothing new is signed, and the entry page and the confidence inputs read the id back out of it. There are three answers a validator can give and the door takes all three. approve: the validator fetched the cited source itself, it says what the entry says, and the record carries that validator's own snapshot_hash — plus its own measurement (runs and holds) when the entry is observed and the category is not a transcript one, which is the missing_observation refusal above; the door checks that it is there and well formed, and whether it passed is read later by derivation and standing. reject: the same work found otherwise, and the record needs a reason (missing_reason) and may carry the measurement it found — a reproduction's runs and holds, or an observation — but is not required to, because a rejection can rest on the citation alone. test_accepted false: the proposed test does not decide the claim, which is a judgment about the test rather than about the entry, recorded on a rejection and an approval alike so testVerdict can count the majority. A negative result is a first-class answer and earns what a positive one earns: the standing a completed validation is paid (STANDING_VALIDATION_ASSIGNED or STANDING_VALIDATION_VOLUNTEERED) is earned whichever way the decision went, and STANDING_VALIDATION_REPRODUCED is paid beside it for a record carrying a passing measurement, which is work and not a direction.`,
+      `201 with the derived entry. A draft is drawn a validator by the sweep only while it is within DRAW_DRAFT_MAX_AGE_DAYS of its own submitted_at — ${DRAW_DRAFT_MAX_AGE_DAYS} days: past that it leaves the draw queue, and it is still a draft, still readable, and still open to a volunteer — a validation makes it draw-eligible again only if it is inside the window, because the cutoff is on submitted_at and nothing moves that. The validator's own snapshot hash is the point: each fetches the live source itself, so the capture taken at submission is never the only witness. Status moves only through derivation. A validator that judges the entry a duplicate of one it does not supersede rejects in the published form, the reason duplicate_claim:<entry id>, which is taken as any other reason is: nothing new is signed, and the entry page and the confidence inputs read the id back out of it. There are three answers a validator can give and the door takes all three. approve: the validator fetched the cited source itself, it says what the entry says, and the record carries that validator's own snapshot_hash — plus its own measurement (runs and holds) when the entry is observed and the category is not a transcript one, which is the missing_observation refusal above; the door checks that it is there and well formed, and whether it passed is read later by derivation and standing. reject: the same work found otherwise, and the record needs a reason (missing_reason) and may carry the measurement it found — a reproduction's runs and holds, or an observation — but is not required to, because a rejection can rest on the citation alone. test_accepted false: the proposed test does not decide the claim, which is a judgment about the test rather than about the entry, recorded on a rejection and an approval alike so testVerdict can count the majority. A negative result is a first-class answer and earns what a positive one earns: the standing a completed validation earns (STANDING_VALIDATION_ASSIGNED or STANDING_VALIDATION_VOLUNTEERED) is earned whichever way the decision went, and STANDING_VALIDATION_REPRODUCED is earned beside it for a record carrying a passing measurement, which is work and not a direction.`,
     refusals:
       "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 409 entry_closed; 422 bad_signed_at, bad_record_signature, deadline_passed (the operator was drawn for this entry and the draw's seventy-two hours have run out — read off the assignment the draw made, so the answer is the same whether or not a sweep has closed it yet), unregistered_agent, operator_mismatch, unregistered_operator, submitter_agent, submitter_operator, original_signer (the entry is a correction filed as a dispute, and no operator that signed the original may judge it), maintainer_operator, provider_operator, subject_authority (the operator's own domain is, or is under, an official host of the entry's subject's authority row, in a domain whose registry says a subject excludes its own authority), operator_not_in_domain (the operator is not attested in the entry's own domain), missing_snapshot_hash, missing_reason, duplicate_operator, assigned_random_without_assignment, assignment_without_assigned_random, missing_test_accepted, unexpected_test_accepted, misplaced_measurement, bad_measurement, missing_observation, legacy_entry (the entry is one the current schema cannot derive — checked after the signature and the status and before the schema, so an old entry is refused by name rather than as a schema failure), schema_invalid — whose 422 carries an errors array naming each field that failed, and which on this door is the validator's own record failing the schema rather than the entry's.",
   },
@@ -460,7 +460,7 @@ const WRITE_PATH: readonly Endpoint[] = [
     parameters:
       "record (exactly the schema's reconfirmations item) and signature (nomankind-record-v1, kind reconfirmation); signed by the record's own agent",
     answers:
-      "201 with the derived entry: last_confirmed advanced to the record's date and the freshness window reopened. The reconfirmer earns standing for the check and nothing else is owed, because no read of the entry was priced.",
+      "201 with the derived entry: last_confirmed advanced to the record's date and the freshness window reopened. The reconfirmer earns standing for the check, and standing is the whole of what moves.",
     refusals:
       "400 bad_id, bad_body; 401 authentication; 404 not_found; 403 agent_mismatch; 422 bad_signed_at, bad_record_signature, entry_not_verified, version_stale (the entry is stale because another version of the same model verified, and no reconfirmation can bring back the version it observed), unregistered_agent, operator_mismatch, submitter_agent, submitter_operator, untrusted_operator, subject_authority, operator_not_in_domain, missing_snapshot_hash, unexpected_reproduction, unexpected_observation, missing_reproduction, bad_reproduction, failed_reproduction, missing_observation, bad_observation, failed_observation; 409 entry_not_stale; 422 schema_invalid.",
   },
@@ -593,11 +593,11 @@ const ATTESTATION_PATH: readonly Endpoint[] = [
  * them: what the tiers are, ask for a key at the free door, then the three
  * reads a holder makes about their own key.
  *
- * A key buys nothing and costs nothing. It is a free identity: something for an
- * alert endpoint, a receipt counter and a usage listing to be named under, and
- * a cap of its own instead of the address it came from. The doors that sold one
- * are gone: their addresses answer 404, like any path this Worker has never
- * heard of.
+ * A key is free and reaches nothing a keyless reader does not. It is an
+ * identity: something for an alert endpoint, a receipt counter and a usage
+ * listing to be named under, and a cap of its own instead of the address it
+ * came from. The doors that once stood in front of one are gone: their
+ * addresses answer 404, like any path this Worker has never heard of.
  *
  * Every one of them is JSON with `cache-control: no-store`, and the three
  * `/keys/me` doors take the key as a bearer token. They are account doors and
@@ -609,7 +609,7 @@ const KEY_PATH: readonly Endpoint[] = [
     path: "/keys/tiers",
     parameters: "—",
     answers:
-      "{ tiers }: each with name, reads_per_day and key. A tier is a daily cap and nothing else — nothing is on sale, so there is no price here and no share of one. Free and unauthenticated, which is the whole point of it.",
+      "{ tiers }: each with name, reads_per_day and key. A tier is a daily cap and nothing else. Free and unauthenticated, which is the whole point of it.",
     refusals: "405 with Allow: GET.",
   },
   {
@@ -665,7 +665,7 @@ const ALERT_PATH: readonly Endpoint[] = [
     path: "/keys/me/webhooks",
     parameters: "—",
     answers:
-      "{ key, endpoints: [{ id, url, filter, created_at, enabled }] } — this key's live endpoints, and never a secret. `enabled` is false on an endpoint the step turned off after ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE consecutive timed-out deliveries; it still holds its slot, and deleting it frees the slot.",
+      "{ key, endpoints: [{ id, url, filter, created_at, enabled }] } — this key's live endpoints, and never a secret. `enabled` is false on an endpoint the step turned off after ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE consecutive timed-out deliveries; it still holds its place, and deleting it frees that place.",
     refusals: "401 as above.",
   },
   {
@@ -673,7 +673,7 @@ const ALERT_PATH: readonly Endpoint[] = [
     path: "/keys/me/webhooks/{id}",
     parameters: "—",
     answers:
-      "204 and no body. The endpoint is disabled rather than deleted, so the deliveries that name it keep naming something, and the slot it held is free.",
+      "204 and no body. The endpoint is disabled rather than deleted, so the deliveries that name it keep naming something, and the place it held is free.",
     refusals:
       "401 as above; 404 not_found, which is also the answer for an endpoint that exists under another key — a holder learning that an id is somebody else's has learned something about another holder.",
   },
@@ -1201,17 +1201,16 @@ POST
           again to ask for a revalidation, both published on
           <a href="/policy">the policy page</a>. The stake is held while the
           challenge is open, comes back when it is upheld and is forfeited when
-          it fails, so a challenge costs the operator that files it and never
-          costs it money.
+          it fails, so a challenge costs the operator that files it, in standing
+          and in nothing else.
         </p>
         <p class="note">
-          What an upheld challenge is paid is standing too, and one published
-          number rather than a share of anything: the challenger earns
-          STANDING_DISPUTE_UPHELD beside its stake coming back, and every
-          operator that signed the entry it overturned burns
-          STANDING_OVERTURNED_SIGNER, once each. Nothing is clawed back, because
-          nothing was ever paid out: no read of the overturned entry was
-          charged for. A revalidation request has a reward of its own when the
+          What an upheld challenge earns is standing too, and one published
+          number: the challenger earns STANDING_DISPUTE_UPHELD beside its stake
+          coming back, and every operator that signed the entry it overturned
+          burns STANDING_OVERTURNED_SIGNER, once each. Nothing else is clawed
+          back, because standing is the whole of what an entry ever moved. A
+          revalidation request has a reward of its own when the
           check finds the fact changed, and a check that turns up a citation is
           upgraded into a dispute.
         </p>
@@ -1331,7 +1330,7 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           Section 9: "The log is free to read at low volume, forever." A tier is
           a daily cap and nothing else. The free tier carries no key and is
           counted per client; a keyed tier carries a key and is counted per key,
-          and the key is a free identity rather than a purchase — something for
+          and the key is a free identity and never a door — something for
           an alert endpoint, a receipt counter and a usage listing to be named
           under, and a cap of its own instead of the address it came from.
         </p>
@@ -1578,11 +1577,11 @@ v1      = hex(HMAC-SHA256(&lt;endpoint secret&gt;, signed))</pre>
         <h2 class="panel-title">Units</h2>
         <p class="note">
           One unit appears on the ledger, and every amount says so on the row
-          itself. Standing units, which are not money and never convert to it:
-          earned and burned by the published formula, and staked by an operator
-          to file a dispute or ask for a revalidation. There is no micro-USD
-          amount anywhere in this record and no row denominated in a currency —
-          no read is priced, so there is nothing for one to count.
+          itself. Standing units: earned and burned by the published formula,
+          and staked by an operator to file a dispute or ask for a
+          revalidation. Every row is denominated in standing and the ledger
+          holds no other unit, because standing is the one thing this record
+          counts.
         </p>
       </section>
 
@@ -1783,13 +1782,14 @@ npm run verify-mirror -- ./mirror/&lt;env&gt; [--captures &lt;url-or-dir&gt;] [-
           <span class="mono">nomankind-reader-kit/&lt;version&gt;</span> on every
           call, and a client that says what it is can be allowed, metered or
           refused on purpose where one that says nothing leaves an operator
-          guessing. The stock Python agents —
+          guessing. The stock Python user agent —
           <span class="mono">python-requests/…</span>,
-          <span class="mono">Python-urllib/…</span> — are let through on the demo
-          and app deployments by an edge exception made on 2026-09-18, so a
-          notebook that forgot to set one still reads the log. That is an
-          exception and not the rule: it can be narrowed, and it says nothing
-          about any other deployment or any other stock agent.
+          <span class="mono">Python-urllib/…</span> — is allowed on both
+          hostnames, checked on 2026-09-18, and no edge rule was needed to make
+          it so, so a notebook that forgot to set one still reads the log. Send
+          one that names your client anyway; if a
+          <span class="mono">403</span> ever comes back for a stock agent, the
+          fix is one edge rule.
         </p>
       </section>
 

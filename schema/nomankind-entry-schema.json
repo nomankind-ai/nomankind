@@ -98,7 +98,7 @@
     "evidence_tier": {
       "type": "string",
       "enum": ["stated", "observed"],
-      "description": "Required, part of the signed immutable core. 'stated': the entry rests on a document that said it (citation + snapshot_hash). 'observed': the entry rests on a measurement someone made and receipted: a metered API call for pricing, probing to the limit for 'limit', an endpoint error for deprecation, a completed request for availability, a reproducible transcript for behavior. 'behavior' and 'misbehavior' are always 'observed'. For every other category 'stated' is the default the submit tool fills in, and a cited page is sufficient to enter the log. Observed entries carry a proposed test that validators first judge and then run under the n-of-k rule; they take a larger read share by published policy. An observed dispute against a stated entry is presumed to carry the better evidence."
+      "description": "Required, part of the signed immutable core. 'stated': the entry rests on a document that said it (citation + snapshot_hash). 'observed': the entry rests on a measurement someone made and receipted: a metered API call for pricing, probing to the limit for 'limit', an endpoint error for deprecation, a completed request for availability, a reproducible transcript for behavior. 'behavior' and 'misbehavior' are always 'observed'. For every other category 'stated' is the default the submit tool fills in, and a cited page is sufficient to enter the log. Observed entries carry a proposed test that validators first judge and then run under the n-of-k rule; measuring earns more standing than copying, where until D-127 retired the money on 2026-09-14 it took a larger read share. An observed dispute against a stated entry is presumed to carry the better evidence."
     },
     "evidence": {
       "type": ["object", "null"],
@@ -239,7 +239,7 @@
     },
     "reconfirmations": {
       "type": "array",
-      "description": "Append-only reconfirmation attestations by trusted operators, never the submitter's. last_confirmed and expires_at are derived from the most recent record here (or from submitted_at if empty). For stated entries the attestation is a fresh snapshot_hash. For behavior and misbehavior entries it is a fresh reproduction under the same n-of-k rule; for observed entries in other categories, a fresh measurement. Each reconfirmation rotates the reconfirmer into the oldest read-share slot unless already holding one (derived in the ledger, not stored here).",
+      "description": "Append-only reconfirmation attestations by trusted operators, never the submitter's. last_confirmed and expires_at are derived from the most recent record here (or from submitted_at if empty). For stated entries the attestation is a fresh snapshot_hash. For behavior and misbehavior entries it is a fresh reproduction under the same n-of-k rule; for observed entries in other categories, a fresh measurement. Each reconfirmation used to rotate the reconfirmer into the oldest read-share slot unless already holding one, until D-127 retired the read-share slots on 2026-09-14; the field keeps its shape, null before verification and an empty list after, and what a reconfirmation earns now is standing.",
       "items": {
         "type": "object",
         "additionalProperties": false,

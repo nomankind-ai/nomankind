@@ -49,14 +49,31 @@ import type { LandingData, PageContext } from "../types.js";
 const LANDING_TITLE = "nomankind: verified facts for models that keep learning";
 
 /**
- * The sentence under it, in the `description` meta and the `og:description`.
- * Written once here rather than twice in the head, for the same reason.
+ * The one sentence the front door says (decision D-131 item 1).
+ *
+ * Written once, printed twice: it is the hero's own line and the `description`
+ * meta and `og:description` both, so the tab, the card and the page cannot
+ * drift into three descriptions of one record. Five words carry it — free,
+ * tamper-evident, verified, lab-independent, and for models that keep learning
+ * — and the rest of this page is those five words at length.
  */
-const LANDING_DESCRIPTION =
-  "nomankind is a sealed feed of facts about the AI ecosystem, made for " +
-  "continual learners. Nothing enters the feed until its source is captured " +
-  "and hashed, three independent operators have checked it, and a witnessed " +
-  "seal has dated it.";
+const LANDING_SENTENCE =
+  "nomankind is a free, tamper-evident record of verified facts about AI, " +
+  "independent of every lab, for models that keep learning.";
+
+/**
+ * The line under it: the registered domains, named, AI safety first.
+ *
+ * Three of them, and the order is the order of the stakes rather than the
+ * order the policy module declares them in. A reader who arrived knowing
+ * nothing needs to be told what "facts about AI" covers before anything else
+ * on the page can mean much.
+ */
+const LANDING_DOMAINS_LINE =
+  "Three registered domains: AI safety, AI governance, and the AI ecosystem.";
+
+/** The `description` meta and the `og:description`, which is the sentence. */
+const LANDING_DESCRIPTION = LANDING_SENTENCE;
 
 /**
  * Where the top bar points. The first three are this site's own pages — the
@@ -189,32 +206,44 @@ const DOMAINS: readonly string[] = [
   "FINANCIAL AI",
 ];
 
-/** The five values, numbered. The paper's goals list, in its words. */
+/**
+ * The five words of the sentence above, one panel each, in its order.
+ *
+ * Free, trustworthy, tamper-evident, poison-free, lab-independent — and the
+ * sixth panel is who it is for, which is the end of the same sentence. The
+ * bodies are the paper's goals in its own words, re-sorted under the five so
+ * the front door and the sentence say one thing rather than two.
+ */
 const VALUES: readonly { readonly head: string; readonly body: string }[] = [
   {
-    head: "Owned by no lab.",
+    head: "Free.",
     body:
-      "No model provider funds, runs, or validates the feed. The maintainer runs the pipes, never the judgment.",
+      "Every read, from the seal that covers it. Open code, public-domain data from the seal, the whole log exportable, and training on the data free. A key is a free identity, never a door.",
   },
   {
-    head: "Facts, never opinions.",
+    head: "Trustworthy.",
     body:
-      "What a source said, or what a reproduced test showed. No rankings, no scores.",
+      "Nothing enters until its source is captured and hashed and operators outside the submitter's have fetched that source themselves and signed what they found. Facts, never opinions: what a source said, or what a reproduced test showed. No rankings, no scores.",
   },
   {
-    head: "Credited for being right.",
+    head: "Tamper-evident.",
     body:
-      "Contributors earn standing for the facts they back, and only while those facts survive. Errors are burned and attributed, forever.",
+      "Hashes, signatures, seals, countersigning witnesses, a daily anchor outside the system. Trust is not required and no later change is quiet: the proof travels with the fact, and anyone can recheck it offline.",
   },
   {
-    head: "Checkable offline.",
+    head: "Poison-free.",
     body:
-      "Hashes, signatures, seals. Trust is not required; the proof travels with the fact.",
+      "The open web can be poisoned for almost nothing. Here every fact is checked before it is offered, the same fact filed twice is refused at the door, a wrong one is challenged where it lives, and contributors earn standing only while what they backed survives. Errors are burned and attributed, forever.",
   },
   {
-    head: "Forkable.",
+    head: "Lab-independent.",
     body:
-      "Open code, public-domain data from the seal, the whole log exportable. If nomankind breaks its rules, anyone leaves with the record.",
+      "No lab funds, runs, or validates the record. The maintainer runs the pipes, never the judgment. The pool that started it is nomankind's own, disclosed as a bootstrap perimeter on every entry it signed, and replaced as outside operators join — a registered domain operator, or a community operator posting one signed line from an account anyone can read.",
+  },
+  {
+    head: "For models that keep learning.",
+    body:
+      "A learner syncs the delta from its last sealed position, weights a measurement above a quotation, and takes an overturned fact as an explicit unlearn. If nomankind breaks its rules, anyone leaves with the record.",
   },
 ];
 
@@ -301,20 +330,18 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
       <section class="hero row">
         <div class="hero-copy">
           <p class="eyebrow eyebrow-teal">
-            VERIFIED FACTS FOR MODELS THAT KEEP LEARNING
+            FREE · TRUSTWORTHY · TAMPER-EVIDENT · POISON-FREE · LAB-INDEPENDENT
           </p>
           <h1 class="display hero-title">
             Proof-of-provenance.<br /><span class="hero-turn"
               >Proof-of-truth.</span
             >
           </h1>
-          <p class="hero-sub">
-            nomankind is a sealed feed of facts about the AI ecosystem, made for
-            continual learners. Nothing enters the feed until its source is
-            captured and hashed, three independent operators have checked it, and
-            a witnessed seal has dated it. nomankind is a trust layer for
-            inference today, and it aims to be the neutral trust substrate every
-            future AI system draws on.
+          <p class="hero-sub">${LANDING_SENTENCE}</p>
+          <p class="hero-domains">
+            ${LANDING_DOMAINS_LINE} Nothing enters until its source is captured
+            and hashed, operators no lab controls have checked it, and a
+            witnessed seal has dated it.
           </p>
         </div>
         <div class="diagram-panel">
@@ -409,15 +436,15 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
         <div class="reach-copy">
           <p class="eyebrow eyebrow-amber">WHERE IT REACHES NEXT</p>
           <h2 class="display reach-title">
-            Built first for the AI ecosystem. Made for every domain where a
-            model acts on a fact.
+            Built first for AI safety, AI governance and the AI ecosystem. Made
+            for every domain where a model acts on a fact.
           </h2>
           <p class="reach-body">
             Provenance proven on every fact and truth tested wherever a
             predicate exists is what enterprise compliance, regulated
             industries, and scientific, legal, medical, and financial AI need
             before a model may act. Those domains come next, one at a time,
-            after this one is saturated.
+            after these three are saturated.
           </p>
         </div>
         <div class="reach-tags">
@@ -693,6 +720,17 @@ export const LANDING_CSS = `
   font-size: clamp(17px, 1.5vw, 21px);
   line-height: 1.5;
   color: var(--muted);
+  text-wrap: pretty;
+}
+
+/* The domains line under the sentence: the same column, a step quieter, so the
+   one sentence above it stays the loudest thing in the hero. */
+.hero-domains {
+  margin: 16px 0 0;
+  max-width: 540px;
+  font-size: clamp(15px, 1.2vw, 17px);
+  line-height: 1.55;
+  color: var(--dim);
   text-wrap: pretty;
 }
 
