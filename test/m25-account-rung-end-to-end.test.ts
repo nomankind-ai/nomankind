@@ -124,6 +124,17 @@ const NOW = new Date("2026-09-17T12:00:00.000Z");
 const ENTRY_BARE = `nmk_${"d4".repeat(16)}`;
 /** The entry the perimeter line and the failed capture are said about. */
 const ENTRY_EDGE = `nmk_${"e5".repeat(16)}`;
+/** An observed entry: a tier the account rung may not count toward at all. */
+const ENTRY_OBSERVED = `nmk_${"f6".repeat(16)}`;
+/**
+ * A stated entry nothing has been said about, for the age clause alone.
+ *
+ * Its own entry and not one of the others', because the scope is asked last:
+ * the per-community cap and the closed entry are checked before it, so a line
+ * said about an entry that had already met either would be refused by that rule
+ * and would prove nothing about this one.
+ */
+const ENTRY_YOUNG = `nmk_${"a7".repeat(16)}`;
 
 const COLONY = "colony";
 const GITHUB = "github";
@@ -136,6 +147,8 @@ const SECOND = "second-reader";
 const THIRD = "third-reader";
 /** The account whose comment capture the board refuses to answer. */
 const LOST = "lost-comment";
+/** An account the platform says was created after the entry was submitted. */
+const LATECOMER = "latecomer";
 /** One of nomankind's own, taken from the published list. */
 const PERIMETER_OPERATOR = PERIMETER_ACCOUNTS.find((id) =>
   id.startsWith(`${COLONY}:`),
@@ -421,6 +434,15 @@ async function buildEvents(): Promise<Event[]> {
   // which is a rule about consensus and not about the rung.)
   await submit(ENTRY_BARE, {}, []);
   await submit(ENTRY_EDGE, { subject: "openai/gpt-4o" }, []);
+  // An observed entry, so the account rung has a tier it may not speak to:
+  // `ACCOUNT_BINDING_TIERS` is `stated` and nothing else, because an observed
+  // entry rests on a measurement somebody ran.
+  await submit(
+    ENTRY_OBSERVED,
+    { subject: "openai/gpt-4o-mini", evidence_tier: "observed" },
+    [],
+  );
+  await submit(ENTRY_YOUNG, { subject: "anthropic/claude-3-5-haiku" }, []);
 
   return events;
 }
@@ -578,7 +600,12 @@ describe("the account rung, end to end", () => {
       },
     });
 
-    for (const id of [ENTRY_BARE, ENTRY_EDGE]) {
+    for (const id of [
+      ENTRY_BARE,
+      ENTRY_EDGE,
+      ENTRY_OBSERVED,
+      ENTRY_YOUNG,
+    ]) {
       const submitted = events.find(
         (event) => event.type === "entry_submitted" && event.entry_id === id,
       )!;
@@ -948,6 +975,90 @@ describe("the account rung, end to end", () => {
     expect(html).toContain("A sealed line is not a counted one");
     expect(html).toContain("sealed, not counted");
     expect(html).not.toContain("counted lines so far");
+  }, 600_000);
+
+  it("refuses the account rung's scope at the door, and counts why", async () => {
+    // D-142 item 3, asked at the door and not only at the fold: a line the
+    // sweep sealed as a validation that derivation then counted toward nothing
+    // would be a door and a fold disagreeing about the same rule. Both now ask
+    // `communityLineDisposition`, and the door hands it the binding of the line
+    // in hand — the only binding that is true of the line in hand.
+    rewindThread(7_200_000);
+    const board = new MockBoardAdapter({
+      venue: COLONY,
+      binding: "profile",
+      cursor: "time",
+      threads: [COLONY_THREAD],
+      comments: new Map([
+        [
+          COLONY_THREAD,
+          [
+            // An account younger than the entry it is speaking about. An
+            // account made after the entry was submitted is an account made
+            // for it, as far as the record can tell.
+            comment(
+              "c25e4ea2-ab8d-4f5c-be6d-6fae6d4c5b55",
+              COLONY_THREAD,
+              LATECOMER,
+              bareLine(ENTRY_YOUNG, "I just got here"),
+            ),
+            // And an account in good standing speaking to a tier this rung may
+            // not count toward at all.
+            comment(
+              "d36f5fb3-bc9e-4a6d-cf7e-7fbf7e5d6c66",
+              COLONY_THREAD,
+              SECOND,
+              bareLine(ENTRY_OBSERVED, "the measurement looks right to me"),
+            ),
+          ],
+        ],
+      ]),
+      profiles: new Map([
+        [LATECOMER, profileJson(LATECOMER, null)],
+        [SECOND, profileJson(SECOND, null)],
+      ]),
+      accounts: new Map([
+        // After the entry's own submitted_at.
+        [LATECOMER, "2026-09-15T00:00:00.000Z"],
+        [SECOND, CREATED_AT],
+      ]),
+    });
+
+    const again = await runSweep(envOf(), {
+      now: new Date(NOW.getTime() + 900_000),
+      beacon: new FixtureBeacon("account-rung-scope"),
+      board: [board],
+    });
+
+    // Both fell back to the confirmation they already were, each with the word
+    // that says which half of the scope it fell outside — and the run's detail
+    // carries them under the same `fell_back` key every other refusal uses.
+    expect(again.confirmation_fallbacks["account_too_new"]).toBe(1);
+    expect(again.confirmation_fallbacks["account_out_of_scope"]).toBe(1);
+
+    // Nothing was sealed as a validation, and the younger account registered
+    // no operator at all: a line the door refuses registers nobody.
+    expect(
+      again.community_validations.some(
+        (row) => row.handle === LATECOMER || row.entry_id === ENTRY_OBSERVED,
+      ),
+    ).toBe(false);
+    const operators = payloadsOf(
+      await sealedOf("community_operator_registered"),
+    ).map((payload) => payload["operator"]);
+    expect(operators).not.toContain(communityOperatorId(COLONY, LATECOMER));
+
+    // And both lines are sealed and shown as the account statements they are,
+    // which is what a confirmation has been since D-136.
+    const confirmations = payloadsOf(
+      await sealedOf("public_confirmation"),
+    ).filter(
+      (payload) =>
+        payload["handle"] === LATECOMER ||
+        payload["entry_id"] === ENTRY_OBSERVED,
+    );
+    expect(confirmations.length).toBeGreaterThanOrEqual(2);
+    for (const each of confirmations) expect(each["counted"]).toBe(false);
   }, 600_000);
 
   it("keeps the core's own field list untouched by any of it", () => {

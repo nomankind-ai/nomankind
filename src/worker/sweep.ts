@@ -128,7 +128,12 @@ import {
   type EntryStatus,
   type Sidecar,
 } from "../derive.js";
-import { communityOperatorId } from "../registry.js";
+// The two halves of what a community operator id is: what mints one, and what
+// decides whether one is the maintainer's own. Both fold the venue and the
+// handle the same way, and both live in src/registry.ts so they cannot come to
+// disagree — an id that arrived from a stored row or a stranger's bundle must
+// not walk past the perimeter on its capitalization (the review of #105).
+import { communityOperatorId, isPerimeterOperator } from "../registry.js";
 import { AGENT_ID_PREFIX } from "../identity.js";
 import { openRevalidation, revalidationDrawExclusions } from "../dispute.js";
 import { duplicateKey, sameDuplicateKey } from "../duplicate.js";
@@ -155,7 +160,6 @@ import {
   LEDGER_ENTRIES_PER_RUN,
   LIST_PAGE_LIMIT,
   NORM_VERSION,
-  PERIMETER_ACCOUNTS,
   PERIMETER_WORD,
   RELEASE_WINDOW_DAYS,
   SEAL_MAX_EVENTS,
@@ -1506,28 +1510,6 @@ async function confirmationsStep(
   return nothing();
 }
 
-/**
- * Whether an operator id is one of nomankind's own accounts (D-142).
- *
- * One name, asked at every place this step decides a perimeter, so the rule
- * lives in one place rather than in each call site — which is the whole of the
- * finding this closes (the review of #105, reviewer 6): a venue token and a
- * handle have a case and an encoding, and two comparisons written separately
- * are two comparisons that can come to disagree about which accounts are the
- * maintainer's own.
- *
- * The comparison itself belongs in src/registry.ts beside `communityOperatorId`,
- * which is what mints these ids, and K1's fix commit puts it there as
- * `isPerimeterAccount`. This function is the seam until it lands: it does what
- * the code has always done and invents no normalization of its own, because a
- * second normalization rule written here is exactly the thing the finding is
- * about. When the helper arrives, this becomes an import of it and no call site
- * moves.
- */
-function isPerimeterAccount(operator: string): boolean {
-  return PERIMETER_ACCOUNTS.includes(operator);
-}
-
 /** A plain object off a stored payload, or null. */
 function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1624,7 +1606,10 @@ async function profileCaptureFor(
   handle: string,
   refetch = false,
 ): Promise<ProfileCapture | null> {
-  const key = `${board.venue}:${handle}`;
+  // Keyed by the operator id this handle mints, and so folded the way every
+  // other reading of it is: two spellings of one account are one account, and
+  // a run that read its profile twice would be paying twice for one answer.
+  const key = communityOperatorId(board.venue, handle);
   const held = run.byAuthor.get(key);
   // Two reads of one author's profile in one run at the very most, and only
   // ever two: the first, and one more for the first line whose signature did
@@ -2468,26 +2453,21 @@ async function communityLine(
   // which is the operator's own id. That is the honest answer to "whose key was
   // this?" at this rung — there was none — and it is the same id the operator
   // keeps when it later publishes one.
+  // The registry's word about this handle, read once where the venue has one
+  // and used for both halves of it: which key stands behind the handle, and
+  // which event bound it. Two reads of one record for one line was a cost
+  // nobody chose, and the second was only ever made because the two halves
+  // were read in two places.
+  const record =
+    binding.kind === "registry" ? await board.record(comment.handle) : null;
+
   const agent =
     binding.kind === "account"
       ? communityOperatorId(board.venue, comment.handle)
       : binding.kind === "profile"
         ? AGENT_ID_PREFIX + binding.public_key
-        : ((await board.record(comment.handle))?.agent ?? null);
+        : (record?.agent ?? null);
   if (agent === null) return { kind: "confirmation", reason: "unbound" };
-
-  const disposition = communityLineDisposition(
-    eventsOf(world),
-    entryId,
-    line,
-    comment.handle,
-    board.venue,
-    agent,
-    at,
-  );
-  if (disposition.kind !== "validation") {
-    return { kind: "confirmation", reason: disposition.reason };
-  }
 
   const operator = communityOperatorId(board.venue, comment.handle);
   const domain = domainOfWorld(world, entryId);
@@ -2496,6 +2476,14 @@ async function communityLine(
   // and as the offline verifier rereads it: the registry's own key-bind, or the
   // profile page that published the key, by the hash its bytes are archived
   // under (D-138).
+  //
+  // Built before the disposition rather than after it (D-142, the review of
+  // #105), because the disposition now asks what rung this line stands on. It
+  // has to be told: the log's answer is the registration's binding, and a first
+  // line has no registration to read while a key-bound line from an operator
+  // the log still holds at the account rung would be judged by a rung it has
+  // already climbed off. The binding of the line in hand is the only one that
+  // is true of the line in hand.
   const recorded: CommunityBinding =
     binding.kind === "account"
       ? {
@@ -2522,9 +2510,29 @@ async function communityLine(
         : {
             kind: "registry",
             registry: board.venue,
-            key_bind_event_id:
-              (await board.record(comment.handle))?.key_bind_event_id ?? null,
+            key_bind_event_id: record?.key_bind_event_id ?? null,
           };
+
+  // Whether this line is a validation at all, asked at the door with the rung
+  // it stands on (D-142). The same rule the fold asks, handed the same binding,
+  // so a line the door seals as a validation is a line the fold counts — and a
+  // line outside the account rung's scope is refused here, with the word that
+  // says which half of the scope it fell outside, rather than sealed as a
+  // validation the fold would go on to count toward nothing.
+  const disposition = communityLineDisposition(
+    eventsOf(world),
+    entryId,
+    line,
+    comment.handle,
+    board.venue,
+    agent,
+    at,
+    recorded,
+  );
+  if (disposition.kind !== "validation") {
+    return { kind: "confirmation", reason: disposition.reason };
+  }
+
   const attestation = { version, domain };
   // What a reader with the bundle rechecks about this line, built once and
   // sealed in two places: on the validation, where it always was, and on the
@@ -2687,31 +2695,19 @@ async function communityLine(
               // on a registry one, mirroring `key_rotated`'s own field.
               capture_hash:
                 binding.kind === "profile" ? binding.capture_hash : null,
-              // What the world rechecks the stronger binding by, and never null
-              // here: this branch runs only where the line reached a key rung,
-              // so the proof is the registry seal or the profile signature the
-              // validation beside it carries. A `registry` upgrade without one
-              // was unfalsifiable offline, which is the finding this closes.
-              // D-142: payload field from K1's fix commit.
+              // What a reader rechecks the upgrade against (D-142, the review
+              // of #105): the same object this very line's validation carries,
+              // built once above, so an upgrade is falsifiable offline exactly
+              // as the validation beside it is and the verifier rechecks both
+              // by one code path. An upgrade without one lifts no rung, in the
+              // fold or in the verifier.
+              //
+              // Never null here, and never the account arm: this branch runs
+              // only where the line reached a key rung, so the proof is the
+              // registry seal or the profile signature. A `registry` upgrade
+              // carrying nothing was the unfalsifiable claim the finding named.
               proof: bindingProof,
               fingerprint,
-              // What a reader rechecks the upgrade against (D-142, the review
-              // of #105): the same proof this very line carries, so an upgrade
-              // is falsifiable offline exactly as the validation beside it is.
-              // An upgrade without one lifts no rung, in the fold or in the
-              // verifier, so this is the field that makes the event mean
-              // anything at all.
-              proof:
-                binding.kind === "profile"
-                  ? {
-                      kind: "profile",
-                      public_key: binding.public_key,
-                      signature: binding.signature,
-                      capture_hash: binding.capture_hash,
-                    }
-                  : binding.kind === "registry"
-                    ? { kind: "registry", proof: binding.sealed.proof }
-                    : null,
             },
           }),
         );
@@ -2842,7 +2838,7 @@ async function communityLine(
           // read from today's registry would relabel a consensus that closed
           // months ago. What this says is what was true when it counted.
           binding_kind: binding.kind,
-          perimeter: isPerimeterAccount(operator) ? PERIMETER_WORD : null,
+          perimeter: isPerimeterOperator(operator) ? PERIMETER_WORD : null,
           comment_id: comment.id,
           line: line.line,
           posted_at: comment.posted_at,
@@ -2876,7 +2872,7 @@ async function communityLine(
         // The rung and the perimeter as this line sealed them (D-142), so the
         // run's own report says what its detail counts.
         binding_kind: binding.kind,
-        perimeter: isPerimeterAccount(operator) ? PERIMETER_WORD : null,
+        perimeter: isPerimeterOperator(operator) ? PERIMETER_WORD : null,
         seq: validated.seq,
       },
     };
@@ -5736,6 +5732,14 @@ function stepRows(
             ).length,
             upgraded: report.community_validations.filter((one) => one.upgraded)
               .length,
+            // Why each token-bearing line that did not become a validation
+            // fell back, by the kernel's own word for the rule it fell under —
+            // `community_cap`, `already_validated`, `own_entry`, and since
+            // D-142 `account_out_of_scope` and `account_too_new`, which are the
+            // account rung's scope refused at the door rather than only at the
+            // fold. Counted here and nowhere else, so a door nobody attested
+            // through and one whose every line is being sent back by a rule are
+            // different rows.
             fell_back: { ...report.confirmation_fallbacks },
           },
           publish: {
