@@ -149,6 +149,14 @@ const THIRD = "third-reader";
 const LOST = "lost-comment";
 /** An account the platform says was created after the entry was submitted. */
 const LATECOMER = "latecomer";
+/** The accounts the form reading is told apart by (decision D-144). */
+const FORM_PASTER = "form-paster";
+const SOLO = "solo-reader";
+const MIXED = "two-pages";
+const FORM_COMMENT = "b1a0e6d4-1c2f-4a3b-8d4e-5f6a7b8c9d01";
+const PERIMETER_FORM_COMMENT = "c2b1f7e5-2d3a-4b4c-9e5f-6a7b8c9d0e12";
+const SOLO_COMMENT = "d3c2a8f6-3e4b-4c5d-af60-7b8c9d0e1f23";
+const MIXED_COMMENT = "e4d3b907-4f5c-4d6e-b071-8c9d0e1f2a34";
 /** One of nomankind's own, taken from the published list. */
 const PERIMETER_OPERATOR = PERIMETER_ACCOUNTS.find((id) =>
   id.startsWith(`${COLONY}:`),
@@ -296,6 +304,42 @@ function claimFor(entryId: string): string {
  */
 function bareLine(entryId: string, reason: string): string {
   return `${claimFor(entryId)} ${reason}`;
+}
+
+/**
+ * One of an entry's two published lines, spelled as the ask spells it.
+ *
+ * `span-present` for approve and `span-absent` for reject, which is the pair
+ * `replyLines` prints under every entry of a batch post (src/cli/batch-post.ts):
+ * D-142's ask is the one a reader can answer by reading, so the check is
+ * whether the quoted claim is on the cited page.
+ */
+function lineFor(entryId: string, verdict: "approve" | "reject"): string {
+  return canonicalConfirmationLine({
+    entry_id: entryId,
+    verdict,
+    check: {
+      kind: "span",
+      value: verdict === "approve" ? "present" : "absent",
+    },
+    attestation_version: ATTESTATION_VERSION,
+  });
+}
+
+/**
+ * An entry's block as the ask prints it: both lines, indented, under a heading.
+ *
+ * What a stranger pastes back when they copy the whole block rather than one
+ * line of it — and what nomankind's own post is made of, which is the comment
+ * the reader mistook for a statement on 2026-09-18 (decision D-144).
+ */
+function askBlockFor(entryId: string): string {
+  return [
+    `  ${entryId} · ai-ecosystem · ${SUBJECT} · draft`,
+    `  claim: "the quoted claim"`,
+    `  ${lineFor(entryId, "approve")}`,
+    `  ${lineFor(entryId, "reject")}`,
+  ].join("\n");
 }
 
 /** The same line, signed: what an account writes the day it publishes a key. */
@@ -1059,6 +1103,142 @@ describe("the account rung, end to end", () => {
     );
     expect(confirmations.length).toBeGreaterThanOrEqual(2);
     for (const each of confirmations) expect(each["counted"]).toBe(false);
+  }, 600_000);
+
+  it("passes over a comment that carries both of an entry's lines", async () => {
+    // Decision D-144, at the door. The ask this record posts prints an entry's
+    // approve line and its reject line together so there is something to paste
+    // (src/cli/batch-post.ts), so a comment holding both of one entry's lines
+    // is that form quoted back and not a statement about the entry — and on
+    // 2026-09-18 the reader had no way to tell the two apart: the GitHub ask
+    // was posted from the maintainer's own login and the sweep read its lines
+    // as that account's statements, one sealed approve and one sealed reject
+    // per entry (production seq 15 to 35).
+    //
+    // Four comments in one run, because the rule is only worth anything if it
+    // tells them apart: two forms that seal nothing, one ordinary reply that
+    // still seals, and one reply that answers two entries different ways and
+    // seals both.
+    rewindThread(10_800_000);
+    const board = new MockBoardAdapter({
+      venue: COLONY,
+      binding: "profile",
+      cursor: "time",
+      threads: [COLONY_THREAD],
+      comments: new Map([
+        [
+          COLONY_THREAD,
+          [
+            // The ask's own block, pasted back whole by a stranger.
+            comment(FORM_COMMENT, COLONY_THREAD, FORM_PASTER, askBlockFor(ENTRY_YOUNG)),
+            // And by nomankind's own account, which is what really happened:
+            // the perimeter keeps such a line from counting, and this keeps it
+            // from being read as a statement at all.
+            comment(
+              PERIMETER_FORM_COMMENT,
+              COLONY_THREAD,
+              PERIMETER_HANDLE,
+              askBlockFor(ENTRY_BARE),
+            ),
+            // One line, which is the whole of what the ask asks for.
+            comment(
+              SOLO_COMMENT,
+              COLONY_THREAD,
+              SOLO,
+              bareLine(ENTRY_YOUNG, "the quoted claim is on the page"),
+            ),
+            // Two entries, two verdicts, one reply: a replier who opened both
+            // cited pages and found one claim present and the other absent.
+            // Not a form, and never was.
+            comment(
+              MIXED_COMMENT,
+              COLONY_THREAD,
+              MIXED,
+              [
+                lineFor(ENTRY_YOUNG, "approve"),
+                lineFor(ENTRY_BARE, "reject"),
+              ].join("\n"),
+            ),
+          ],
+        ],
+      ]),
+      profiles: new Map(
+        [FORM_PASTER, PERIMETER_HANDLE, SOLO, MIXED].map((handle) => [
+          handle,
+          profileJson(handle, null),
+        ]),
+      ),
+      accounts: new Map(
+        [FORM_PASTER, PERIMETER_HANDLE, SOLO, MIXED].map((handle) => [
+          handle,
+          CREATED_AT,
+        ]),
+      ),
+      commentCaptures: new Map([
+        [SOLO_COMMENT, '{"comment":"solo"}'],
+        [MIXED_COMMENT, '{"comment":"mixed"}'],
+        // Deliberately none for the two form comments: the door must not reach
+        // for a capture it would never use, and a fixture that named one could
+        // not tell a comment passed over from a comment read.
+      ]),
+    });
+
+    const again = await runSweep(envOf(), {
+      now: new Date(NOW.getTime() + 1_800_000),
+      beacon: new FixtureBeacon("account-rung-form"),
+      board: [board],
+    });
+
+    // Both form comments were passed over, once each, by the reason's own name.
+    expect(again.skipped["confirmation_form_not_statement"]).toBe(2);
+    // And each of them cost one parse: the board was never asked for their
+    // bytes, so a capture that does not exist was never missed either.
+    expect(board.commentReads).not.toContain(FORM_COMMENT);
+    expect(board.commentReads).not.toContain(PERIMETER_FORM_COMMENT);
+    expect(again.skipped["account_comment_unavailable"]).toBeUndefined();
+
+    // Nothing was taken from either of them, at either rung. The perimeter one
+    // is the sharper half: a perimeter line is ordinarily sealed and shown and
+    // counted toward nothing, and this one is not sealed at all, because it was
+    // never anybody's statement.
+    const fromComment = async (
+      type: "public_confirmation" | "community_validation",
+      id: string,
+    ): Promise<Record<string, unknown>[]> =>
+      payloadsOf(await sealedOf(type)).filter(
+        (payload) => payload["comment_id"] === id,
+      );
+    for (const id of [FORM_COMMENT, PERIMETER_FORM_COMMENT]) {
+      expect(await fromComment("public_confirmation", id)).toHaveLength(0);
+      expect(await fromComment("community_validation", id)).toHaveLength(0);
+    }
+
+    // The ordinary reply beside them still seals, which is the control: the
+    // rule passed over two comments and not the thread.
+    const solo = [
+      ...(await fromComment("public_confirmation", SOLO_COMMENT)),
+      ...(await fromComment("community_validation", SOLO_COMMENT)),
+    ];
+    expect(solo).toHaveLength(1);
+    expect(solo[0]!["entry_id"]).toBe(ENTRY_YOUNG);
+
+    // And both halves of the two-entry reply are sealed, each about its own
+    // entry: approving one fact and rejecting another is an answer.
+    const mixed = [
+      ...(await fromComment("public_confirmation", MIXED_COMMENT)),
+      ...(await fromComment("community_validation", MIXED_COMMENT)),
+    ];
+    expect(mixed).toHaveLength(2);
+    expect(mixed.map((payload) => payload["entry_id"]).sort()).toEqual(
+      [ENTRY_BARE, ENTRY_YOUNG].sort(),
+    );
+
+    // Nothing the two form comments named registered an operator, either: a
+    // comment the door passed over introduced nobody.
+    const operators = payloadsOf(
+      await sealedOf("community_operator_registered"),
+    ).map((payload) => payload["operator"]);
+    expect(operators).not.toContain(communityOperatorId(COLONY, FORM_PASTER));
   }, 600_000);
 
   it("keeps the core's own field list untouched by any of it", () => {

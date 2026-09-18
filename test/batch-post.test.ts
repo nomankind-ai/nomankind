@@ -47,6 +47,11 @@ import {
   type BatchPostDeps,
   type StateStore,
 } from "../src/cli/batch-post.js";
+import {
+  carriesBothVerdicts,
+  formEntryIds,
+  parseConfirmationComment,
+} from "../src/confirm.js";
 import type { PostBody, Posted, Poster } from "../src/adapters/poster.js";
 import {
   ACCOUNT_BINDING_SUNSET,
@@ -597,6 +602,39 @@ describe("the composed post", () => {
         expect(body.body).toContain(`claim: "${entry.claim}"`);
         expect(body.body).toContain(entry.citation);
       }
+    }
+  });
+
+  // D-144: the ask and the reader, held against each other.
+  it("reads as the form, not as a statement, under the reader's own rule", () => {
+    for (const body of bodies) {
+      // The reader's rule, run on the ask itself: every entry the post names
+      // carries both of its lines, so every one of them is a form entry and the
+      // sweep passes the whole comment over. This is the drift test — the ask
+      // prints both lines on purpose, and the day somebody makes it print one
+      // the reader would start taking the post as a statement about its own
+      // entries, which is what happened on 2026-09-18.
+      const forms = formEntryIds(
+        parseConfirmationComment(body.body, () => true),
+      );
+      for (const entry of entries) expect(forms.has(entry.id)).toBe(true);
+      // And the text-level twin says the same of the same bytes, so the door's
+      // reading and the offline verifier's cannot come apart either.
+      for (const entry of entries) {
+        expect(carriesBothVerdicts(body.body, entry.id)).toBe(true);
+      }
+    }
+  });
+
+  it("tells a replier to paste one of the two lines and not both", () => {
+    for (const body of bodies) {
+      expect(body.body).toContain("One of the two, not both");
+      // And what the whole-comment skip costs, said where the replier reads:
+      // quoting the block and answering under it loses the answer too, and
+      // nothing tells them afterwards.
+      expect(body.body).toContain("nothing in it is sealed");
+      expect(body.body).toContain("not a line you wrote under it");
+      expect(body.body).toContain("write your line in a comment of its");
     }
   });
 

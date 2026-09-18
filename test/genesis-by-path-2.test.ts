@@ -61,6 +61,7 @@ import {
   BINDING_RUNGS,
   COMMUNITY_MIN_ACCOUNTS,
   COMMUNITY_MIN_COMMUNITIES,
+  CONFIRMATION_FORM_PREFIX,
   CONFIRMATION_VENUES,
   countingCommunities,
   PERIMETER_ACCOUNTS,
@@ -956,6 +957,228 @@ describe("the verifier's account-binding checks", () => {
     expect(await bindingDiffs(built)).toContain(
       "account_binding_after_sunset",
     );
+  });
+
+  // The form (decision D-144), scoped exactly as the perimeter is.
+
+  /** The line, spelled as the ask prints it. */
+  const formLine = (verdict: "approve" | "reject") =>
+    `${CONFIRMATION_FORM_PREFIX} ${ENTRY_ID} ${verdict} ${
+      verdict === "approve" ? "span-present" : "span-absent"
+    }`;
+
+  /**
+   * The ask, as this record posts it on a batch thread: both of the entry's
+   * lines, because the replier has to have something to paste.
+   *
+   * This is the text at the heart of the whole decision. On The Colony and on
+   * 1F916 it is the THREAD'S OWN POST, and both of those venues archive a
+   * comment by archiving the whole thread — so it is inside the capture of
+   * every honest reply on the thread, and a rule asked of a capture whole would
+   * call every one of them a form.
+   */
+  const askPost = [
+    "nomankind: 1 entry asking for a check (2026-09-06)",
+    "Paste one of the two lines back. One of the two, not both.",
+    `  ${formLine("approve")}`,
+    `  ${formLine("reject")}`,
+  ].join("\n");
+
+  /** One honest reply: one line, and a sentence of the replier's own. */
+  const honestReply = `${formLine("approve")} I opened the page and the claim is on it`;
+  /** And the block pasted back whole, which is the fault. */
+  const formReply = [
+    "I could not decide, so here is the whole block",
+    formLine("approve"),
+    formLine("reject"),
+  ].join("\n");
+
+  /**
+   * The Colony's comment door: `GET /api/v1/posts/<id>/context`, which answers
+   * `{post, author, comments[...]}` with `author_username` and `body` on each
+   * row (src/adapters/board.ts). The ask is the post; the reply is a row.
+   */
+  const colonyContext = (body: string): string =>
+    JSON.stringify({
+      post: { id: 1, body: askPost },
+      author: { username: "nomankind" },
+      comments: [
+        {
+          id: 701,
+          author_username: handle,
+          body,
+          created_at: "2026-09-06T10:00:00.000Z",
+        },
+      ],
+    });
+
+  /**
+   * 1F916's: the whole post, whose comment rows spell the id `comment_id` as
+   * well as `id` (src/adapters/board.ts). The ask is the post here too.
+   */
+  const registryPost = (body: string): string =>
+    JSON.stringify({
+      id: 1,
+      author: "nomankind",
+      body: askPost,
+      comments: [
+        {
+          comment_id: 701,
+          author: handle,
+          body,
+          created_at: "2026-09-06T10:00:00.000Z",
+        },
+      ],
+    });
+
+  /** GitHub's, the one venue with a per-comment door: that comment alone. */
+  const githubComment = (body: string): string =>
+    JSON.stringify({ id: 701, user: { login: handle }, body });
+
+  it("says nothing about an honest reply on a thread whose post is the ask", async () => {
+    // The Colony has no per-comment door, so the capture of this reply holds the
+    // whole thread — the ask included, with both of the entry's lines in it. A
+    // rule asked of those bytes would refuse every honest counted line on every
+    // Colony thread, and one bystander pasting the block would make every other
+    // line on the thread permanently unverifiable: captures are
+    // content-addressed and the log is append-only, so there is no way back.
+    const built = await bundleFor({
+      pages: { comment: colonyContext(honestReply) },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toEqual([]);
+  });
+
+  it("says nothing about an honest reply under a 1F916 ask post", async () => {
+    // The same fault on the other whole-thread venue, whose rows spell the id
+    // the other way.
+    const built = await bundleFor({
+      pages: { comment: registryPost(honestReply) },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toEqual([]);
+  });
+
+  it("refuses a counted line whose own comment carried both verdicts", async () => {
+    // Nobody approves and rejects the same fact in the same breath, so the
+    // comment behind this line was the published form and not a statement — and
+    // a consensus that counted it counted the record's own words back. The ask
+    // is in these bytes too; what names the fault is the located comment.
+    const built = await bundleFor({
+      pages: { comment: colonyContext(formReply) },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toContain("confirmation_form_counted");
+  });
+
+  it("refuses the same on GitHub, whose capture is the comment itself", async () => {
+    const built = await bundleFor({
+      pages: { comment: githubComment(formReply) },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toContain("confirmation_form_counted");
+  });
+
+  it("says nothing when the capture holds no comment of that id", async () => {
+    // Under-fire, never guess: a rendering this build cannot find the comment
+    // in is a reading it cannot make, and not evidence of a fault. The thread's
+    // own post is never fallen back to, which is what this pins — the post here
+    // is the ask and carries both lines.
+    const built = await bundleFor({
+      pages: {
+        comment: JSON.stringify({
+          post: { id: 1, body: askPost },
+          comments: [
+            { id: 999, author_username: handle, body: formReply },
+          ],
+        }),
+      },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toEqual([]);
+  });
+
+  it("never reads a thread's own post as the comment", async () => {
+    // The re-review of #107. A whole-post rendering whose comments are omitted,
+    // or given as an object rather than an array, or whose own id is missing,
+    // must not fall through to the per-comment reading and have its own body —
+    // the ask — read as somebody's comment. A thread's post is a comment of
+    // nobody's, so both probes are unlocatable and neither is a refusal.
+    const probes = [
+      // Comments present but not a list: it speaks of a thread, so it is read
+      // as one or not at all.
+      JSON.stringify({ comments: { count: 1 }, body: askPost }),
+      // And a post with no id to match against.
+      JSON.stringify({ body: askPost }),
+    ];
+    for (const comment of probes) {
+      const built = await bundleFor({ pages: { comment }, counted: "accounts" });
+      expect(await bindingDiffs(built)).toEqual([]);
+    }
+  });
+
+  it("still reads a per-comment document that names its own id", async () => {
+    // The other side of that tightening: GitHub's shape and the fixture
+    // board's both carry the id, so the reading they were always given is
+    // unchanged and a block pasted into one of them is still the form.
+    for (const comment of [
+      githubComment(formReply),
+      JSON.stringify({
+        id: 701,
+        thread: 1,
+        handle,
+        body: formReply,
+        posted_at: "2026-09-06T10:00:00.000Z",
+      }),
+    ]) {
+      const built = await bundleFor({ pages: { comment }, counted: "accounts" });
+      expect(await bindingDiffs(built)).toContain("confirmation_form_counted");
+    }
+  });
+
+  it("says nothing about the same comment on an uncounted line", async () => {
+    // The scoping the review of #105 asked for, and the reason production's own
+    // seq 16 to 35 verify clean: those lines were read off the ask before the
+    // door knew better, and the fold counts them toward nothing. A check that
+    // fired on them would refuse every published mirror for holding comments
+    // that moved nothing.
+    //
+    // Uncounted here by the tier, which is the shortest way to a line the fold
+    // leaves out: an observed entry is not one this rung may speak to at all.
+    const built = await bundleFor({
+      core: coreFrom({ evidence_tier: "observed" }),
+      pages: { comment: githubComment(formReply) },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toEqual([]);
+    expect(built.entry["status"]).toBe("draft");
+  });
+
+  it("says nothing about a perimeter line whose comment carried both", async () => {
+    // Production's case exactly: the ask posted from nomankind's own login, its
+    // lines sealed as that account's statements at the perimeter. Uncounted at
+    // two rules at once, and silent here for the same reason. The profile page
+    // is written for the perimeter account so both captures really hold, which
+    // is what makes the silence about the counting and not about the proof.
+    const own = PERIMETER_ACCOUNTS[0]!;
+    const ownHandle = own.slice(own.indexOf(":") + 1);
+    const built = await bundleFor({
+      pages: {
+        comment: JSON.stringify({ id: 701, body: formReply }),
+        profile: `{"handle":"${ownHandle}","created_at":"${OLD_ENOUGH}"}`,
+      },
+      operatorAs: own,
+    });
+    expect(await bindingDiffs(built)).not.toContain(
+      "confirmation_form_counted",
+    );
+  });
+
+  it("says nothing about a counted line whose comment carried one", async () => {
+    // The control: the ordinary capture every other case above uses holds one
+    // verdict, and a counted line resting on it is a line somebody meant.
+    const built = await bundleFor({ counted: "accounts" });
+    expect(await bindingDiffs(built)).toEqual([]);
   });
 
   it("says nothing about a perimeter line the fold refused to count", async () => {

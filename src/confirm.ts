@@ -255,6 +255,83 @@ export function parseConfirmationLine(
 }
 
 /**
+ * The entries a comment carries BOTH verdicts for: the form, not a statement
+ * (decision D-144).
+ *
+ * The ask this record posts on every batch thread prints, under each entry, the
+ * approve line and the reject line, so that a replier can paste one of them
+ * back (src/cli/batch-post.ts). A text holding both lines for one entry is
+ * therefore the ask itself, or a quotation of it, or a reply that pasted the
+ * whole block — and whatever it is, it is not a statement about that entry,
+ * because no author approves and rejects the same fact in the same breath. On
+ * 2026-09-18 the reader had no way to tell the two apart: the ask was posted
+ * from the maintainer's own login and the door read its lines as that account's
+ * statements, sealing one of each per entry (production seq 15 to 35, perimeter
+ * and counted toward nothing). Those events stay, because this log is
+ * append-only; this rule is what stops it happening again, for any poster.
+ *
+ * Per entry id and never per comment. Approving one entry and rejecting another
+ * in a single reply is an ordinary answer to a batch ask — a replier who
+ * checked two pages and found one claim present and the other absent has said
+ * exactly what they meant — so the contradiction that names a form is two
+ * verdicts about the SAME id.
+ *
+ * Pure, and about the parsed lines alone: who posted the comment, which venue
+ * it is on and what the log holds are all questions this does not ask. D-144,
+ * building on D-142 and D-138.
+ */
+export function formEntryIds(
+  lines: readonly ConfirmationLine[],
+): Set<string> {
+  const approved = new Set<string>();
+  const rejected = new Set<string>();
+  for (const line of lines) {
+    (line.verdict === "approve" ? approved : rejected).add(line.entry_id);
+  }
+  const both = new Set<string>();
+  for (const id of approved) if (rejected.has(id)) both.add(id);
+  return both;
+}
+
+/**
+ * The same rule asked of one comment's body: does this text carry both verdicts
+ * for this entry (decision D-144).
+ *
+ * The twin the offline verifier needs. What a reader holding a bundle has is an
+ * archived capture rather than a parsed line, so the rule has to be askable of
+ * a text — and it is asked the one way this module asks anything of a
+ * stranger's text: `parseConfirmationComment` reads it line by line for the
+ * published form, and `formEntryIds` says what the lines add up to. No pattern
+ * is matched against the text directly, because a loose match for the prefix
+ * and a verdict would fire on a sentence ABOUT the form, and a sentence about
+ * the form is prose.
+ *
+ * ONE COMMENT'S BODY, and never a capture whole. Two of the three venues have
+ * no per-comment door at all — The Colony answers a post's whole context and
+ * 1F916 answers the whole post — so a capture from either holds the thread's
+ * own post, which on a batch thread IS the ask and carries both lines for every
+ * entry in it. A rule asked of those bytes would call every honest reply on
+ * such a thread a form. The caller locates the one comment the binding names
+ * first (`commentBodyIn`, src/verify.ts) and hands its body here.
+ *
+ * Only this entry's lines are read — `isKnownEntry` here means "the one we are
+ * asking about" — so a body answering fifty entries answers a question about
+ * one of them.
+ *
+ * The text is read exactly as the door reads it and by the same parser, with no
+ * normalization of its own: the door and the offline verifier have to agree
+ * about what a form is, and a reading that unfolded something here would make
+ * them disagree about the same comment.
+ *
+ * Never throws: a stranger's bytes are always answered with a verdict.
+ */
+export function carriesBothVerdicts(text: string, entryId: string): boolean {
+  if (typeof text !== "string" || entryId === "") return false;
+  const lines = parseConfirmationComment(text, (id) => id === entryId);
+  return formEntryIds(lines).has(entryId);
+}
+
+/**
  * The key a profile publishes, or null when its bytes publish none.
  *
  * The whole of what a `profile` binding reads out of a page (decision D-138

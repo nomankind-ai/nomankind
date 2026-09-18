@@ -179,6 +179,7 @@ import type {
 import {
   canonicalConfirmationLine,
   confirmationFingerprint,
+  formEntryIds,
   parseConfirmationComment,
   pinnedConfirmationTrust,
   profileKeyIn,
@@ -715,7 +716,10 @@ export interface SweepReport {
    * run refused is in `skipped`, by rule rather than by error:
    * `confirmation_proof_invalid` for a handle whose key could not be proved,
    * `confirmation_unknown_entry` for a line naming an entry the log does not
-   * hold, and `board_unavailable` for a board that did not answer.
+   * hold, `confirmation_form_not_statement` for a comment that carried both of
+   * an entry's lines and is therefore the published form rather than anybody's
+   * statement (decision D-144), and `board_unavailable` for a board that did
+   * not answer.
    */
   readonly confirmations: readonly SweepConfirmation[];
   /**
@@ -1817,6 +1821,35 @@ async function confirmationsInComment(
   // an entry in the published form.
   const offered = parseConfirmationComment(comment.body, () => true);
   if (offered.length === 0) return stop(false);
+
+  // The form, before anything else is asked of anybody (decision D-144).
+  //
+  // A comment carrying both of an entry's lines is the ask this record posts,
+  // or a quotation of it, or a reply that pasted the whole block — never a
+  // statement, because nobody approves and rejects the same fact in the same
+  // breath. So the whole comment is passed over: nothing taken, nothing sealed,
+  // no comment capture fetched and no profile read. It costs the one parse
+  // above, which is what a thread of prose costs.
+  //
+  // The whole comment and not the offending lines, because a text that holds
+  // the ask holds the ask: reading its other lines as statements would be this
+  // record taking the sentences it published as somebody's answer to itself,
+  // which is exactly what happened on 2026-09-18 (production seq 15 to 35,
+  // sealed from the maintainer's own login, perimeter and counted toward
+  // nothing). Those events stay — the log is append-only — and this is the rule
+  // that stops the next one, for any poster.
+  //
+  // Asked before `existingEntryIds`, so a form comment costs no read of the
+  // index either, and asked of the parsed lines rather than of the log: whether
+  // a text is a form is a fact about the text.
+  //
+  // Nothing is written, so nothing needs saying to `already` or to the cursor.
+  // A comment the door passed over is a comment it read and did not take, and
+  // the cursor moves past it exactly as it moves past prose.
+  if (formEntryIds(offered).size > 0) {
+    skip("confirmation_form_not_statement");
+    return stop(false);
+  }
 
   const known = await existingEntryIds(db, [
     ...new Set(offered.map((line) => line.entry_id)),
