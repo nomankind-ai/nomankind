@@ -132,6 +132,10 @@ const EXPECTED_POLICY_KEYS = [
   // (D-136 item 6).
   "BATCH_ASK_LIMIT",
   "BATCH_READ_PAGES_MAX",
+  // What the seeder reads before it writes, and when it gives up (D-085).
+  "SEED_READ_PAGES_MAX",
+  "SEED_HELD_CLAIMS_MAX",
+  "SEED_DUPLICATES_BEFORE_STOP",
   "ANCHOR_CALENDARS",
   "FAILURE_REPORT_THRESHOLD",
   "DISPUTE_STAKE_STANDING",

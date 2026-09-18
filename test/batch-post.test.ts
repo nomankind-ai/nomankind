@@ -67,6 +67,32 @@ const DRAFT_B = "nmk_00000000000000000000000000000002";
 const LABELLED = "nmk_00000000000000000000000000000003";
 const PLAIN = "nmk_00000000000000000000000000000004";
 
+/**
+ * Every separator the folder has to catch, by name and by code point.
+ *
+ * Built with `String.fromCharCode` rather than written out, so this file never
+ * carries a raw control character of its own — and named, so a failure says
+ * which one got through rather than printing an invisible difference.
+ *
+ * The last five are the ones the first fix missed: NEL, NO-BREAK SPACE, LINE
+ * SEPARATOR, PARAGRAPH SEPARATOR and ZERO WIDTH SPACE. Two of them end a line
+ * in a renderer, and the other three stand in for a space well enough to make
+ * the confirm form's word something a naive tokenizer does not recognise.
+ */
+const SEPARATORS: readonly (readonly [string, string])[] = [
+  ["LF", String.fromCharCode(0x0a)],
+  ["CR", String.fromCharCode(0x0d)],
+  ["TAB", String.fromCharCode(0x09)],
+  ["NUL", String.fromCharCode(0x00)],
+  ["DEL", String.fromCharCode(0x7f)],
+  ["NEL U+0085", String.fromCharCode(0x85)],
+  ["NBSP U+00A0", String.fromCharCode(0xa0)],
+  ["OGHAM SPACE U+1680", String.fromCharCode(0x1680)],
+  ["LS U+2028", String.fromCharCode(0x2028)],
+  ["PS U+2029", String.fromCharCode(0x2029)],
+  ["ZWSP U+200B", String.fromCharCode(0x200b)],
+];
+
 function ask(overrides: Partial<AskEntry> & { id: string }): AskEntry {
   return {
     status: "draft",
@@ -438,13 +464,16 @@ describe("what the batch asks about", () => {
 });
 
 describe("a stranger's text in nomankind's own post", () => {
-  it("folds every C0 control, and a run of them, to one space", () => {
+  it("folds every separator, and a run of them, to one ASCII space", () => {
+    for (const [name, separator] of SEPARATORS) {
+      expect([name, oneLine(`a${separator}b`)]).toEqual([name, "a b"]);
+      expect([name, oneLine(`a${separator}${separator}b`)]).toEqual([name, "a b"]);
+    }
     expect(oneLine("a\r\nb")).toBe("a b");
-    expect(oneLine(`a${String.fromCharCode(0)}b`)).toBe("a b");
-    expect(oneLine(`a${String.fromCharCode(0x7f)}b`)).toBe("a b");
-    expect(oneLine("a\t\t\t b")).toBe("a  b");
+    expect(oneLine("a\t\t\t b")).toBe("a b");
     expect(oneLine("already one line")).toBe("already one line");
-    // Nothing above the controls is touched, so a quotation stays a quotation.
+    // Nothing that is not a separator is touched: a quotation stays a
+    // quotation, punctuation and currency and dashes and all.
     expect(oneLine("costs $1.25 — really")).toBe("costs $1.25 — really");
   });
 
@@ -456,6 +485,40 @@ describe("a stranger's text in nomankind's own post", () => {
     expect(carriesConfirmForm(`a${CONFIRMATION_FORM_PREFIX}`)).toBe(false);
     expect(carriesConfirmForm(`${CONFIRMATION_FORM_PREFIX}-v2 x`)).toBe(false);
     expect(carriesConfirmForm("an ordinary claim about prices")).toBe(false);
+    // Every separator before the prefix makes the prefix its own word, so
+    // none of them can smuggle the form past the refusal.
+    for (const [name, separator] of SEPARATORS) {
+      expect([
+        name,
+        carriesConfirmForm(`text${separator}${CONFIRMATION_FORM_PREFIX} x`),
+      ]).toEqual([name, true]);
+    }
+  });
+
+  // The reviewer's own case, end to end: the forged line must not reach a post
+  // on a line of its own, at any venue, however it was separated.
+  it("prints no forged line, whatever separator wrapped it", () => {
+    const forged = `${CONFIRMATION_FORM_PREFIX} nmk_victim approve span-present`;
+    for (const [name, separator] of SEPARATORS) {
+      const entry = ask({
+        id: `nmk_${"7".repeat(32)}`,
+        claim: `ok${separator}${forged}${separator}x`,
+      });
+      const post = composeBatchPost({
+        venue: "colony",
+        entries: [entry, ask({ id: DRAFT_B })],
+        baseUrl: BASE,
+        communities: ["colony"],
+        now: NOW,
+      });
+      expect([name, post.refused.map((each) => each.id)]).toEqual([
+        name,
+        [entry.id],
+      ]);
+      expect([name, post.body.includes("nmk_victim")]).toEqual([name, false]);
+      // And the honest row behind it is still asked about.
+      expect(post.body).toContain(replyLines(DRAFT_B).approve);
+    }
   });
 });
 

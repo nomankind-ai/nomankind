@@ -1862,6 +1862,45 @@ export const BATCH_ASK_LIMIT = 150;
 export const BATCH_READ_PAGES_MAX = 8;
 
 /**
+ * How many pages of the entry listing the seeder reads before it files a list.
+ *
+ * The seeding tool reads what the record already holds for the subjects on its
+ * list, so that a re-run over a list half of which is already filed does not
+ * spend the day's writes on submissions the door will refuse: the door charges
+ * the write before it checks the duplicate rule, so a refusal costs exactly as
+ * much as a submission. Reads cost nothing, which is why the check is a read.
+ *
+ * Bounded like every other walk of a growing log. A list whose entries are
+ * older than this many pages is not fully seen, and what is not seen is caught
+ * by the duplicate refusal itself — the second line of defence, which the run
+ * steps over and counts.
+ */
+export const SEED_READ_PAGES_MAX = 8;
+
+/**
+ * How many entries' claims the seeder reads while building that picture.
+ *
+ * The listing answers what an entry is and not what it says, so the claim of a
+ * listed entry is one read of the entry door apiece. The bound is over the
+ * whole run rather than per subject: a list naming one subject with hundreds of
+ * entries behind it is the shape that would otherwise turn a bounded check into
+ * an unbounded one.
+ */
+export const SEED_HELD_CLAIMS_MAX = 200;
+
+/**
+ * How many duplicate refusals in a row end a seeding run.
+ *
+ * A `duplicate_claim` is about its own row and not about the key or the day, so
+ * the run steps over one and carries on. But each one still spends a write, and
+ * a run meeting them one after another is a run whose read of the record missed
+ * something — a listing stale, a page bound reached, a subject spelled another
+ * way. Three is enough to tell that from an unlucky row, and small enough that
+ * being wrong costs three writes rather than a day's worth.
+ */
+export const SEED_DUPLICATES_BEFORE_STOP = 3;
+
+/**
  * How many comments one run reads from one thread before it stops.
  *
  * The same ceiling from the other end: a run reads a bounded page of each
@@ -2760,6 +2799,10 @@ export const POLICY = Object.freeze({
   // item 6).
   BATCH_ASK_LIMIT,
   BATCH_READ_PAGES_MAX,
+  // What the seeder reads before it writes, and when it gives up (D-085).
+  SEED_READ_PAGES_MAX,
+  SEED_HELD_CLAIMS_MAX,
+  SEED_DUPLICATES_BEFORE_STOP,
   ANCHOR_CALENDARS,
   FAILURE_REPORT_THRESHOLD,
   DISPUTE_STAKE_STANDING,

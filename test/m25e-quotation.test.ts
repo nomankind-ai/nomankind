@@ -106,13 +106,28 @@ class StubLog implements HttpClient {
    * row's refusal does to the rows behind it.
    */
   readonly submitAnswers: { status: number; body: unknown }[] = [];
+  /**
+   * The free read doors the seeder asks before it writes: one listing page per
+   * status, and the entries those pages point at, by id. Empty by default, so a
+   * test that says nothing about them is a run against a record holding nothing.
+   */
+  readonly listing = new Map<string, { entries: unknown[]; next: unknown }>();
+  readonly held = new Map<string, Record<string, unknown>>();
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (request.method === "GET" && path.startsWith("/agents/")) {
       return Response.json({ operator: { id: OPERATOR } });
     }
+    if (request.method === "GET" && path === "/entries") {
+      const status = new URL(request.url).searchParams.get("status") ?? "";
+      return Response.json(
+        this.listing.get(status) ?? { entries: [], next: null },
+      );
+    }
     if (request.method === "GET" && path.startsWith("/entries/")) {
+      const byId = this.held.get(path.slice("/entries/".length));
+      if (byId !== undefined) return Response.json(byId);
       if (this.entry === null) return Response.json({ error: "not_found" }, { status: 404 });
       return Response.json(this.entry);
     }
@@ -295,6 +310,113 @@ describe("npm run seed builds one entry per source row", () => {
     expect([first.result, first.reason]).toEqual(["refused", "duplicate_claim"]);
     // A run that refused anything is still not ok: it says so and exits 1.
     expect([run.ok, run.code]).toEqual([false, 1]);
+  });
+
+  // The door charges the write before it checks the duplicate rule, so a row
+  // the record already holds costs a write to be told so. The run reads what
+  // is held through the free doors first, and files nothing it finds there.
+  it("skips a row the record already holds, and files the one it does not", async () => {
+    const http = new StubLog();
+    const filed = "nmk_00000000000000000000000000000001";
+    http.listing.set("draft", {
+      entries: [{ id: filed, subject: rowFor(SPAN).subject, status: "draft" }],
+      next: null,
+    });
+    http.held.set(filed, { id: filed, claim: SPAN, subject: rowFor(SPAN).subject });
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN), rowFor(SECOND_SPAN)],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    // One write for the row that was not held, and none for the row that was.
+    expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(1);
+    expect([run.skipped, run.submitted, run.refused]).toEqual([1, 1, 0]);
+    // A skip is not a failure: a list the record already holds is a list done.
+    expect([run.ok, run.code, run.stopped]).toEqual([true, 0, null]);
+    const skippedRow = run.log[0]!.outcome as {
+      result: string;
+      reason: string;
+      entry_id: string;
+    };
+    expect([skippedRow.result, skippedRow.reason, skippedRow.entry_id]).toEqual([
+      "skipped",
+      "already_filed",
+      filed,
+    ]);
+    expect((run.log[1]!.outcome as { result: string }).result).toBe("submitted");
+  });
+
+  it("matches what is held by the normalized claim, not by its spelling", async () => {
+    const http = new StubLog();
+    const filed = "nmk_00000000000000000000000000000002";
+    http.listing.set("verified", {
+      entries: [{ id: filed, subject: rowFor(SPAN).subject, status: "verified" }],
+      next: null,
+    });
+    // The same passage, respaced: `normalizeText` is the rule on both sides.
+    http.held.set(filed, { id: filed, claim: `  ${SPAN.replace(/ /gu, "  ")}  ` });
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN)],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect([run.skipped, run.submitted]).toEqual([1, 0]);
+    expect(http.posted.filter((post) => post.path === "/entries")).toEqual([]);
+  });
+
+  // The read above the loop can miss — a stale page, a bound reached — and the
+  // refusal is the second line of defence. It is not a free one: each stepped
+  // over spent a write, so three in a row ends the run.
+  it("stops after three duplicate refusals in a row", async () => {
+    const http = new StubLog();
+    const duplicate = { status: 409, body: { error: "duplicate_claim" } };
+    http.submitAnswers.push(duplicate, duplicate, duplicate);
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [
+        rowFor(SPAN),
+        rowFor(SECOND_SPAN),
+        rowFor(SPAN),
+        rowFor(SECOND_SPAN),
+      ],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect(run.stopped).toBe("duplicate_claim");
+    expect([run.submitted, run.refused, run.remaining]).toEqual([0, 3, 1]);
+    // Three writes spent and no more: the fourth row was never attempted.
+    expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(3);
+  });
+
+  it("counts duplicates in a row, and a submission starts the count again", async () => {
+    const http = new StubLog();
+    const duplicate = { status: 409, body: { error: "duplicate_claim" } };
+    // Two, then one that goes in, then two more: five rows and no stop.
+    http.submitAnswers.push(duplicate, duplicate, { status: 201, body: { status: "draft" } }, duplicate, duplicate);
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [
+        rowFor(SPAN),
+        rowFor(SECOND_SPAN),
+        rowFor(SPAN),
+        rowFor(SECOND_SPAN),
+        rowFor(SPAN),
+      ],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect(run.stopped).toBeNull();
+    expect([run.submitted, run.refused, run.remaining]).toEqual([1, 4, 0]);
   });
 
   it("still stops at the cap, even after carrying on past a duplicate", async () => {

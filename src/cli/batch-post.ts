@@ -648,32 +648,41 @@ export function replyLines(entryId: string): {
 }
 
 /**
+ * Every character that can end a line or stand in for a space, as one class.
+ *
+ * `Cc` is the C0 and C1 controls, which carries the ASCII newlines and the
+ * delete character and U+0085 NEL; `Zl` and `Zp` are U+2028 LINE SEPARATOR and
+ * U+2029 PARAGRAPH SEPARATOR; `Zs` is every space character, U+00A0 NO-BREAK
+ * SPACE among them; `Cf` is the formatting characters, which is where the
+ * zero-width ones live.
+ *
+ * All five and not the ASCII ones alone, because this is the whole of the first
+ * fix's blind spot. The reviewer's own case: a claim of "ok", U+2028, a
+ * confirmation line, U+2028, "x" folded to nothing and printed the forged line
+ * on a line of its own, because the renderer breaks at U+2028 and the folder
+ * did not. And a no-break space before the form made the word ` prefix`
+ * rather than the prefix, which the refusal below then let through.
+ */
+const SEPARATORS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}]+/gu;
+
+/**
  * One field of an entry, folded onto one line.
  *
  * An entry's claim, citation and subject are a stranger's text: any bare key
  * may submit a draft, and what it submitted is what this command is about to
  * publish under nomankind's own account. A post is read line by line by the
- * confirmation door, so a newline inside a field is a field that can write a
- * line of its own — which is the whole of the attack. Every C0 control, the
- * delete character included, becomes one space, and a run of them becomes one
- * space: the words survive and the layout cannot be moved.
+ * confirmation door, so anything inside a field that can end a line is a field
+ * that can write a line of its own — which is the whole of the attack.
+ *
+ * Every separator above becomes one ASCII space, and a run of them becomes one
+ * space: the words survive, the layout cannot be moved, and what is left is
+ * separated by the one character the refusal below tokenizes on. Folding a
+ * zero-width character to a visible space is deliberate — a quotation carrying
+ * one is a quotation whose words are not what they look like, and this record
+ * would rather print the seam than hide it.
  */
 export function oneLine(value: string): string {
-  const SPACE = 0x20;
-  const DELETE = 0x7f;
-  let folded = "";
-  let folding = false;
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? SPACE;
-    if (code < SPACE || code === DELETE) {
-      if (!folding) folded += " ";
-      folding = true;
-      continue;
-    }
-    folded += character;
-    folding = false;
-  }
-  return folded;
+  return value.replace(SEPARATORS, " ");
 }
 
 /**
@@ -685,6 +694,12 @@ export function oneLine(value: string): string {
  * not indentation. So an entry whose own text says the form at all is not
  * printed. The prefix is read from src/policy.ts, because a second spelling of
  * it here would be a filter that stops guarding the day the form moves.
+ *
+ * Tokenizing on the ASCII space alone is safe only because `oneLine` ran
+ * first: it turns every other space character into this one, so a no-break
+ * space or a zero-width character before the prefix cannot make the word
+ * something this comparison does not recognise. The two are one guard, and
+ * splitting them would be a hole.
  */
 export function carriesConfirmForm(value: string): boolean {
   return oneLine(value).split(" ").includes(CONFIRMATION_FORM_PREFIX);
@@ -1088,7 +1103,7 @@ export async function runBatchPost(
     if (body.deferred.length > 0) {
       deps.io.stdout(
         `waiting ${venue}: ${body.deferred.length} entries did not fit inside ` +
-          `${body.limitChars} characters and are named in the next batch — ` +
+          `${body.limitChars} characters and are named in a later batch — ` +
           body.deferred.map((entry) => entry.id).join(", "),
       );
     }
