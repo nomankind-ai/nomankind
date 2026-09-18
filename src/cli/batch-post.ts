@@ -59,8 +59,7 @@ import {
 } from "../adapters/poster.js";
 import { withDeadline } from "../adapters/timeout.js";
 import {
-  ACCOUNT_BOUND_RUNG,
-  ACCOUNT_BOUND_SUNSET,
+  ACCOUNT_BINDING_SUNSET,
   BATCH_ASK_LIMIT,
   BATCH_READ_PAGES_MAX,
   CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
@@ -841,11 +840,16 @@ function batchBody(
     "",
     [
       "What it counts for, said plainly. A reply with no key on it counts at the",
-      `lowest rung, "${ACCOUNT_BOUND_RUNG}": the board authenticated the author, and that`,
-      "is all anybody can recheck later. So it counts only for a stated fact, only",
-      "from an account older than the entry it answers, and only until",
-      `${ACCOUNT_BOUND_SUNSET}. The entry discloses on its own page that it rested on one.`,
-      "That is the honest size of it.",
+      // "account-bound" as prose and not as `BINDING_RUNGS[0]`, which is the
+      // stored word "account": what belongs here is the word the entry page
+      // prints for the same rung, so somebody who reads this post and then
+      // reads the entry it names meets one word and not two.
+      'lowest rung, "account-bound", which is what the entry page calls it: the',
+      "board authenticated the author, and that is all anybody can recheck later.",
+      "So it counts only for a stated fact, only from an account the board says",
+      "existed before the entry was submitted, and only until",
+      `${ACCOUNT_BINDING_SUNSET}. The entry discloses on its own page that it`,
+      "rested on one. That is the honest size of it.",
     ].join("\n"),
     "",
     [

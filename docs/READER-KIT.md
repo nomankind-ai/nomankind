@@ -194,9 +194,9 @@ the published forms is prose the record ignores.
 What it counts for, exactly. A reply with no key on it counts at the lowest
 rung, `account-bound`: the board authenticated the author, and that is all
 anybody can recheck later. So it counts only for a stated fact, only from an
-account older than the entry it answers, and only until the sunset the policy
-publishes as `ACCOUNT_BINDING_SUNSET`, 2032-01-01 — and the entry says on its
-own page that it rested on one.
+account the board says existed before the entry was submitted, and only until
+the instant the policy publishes as `ACCOUNT_BINDING_SUNSET`,
+2032-01-01T00:00:00Z — and the entry says on its own page that it rested on one.
 
 `attest:nomankind-independence-v1` is nomankind's independence attestation said
 in the line itself: no model provider controls or funds you. Saying it registers

@@ -48,8 +48,7 @@ import {
 } from "../src/cli/batch-post.js";
 import type { PostBody, Posted, Poster } from "../src/adapters/poster.js";
 import {
-  ACCOUNT_BOUND_RUNG,
-  ACCOUNT_BOUND_SUNSET,
+  ACCOUNT_BINDING_SUNSET,
   CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
   CONFIRMATION_FORM_PREFIX,
   CONFIRMATION_VENUES,
@@ -542,11 +541,15 @@ describe("the composed post", () => {
       // No tool and no key, and what the record does with the reply.
       expect(body.body).toContain("no tool to install");
       expect(body.body).toContain(`${SEAL_INTERVAL_MINUTES} minutes`);
-      // The rung, in full, with every condition on it.
-      expect(body.body).toContain(ACCOUNT_BOUND_RUNG);
+      // The rung, in full, with every condition on it — and in the word the
+      // entry page prints for the same rung, so the post and the page agree.
+      expect(body.body).toContain('"account-bound"');
       expect(body.body).toContain("only for a stated fact");
-      expect(body.body).toContain("older than the entry it answers");
-      expect(body.body).toContain(ACCOUNT_BOUND_SUNSET);
+      // Wrapped across two lines of the post, so it is asserted as the post
+      // lays it out rather than as one sentence.
+      expect(body.body).toContain("from an account the board says");
+      expect(body.body).toContain("existed before the entry was submitted");
+      expect(body.body).toContain(ACCOUNT_BINDING_SUNSET);
       expect(body.body).toContain("The entry discloses on its own page");
       // The upgrade, and where the tool that composes it lives.
       expect(body.body).toContain("A key is the upgrade");

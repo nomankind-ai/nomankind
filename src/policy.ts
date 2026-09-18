@@ -1842,32 +1842,6 @@ export const BOARD_READ_MAX_BYTES = 2097152;
 export const CONFIRMATIONS_PER_RUN = 20;
 
 /**
- * The lowest rung a reply can count at, and the day it stops counting
- * (decision D-142).
- *
- * A reply with no key on it is the board's word that this account said this,
- * and nothing more: the record seals a capture of the comment and of the
- * author's own profile, and counts the line only for a stated fact, only from
- * an account older than the entry it answers, and only until the day below.
- * The entry discloses that it rested on one. A key on the profile, or a seal of
- * the line's fingerprint at the founding registry, is the upgrade to a binding
- * anybody can recheck years later without asking a platform anything.
- *
- * The sunset is the point of the rung: an account's age is evidence while
- * accounts are cheap to make and hard to backdate, and it stops being evidence
- * the moment somebody sells a decade-old one. So it is a dated promise rather
- * than a standing rule, and the day is named here where every other number the
- * maintainer chose is named. It moves only by a later decision.
- *
- * Not in the `POLICY` object below yet, which collects the numbers the /policy
- * page publishes: these two are a word and a date, and what publishes them
- * today is the daily ask, which says the whole rung in the post itself. The
- * half of D-142 that seals a reply at this rung adds them there.
- */
-export const ACCOUNT_BOUND_RUNG = "account-bound";
-export const ACCOUNT_BOUND_SUNSET = "2032-01-01";
-
-/**
  * How many entries one batch post names, when the command line does not say.
  *
  * Decision D-136 item 6: the record asks in public for its drafts to be
