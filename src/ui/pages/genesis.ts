@@ -100,8 +100,8 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
         maintainer's own have decided it. Genesis is those three: publicly bound
         operators the maintainer does not run, at any rung of the ladder below,
         meeting the consensus of one seeded entry in public (decision D-142).
-        Until they sign, the seeded entries stand as drafts marked awaiting
-        validators, which is what this environment's log shows.
+        Until they sign, the seeded entries stand as drafts, awaiting
+        validators.
       </p>
       <p class="note">
         The maintainer may still name bootstrap operators into the trusted pool
@@ -192,8 +192,9 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
           paste back. The board authenticates whoever replies, the record
           captures the reply and the author's profile and seals the hash of
           each, and the offline verifier checks those captures rather than the
-          board's word. No tool, no key, no clone. It is the least reliable rung
-          and says so on every entry it decides: it counts only toward stated
+          board's word. No tool, no key, no clone. It is the least reliable
+          rung, and the rule is that it is disclosed as one wherever it decides
+          an entry: it counts only toward stated
           facts, only from an account that existed before the entry was
           submitted, under the same cap per community, and it expires on the
           published date
@@ -203,8 +204,11 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
         </p>
         <p class="note">
           All three rungs are validations, all three count towards consensus,
-          and every verified entry discloses which kinds of operator met it and
-          which rung each counted line stood on. A counted line from outside
+          and every verified entry discloses which kinds of operator met it.
+          Under decision D-142 the rung each counted line stood on is disclosed
+          beside that word — the record's rule, carried onto the entry pages
+          when the kernel change that reads the rung lands. A counted line from
+          outside
           every disclosed perimeter clears an entry's bootstrap label, wherever
           the naming fallback above put one there.
         </p>

@@ -704,7 +704,7 @@ describe("the landing page's one sentence (D-131 item 1)", () => {
     expect(flat).toContain("No lab funds, runs, or validates the record.");
     expect(flat).toContain(
       "the first three validators are outsiders, and until they sign, the " +
-        "seeded entries stand as drafts marked awaiting validators",
+        "seeded entries stand as drafts, awaiting validators",
     );
     expect(flat).toContain(
       "or a reply on the daily batch post, which takes no tool and no key",

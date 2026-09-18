@@ -88,14 +88,15 @@ export function renderDryRun(ctx: PageContext): string {
         batch post carries, per entry, the span quoted from the cited page, the
         page it was quoted from, and the exact line to paste back, and the reply
         is the validation. No domain, no DNS record, no key here.
-        Either line is a validation, and every entry says which rung each of its
-        own lines stood on.
+        Either line is a validation, and the rule under decision D-142 is that
+        the rung a counted line stood on is disclosed beside the entry's
+        verification class.
       </p>
       <p class="note">
         Genesis itself is not a naming (decision D-142). It is the first
         ${VERIFICATION_MIN_OUTSIDE_OPERATORS} publicly bound operators the
         maintainer does not run, deciding one seeded entry in public; until they
-        do, the seeds stand as drafts marked awaiting validators. The
+        do, the seeds stand as drafts, awaiting validators. The
         maintainer's naming of bootstrap operators under a disclosed perimeter
         is a fallback invoked by a published decision, and it is not invoked on
         production.
