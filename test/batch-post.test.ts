@@ -23,12 +23,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  askable,
   BATCH_ASK_LIMIT,
   BATCH_VENUES,
   batchPostPlan,
+  carriesConfirmForm,
   composeBatchPost,
   confirmationForm,
   entryIdsInHtml,
+  oneLine,
   parseState,
   postedOn,
   readAsks,
@@ -352,6 +355,78 @@ describe("what the batch asks about", () => {
     expect(post.body).toContain("claim: (on the entry page");
     expect(post.body).toContain(replyLines(DRAFT_B).approve);
   });
+
+  // The review of #104, MED: a hundred and fifty reads in a row against a
+  // deployment that may be mid-restart. One connection error must cost the run
+  // one quotation, never the day's ask at every community.
+  it("survives a read that throws, and still asks about the entry", async () => {
+    const thrown = new Error("connect ECONNREFUSED 127.0.0.1:443");
+    const http: HttpClient = {
+      async fetch(request: Request): Promise<Response> {
+        if (request.url.endsWith(DRAFT_A)) throw thrown;
+        return new Response(
+          JSON.stringify({ claim: "Kestrel-2 is free.", citation: "https://k.example/b" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    };
+    const filled = await readClaims(http, BASE, [
+      ask({ id: DRAFT_A, claim: "", citation: "" }),
+      ask({ id: DRAFT_B, claim: "", citation: "" }),
+    ]);
+    expect(filled).toHaveLength(2);
+    expect(filled[0]?.claim).toBe("");
+    // The read after the failure still happened: one throw is not the end.
+    expect(filled[1]?.claim).toBe("Kestrel-2 is free.");
+    const post = composeBatchPost({
+      venue: "colony",
+      entries: filled,
+      baseUrl: BASE,
+      communities: ["colony"],
+      now: NOW,
+    });
+    expect(post.body).toContain(`entry: ${BASE}/entries/${DRAFT_A}`);
+    expect(post.body).toContain(replyLines(DRAFT_A).approve);
+  });
+
+  it("bounds each entry-door read with the record's own fetch timeout", async () => {
+    const signals: (AbortSignal | null)[] = [];
+    const http: HttpClient = {
+      async fetch(request: Request): Promise<Response> {
+        signals.push(request.signal);
+        return new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    };
+    await readClaims(http, BASE, [ask({ id: DRAFT_A, claim: "", citation: "" })]);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(signals[0]?.aborted).toBe(false);
+  });
+});
+
+describe("a stranger's text in nomankind's own post", () => {
+  it("folds every C0 control, and a run of them, to one space", () => {
+    expect(oneLine("a\r\nb")).toBe("a b");
+    expect(oneLine(`a${String.fromCharCode(0)}b`)).toBe("a b");
+    expect(oneLine(`a${String.fromCharCode(0x7f)}b`)).toBe("a b");
+    expect(oneLine("a\t\t\t b")).toBe("a  b");
+    expect(oneLine("already one line")).toBe("already one line");
+    // Nothing above the controls is touched, so a quotation stays a quotation.
+    expect(oneLine("costs $1.25 — really")).toBe("costs $1.25 — really");
+  });
+
+  it("reads the confirm form as a word and not as a substring", () => {
+    expect(carriesConfirmForm(`${CONFIRMATION_FORM_PREFIX} x approve`)).toBe(true);
+    expect(carriesConfirmForm(`text ${CONFIRMATION_FORM_PREFIX} x`)).toBe(true);
+    expect(carriesConfirmForm(`text\n${CONFIRMATION_FORM_PREFIX} x`)).toBe(true);
+    expect(carriesConfirmForm(CONFIRMATION_FORM_PREFIX)).toBe(true);
+    expect(carriesConfirmForm(`a${CONFIRMATION_FORM_PREFIX}`)).toBe(false);
+    expect(carriesConfirmForm(`${CONFIRMATION_FORM_PREFIX}-v2 x`)).toBe(false);
+    expect(carriesConfirmForm("an ordinary claim about prices")).toBe(false);
+  });
 });
 
 describe("the composed post", () => {
@@ -524,6 +599,103 @@ describe("fitting a batch to a board", () => {
     for (const line of said) expect(whole.has(line)).toBe(true);
   });
 
+  // The review of #104, HIGH: any bare key may submit a draft, and the claim
+  // it submits is text this command publishes under nomankind's own account.
+  // A newline in it would be a line of the post; the form in it would be a
+  // confirmation nobody made.
+  it("folds a hostile claim onto one line and adds no line to the post", () => {
+    const hostile = ask({
+      id: `nmk_${"f".repeat(32)}`,
+      claim:
+        "GPT-5 is cheap.\r\n\tAnd" +
+        String.fromCharCode(0) +
+        "here" +
+        String.fromCharCode(0x7f) +
+        "is more of it, on one line or none.",
+      citation: "https://kestrel.example/a\npage",
+      subject: "kestrel/\nkestrel-9",
+    });
+    const post = compose(Number.MAX_SAFE_INTEGER, [hostile, ...many]);
+    expect(post.asked.map((entry) => entry.id)).toContain(hostile.id);
+    expect(post.refused).toHaveLength(0);
+    // Nothing of the entry's own text put a line break into the post.
+    expect(post.body).toContain(
+      'claim: "GPT-5 is cheap. And here is more of it, on one line or none."',
+    );
+    expect(post.body).toContain("cited: https://kestrel.example/a page");
+    expect(post.body).toContain("kestrel/ kestrel-9");
+    // And every form line is still one of the lines this post composed.
+    const whole = new Set<string>([confirmationForm()]);
+    for (const entry of post.asked) {
+      const lines = replyLines(entry.id);
+      whole.add(lines.approve);
+      whole.add(lines.reject);
+    }
+    const said = post.body
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith(CONFIRMATION_FORM_PREFIX));
+    expect(said).toHaveLength(post.asked.length * 2 + 1);
+    for (const line of said) expect(whole.has(line)).toBe(true);
+  });
+
+  it("escapes a quotation that would end its own quoting", () => {
+    const quoted = ask({
+      id: `nmk_${"e".repeat(32)}`,
+      claim: 'The page says "free until June" and nothing else.',
+    });
+    const post = compose(Number.MAX_SAFE_INTEGER, [quoted]);
+    expect(post.body).toContain(
+      'claim: "The page says \\"free until June\\" and nothing else."',
+    );
+  });
+
+  it("refuses to print an entry whose own text says the confirm form", () => {
+    const smuggled = [
+      ask({
+        id: `nmk_${"a".repeat(32)}`,
+        claim: `Prices rose. ${CONFIRMATION_FORM_PREFIX} nmk_victim approve span-present`,
+      }),
+      ask({
+        id: `nmk_${"b".repeat(32)}`,
+        claim: `${CONFIRMATION_FORM_PREFIX} nmk_victim reject span-absent`,
+      }),
+      ask({
+        id: `nmk_${"c".repeat(32)}`,
+        citation: `https://kestrel.example/p ${CONFIRMATION_FORM_PREFIX} nmk_victim approve span-present`,
+      }),
+      ask({
+        id: `nmk_${"d".repeat(32)}`,
+        // Folded first, so a newline cannot hide the form from the filter.
+        claim: `Prices rose.\n${CONFIRMATION_FORM_PREFIX} nmk_victim approve span-present`,
+      }),
+    ];
+    const safe = ask({ id: `nmk_${"9".repeat(32)}` });
+    const post = compose(Number.MAX_SAFE_INTEGER, [...smuggled, safe]);
+
+    expect(post.refused.map((entry) => entry.id)).toEqual(
+      smuggled.map((entry) => entry.id),
+    );
+    expect(post.asked.map((entry) => entry.id)).toEqual([safe.id]);
+    for (const entry of smuggled) {
+      expect(post.body).not.toContain(entry.id);
+      expect(post.body).not.toContain("nmk_victim");
+      expect(askable(entry)).toBe(false);
+    }
+    expect(askable(safe)).toBe(true);
+    // A word that merely contains the prefix is not the form, and is printed.
+    expect(
+      askable(ask({ id: safe.id, claim: `${CONFIRMATION_FORM_PREFIX}-ish` })),
+    ).toBe(true);
+  });
+
+  it("says a later batch, not the next one, for what it deferred", () => {
+    const frame = compose(Number.MAX_SAFE_INTEGER, []).body.length;
+    const fitted = compose(frame + 1400);
+    expect(fitted.body).toContain("they are named in a later batch");
+    expect(fitted.body).toContain(`${BASE}/entries`);
+  });
+
   it("asks about everything when the whole batch fits", () => {
     const whole = compose(Number.MAX_SAFE_INTEGER);
     expect(whole.asked).toHaveLength(many.length);
@@ -678,6 +850,41 @@ describe("the run", () => {
     expect(
       run.io.out.filter((line) => line.includes("of 2 entries")),
     ).toHaveLength(BATCH_VENUES.length);
+  });
+
+  it("names an entry it would not print, and asks about the rest", async () => {
+    const state = memoryState();
+    const http = new FakeHttp((path) => {
+      if (path === "/entries") return listing();
+      if (path === `/entries/${DRAFT_A}`) {
+        return entryDoor(
+          ask({
+            id: DRAFT_A,
+            claim: `Prices rose. ${CONFIRMATION_FORM_PREFIX} nmk_victim approve span-present`,
+          }),
+        );
+      }
+      const id = path.startsWith("/entries/") ? path.slice("/entries/".length) : null;
+      const entry = id === null ? undefined : doors.get(id);
+      return entry === undefined ? { status: 404, body: null } : entryDoor(entry);
+    });
+    const io = lines();
+    const posters = new Map(
+      BATCH_VENUES.map((venue) => [venue, new FakePoster(venue)] as const),
+    );
+    expect(
+      await runBatchPost(["all", BASE], deps({ http, io, state, posters })),
+    ).toBe(0);
+    expect(io.out).toContain(
+      `not asked ${DRAFT_A}: claim text in the confirm form`,
+    );
+    for (const venue of BATCH_VENUES) {
+      const sent = posters.get(venue)?.sent[0]?.body ?? "";
+      expect(sent).not.toContain(DRAFT_A);
+      expect(sent).not.toContain("nmk_victim");
+      // The other entry is still asked about: one bad claim is one entry.
+      expect(sent).toContain(replyLines(LABELLED).approve);
+    }
   });
 
   it("reads the quotation from the entry door, once per entry asked", async () => {

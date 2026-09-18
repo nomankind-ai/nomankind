@@ -150,7 +150,13 @@ describe("the kit's own page", () => {
     );
     expect(one).toContain("no tool, no key, no account anywhere but the one");
     expect(one).toContain("account-bound");
+    // The sunset by the name the policy publishes it under, and the date, so
+    // a reader can find the number rather than only read it here.
+    expect(one).toContain("ACCOUNT_BINDING_SUNSET");
     expect(one).toContain("2032-01-01");
+    // The bootstrap label is conditional: production carries none (review #104).
+    expect(one).toContain("wherever an entry carries a bootstrap label");
+    expect(one).not.toContain("clearing its bootstrap label");
     expect(one.indexOf("Reply, no tool")).toBeLessThan(
       one.indexOf("Confirming an entry in public"),
     );
