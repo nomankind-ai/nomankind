@@ -46,6 +46,7 @@ import { appendFile, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { WebFetcher } from "../adapters/fetch.js";
+import { DUPLICATE_REFUSALS } from "../duplicate.js";
 import { hashText, normalizeText } from "../normalize.js";
 import { CORE_TEXT_MAX_CHARS } from "../policy.js";
 import { runCommand } from "./main.js";
@@ -179,12 +180,27 @@ export function checkSources(value: unknown): SourcesVerdict {
  * The fields file one row builds: the row's own fields, the span as the claim
  * exactly, and the three the row leaves to the tool.
  *
- * The defaults say what the capture supports and nothing more. A quotation
- * entry records that the cited page carries this passage; what the page said
- * before is not something this tool captured, so the `before` says so in those
- * words rather than asserting an absence nobody checked. `effective_at` is the
- * day the capture was taken, for the same reason the checkpoint's seeded entry
- * uses its own day: it is the one date the run actually knows.
+ * The defaults say what the capture supports and nothing more. What the page
+ * said before is not something this tool captured, so the `before` says so in
+ * those words rather than asserting an absence nobody checked. `effective_at`
+ * is the day the capture was taken, for the same reason the checkpoint's seeded
+ * entry uses its own day: it is the one date the run actually knows.
+ *
+ * `after` is the span, like the claim, and that is load-bearing rather than
+ * tidy. The duplicate key (decision D-085, src/duplicate.ts) is the domain, the
+ * subject, the category, the normalized `after` and the effective date — it
+ * reads `after` and nothing else of what the entry asserts. A constant sentence
+ * there, which is what this tool used to write, gave every quotation from one
+ * page one key: the first row of a list filed, and the second was refused
+ * `duplicate_claim` however different its passage. Today's first real run on
+ * demo showed exactly that, filing row 0 and stopping on row 1.
+ *
+ * Making the state after the change the passage itself is the honest reading as
+ * well as the working one. A quotation entry asserts that this page carries
+ * this passage, so the passage is the state it asserts; two different passages
+ * are two different assertions, and the same passage filed twice is the one
+ * thing the duplicate rule should still catch. The fix belongs here and not in
+ * the key: a key that ignored `after` would stop catching real duplicates.
  */
 export function fieldsForRow(row: SeedRow, now: Date): Record<string, unknown> {
   return {
@@ -193,7 +209,7 @@ export function fieldsForRow(row: SeedRow, now: Date): Record<string, unknown> {
     domain: row.domain,
     claim: row.span,
     before: row.before ?? "not recorded in nomankind",
-    after: row.after ?? "the cited page carries this passage verbatim",
+    after: row.after ?? row.span,
     effective_at: row.effective_at ?? now.toISOString().slice(0, 10),
     citation: row.citation,
   };
@@ -248,8 +264,14 @@ export type SeedDeps = SubmitDeps;
  * refused at any of the first two is recorded and the run moves on, because one
  * bad row on a list of twenty is a fact about that row. A refusal from the door
  * stops the run, because the door's refusals are about the key and the day — the
- * daily write cap above all — and nineteen more submissions would earn nineteen
- * more copies of the same 429.
+ * daily write cap, `rate_limited`, above all — and nineteen more submissions
+ * would earn nineteen more copies of the same 429.
+ *
+ * With one exception, `duplicate_claim`, which is a door refusal about the row:
+ * this claim is already in the log, which says nothing about the next row. It
+ * is counted as a refusal, logged like any other, and the run carries on — so
+ * running the same list again after a partial run finishes the list rather than
+ * stopping on its first already-filed row.
  */
 export async function runSeed(input: {
   readonly key: ValidatorKey;
@@ -339,10 +361,19 @@ export async function runSeed(input: {
       ...(run.status === null ? {} : { status: run.status }),
     });
     // A refusal the door made is about this key and this day -- the daily write
-    // cap above all -- so the run stops and says what is left. A refusal the
-    // submit path made for itself, before the door was asked, is about this row
-    // alone and the next row is still worth trying.
-    if (run.status !== null) {
+    // cap, `rate_limited` (src/keys.ts), above all -- so the run stops and says
+    // what is left: nineteen more submissions would earn nineteen more copies
+    // of the same 429. A refusal the submit path made for itself, before the
+    // door was asked, is about this row alone and the next row is still worth
+    // trying.
+    //
+    // `duplicate_claim` is the one door refusal that is about the row rather
+    // than about the key or the day: it says this exact claim is already in the
+    // log, which is true of that row and says nothing about the next one. A
+    // re-run over a list whose first row was filed yesterday used to stall on
+    // it forever, which made the tool unusable for the thing it is for —
+    // running the same list again until the whole of it is in.
+    if (run.status !== null && !DUPLICATE_REFUSALS.includes(reason)) {
       stopped = reason;
       index += 1;
       break;

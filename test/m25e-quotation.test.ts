@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { extractCore, type Core } from "../src/core.js";
+import { duplicateKey, sameDuplicateKey } from "../src/duplicate.js";
 import {
   checkSources,
   fieldsForRow,
@@ -57,6 +58,8 @@ const RUN_URL = "https://github.com/nomankind-ai/bootstrap/actions/runs/42";
 const SPAN = "We will not deploy a model that we cannot switch off.";
 /** The same sentence, said differently: a paraphrase is not a quotation. */
 const PARAPHRASE = "We will not deploy any model we are unable to switch off.";
+/** A second passage the same page carries: two quotations, one citation. */
+const SECOND_SPAN = "Every change to this page is dated and kept in public.";
 
 const PAGE: FixturePage = {
   body: new Uint8Array(
@@ -97,6 +100,12 @@ class StubLog implements HttpClient {
   entry: Record<string, unknown> | null = null;
   submitStatus = 201;
   submitBody: unknown = { status: "draft" };
+  /**
+   * Answers for the next submissions, in order, before the pair above is used.
+   * A run whose rows are answered differently is the only way to see what one
+   * row's refusal does to the rows behind it.
+   */
+  readonly submitAnswers: { status: number; body: unknown }[] = [];
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
@@ -110,7 +119,10 @@ class StubLog implements HttpClient {
     const body = await request.json();
     this.posted.push({ path, body });
     if (path === "/entries") {
-      return Response.json(this.submitBody, { status: this.submitStatus });
+      const next = this.submitAnswers.shift();
+      return next === undefined
+        ? Response.json(this.submitBody, { status: this.submitStatus })
+        : Response.json(next.body, { status: next.status });
     }
     return Response.json({ sealed: true }, { status: 201 });
   }
@@ -226,6 +238,82 @@ describe("npm run seed builds one entry per source row", () => {
     expect(run.remaining).toBe(2);
     // One submission was attempted, and the two behind it were not.
     expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(1);
+  });
+
+  // The first real run on demo filed row 0 and was refused `duplicate_claim`
+  // on row 1: `after` was one constant sentence for every row, and the
+  // duplicate key (D-085) reads `after`, so sixty quotations off one page
+  // shared one key. The state a quotation entry asserts is the passage itself.
+  it("asserts the span as the state after, so one page can carry two quotations", async () => {
+    const fields = fieldsForRow(rowFor(SPAN), NOW);
+    expect(fields["after"]).toBe(SPAN);
+    expect(fields["claim"]).toBe(SPAN);
+    expect(fields["before"]).toBe("not recorded in nomankind");
+    // A row that says its own `after` still wins: the default is a default.
+    expect(fieldsForRow({ ...rowFor(SPAN), after: "said" }, NOW)["after"]).toBe(
+      "said",
+    );
+  });
+
+  it("gives two spans off one citation two duplicate keys", async () => {
+    const first = duplicateKey(await seededCore(SPAN, pageHashValue));
+    const second = duplicateKey(await seededCore(SECOND_SPAN, pageHashValue));
+    // Same page, same subject, same category, same day — and not the same key,
+    // which is the whole of the bug that stopped the first run.
+    expect(first.subject).toBe(second.subject);
+    expect(first.category).toBe(second.category);
+    expect(first.effective_at).toBe(second.effective_at);
+    expect(sameDuplicateKey(first, second)).toBe(false);
+  });
+
+  it("still gives the same span twice one duplicate key", async () => {
+    const once = duplicateKey(await seededCore(SPAN, pageHashValue));
+    const again = duplicateKey(await seededCore(SPAN, pageHashValue));
+    expect(sameDuplicateKey(once, again)).toBe(true);
+    // And a passage differing only in whitespace is the same passage, because
+    // the key normalizes what it reads.
+    const spaced = duplicateKey(await seededCore(`  ${SPAN}  `, pageHashValue));
+    expect(sameDuplicateKey(once, spaced)).toBe(true);
+  });
+
+  it("logs a duplicate row and carries on to the next", async () => {
+    const http = new StubLog();
+    http.submitAnswers.push({ status: 409, body: { error: "duplicate_claim" } });
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN), rowFor(SECOND_SPAN), rowFor(SECOND_SPAN)],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect(run.stopped).toBeNull();
+    expect([run.submitted, run.refused, run.remaining]).toEqual([2, 1, 0]);
+    expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(3);
+    // The refusal is in the log, named, on the row it happened to.
+    const first = run.log[0]!.outcome as { result: string; reason: string };
+    expect([first.result, first.reason]).toEqual(["refused", "duplicate_claim"]);
+    // A run that refused anything is still not ok: it says so and exits 1.
+    expect([run.ok, run.code]).toEqual([false, 1]);
+  });
+
+  it("still stops at the cap, even after carrying on past a duplicate", async () => {
+    const http = new StubLog();
+    http.submitAnswers.push(
+      { status: 409, body: { error: "duplicate_claim" } },
+      { status: 429, body: { error: "write_quota", bucket: "agent", limit: 100 } },
+    );
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN), rowFor(SECOND_SPAN), rowFor(SECOND_SPAN)],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect(run.stopped).toBe("write_quota");
+    expect([run.submitted, run.refused, run.remaining]).toEqual([0, 2, 1]);
+    expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(2);
   });
 
   it("leaves the rows past --limit for a later run", async () => {
