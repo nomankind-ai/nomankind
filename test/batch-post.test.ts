@@ -1055,6 +1055,36 @@ describe("the run", () => {
     expect(advice).not.toContain("cap of");
   });
 
+  it("says nothing about the table when the board is counting posts, not characters", () => {
+    // The founding registry counts a daily post, and it says so with the same
+    // word it says the length limit with. A rate limit is not a row anybody can
+    // change: the answer to it is tomorrow, and the post is unspent.
+    expect(
+      capRowAdvice(
+        "1f916",
+        '1f916 refused 429: {"error":"you have used your daily post cap; the ' +
+          'next one is at 00:00 UTC"}',
+      ),
+    ).toBeNull();
+    // Nor is a cap on anything else this table's business: the word alone
+    // counts whatever a board wants to count, so it has to name a length.
+    expect(
+      capRowAdvice("colony", "colony refused 400: daily post cap reached"),
+    ).toBeNull();
+    expect(
+      capRowAdvice("colony", "colony refused 403: your thread cap is 3"),
+    ).toBeNull();
+    // A cap on characters, said any of the ways a board says it, still does.
+    for (const answer of [
+      "colony refused 400: the cap is 8000 characters",
+      "colony refused 400: maximum length 8000",
+      "colony refused 400: character limit exceeded",
+      "colony refused 413: body too large",
+    ]) {
+      expect(capRowAdvice("colony", answer)).toContain("post_max_chars");
+    }
+  });
+
   it("refuses arguments that are not a batch, before any read", async () => {
     const state = memoryState();
     const run = fixture(state);

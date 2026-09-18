@@ -540,6 +540,40 @@ describe("the boards an environment listens to", () => {
     expect(await silent.threads()).toEqual([5891]);
   });
 
+  it("drops a pin this board cannot number, and discovers nothing without one", async () => {
+    // A pin that is not a number is another venue's id in this venue's row. It
+    // is no thread here, and it must not become a floor either: NaN compares
+    // false against everything, so leaving it in would take the floor away and
+    // let the whole listing back in.
+    const row = confirmationVenue("1f916")!;
+    const mistyped = {
+      ...row,
+      threads: { ...row.threads, production: ["bae0e581-d7e2-4a25"] },
+    };
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: mistyped,
+      environment: "production",
+      fetch: listing([5212, 5891, 6000], asked),
+    });
+    expect(await board.threads()).toEqual([]);
+    expect(asked).toEqual([]);
+
+    // And beside a real pin it is dropped, while the real one still floors the
+    // listing: one bad row does not cost the environment its door.
+    const half = {
+      ...row,
+      threads: { ...row.threads, production: ["bae0e581-d7e2-4a25", 5891] },
+    };
+    const alsoAsked: string[] = [];
+    const board2 = new RegistryBoardAdapter({
+      venue: half,
+      environment: "production",
+      fetch: listing([5212, 5891, 6000], alsoAsked),
+    });
+    expect(await board2.threads()).toEqual([5891, 6000]);
+  });
+
   it("listens to all three real boards on production, on the pinned threads", async () => {
     const boards = boardAdaptersFor(envOf("production"));
     expect(boards.map((board) => board.venue)).toEqual([

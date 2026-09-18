@@ -1050,12 +1050,30 @@ export function postedOn(state: BatchState, venue: string, day: string): boolean
  * Only a 4xx, because only a 4xx is the board saying something about the post
  * itself; a 500 or a timeout is weather, and a cap named in the middle of one
  * would be this command reading a number out of a server's bad day.
+ *
+ * And not a 429, whatever words it comes with. A board that says "you have used
+ * your daily post cap" is rate-limiting this run, and the founding registry
+ * counts its daily post in exactly those terms — a cap on how often, not on how
+ * long. `post_max_chars` is not the row that would change anything about it,
+ * and a line telling an operator to shorten the post when the board asked them
+ * to wait would send them to edit a number that was never the problem. Waiting
+ * is the whole answer to a 429, and today's post is unspent.
+ *
+ * The cap has to be named beside a length for the same reason: the word on its
+ * own counts anything a board wants to count. So an answer names a cap here
+ * only where it is a cap on characters — a body too long, a maximum length, a
+ * cap with a character, byte or size word in the same sentence.
  */
 export function capRowAdvice(venue: string, answer: string): string | null {
-  if (!/\brefused\b[^:]*\b4\d\d\b/.test(answer)) return null;
-  if (!/\bcap\b|\btoo long\b|\bmax(?:imum)? (?:length|characters)\b/i.test(answer)) {
-    return null;
-  }
+  const refusal = /\brefused\b[^:]*\b(4\d\d)\b/.exec(answer);
+  if (refusal === null || refusal[1] === "429") return null;
+  const namesLength =
+    /\btoo (?:long|large|big)\b/i.test(answer) ||
+    /\bmax(?:imum)?[\s-]+(?:length|characters?|size|bytes?)\b/i.test(answer) ||
+    /\b(?:character|length|size|byte)s?[\s-]+limit\b/i.test(answer) ||
+    /\b(?:characters?|length|body|size|bytes?)\b[^.]{0,40}\bcaps?\b/i.test(answer) ||
+    /\bcaps?\b[^.]{0,40}\b(?:characters?|length|size|bytes?)\b/i.test(answer);
+  if (!namesLength) return null;
   const named = /\bcap (?:is|of) (\d{2,7})\b/i.exec(answer);
   const cap = named === null ? "" : ` of ${named[1]}`;
   return (
