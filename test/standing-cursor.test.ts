@@ -225,10 +225,15 @@ describe("the sweep's standing step", () => {
     // the log: the tail, the registry, the entries the tail names, the rows.
     // Pinned at the measured cost with a little headroom, so a regression that
     // doubled the work fails here rather than on the platform's row budget.
+    //
+    // One more since D-142, and for the reason the world cache reads one more:
+    // `community_operator_bound` joined the registry event types, and the
+    // registry is read one statement per type. A rung that a world did not hold
+    // would judge a key-bound operator by the account it registered as.
     const prepared = measured.statements.filter(
       (statement) => statement.values.length === 0,
     );
-    expect(prepared.length).toBeLessThanOrEqual(30);
+    expect(prepared.length).toBeLessThanOrEqual(31);
   }, 120_000);
 });
 

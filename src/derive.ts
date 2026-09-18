@@ -31,7 +31,6 @@ import {
   ACCOUNT_BINDING_TIERS,
   COMMUNITY_MIN_ACCOUNTS,
   COMMUNITY_MIN_COMMUNITIES,
-  PERIMETER_ACCOUNTS,
   PERIMETER_WORD,
   CONFIRMATION_VENUES,
   DEFAULT_DOMAIN,
@@ -48,7 +47,11 @@ import {
   type OperatorKind,
   type VerificationClass,
 } from "./policy.js";
-import { communityOperatorId, isExcludedParty } from "./registry.js";
+import {
+  communityOperatorId,
+  isExcludedParty,
+  isPerimeterOperator,
+} from "./registry.js";
 import { retiredAgentsAt } from "./rotation.js";
 import type { Entry } from "./schema.js";
 import type { EntrySeal } from "./seal.js";
@@ -683,6 +686,16 @@ export function communityOperatorsAt(
       // than the one the log already holds would be an operator un-publishing
       // a key it published, which is not a thing a page can say.
       if (rungOf(payload.binding) !== "key") continue;
+      // And only on a proof of the kind the binding claims. A rung is a
+      // sentence about what a reader can recheck offline, so an upgrade
+      // carrying no proof — or a proof of another kind of binding — lifts
+      // nothing: it would otherwise be a line saying "trust me, there is a key
+      // somewhere", which is the one thing a binding exists to replace. The
+      // cryptography is the verifier's half (src/verify.ts,
+      // `checkCommunityBindings`); this is the half a synchronous fold can ask,
+      // and both have to hold.
+      if (payload.proof === null) continue;
+      if (payload.proof.kind !== payload.binding.kind) continue;
       operators.set(payload.operator, {
         ...held,
         agent: payload.agent,
@@ -953,6 +966,112 @@ function countableSeats(
 }
 
 /**
+ * Why an account-bound line is out of the rung's scope, or null when it is in
+ * (decision D-142 item 3).
+ *
+ * The one place the two entry-shaped clauses of the scope are decided, so the
+ * fold and the rule the sweep asks at ingestion cannot drift: a line the door
+ * seals as a validation must be a line the fold counts, and a line the fold
+ * will not count should never have been sealed as one.
+ *
+ * The third clause, the sunset, is not here: it is read at the promoting
+ * decision's instant and the promoting decision does not exist yet when the
+ * door is deciding what to seal. So the door seals a line the sunset will later
+ * refuse to count, exactly as it seals a line a later cap will not reach — and
+ * derivation is where that is settled.
+ */
+function accountScopeRefusal(
+  core: Core,
+  binding: CommunityBinding | undefined,
+  submittedAt: string | null,
+): AccountScopeRefusal | null {
+  const claimedTier = core["evidence_tier"];
+  if (
+    typeof claimedTier !== "string" ||
+    !(ACCOUNT_BINDING_TIERS as readonly string[]).includes(claimedTier)
+  ) {
+    return "account_out_of_scope";
+  }
+  const createdAt =
+    binding !== undefined && binding.kind === "account"
+      ? binding.account_created_at
+      : null;
+  // A log that says when neither the account nor the entry began cannot say
+  // which came first, and the honest answer to "was the account older?" is no.
+  if (submittedAt === null) return "account_too_new";
+  if (!isBeforeInstant(createdAt, submittedAt)) return "account_too_new";
+  return null;
+}
+
+/** The two ways an account-bound line falls outside the rung's scope. */
+export type AccountScopeRefusal = "account_out_of_scope" | "account_too_new";
+
+/**
+ * How many seats one community still holds at this instant (decision D-142).
+ *
+ * The cap's own count, taken over the seats that count: an account-bound seat
+ * the sunset has dropped is not occupying a place on its board, and a cap that
+ * went on counting it would hold that board's last seat empty forever on a rule
+ * that had already expired.
+ */
+function admittedFromVenue(
+  counted: ReadonlyMap<string, ApprovingSeat>,
+  venue: string,
+  at: string,
+): number {
+  const open = isBeforeInstant(at, ACCOUNT_BINDING_SUNSET);
+  let taken = 0;
+  for (const seat of counted.values()) {
+    if (seat.venue !== venue) continue;
+    if (!open && seat.rung === "account") continue;
+    taken += 1;
+  }
+  return taken;
+}
+
+/**
+ * The instant a decision is judged by the sunset at (decision D-142 item 7 of
+ * the review): the later of what the signer said and when the log sealed it.
+ *
+ * `signed_at` is the signer's own word and nothing checks it, so a key that
+ * wanted one more account-bound consensus after the rung closed could simply
+ * date its approval to 2031. The event's `at` is the record's own clock at the
+ * moment the decision entered the log, and a decision cannot have been taken
+ * after it was sealed — so the later of the two is the earliest instant the
+ * decision can honestly claim, and the sunset is read there.
+ *
+ * Every other rule in this fold goes on reading `signed_at`: this one is about
+ * a deadline, and a deadline is the one kind of rule a backdated claim can buy
+ * something from.
+ */
+function decisionInstant(decision: Decision): string {
+  const signed = Date.parse(decision.signedAt);
+  const sealed = Date.parse(decision.at);
+  if (Number.isNaN(signed)) return decision.at;
+  if (Number.isNaN(sealed)) return decision.signedAt;
+  return signed >= sealed ? decision.signedAt : decision.at;
+}
+
+/**
+ * The operators whose decisions this entry's consensus counted, in the order
+ * they were counted, or an empty list while nothing is counted.
+ *
+ * The fold's own `countedOperators`, re-folded for a caller holding only the
+ * log — the offline verifier, which asks whether a line it is looking at is one
+ * the consensus counted before it judges the line by the rules that apply to
+ * counted lines. One fold and one answer, so the verifier and derivation can
+ * never disagree about which lines were in the room.
+ */
+export function countedOperatorsFor(
+  events: readonly Event[],
+  entryId: string,
+): readonly string[] {
+  const submission = submissionOf(events, entryId);
+  if (submission === null) return [];
+  return consensusFor(events, entryId, submission.core).countedOperators;
+}
+
+/**
  * Whether one instant is strictly earlier than another, both parsed.
  *
  * Strict, and false for anything unparseable on either side, because both
@@ -1055,9 +1174,15 @@ function consensusFor(
   // seq order: the same records the counts above are built from, kept so the
   // evidence gate reads exactly what consensus counted.
   const countedRecords: ApproverRecord[] = [];
-  const countedOperators = new Set<string>();
-  /** How many counted decisions this entry has taken from each community. */
-  const countedPerVenue = new Map<string, number>();
+  /**
+   * The counted decisions, one per distinct eligible operator, with the seat
+   * each one took: which kind of operator, which community, which rung.
+   *
+   * A map rather than a set since D-142, because the per-community cap is now
+   * a question asked at a position — the seats an expired rung left are seats
+   * nobody is sitting in.
+   */
+  const counted = new Map<string, ApprovingSeat>();
   // How many communities count at all, read once: the cap and the floor below
   // are both functions of this one number, and src/policy.ts is where each of
   // them is decided.
@@ -1075,14 +1200,9 @@ function consensusFor(
   let verificationClass: VerificationClass | null = null;
   let verificationCommunities: readonly string[] = [];
   let verificationBinding: BindingRung | null = null;
-  // The two facts about this entry the account rung is judged against, read off
-  // the signed core once (D-142 item 3): the tier it claims, and the instant it
-  // was submitted. An account made after the entry was submitted is an account
-  // made for it as far as the record can tell.
-  const claimedTier = core["evidence_tier"];
-  const accountTierInScope =
-    typeof claimedTier === "string" &&
-    (ACCOUNT_BINDING_TIERS as readonly string[]).includes(claimedTier);
+  // When this entry was submitted, which is half of what the account rung is
+  // judged against (D-142 item 3): an account made after the entry was
+  // submitted is an account made for it, as far as the record can tell.
   const submittedAt = submittedInstantOf(events, entryId, core);
 
   for (const decision of decisionsFor(events, entryId)) {
@@ -1100,7 +1220,7 @@ function consensusFor(
     // change that, because what is disqualifying is whose account it is. The
     // record verifying its own entries is the failure the genesis exception
     // exists to leave behind, so this is refused before the rung is even read.
-    if (PERIMETER_ACCOUNTS.includes(decision.operator)) continue;
+    if (isPerimeterOperator(decision.operator)) continue;
 
     // Which rung this operator stands on at this position (D-142). The
     // registration's binding, or the strongest one a `community_operator_bound`
@@ -1114,22 +1234,16 @@ function consensusFor(
         decision.operator,
       );
       rung = account === undefined ? null : rungOf(account.binding);
-      // The account rung's scope, all three halves of it read here because all
-      // three are about this line and this entry (D-142 item 3). A line that
-      // fails any of them is not refused and not rejected: it is an account
-      // statement, sealed and shown, counting toward nothing — which is
-      // exactly what a counted line without the token has been since D-136.
-      if (rung === "account") {
-        if (!accountTierInScope) continue;
-        const createdAt =
-          account !== undefined && account.binding.kind === "account"
-            ? account.binding.account_created_at
-            : null;
-        // A log that says when neither the account nor the entry began cannot
-        // say which came first, and the honest answer to "was the account
-        // older?" is then no.
-        if (submittedAt === null) continue;
-        if (!isBeforeInstant(createdAt, submittedAt)) continue;
+      // The account rung's scope, through the same rule the door asks at
+      // ingestion (D-142 item 3). A line that falls outside it is not refused
+      // and not rejected: it is an account statement, sealed and shown,
+      // counting toward nothing — which is exactly what a counted line without
+      // the token has been since D-136.
+      if (
+        rung === "account" &&
+        accountScopeRefusal(core, account?.binding, submittedAt) !== null
+      ) {
+        continue;
       }
     }
     // A binding on no rung at all — a `platform` statement about an account —
@@ -1165,22 +1279,28 @@ function consensusFor(
     // supply a consensus by itself once a second community signs. Counted per
     // community and not per key, because the accounts on one board are as cheap
     // as each other.
+    //
+    // Over the seats that still count at this position, and not over every seat
+    // ever counted (D-142): an account-bound seat the sunset has dropped
+    // occupies nothing, and a cap that went on holding its place would let a
+    // rung that no longer counts keep a board's last seat empty forever.
     const venue = decision.venue;
     if (decision.kind === "community" && venue !== null) {
-      const taken = countedPerVenue.get(venue) ?? 0;
-      if (!countedOperators.has(decision.operator) && taken >= capPerEntry) {
+      const taken = admittedFromVenue(counted, venue, decisionInstant(decision));
+      if (!counted.has(decision.operator) && taken >= capPerEntry) {
         continue;
       }
     }
 
     // The first record from an operator is the one that counts, here as in the
     // distinct-operator sets below.
-    if (!countedOperators.has(decision.operator)) {
-      countedOperators.add(decision.operator);
+    if (!counted.has(decision.operator)) {
+      counted.set(decision.operator, {
+        kind: decision.kind,
+        venue: decision.kind === "community" ? venue : null,
+        rung,
+      });
       countedRecords.push(decision.record);
-      if (decision.kind === "community" && venue !== null) {
-        countedPerVenue.set(venue, (countedPerVenue.get(venue) ?? 0) + 1);
-      }
     }
 
     if (decision.decision === "approve") {
@@ -1200,13 +1320,13 @@ function consensusFor(
 
     const trustedCount = trustedOperatorsAt(events, position).size;
     const largePool = trustedCount >= TRUSTED_POOL_SWITCH;
-    // The sunset (D-142 item 4), read at this decision's own `signed_at` and
-    // nowhere else, because this is the decision that would promote the entry.
-    // Before the instant, an account-bound approval forms a consensus like any
-    // other; at or after it, it counts toward nothing and the counts below are
-    // taken over the seats that remain. A line counted yesterday keeps what it
-    // was counted into: nothing here recomputes a decision that closed.
-    const seats = countableSeats(approving, decision.signedAt);
+    // The sunset (D-142 item 4), read at this decision's own instant, because
+    // this is the decision that would promote the entry. Before it, an
+    // account-bound approval forms a consensus like any other; at or after it,
+    // it counts toward nothing and the counts below are taken over the seats
+    // that remain. A line counted yesterday keeps what it was counted into:
+    // nothing here recomputes a decision that closed.
+    const seats = countableSeats(approving, decisionInstant(decision));
     const approvals = seats.approvals;
     const rejections = rejectingOperators.size;
 
@@ -1311,7 +1431,7 @@ function consensusFor(
     needsReplacement,
     approvers,
     promotingSeq,
-    countedOperators: [...countedOperators],
+    countedOperators: [...counted.keys()],
     verificationClass,
     verificationCommunities,
     verificationBinding,
@@ -1595,7 +1715,7 @@ function preconditionsMet(
     // (D-142): they may never be counted into a consensus at any rung, so
     // counting them here would promise signers that cannot sign — the same
     // miscount the QA of 2026-09-12 found, from the third side.
-    if (PERIMETER_ACCOUNTS.includes(operator)) continue;
+    if (isPerimeterOperator(operator)) continue;
     if (!mayValidateEntry(events, position, target, operator)) continue;
     outside += 1;
   }
@@ -2136,7 +2256,7 @@ function bootstrapLabelOf(
       // from an account inside that perimeter is the perimeter looking at
       // itself: it clears nothing, exactly as it counts toward nothing.
       const operator = payload["operator"];
-      if (typeof operator === "string" && PERIMETER_ACCOUNTS.includes(operator)) {
+      if (typeof operator === "string" && isPerimeterOperator(operator)) {
         continue;
       }
       if (!confirmationReproduces(payload["check"], snapshotHash)) continue;
@@ -2333,7 +2453,7 @@ export function communityValidationsFor(
       // event's own `perimeter` is the sweep's copy of the same sentence, and a
       // fold that trusted it would let a line say it was outside a perimeter it
       // is inside. The list is policy, and policy is what decides.
-      perimeter: PERIMETER_ACCOUNTS.includes(operator) ? PERIMETER_WORD : null,
+      perimeter: isPerimeterOperator(operator) ? PERIMETER_WORD : null,
       seq: event.seq,
     });
   }
@@ -2466,7 +2586,7 @@ function verificationLayersOf(
       .operator;
     // Nomankind's own accounts add no layer either (D-142): a perimeter line
     // is shown and counted toward nothing, and a dated layer is a count.
-    if (PERIMETER_ACCOUNTS.includes(operator)) continue;
+    if (isPerimeterOperator(operator)) continue;
     const kind = kinds.get(operator) ?? "domain";
     if (kind === "domain") {
       layers.push({
@@ -2524,6 +2644,12 @@ export const COMMUNITY_LINE_REFUSALS = [
   "entry_closed",
   "already_validated",
   "community_cap",
+  // The account rung's scope (D-142 item 3). Two more words and not one,
+  // because they are two different things to tell the account that wrote the
+  // line: this entry is not the kind the rung may speak to, and this account is
+  // younger than the entry it is speaking about.
+  "account_out_of_scope",
+  "account_too_new",
 ] as const;
 
 export type CommunityLineRefusal = (typeof COMMUNITY_LINE_REFUSALS)[number];
@@ -2550,7 +2676,11 @@ export type CommunityLineDisposition =
  *   refused exactly as a domain operator is;
  * - an entry that is closed takes no further decision;
  * - one counted validation per account per entry;
- * - and the per-community cap for this entry is not reached.
+ * - the per-community cap for this entry is not reached;
+ * - and, where the operator stands on the account rung (D-142), the entry is
+ *   one of the tiers that rung may count toward and the account is older than
+ *   the entry — the same `accountScopeRefusal` the fold asks, so a line the
+ *   door seals as a validation is a line the fold counts.
  *
  * Otherwise a confirmation, with the word that says which rule it fell under.
  * A confirmation is not a refusal of the line: it is sealed, shown, and clears
@@ -2564,6 +2694,18 @@ export function communityLineDisposition(
   venue: string,
   agent: string,
   at: string,
+  /**
+   * The binding this line stands on, where the caller already holds it
+   * (decision D-142).
+   *
+   * Optional, and read off the log when it is not given: a first line registers
+   * its own operator, so at ingestion there may be no registration to read and
+   * the caller is the only one who knows what the sweep captured. Where neither
+   * has it, the operator is not on the account rung as far as this rule can
+   * tell and the two clauses below do not apply — derivation asks again at the
+   * position where the registration does exist.
+   */
+  binding?: CommunityBinding,
 ): CommunityLineDisposition {
   const no = (reason: CommunityLineRefusal): CommunityLineDisposition => ({
     kind: "confirmation",
@@ -2653,6 +2795,20 @@ export function communityLineDisposition(
     already.filter((each) => each.venue === venue).map((each) => each.operator),
   );
   if (fromVenue.size >= cap) return no("community_cap");
+
+  // The account rung's scope (D-142 item 3), asked last because it is the only
+  // clause about the rung rather than about the speaker, and asked through the
+  // same function the fold asks so the door and the fold cannot drift.
+  const held =
+    binding ?? communityOperatorsAt(events, position).get(operator)?.binding;
+  if (held !== undefined && rungOf(held) === "account") {
+    const outside = accountScopeRefusal(
+      core,
+      held,
+      submittedInstantOf(events, entryId, core),
+    );
+    if (outside !== null) return no(outside);
+  }
 
   // `at` is the sweep's own clock, carried so the rule has the same shape every
   // other rule here has and so a later rule that needs the moment has it. No

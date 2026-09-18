@@ -2637,6 +2637,23 @@ async function communityLine(
               capture_hash:
                 binding.kind === "profile" ? binding.capture_hash : null,
               fingerprint,
+              // What a reader rechecks the upgrade against (D-142, the review
+              // of #105): the same proof this very line carries, so an upgrade
+              // is falsifiable offline exactly as the validation beside it is.
+              // An upgrade without one lifts no rung, in the fold or in the
+              // verifier, so this is the field that makes the event mean
+              // anything at all.
+              proof:
+                binding.kind === "profile"
+                  ? {
+                      kind: "profile",
+                      public_key: binding.public_key,
+                      signature: binding.signature,
+                      capture_hash: binding.capture_hash,
+                    }
+                  : binding.kind === "registry"
+                    ? { kind: "registry", proof: binding.sealed.proof }
+                    : null,
             },
           }),
         );

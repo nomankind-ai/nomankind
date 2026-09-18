@@ -307,33 +307,48 @@ describe("the derivation stamp", () => {
 // The rows a re-derivation cannot reach
 // ---------------------------------------------------------------------------
 
-describe("a legacy row whose consensus fields derive differently", () => {
-  const consensus = [
-    { field: "/entry/status", reason: "mismatch" },
-    { field: "/entry/verified_at", reason: "mismatch" },
+describe("a legacy row the fold no longer reaches", () => {
+  const sidecarOnly = [
+    { field: "/sidecar/verification_class", reason: "mismatch" },
+    { field: "/sidecar/verification_layers", reason: "mismatch" },
   ];
 
-  it("is frozen history on a v0.6 record, with the fields named", () => {
-    expect(frozenFieldsOf(consensus, true)).toEqual([
-      "/entry/status",
-      "/entry/verified_at",
+  it("names the fields the record invented after the row was sealed", () => {
+    expect(frozenFieldsOf(sidecarOnly, true)).toEqual([
+      "/sidecar/verification_class",
+      "/sidecar/verification_layers",
     ]);
+  });
+
+  it("holds the verdict out of that list, so an edited status still fails", () => {
+    // The hole the review of #105 found: `status` and `verified_at` are the
+    // verdict itself, and a verdict nobody rechecks is a verdict anybody can
+    // type in. They are checked against `legacyVerdict` instead — the rule the
+    // record decided them by — so they are deliberately not freezable here.
+    expect(CONSENSUS_DECIDED).not.toContain("/entry/status");
+    expect(CONSENSUS_DECIDED).not.toContain("/entry/verified_at");
+    expect(
+      frozenFieldsOf(
+        [{ field: "/entry/status", reason: "mismatch" }, ...sidecarOnly],
+        true,
+      ),
+    ).toBeNull();
   });
 
   it("is a difference like any other on a v0.7 record", () => {
     // The record rewrites a v0.7 row when the rules move, so a v0.7 row that
     // disagrees with the fold is a row somebody edited or a sweep that has not
     // run — and either is a FAIL a reader is owed.
-    expect(frozenFieldsOf(consensus, false)).toBeNull();
+    expect(frozenFieldsOf(sidecarOnly, false)).toBeNull();
   });
 
-  it("is a difference when anything outside the consensus differs too", () => {
+  it("is a difference when anything outside the list differs too", () => {
     // The carve-out is about which fields the fold decides, never about which
     // rows are allowed to differ: one edited claim beside them and the whole
     // row is a FAIL again.
     expect(
       frozenFieldsOf(
-        [...consensus, { field: "/entry/claim", reason: "mismatch" }],
+        [...sidecarOnly, { field: "/entry/claim", reason: "mismatch" }],
         true,
       ),
     ).toBeNull();
@@ -348,11 +363,8 @@ describe("a legacy row whose consensus fields derive differently", () => {
     // rewritten. A path that is not — a claim, a citation, a seal — would be a
     // field an edit could hide behind, which is the one thing this must not be.
     for (const field of CONSENSUS_DECIDED) {
-      expect(field.startsWith("/entry/") || field.startsWith("/sidecar/")).toBe(
-        true,
-      );
+      expect(field.startsWith("/sidecar/")).toBe(true);
     }
-    expect(CONSENSUS_DECIDED).toContain("/entry/status");
     expect(CONSENSUS_DECIDED).toContain("/sidecar/verification_binding");
     expect(CONSENSUS_DECIDED).not.toContain("/entry/claim");
     expect(CONSENSUS_DECIDED).not.toContain("/entry/snapshot_hash");

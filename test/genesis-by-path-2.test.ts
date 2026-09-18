@@ -47,7 +47,11 @@ import { describe, expect, it } from "vitest";
 
 import { confirmationFingerprint } from "../src/confirm.js";
 import { CORE_KEYS, type Core } from "../src/core.js";
-import { deriveEntry, communityValidationsFor } from "../src/derive.js";
+import {
+  communityLineDisposition,
+  communityValidationsFor,
+  deriveEntry,
+} from "../src/derive.js";
 import { base64Encode } from "../src/encoding.js";
 import type { Event, EventType } from "../src/events.js";
 import { snapshotHash } from "../src/normalize.js";
@@ -57,11 +61,16 @@ import {
   BINDING_RUNGS,
   COMMUNITY_MIN_ACCOUNTS,
   COMMUNITY_MIN_COMMUNITIES,
+  CONFIRMATION_VENUES,
   countingCommunities,
   PERIMETER_ACCOUNTS,
   PERIMETER_WORD,
 } from "../src/policy.js";
-import { ATTESTATION_VERSION, communityOperatorId } from "../src/registry.js";
+import {
+  ATTESTATION_VERSION,
+  communityOperatorId,
+  isPerimeterOperator,
+} from "../src/registry.js";
 import { standingAt } from "../src/standing.js";
 import { verifyOffline, type LogBundle } from "../src/verify.js";
 
@@ -103,14 +112,18 @@ class Log {
     type: T,
     entryId: string | null,
     payload: Event<T>["payload"],
+    /** The sealed instant, where a case is about one; the clock otherwise. */
+    at?: string,
   ): void {
     const seq = this.next;
     this.next += 1;
     this.events.push({
       seq,
-      at: new Date(
-        Date.parse("2026-09-06T00:00:00Z") + seq * 60_000,
-      ).toISOString(),
+      at:
+        at ??
+        new Date(
+          Date.parse("2026-09-06T00:00:00Z") + seq * 60_000,
+        ).toISOString(),
       type,
       entry_id: entryId,
       payload,
@@ -225,6 +238,8 @@ function hashOf(prefix: string, name: string): string {
 
 interface LineOptions {
   readonly postedAt?: string;
+  /** The instant the log sealed the line, where a case is about one. */
+  readonly at?: string;
   readonly bindingKind?: "registry" | "profile" | "account";
   readonly perimeter?: string | null;
   readonly decision?: "approve" | "reject";
@@ -255,7 +270,7 @@ function validate(log: Log, operator: string, options: LineOptions = {}): void {
     comment_id: log.nextComment(),
     line: 0,
     posted_at: options.postedAt ?? "2026-09-06T10:00:00.000Z",
-  } as never);
+  } as never, options.at);
 }
 
 function derived(log: Log) {
@@ -536,6 +551,37 @@ describe("nomankind's own accounts", () => {
 // The upgrade
 // ---------------------------------------------------------------------------
 
+/**
+ * The upgrade, with the proof that makes it mean anything (the review of #105).
+ *
+ * An event carrying no proof is the record's own word that a key exists
+ * somewhere, and it lifts no rung on either side of the log — which the case
+ * below this one pins.
+ */
+function upgrade(log: Log, operator: string, withProof = true): void {
+  const handle = operator.split(":")[1]!;
+  log.add("community_operator_bound", null, {
+    operator,
+    agent: `1F916:agent-${handle}-key`,
+    binding: {
+      kind: "profile",
+      url: `https://example.test/${handle}`,
+      capture_hash: hashOf("k", handle),
+      public_key: `key-${handle}`,
+    },
+    capture_hash: hashOf("k", handle),
+    fingerprint: `sha256:${"e".repeat(64)}`,
+    proof: withProof
+      ? {
+          kind: "profile",
+          public_key: `key-${handle}`,
+          signature: `sig-${handle}`,
+          capture_hash: hashOf("k", handle),
+        }
+      : null,
+  } as never);
+}
+
 describe("an account that publishes a key", () => {
   it("keeps its id, its standing and its marks, and stands on the key", () => {
     const log = world();
@@ -543,18 +589,7 @@ describe("an account that publishes a key", () => {
     validate(log, first);
 
     // The upgrade: the same operator, a stronger binding, nothing else moved.
-    log.add("community_operator_bound", null, {
-      operator: first,
-      agent: "1F916:agent-voice-a-key",
-      binding: {
-        kind: "profile",
-        url: "https://example.test/voice-a",
-        capture_hash: hashOf("k", "voice-a"),
-        public_key: "key-voice-a",
-      },
-      capture_hash: hashOf("k", "voice-a"),
-      fingerprint: `sha256:${"e".repeat(64)}`,
-    } as never);
+    upgrade(log, first);
 
     validate(log, registerAccount(log, "voice-b", VENUE_A));
     validate(log, registerAccount(log, "voice-c", VENUE_B));
@@ -580,21 +615,7 @@ describe("an account that publishes a key", () => {
       registerAccount(log, "voice-b", VENUE_A),
       registerAccount(log, "voice-c", VENUE_B),
     ];
-    for (const operator of ids) {
-      const handle = operator.split(":")[1]!;
-      log.add("community_operator_bound", null, {
-        operator,
-        agent: `1F916:agent-${handle}-key`,
-        binding: {
-          kind: "profile",
-          url: `https://example.test/${handle}`,
-          capture_hash: hashOf("k", handle),
-          public_key: `key-${handle}`,
-        },
-        capture_hash: hashOf("k", handle),
-        fingerprint: `sha256:${"e".repeat(64)}`,
-      } as never);
-    }
+    for (const operator of ids) upgrade(log, operator);
     for (const operator of ids) {
       validate(log, operator, { bindingKind: "profile" });
     }
@@ -602,6 +623,25 @@ describe("an account that publishes a key", () => {
     const { entry, sidecar } = derived(log);
     expect(entry["status"]).toBe("verified");
     expect(sidecar.verification_binding).toBe("key");
+  });
+
+  it("lifts nothing when the upgrade carries no proof", () => {
+    // A rung is a sentence about what a reader can recheck offline. An event
+    // that says "there is a key now" and hands over nothing to check it against
+    // is the one thing a binding exists to replace, so it moves no rung — here,
+    // and in the verifier (the review of #105).
+    const log = world();
+    const ids = [
+      registerAccount(log, "voice-a", VENUE_A),
+      registerAccount(log, "voice-b", VENUE_A),
+      registerAccount(log, "voice-c", VENUE_B),
+    ];
+    for (const operator of ids) upgrade(log, operator, false);
+    for (const operator of ids) validate(log, operator);
+
+    const { entry, sidecar } = derived(log);
+    expect(entry["status"]).toBe("verified");
+    expect(sidecar.verification_binding).toBe("account");
   });
 });
 
@@ -619,10 +659,31 @@ describe("min_binding", () => {
 // The offline recheck
 // ---------------------------------------------------------------------------
 
+
+/**
+ * What the verifier says about an account-bound line.
+ *
+ * Two kinds of check, and the difference between them is the review of #105.
+ *
+ * The captures are a fact about the LINE: the rung carries no signature, so the
+ * two archived pages are the whole of what it proves, and a binding nobody can
+ * recheck is a fault whatever the line went on to do. Those are checked on
+ * every account-bound line in the bundle.
+ *
+ * The scope — the tier, the age of the account, the sunset — are facts about
+ * COUNTING, and the verifier asks them of exactly the lines the bundle's own
+ * fold counted, which is what derivation does. A line the fold left uncounted
+ * moved nothing, and refusing a clone for holding a comment that changed
+ * nothing is not a fault a clone can have. So the cases below pin both halves:
+ * the captures refused four ways, and the scope answered with silence and an
+ * uncounted line.
+ */
 describe("the verifier's account-binding checks", () => {
   const handle = "morty-synctzn";
   const venue = VENUE_A;
   const operator = communityOperatorId(venue, handle);
+  const origin = CONFIRMATION_VENUES.find((each) => each.venue === venue)!
+    .origin;
   const line = {
     entry_id: ENTRY_ID,
     verdict: "approve" as const,
@@ -630,15 +691,33 @@ describe("the verifier's account-binding checks", () => {
     attestation_version: ATTESTATION_VERSION,
   };
 
-  /** Two archived pages, under the hashes their own bytes produce. */
-  async function captured(): Promise<{
-    comment: string;
-    profile: string;
-    captures: Record<string, { content_type: string | null; body_base64: string }>;
-  }> {
+  interface Pages {
+    readonly comment: string;
+    readonly profile: string;
+    readonly captures: Record<
+      string,
+      { content_type: string | null; body_base64: string }
+    >;
+  }
+
+  /**
+   * Two archived pages under the hashes their own bytes produce: the comment
+   * naming the entry it was read about, and the profile naming the account.
+   *
+   * The two tokens the verifier looks for, and not the canonical line itself —
+   * a capture is whatever the venue's public door answered, and on two of the
+   * three venues that is a JSON rendering rather than the raw text, so the
+   * line's exact bytes may be escaped or split across fields while an opaque id
+   * survives every rendering of the same content.
+   */
+  async function captured(over: Partial<Record<"comment" | "profile", string>> = {}): Promise<Pages> {
     const pages: Record<string, string> = {
-      comment: "nomankind-confirm-v1 approve hash=...",
-      profile: `{"handle":"${handle}","created_at":"${OLD_ENOUGH}"}`,
+      comment:
+        over.comment ??
+        `{"body":"nomankind-confirm-v1 approve ${ENTRY_ID} hash=${SNAPSHOT_HASH}"}`,
+      profile:
+        over.profile ??
+        `{"handle":"${handle}","created_at":"${OLD_ENOUGH}"}`,
     };
     const captures: Record<
       string,
@@ -662,22 +741,38 @@ describe("the verifier's account-binding checks", () => {
     };
   }
 
+  interface BundleOptions {
+    readonly core?: Core;
+    readonly createdAt?: string;
+    readonly postedAt?: string;
+    /** A hash the proof names that the bundle holds no bytes for. */
+    readonly commentHash?: string;
+    readonly pages?: Partial<Record<"comment" | "profile", string>>;
+    readonly commentUrl?: string;
+    readonly profileUrl?: string;
+    readonly operatorAs?: string;
+    /**
+     * More lines beside the one under test, so it is a counted decision.
+     *
+     * `accounts` is two more of the same rung, which is the ordinary genesis
+     * consensus. `keys` is three key-bound ones, which is how a consensus can
+     * close after the sunset at all: the account seat is dropped from the
+     * count and the key seats carry it, and the dropped seat is still one of
+     * the decisions the entry was folded from.
+     */
+    readonly counted?: "accounts" | "keys";
+  }
+
   /** A log with one account-bound validation, and the bundle around it. */
-  async function bundleFor(
-    options: {
-      core?: Core;
-      createdAt?: string;
-      postedAt?: string;
-      commentHash?: string;
-      perimeterAs?: string;
-    } = {},
-  ): Promise<{
+  async function bundleFor(options: BundleOptions = {}): Promise<{
     entry: Record<string, unknown>;
     bundle: LogBundle;
+    /** The position of the line under test, so its own diffs can be read. */
+    seq: number;
   }> {
-    const pages = await captured();
+    const pages = await captured(options.pages);
     const log = world(options.core ?? coreFrom());
-    const id = options.perimeterAs ?? operator;
+    const id = options.operatorAs ?? operator;
     const [ownVenue, ownHandle] = id.split(":") as [string, string];
     log.add("community_operator_registered", null, {
       operator: id,
@@ -688,9 +783,9 @@ describe("the verifier's account-binding checks", () => {
         kind: "account",
         venue: ownVenue,
         handle: ownHandle,
-        comment_url: "https://example.test/comment",
-        comment_capture_hash: options.commentHash ?? pages.comment,
-        profile_url: "https://example.test/profile",
+        comment_url: options.commentUrl ?? `${origin}/post/1#comment-701`,
+        comment_capture_hash: pages.comment,
+        profile_url: options.profileUrl ?? `${origin}/users/${ownHandle}`,
         profile_capture_hash: pages.profile,
         account_created_at: options.createdAt ?? OLD_ENOUGH,
       },
@@ -720,11 +815,34 @@ describe("the verifier's account-binding checks", () => {
       line: 0,
       posted_at: options.postedAt ?? "2026-09-06T10:00:00.000Z",
     } as never);
+    const seq = log.events[log.events.length - 1]!.seq;
+
+    if (options.counted === "accounts") {
+      validate(log, registerAccount(log, "voice-b", VENUE_A), {
+        postedAt: options.postedAt,
+      });
+      validate(log, registerAccount(log, "voice-c", VENUE_B), {
+        postedAt: options.postedAt,
+      });
+    }
+    if (options.counted === "keys") {
+      for (const [name, board] of [
+        ["voice-b", VENUE_A],
+        ["voice-c", VENUE_B],
+        ["voice-d", VENUE_B],
+      ] as const) {
+        validate(log, registerKey(log, name, board), {
+          postedAt: options.postedAt,
+          bindingKind: "profile",
+        });
+      }
+    }
 
     const entry = deriveEntry(log.events, ENTRY_ID, { now: NOW })
       .entry as unknown as Record<string, unknown>;
     return {
       entry,
+      seq,
       bundle: {
         as_of: NOW,
         events: log.events,
@@ -735,24 +853,36 @@ describe("the verifier's account-binding checks", () => {
     };
   }
 
+  /**
+   * What the verifier says about the ONE line under test.
+   *
+   * The lines a case adds to make that one counted are fixtures and not the
+   * subject: their own bindings are hashes with no bytes behind them, so the
+   * verifier says the same thing about each of them, every time, and reading
+   * those answers back would be reading the fixture rather than the rule.
+   */
   async function bindingDiffs(built: {
     entry: Record<string, unknown>;
     bundle: LogBundle;
+    seq: number;
   }): Promise<string[]> {
     const report = await verifyOffline(built.entry, built.bundle);
     return report.diffs
-      .filter((diff) => diff.check === "community_binding")
+      .filter(
+        (diff) =>
+          diff.check === "community_binding" &&
+          diff.field === `/events/${built.seq}`,
+      )
       .map((diff) => diff.reason);
   }
 
-  it("says nothing about a line whose two captures are in the bundle", async () => {
+  // The captures: a fact about the line, checked on every one of them.
+
+  it("says nothing about a line whose two captures hold", async () => {
     expect(await bindingDiffs(await bundleFor())).toEqual([]);
   });
 
-  it("refuses a doctored comment capture hash", async () => {
-    // A hash the bundle holds no bytes for. The rung carries no signature, so
-    // the captures are the whole of what it proves, and a capture nobody can
-    // produce proves nothing.
+  it("refuses a comment capture the bundle holds no bytes for", async () => {
     const built = await bundleFor({
       commentHash: `sha256:${"1".repeat(64)}`,
     });
@@ -761,29 +891,266 @@ describe("the verifier's account-binding checks", () => {
     );
   });
 
-  it("refuses a line on an entry the rung may not speak to", async () => {
+  it("refuses a comment capture that is some other page of the board", async () => {
+    // Archived, hashing back to its own bytes, and about another entry: the
+    // hash proves bytes were kept, and only the bytes prove which line.
     const built = await bundleFor({
-      core: coreFrom({ evidence_tier: "observed" }),
+      pages: { comment: '{"body":"nomankind-confirm-v1 approve nmk_somewhere"}' },
     });
     expect(await bindingDiffs(built)).toContain(
-      "account_binding_out_of_scope",
+      "account_binding_proof_invalid",
     );
   });
 
-  it("refuses an account younger than the entry", async () => {
-    const built = await bundleFor({ createdAt: "2026-09-06T00:00:00.000Z" });
-    expect(await bindingDiffs(built)).toContain("account_binding_too_new");
+  it("refuses a profile capture that is some other account's", async () => {
+    const built = await bundleFor({
+      pages: { profile: '{"handle":"somebody-else","created_at":"2020-01-01T00:00:00Z"}' },
+    });
+    expect(await bindingDiffs(built)).toContain(
+      "account_binding_proof_invalid",
+    );
   });
 
-  it("refuses a counted line posted at or after the sunset", async () => {
-    const built = await bundleFor({ postedAt: ACCOUNT_BINDING_SUNSET });
+  it("refuses a page on a site the venue does not answer on", async () => {
+    // Parsed and not prefix-matched: `https://1f916.ai.evil.test` starts with
+    // no origin it is not on.
+    const built = await bundleFor({
+      profileUrl: `${origin}.evil.test/users/${handle}`,
+    });
+    expect(await bindingDiffs(built)).toContain(
+      "account_binding_proof_invalid",
+    );
+  });
+
+  // The scope: a fact about counting, asked of the lines the fold counted.
+
+  it("says nothing about an out-of-scope line, which counted toward nothing", async () => {
+    // An observed entry is not one the rung may speak to, so the fold counts
+    // the line toward nothing — and a clone holding a comment that changed
+    // nothing is not a clone somebody edited.
+    const built = await bundleFor({
+      core: coreFrom({ evidence_tier: "observed" }),
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toEqual([]);
+    expect(built.entry["status"]).toBe("draft");
+  });
+
+  it("says nothing about a too-new account, which counted toward nothing", async () => {
+    const built = await bundleFor({
+      createdAt: "2026-09-06T00:00:00.000Z",
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toEqual([]);
+    expect(built.entry["status"]).toBe("draft");
+  });
+
+  it("refuses a counted account line in a consensus that closed after the sunset", async () => {
+    // The sunset is read at the promoting decision's instant, in the verifier
+    // as in the fold (the review of #105): a line posted in 2026 that is among
+    // the decisions of a consensus closing in 2032 stood on a rung that had
+    // expired by the time the consensus formed.
+    const after = new Date(Date.parse(ACCOUNT_BINDING_SUNSET) + 60_000)
+      .toISOString();
+    const built = await bundleFor({ postedAt: after, counted: "keys" });
     expect(await bindingDiffs(built)).toContain(
       "account_binding_after_sunset",
     );
   });
 
-  it("refuses one of nomankind's own accounts sealed as anybody else's", async () => {
-    const built = await bundleFor({ perimeterAs: PERIMETER_ACCOUNTS[0]! });
-    expect(await bindingDiffs(built)).toContain("perimeter_line_counted");
+  it("says nothing about a perimeter line the fold refused to count", async () => {
+    // Every perimeter line sealed before D-142 carries no perimeter word,
+    // because the field did not exist; the fold counts none of them, and a
+    // check on the word alone failed every published mirror (the review of
+    // #105). What names the fault is the counting, and the fold never counts
+    // one — so the refusal is the invariant, stated, and silent here.
+    const built = await bundleFor({ operatorAs: PERIMETER_ACCOUNTS[0]! });
+    expect(await bindingDiffs(built)).not.toContain("perimeter_line_counted");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The review of #105
+// ---------------------------------------------------------------------------
+
+describe("the id an account speaks under", () => {
+  it("is trimmed and case-folded, so one account is never two operators", () => {
+    // An id is a key this record groups by — the Sybil floor counts distinct
+    // ones, the cap counts them per board — and two spellings of one account
+    // would be two seats for one party.
+    expect(communityOperatorId("GitHub", " Nomankind-AI ")).toBe(
+      "github:nomankind-ai",
+    );
+    expect(communityOperatorId(VENUE_A, "Voice-A")).toBe(
+      communityOperatorId(VENUE_A, "voice-a"),
+    );
+  });
+
+  it("holds the perimeter against a differently spelled id", () => {
+    // The hole this closes: `Nomankind-AI` walking past `PERIMETER_ACCOUNTS`
+    // and being counted into a consensus.
+    const own = PERIMETER_ACCOUNTS[0]!;
+    expect(isPerimeterOperator(own)).toBe(true);
+    expect(isPerimeterOperator(own.toUpperCase())).toBe(true);
+    expect(isPerimeterOperator(` ${own} `)).toBe(true);
+    expect(isPerimeterOperator(`${own}-not`)).toBe(false);
+  });
+
+  it("counts a differently spelled perimeter line toward nothing", () => {
+    const own = PERIMETER_ACCOUNTS[0]!;
+    const [venue, handle] = own.split(":") as [string, string];
+    const log = world();
+    // Registered under the shouted spelling, which mints the folded id.
+    registerKey(log, handle.toUpperCase(), venue.toUpperCase());
+    validate(log, own, { perimeter: null });
+    validate(log, registerAccount(log, "voice-a", VENUE_A));
+    validate(log, registerAccount(log, "voice-b", VENUE_A));
+
+    expect(derived(log).entry["status"]).toBe("draft");
+  });
+});
+
+describe("a decision that dates itself", () => {
+  it("is judged by the later of what it says and when it was sealed", () => {
+    // `signed_at` is the signer's own word and nothing checks it, so a key
+    // wanting one more account-bound consensus after the rung closed could
+    // simply date its approval to 2031. A decision cannot have been taken after
+    // it was sealed, so the sealed instant is the floor (the review of #105).
+    const beforeSunset = new Date(
+      Date.parse(ACCOUNT_BINDING_SUNSET) - 60_000,
+    ).toISOString();
+    const afterSunset = new Date(
+      Date.parse(ACCOUNT_BINDING_SUNSET) + 60_000,
+    ).toISOString();
+
+    const log = world();
+    validate(log, registerAccount(log, "voice-a", VENUE_A), {
+      postedAt: beforeSunset,
+      at: afterSunset,
+    });
+    validate(log, registerAccount(log, "voice-b", VENUE_A), {
+      postedAt: beforeSunset,
+      at: afterSunset,
+    });
+    validate(log, registerAccount(log, "voice-c", VENUE_B), {
+      postedAt: beforeSunset,
+      at: afterSunset,
+    });
+
+    expect(derived(log).entry["status"]).toBe("draft");
+  });
+});
+
+describe("the per-community cap", () => {
+  it("counts the seats that still count and not the ones the sunset dropped", () => {
+    // One board's cap is two. An account seat the sunset has dropped occupies
+    // nothing, so the board's second seat is free — and a cap that went on
+    // holding its place would keep it empty forever on a rule that had already
+    // expired (the review of #105).
+    const after = new Date(
+      Date.parse(ACCOUNT_BINDING_SUNSET) + 60_000,
+    ).toISOString();
+    const log = world();
+    validate(log, registerAccount(log, "voice-a", VENUE_A), { postedAt: after });
+    validate(log, registerKey(log, "voice-b", VENUE_A), {
+      postedAt: after,
+      bindingKind: "profile",
+    });
+    validate(log, registerKey(log, "voice-c", VENUE_B), {
+      postedAt: after,
+      bindingKind: "profile",
+    });
+    validate(log, registerKey(log, "voice-d", VENUE_B), {
+      postedAt: after,
+      bindingKind: "profile",
+    });
+
+    const { entry, sidecar } = derived(log);
+    expect(entry["status"]).toBe("verified");
+    // Three key seats carried it, the account seat carried nothing, and the
+    // floor a reader filters on says so.
+    expect(sidecar.verification_binding).toBe("key");
+  });
+});
+
+describe("what the door seals for an account-bound line", () => {
+  const line = {
+    line: 0,
+    entry_id: ENTRY_ID,
+    verdict: "approve" as const,
+    check: { kind: "hash" as const, value: SNAPSHOT_HASH },
+    attestation_version: ATTESTATION_VERSION,
+    signature: null,
+    reason: null,
+  };
+
+  function accountBinding(createdAt = OLD_ENOUGH) {
+    return {
+      kind: "account" as const,
+      venue: VENUE_A,
+      handle: "voice-a",
+      comment_url: "https://example.test/voice-a/comment",
+      comment_capture_hash: hashOf("c", "voice-a"),
+      profile_url: "https://example.test/voice-a",
+      profile_capture_hash: hashOf("p", "voice-a"),
+      account_created_at: createdAt,
+    };
+  }
+
+  function disposition(core: Core, createdAt = OLD_ENOUGH) {
+    const log = world(core);
+    return communityLineDisposition(
+      log.events,
+      ENTRY_ID,
+      line,
+      "voice-a",
+      VENUE_A,
+      "1F916:agent-voice-a",
+      NOW,
+      accountBinding(createdAt),
+    );
+  }
+
+  it("seals a validation where the rung may speak", () => {
+    expect(disposition(coreFrom())).toEqual({ kind: "validation" });
+  });
+
+  it("falls back to a confirmation on an entry the rung may not speak to", () => {
+    // The door and the fold ask one rule (`accountScopeRefusal`), so a line the
+    // door seals as a validation is a line the fold counts — which is the
+    // three-way disagreement the review found between sweep, derive and
+    // verifier.
+    expect(disposition(coreFrom({ evidence_tier: "observed" }))).toEqual({
+      kind: "confirmation",
+      reason: "account_out_of_scope",
+    });
+  });
+
+  it("falls back to a confirmation for an account younger than the entry", () => {
+    expect(disposition(coreFrom(), "2026-09-06T00:00:00.000Z")).toEqual({
+      kind: "confirmation",
+      reason: "account_too_new",
+    });
+  });
+
+  it("says nothing about the rung for a key-bound line", () => {
+    const log = world(coreFrom({ evidence_tier: "observed" }));
+    expect(
+      communityLineDisposition(
+        log.events,
+        ENTRY_ID,
+        line,
+        "voice-a",
+        VENUE_A,
+        "1F916:agent-voice-a",
+        NOW,
+        {
+          kind: "profile",
+          url: "https://example.test/voice-a",
+          capture_hash: hashOf("k", "voice-a"),
+          public_key: "key-voice-a",
+        },
+      ),
+    ).toEqual({ kind: "validation" });
   });
 });

@@ -52,12 +52,11 @@ import {
   registeredOperatorsAt,
   trustedOperatorsAt,
 } from "./derive.js";
-import { isExcludedParty } from "./registry.js";
+import { isExcludedParty, isPerimeterOperator } from "./registry.js";
 import {
   DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
   REVALIDATION_REQUEST_STAKE_STANDING,
-  PERIMETER_ACCOUNTS,
   STANDING_ASSIGNMENT_MISSED,
   STANDING_ATTESTATION_SCORED,
   STANDING_DISPUTE_UPHELD,
@@ -479,7 +478,7 @@ export function standingAfter(
       // thing standing is not for. Which rung the line stood on changes
       // nothing else here: an account-bound operator did the same work a
       // key-bound one did, and Section 9 pays the work.
-      if (PERIMETER_ACCOUNTS.includes(operator)) continue;
+      if (isPerimeterOperator(operator)) continue;
       const validator = of(operator);
       validator.earned += STANDING_VALIDATION_VOLUNTEERED;
       validator.validations_volunteered += 1;

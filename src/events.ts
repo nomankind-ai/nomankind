@@ -700,6 +700,23 @@ export type EventPayloads = {
     capture_hash: string | null;
     /** The fingerprint of the line the upgrade was read from. */
     fingerprint: string;
+    /**
+     * What a reader rechecks the upgrade against, offline, alone.
+     *
+     * The same shape a `community_validation` carries and verified by the same
+     * code: the registry proof for a registry binding, the agent's own
+     * signature over the line for a profile one. Without it an upgrade is the
+     * record's word that a key exists somewhere — which is exactly what a
+     * binding is for replacing, and which no reader could falsify. So an
+     * upgrade whose proof is null, or whose proof is of another kind than the
+     * binding it carries, lifts nothing: not in the fold (src/derive.ts,
+     * `communityOperatorsAt`) and not in the verifier (src/verify.ts,
+     * `checkCommunityBindings`).
+     *
+     * Null is therefore a shape and not a default. It is what the field reads
+     * as on an event this build did not seal, and such an event moves no rung.
+     */
+    proof: CommunityBindingProof | null;
   };
   /**
    * One senior operator's vote on one open question (decision D-130 item 4).
