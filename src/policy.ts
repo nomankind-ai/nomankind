@@ -1673,6 +1673,23 @@ export interface ConfirmationVenue {
    * both venues, so the hourly read is one request per thread.
    */
   readonly comments_door: string;
+  /**
+   * The most characters one post at this venue may carry (decision D-142).
+   *
+   * The batch names every entry that is waiting, and the ask is now several
+   * lines an entry — the quoted claim, the cited page, and the two lines a
+   * replier pastes back — so a full batch is longer than a board will take. The
+   * composer fits as many whole entries as this allows and says how many wait,
+   * because a post cut off in the middle would cut a confirmation line in half,
+   * and half a line is a line nobody can paste.
+   *
+   * GitHub publishes its own number and that is what is here: 65536 characters
+   * for an issue comment body. Neither the founding registry nor The Colony
+   * publishes one, so theirs is the maintainer's own conservative bound rather
+   * than the board's — a batch that stays under it is a batch no server has to
+   * refuse. It moves only by a later decision, or by a published limit.
+   */
+  readonly post_max_chars: number;
 }
 
 export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
@@ -1695,6 +1712,8 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     // reads it through `BoardAdapter.record`.
     profile_door: null,
     comments_door: "/api/post/{thread}",
+    // No published limit; the maintainer's own bound (above).
+    post_max_chars: 10000,
   }),
   Object.freeze({
     venue: "colony",
@@ -1717,6 +1736,8 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     binding: "profile",
     profile_door: "/api/v1/users/{handle}",
     comments_door: "/api/v1/posts/{thread}/context",
+    // No published limit; the maintainer's own bound (above).
+    post_max_chars: 10000,
   }),
   Object.freeze({
     venue: "github",
@@ -1736,6 +1757,8 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     binding: "profile",
     profile_door: "/users/{handle}",
     comments_door: "/repos/{repository}/issues/{thread}/comments?per_page={limit}",
+    // GitHub's own published maximum for an issue comment body.
+    post_max_chars: 65536,
   }),
 ]);
 
@@ -1817,6 +1840,32 @@ export const BOARD_READ_MAX_BYTES = 2097152;
  * stopped and the next run carries on from there.
  */
 export const CONFIRMATIONS_PER_RUN = 20;
+
+/**
+ * The lowest rung a reply can count at, and the day it stops counting
+ * (decision D-142).
+ *
+ * A reply with no key on it is the board's word that this account said this,
+ * and nothing more: the record seals a capture of the comment and of the
+ * author's own profile, and counts the line only for a stated fact, only from
+ * an account older than the entry it answers, and only until the day below.
+ * The entry discloses that it rested on one. A key on the profile, or a seal of
+ * the line's fingerprint at the founding registry, is the upgrade to a binding
+ * anybody can recheck years later without asking a platform anything.
+ *
+ * The sunset is the point of the rung: an account's age is evidence while
+ * accounts are cheap to make and hard to backdate, and it stops being evidence
+ * the moment somebody sells a decade-old one. So it is a dated promise rather
+ * than a standing rule, and the day is named here where every other number the
+ * maintainer chose is named. It moves only by a later decision.
+ *
+ * Not in the `POLICY` object below yet, which collects the numbers the /policy
+ * page publishes: these two are a word and a date, and what publishes them
+ * today is the daily ask, which says the whole rung in the post itself. The
+ * half of D-142 that seals a reply at this rung adds them there.
+ */
+export const ACCOUNT_BOUND_RUNG = "account-bound";
+export const ACCOUNT_BOUND_SUNSET = "2032-01-01";
 
 /**
  * How many entries one batch post names, when the command line does not say.

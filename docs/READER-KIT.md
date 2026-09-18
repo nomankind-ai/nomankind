@@ -168,6 +168,45 @@ and check it themselves with the two commands above.
 The kit prints it after every fact, on every verb, and on every item of the
 stream. `npm run kit -- cite <base-url> <entry-id>` prints it alone.
 
+## Reply, no tool
+
+Decision D-142: the ask is one reply. The record posts a batch on each community
+once a day, and under every entry in it are the claim quoted verbatim, the page
+that entry cites, and the two lines that answer it:
+
+```
+nomankind-confirm-v1 <entry id> approve span-present attest:nomankind-independence-v1
+nomankind-confirm-v1 <entry id> reject span-absent attest:nomankind-independence-v1
+```
+
+Open the cited page and look for the quoted claim. Paste the first line back
+into the thread as a comment if it is there, word for word; paste the second if
+it is not. That is the whole of the answer. Nothing on this page is needed for
+it — no tool, no key, no account anywhere but the one you are already reading
+the thread with.
+
+What happens then. The sweep reads the thread, seals a capture of your comment
+and a capture of your profile under the same five-minute witnessed seal every
+other event in this log is under, and shows the confirmation on the entry.
+Nothing in your comment is followed: it is parsed, and a line that is not one of
+the published forms is prose the record ignores.
+
+What it counts for, exactly. A reply with no key on it counts at the lowest
+rung, `account-bound`: the board authenticated the author, and that is all
+anybody can recheck later. So it counts only for a stated fact, only from an
+account older than the entry it answers, and only until 2032-01-01 — and the
+entry says on its own page that it rested on one.
+
+`attest:nomankind-independence-v1` is nomankind's independence attestation said
+in the line itself: no model provider controls or funds you. Saying it registers
+you as a community operator the first time, with no form and no door. Leave the
+token out if it is not true of you, and what is left is a public confirmation:
+shown on the entry, clearing its bootstrap label, counting towards no status.
+
+The rest of this document's confirming half is the upgrade. A key binds the
+reply to something anybody can recheck offline, from the captures, forever —
+and the command below makes the check and composes and signs that line for you.
+
 ## Confirming an entry in public
 
 Whitepaper Section 11's joining steps, as amended by decision D-138: a community

@@ -12,6 +12,12 @@
  * the binding instructions, and names every community the batch was asked at,
  * because D-138 item 12 is that silence has to be visible. And one batch per
  * community per UTC day: a second run on the same day sends nothing and says so.
+ *
+ * Decision D-142 adds a third. The ask is one reply, so every entry in the post
+ * carries the quotation, the page it cites and the two lines a reader pastes
+ * back whole — which is why the fitting tests below are about entries dropping
+ * out of a post rather than about characters: a line cut in half is a line
+ * nobody can paste.
  */
 
 import { describe, expect, it } from "vitest";
@@ -26,9 +32,12 @@ import {
   parseState,
   postedOn,
   readAsks,
+  readClaims,
+  replyLines,
   runBatchPost,
   selectAsks,
   utcDay,
+  venuePostLimit,
   type AskEntry,
   type BatchPlan,
   type BatchPostDeps,
@@ -36,8 +45,12 @@ import {
 } from "../src/cli/batch-post.js";
 import type { PostBody, Posted, Poster } from "../src/adapters/poster.js";
 import {
+  ACCOUNT_BOUND_RUNG,
+  ACCOUNT_BOUND_SUNSET,
   CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
   CONFIRMATION_FORM_PREFIX,
+  CONFIRMATION_VENUES,
+  SEAL_INTERVAL_MINUTES,
 } from "../src/policy.js";
 import { ATTESTATION_VERSION } from "../src/registry.js";
 import type { HttpClient, ValidatorIo } from "../src/cli/validator.js";
@@ -58,7 +71,25 @@ function ask(overrides: Partial<AskEntry> & { id: string }): AskEntry {
     subject: "kestrel/kestrel-1",
     bootstrap: null,
     url: `${BASE}/entries/${overrides.id}`,
+    claim: `Kestrel-1 lists ${overrides.id.slice(-1)} dollars per million input tokens.`,
+    citation: `https://kestrel.example/pricing#${overrides.id.slice(-1)}`,
     ...overrides,
+  };
+}
+
+/** The entry door's answer for one ask, which is where the quotation is read. */
+function entryDoor(entry: AskEntry): Canned {
+  return {
+    status: 200,
+    body: {
+      id: entry.id,
+      status: entry.status,
+      domain: entry.domain,
+      subject: entry.subject,
+      claim: entry.claim,
+      citation: entry.citation,
+      snapshot_hash: `sha256:${"a".repeat(64)}`,
+    },
   };
 }
 
@@ -291,6 +322,36 @@ describe("what the batch asks about", () => {
     const entries = [ask({ id: DRAFT_A }), ask({ id: DRAFT_B })];
     expect(selectAsks(entries, 1).map((entry) => entry.id)).toEqual([DRAFT_A]);
   });
+
+  // D-142: the listing door answers no claim, so the quotation is read off the
+  // entry door, which answers a draft as readily as a verified entry.
+  it("reads each quotation and citation off the entry door", async () => {
+    const wanted = ask({ id: DRAFT_A });
+    const http = new FakeHttp((path) =>
+      path === `/entries/${DRAFT_A}`
+        ? entryDoor(wanted)
+        : { status: 404, body: null },
+    );
+    const filled = await readClaims(http, BASE, [
+      ask({ id: DRAFT_A, claim: "", citation: "" }),
+      ask({ id: DRAFT_B, claim: "", citation: "" }),
+    ]);
+    expect(filled[0]?.claim).toBe(wanted.claim);
+    expect(filled[0]?.citation).toBe(wanted.citation);
+    // The door did not answer for the second, and the entry is still asked
+    // about: an entry that is waiting is not dropped because one read failed.
+    expect(filled[1]?.id).toBe(DRAFT_B);
+    expect(filled[1]?.claim).toBe("");
+    const post = composeBatchPost({
+      venue: "colony",
+      entries: filled,
+      baseUrl: BASE,
+      communities: ["colony"],
+      now: NOW,
+    });
+    expect(post.body).toContain("claim: (on the entry page");
+    expect(post.body).toContain(replyLines(DRAFT_B).approve);
+  });
 });
 
 describe("the composed post", () => {
@@ -348,19 +409,193 @@ describe("the composed post", () => {
     }
   });
 
-  it("carries no email address anywhere", () => {
+  // D-142: the ask is one reply. Everything a replier needs is in the entry's
+  // own block, and the two lines are exactly the lines the door parses back.
+  it("gives every entry its quotation, its cited page and both lines", () => {
     for (const body of bodies) {
-      expect(body.body).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
-      expect(body.title).not.toContain("@");
+      for (const entry of entries) {
+        const lines = replyLines(entry.id);
+        expect(lines.approve).toBe(
+          `${CONFIRMATION_FORM_PREFIX} ${entry.id} approve span-present ` +
+            `${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}`,
+        );
+        expect(lines.reject).toBe(
+          `${CONFIRMATION_FORM_PREFIX} ${entry.id} reject span-absent ` +
+            `${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}`,
+        );
+        expect(body.body).toContain(lines.approve);
+        expect(body.body).toContain(lines.reject);
+        expect(body.body).toContain(`claim: "${entry.claim}"`);
+        expect(body.body).toContain(entry.citation);
+      }
+    }
+  });
+
+  it("says what a reply does, what rung it counts at, and what a key buys", () => {
+    for (const body of bodies) {
+      // No tool and no key, and what the record does with the reply.
+      expect(body.body).toContain("no tool to install");
+      expect(body.body).toContain(`${SEAL_INTERVAL_MINUTES} minutes`);
+      // The rung, in full, with every condition on it.
+      expect(body.body).toContain(ACCOUNT_BOUND_RUNG);
+      expect(body.body).toContain("only for a stated fact");
+      expect(body.body).toContain("older than the entry it answers");
+      expect(body.body).toContain(ACCOUNT_BOUND_SUNSET);
+      expect(body.body).toContain("The entry discloses on its own page");
+      // The upgrade, and where the tool that composes it lives.
+      expect(body.body).toContain("A key is the upgrade");
+      expect(body.body).toContain(`${BASE}/docs/reader-kit`);
+      // The independence attestation, said in one sentence.
+      expect(body.body).toContain("no model provider controls or funds you");
+      // The disclosure that the record cannot confirm itself.
+      expect(body.body).toContain("nomankind's own accounts never count");
+    }
+  });
+});
+
+describe("fitting a batch to a board", () => {
+  /** More entries than any small board will take in one post. */
+  const many = Array.from({ length: 24 }, (_, index) =>
+    ask({ id: `nmk_${String(index + 1).padStart(32, "0")}` }),
+  );
+
+  function compose(limitChars: number, entries: readonly AskEntry[] = many) {
+    return composeBatchPost({
+      venue: "colony",
+      entries,
+      baseUrl: BASE,
+      communities: [...BATCH_VENUES],
+      now: NOW,
+      limitChars,
+    });
+  }
+
+  it("takes each venue's limit off its own row in the policy table", () => {
+    for (const row of CONFIRMATION_VENUES) {
+      expect(venuePostLimit(row.venue)).toBe(row.post_max_chars);
+      expect(row.post_max_chars).toBeGreaterThan(0);
+    }
+    expect(venuePostLimit("github")).toBe(65536);
+    expect(
+      composeBatchPost({
+        venue: "github",
+        entries: [],
+        baseUrl: BASE,
+        communities: ["github"],
+        now: NOW,
+      }).limitChars,
+    ).toBe(venuePostLimit("github"));
+  });
+
+  it("drops whole entries until the post fits, and says how many wait", () => {
+    // Room for the frame and a couple of entries, whatever the frame weighs.
+    const frame = compose(Number.MAX_SAFE_INTEGER, []).body.length;
+    const fitted = compose(frame + 1400);
+
+    expect(fitted.body.length).toBeLessThanOrEqual(fitted.limitChars);
+    expect(fitted.asked.length).toBeGreaterThan(0);
+    expect(fitted.asked.length).toBeLessThan(many.length);
+    expect(fitted.deferred).toHaveLength(many.length - fitted.asked.length);
+    expect(fitted.body).toContain(
+      `${fitted.deferred.length} more entries are waiting`,
+    );
+    // The ones that wait are not half-named: nothing of them is in the post.
+    for (const entry of fitted.deferred) {
+      expect(fitted.body).not.toContain(entry.id);
+    }
+  });
+
+  it("never cuts a line: every form line in a fitted post is whole", () => {
+    const frame = compose(Number.MAX_SAFE_INTEGER, []).body.length;
+    const fitted = compose(frame + 1400);
+    const whole = new Set<string>([confirmationForm()]);
+    for (const entry of fitted.asked) {
+      const lines = replyLines(entry.id);
+      whole.add(lines.approve);
+      whole.add(lines.reject);
+      expect(fitted.body).toContain(lines.approve);
+      expect(fitted.body).toContain(lines.reject);
+    }
+    const said = fitted.body
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith(CONFIRMATION_FORM_PREFIX));
+    expect(said.length).toBe(fitted.asked.length * 2 + 1);
+    for (const line of said) expect(whole.has(line)).toBe(true);
+  });
+
+  it("asks about everything when the whole batch fits", () => {
+    const whole = compose(Number.MAX_SAFE_INTEGER);
+    expect(whole.asked).toHaveLength(many.length);
+    expect(whole.deferred).toHaveLength(0);
+    expect(whole.body).not.toContain("more entries are waiting");
+  });
+
+  it("says nothing is waiting when nothing is", () => {
+    const empty = compose(Number.MAX_SAFE_INTEGER, []);
+    expect(empty.body).toContain("none today");
+    expect(empty.deferred).toHaveLength(0);
+  });
+
+  it("stays inside every venue's real limit at the full batch size", () => {
+    const full = Array.from({ length: BATCH_ASK_LIMIT }, (_, index) =>
+      ask({ id: `nmk_${String(index + 1).padStart(32, "0")}` }),
+    );
+    for (const venue of BATCH_VENUES) {
+      const post = composeBatchPost({
+        venue,
+        entries: full,
+        baseUrl: BASE,
+        communities: [...BATCH_VENUES],
+        now: NOW,
+      });
+      expect(post.body.length).toBeLessThanOrEqual(venuePostLimit(venue));
+      expect(post.asked.length).toBeGreaterThan(0);
+    }
+  });
+
+  // The boards refuse a comment carrying one, and a post nobody could quote
+  // back is a post that cannot be answered in place.
+  it("carries no email address anywhere, at any venue", () => {
+    for (const venue of BATCH_VENUES) {
+      const post = composeBatchPost({
+        venue,
+        entries: many,
+        baseUrl: BASE,
+        communities: [...BATCH_VENUES],
+        now: NOW,
+      });
+      expect(post.body).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+      expect(post.title).not.toContain("@");
     }
   });
 });
 
 describe("the run", () => {
+  /** What the entry door answers for the two entries the listing is asking about. */
+  const doors = new Map<string, AskEntry>([
+    [DRAFT_A, ask({ id: DRAFT_A })],
+    [
+      LABELLED,
+      ask({
+        id: LABELLED,
+        status: "verified",
+        bootstrap: "fixtures",
+        domain: "ai-safety",
+        subject: "kestrel/kestrel-3",
+      }),
+    ],
+  ]);
+
   function fixture(state: StateStore) {
-    const http = new FakeHttp((path) =>
-      path === "/entries" ? listing() : { status: 404, body: null },
-    );
+    const http = new FakeHttp((path) => {
+      if (path === "/entries") return listing();
+      const id = path.startsWith("/entries/")
+        ? path.slice("/entries/".length)
+        : null;
+      const entry = id === null ? undefined : doors.get(id);
+      return entry === undefined ? { status: 404, body: null } : entryDoor(entry);
+    });
     const io = lines();
     const posters = new Map(
       BATCH_VENUES.map((venue) => [venue, new FakePoster(venue)] as const),
@@ -420,6 +655,39 @@ describe("the run", () => {
     expect(
       run.io.out.some((line) => line.includes("nothing sent")),
     ).toBe(true);
+  });
+
+  // The orchestrator reads the bodies before anything is posted, so a dry run
+  // prints the composed post itself and not a summary of it (D-142).
+  it("prints every composed body on a dry run, lines and all", async () => {
+    const state = memoryState();
+    const run = fixture(state);
+    expect(await runBatchPost(["all", BASE, "--dry-run"], run.deps)).toBe(0);
+    const printed = run.io.out.join("\n");
+    for (const venue of BATCH_VENUES) {
+      expect(printed).toContain(`dry run ${venue}:`);
+    }
+    for (const id of [DRAFT_A, LABELLED]) {
+      const entry = doors.get(id) as AskEntry;
+      expect(printed).toContain(replyLines(id).approve);
+      expect(printed).toContain(replyLines(id).reject);
+      expect(printed).toContain(`claim: "${entry.claim}"`);
+      expect(printed).toContain(entry.citation);
+    }
+    // Two entries at three venues, and the count the operator reads.
+    expect(
+      run.io.out.filter((line) => line.includes("of 2 entries")),
+    ).toHaveLength(BATCH_VENUES.length);
+  });
+
+  it("reads the quotation from the entry door, once per entry asked", async () => {
+    const state = memoryState();
+    const run = fixture(state);
+    expect(await runBatchPost(["1f916", BASE], run.deps)).toBe(0);
+    const read = run.http.asked.filter((path) => path.startsWith("/entries/"));
+    expect(read).toEqual([`/entries/${DRAFT_A}`, `/entries/${LABELLED}`]);
+    // Never the entry nobody is being asked about.
+    expect(run.http.asked).not.toContain(`/entries/${PLAIN}`);
   });
 
   it("names a venue that refused, and goes on to the next", async () => {
