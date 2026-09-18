@@ -139,6 +139,68 @@ function bindingReference(account: CommunityOperator): Safe {
 }
 
 /**
+ * How this operator's binding got stronger, oldest first (decision D-142).
+ *
+ * The upgrade path off the account rung, and the whole of it: an operator's id
+ * is minted from the account, so an author a board merely authenticated and the
+ * same author after it publishes a key are one operator — same id, same
+ * standing, same marks — and what changed is the binding. Each row here is that
+ * change, sealed.
+ *
+ * Additive and never a rewrite, which is why the panel is a history and not a
+ * field: the registration that made this an operator is still in the record
+ * above saying what it said, and every line made before an upgrade is still
+ * counted at the rung it was made on. Nothing here is derived — the rows are
+ * the events, printed.
+ *
+ * Absent entirely for an operator the log holds no upgrade for, because an
+ * empty history panel on every domain operator's page would be a page asking a
+ * reader to wonder what it means.
+ */
+function bindingHistory(data: OperatorData): Safe {
+  if (data.bindings.length === 0) return raw("");
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Binding history</h2>
+      <span class="panel-label">how this operator's binding got stronger</span>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>binding</th>
+            <th>key</th>
+            <th>at</th>
+            <th>seq</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.bindings.map(
+            (each) => html`<tr class="row">
+              <td class="mono">${each.kind}</td>
+              <td class="mono break">${each.agent}</td>
+              <td class="dim">${fmtInstant(each.at)}</td>
+              <td class="dim mono">${each.seq}</td>
+            </tr>`,
+          )}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel-body">
+      <p class="note">
+        Every row is a <span class="mono">community_operator_bound</span> event
+        on this id. The
+        registration above is untouched by them and goes on saying what it said,
+        exactly as a key rotation leaves an agent binding alone: from each
+        position on, the strongest binding the log holds is the one this
+        operator's lines are counted at, and every line it made before is still
+        counted at the rung it was made on.
+      </p>
+    </div>
+  </section>`;
+}
+
+/**
  * The account a community operator's key is bound to, as rows of the record
  * panel (decision D-138).
  *
@@ -905,6 +967,16 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
                   of the operators it named at genesis, and nobody named this
                   key.
                 </p>`}
+            ${row.community === null || row.community.binding.kind !== "account"
+              ? raw("")
+              : html`<p class="note warn">
+                  This operator stands on the account rung (decision D-142): the
+                  board authenticated the author and nothing else did. Its id is
+                  the account's, so the day it publishes a key it keeps this id,
+                  this standing and these marks — the key arrives as an upgrade
+                  below, and every line it made before goes on counting at the
+                  rung it was made on.
+                </p>`}
           </div>
         </section>
         <section class="panel">
@@ -932,7 +1004,7 @@ export function renderOperator(ctx: PageContext, data: OperatorData): string {
             </div>`}
       </section>
 
-      ${contributionPanel(ctx, data)} ${tierPanel(data)}
+      ${bindingHistory(data)} ${contributionPanel(ctx, data)} ${tierPanel(data)}
       ${recordPanel(data)} ${rewardsPanel(ctx, data)} ${citizenPanel(data)}
       ${attestationsPanel(data)}
 

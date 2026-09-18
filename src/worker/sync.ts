@@ -43,6 +43,7 @@ import { signSyncReceipt, type SyncReceipt } from "../receipt.js";
 import {
   isVersionStalenessCategory,
   LIST_PAGE_LIMIT,
+  type BindingRung,
   type OperatorKind,
   type VerificationClass,
 } from "../policy.js";
@@ -125,6 +126,14 @@ interface EntryState {
    * record it is serving.
    */
   readonly verification_class: VerificationClass | null;
+  /**
+   * How strongly the weakest validator counted in that consensus was bound
+   * (decision D-142), off the same re-derived sidecar: `key` when every counted
+   * seat stood on a key the world can check, `account` when one of them rested
+   * on a board having authenticated its author. Read rather than worked out
+   * here, for the reason the class is.
+   */
+  readonly verification_binding: BindingRung | null;
   /**
    * Who the entry is owed to (decision D-130), folded by `attributionOf` from
    * the entry's own events and the operator kinds at this head.
@@ -308,6 +317,7 @@ class Entries {
       domain: domainOf(entry),
       source_class: sidecar.source.class,
       verification_class: sidecar.verification_class,
+      verification_binding: sidecar.verification_binding ?? null,
     };
   }
 
@@ -357,6 +367,7 @@ class Entries {
       domain: domainOf(entry),
       source_class: stored.sidecar.source.class,
       verification_class: stored.sidecar.verification_class,
+      verification_binding: stored.sidecar.verification_binding ?? null,
     };
   }
 }
@@ -619,6 +630,8 @@ async function page(
             source_class: item.state.source_class,
             // D-138: the class the trainer's `min_class` is checked against.
             verification_class: item.state.verification_class,
+            // D-142: the rung `min_binding` is checked against, beside it.
+            verification_binding: item.state.verification_binding,
           },
       query,
     ),

@@ -24,6 +24,7 @@
  */
 
 import { html, layout, link, raw, type Safe } from "../html.js";
+import { PERIMETER_ACCOUNTS, PERIMETER_WORD } from "../../policy.js";
 import {
   CLAIM_SHARED_PERIMETER,
   CLAIM_SINGLE_PERIMETER,
@@ -125,6 +126,78 @@ function perimeters(report: IndependenceReport): Safe {
       validators sat inside one perimeter carries a
       <span class="mono">bootstrap</span> label until somebody outside it
       confirms the fact.
+    </p>
+  </section>`;
+}
+
+/**
+ * Nomankind's own accounts on the community boards (decision D-142).
+ *
+ * The perimeters above are read out of the genesis naming events, which is
+ * where D-128 put them: a perimeter is a disclosure about a naming that
+ * happened. A community operator has no naming event — it registers implicitly,
+ * by a line — so there is nothing in the log to carry a perimeter for the
+ * accounts the maintainer controls on the boards. They are published in advance
+ * instead, in src/policy.ts, and listed here.
+ *
+ * Published rather than inferred, for the reason the witness pin is: a record
+ * that asked itself at run time which accounts were its own could answer
+ * differently tomorrow. This is the maintainer marking its own perimeter where
+ * a reader can check it against the boards.
+ *
+ * A line from one of these is sealed and shown exactly like any other, disclosed
+ * with the word beside it, and counted toward no consensus at any rung — not
+ * even where the account has published a key, and not in the "three eligible
+ * operators outside the submitter" precondition either.
+ */
+function perimeterAccounts(): Safe {
+  return html`<section class="panel">
+    <div class="panel-head">
+      <h2>Perimeter accounts</h2>
+      <span class="panel-label">nomankind's own accounts on the boards</span>
+    </div>
+    ${PERIMETER_ACCOUNTS.length === 0
+      ? html`<div class="panel-empty">
+          No account is disclosed: this build claims none of the accounts on the
+          boards as its own.
+        </div>`
+      : html`<div class="table-wrap">
+          <table class="dense">
+            <thead>
+              <tr>
+                <th>operator</th>
+                <th>perimeter</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${PERIMETER_ACCOUNTS.map(
+                (operator) => html`<tr class="row">
+                  <td class="mono break">
+                    <a href="/operators/${encodeURIComponent(operator)}"
+                      >${operator}</a
+                    >
+                  </td>
+                  <td class="mono warn">${PERIMETER_WORD}</td>
+                </tr>`,
+              )}
+            </tbody>
+          </table>
+        </div>`}
+    <p class="note">
+      These are the community operator ids the maintainer controls, in the form
+      both kinds of operator share, <span class="mono">&lt;venue&gt;:&lt;handle&gt;</span>.
+      A line from one of them is sealed and shown like anybody else's and counted
+      toward nothing at any rung — the account rung included, and the key rung
+      too, because an account of nomankind's that publishes a key is still
+      nomankind's. It is listed under its own heading on the entry page rather
+      than among the counted validations, so a reader sees that this record
+      looked at its own entry, and sees that it did not count.
+    </p>
+    <p class="note">
+      Published here and in <a href="/policy">the policy object</a> rather than
+      worked out at run time, for the reason the witness pin is published: a
+      record that decided each morning which accounts were its own could decide
+      differently tomorrow. The list moves only by a later decision.
     </p>
   </section>`;
 }
@@ -485,7 +558,8 @@ export function renderIndependence(
             </div>`}
       </section>
 
-      ${perimeters(report)} ${covered(report)} ${derivedFrom(report)}
+      ${perimeters(report)} ${perimeterAccounts()} ${covered(report)}
+      ${derivedFrom(report)}
     `,
   });
 }

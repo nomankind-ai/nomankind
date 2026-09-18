@@ -1280,8 +1280,9 @@ describe("renderApi", () => {
     // caller knows exists.
     for (const marker of [
       "subject=<s>, category=<c>, domain=<slug>",
-      // D-138 put min_class between the source floor and the domain on /sync.
-      "min_source=official|recognized, min_class=community|mixed|registered, domain=<slug>",
+      // D-138 put min_class between the source floor and the domain on /sync,
+      // and D-142 put min_binding between the class floor and the domain.
+      "min_source=official|recognized, min_class=community|mixed|registered, min_binding=account|key, domain=<slug>",
       "category=<c>, status=<s>, domain=<slug>",
     ]) {
       expect(page, `${marker} is not documented`).toContain(

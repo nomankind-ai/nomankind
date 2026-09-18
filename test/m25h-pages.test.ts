@@ -232,6 +232,8 @@ function operatorData(overrides: Partial<OperatorData> = {}): OperatorData {
     domains: [{ domain: DEFAULT_DOMAIN, attestationVersion: "v1" }],
     attestation: null,
     namedBy: null,
+    // No upgrade off the account rung (D-142).
+    bindings: [],
     marks: NO_MARKS,
     validations: [],
     cosigners: [],

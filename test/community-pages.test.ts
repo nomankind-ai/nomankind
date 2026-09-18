@@ -90,6 +90,7 @@ const baseSidecar: Sidecar = {
 const registeredSidecar: Sidecar = {
   ...baseSidecar,
   verification_class: "registered",
+  verification_binding: null,
   verification_layers: [
     {
       kind: "decision",
@@ -255,11 +256,13 @@ describe("the entry page and its JSON view model", () => {
     expect(html).not.toContain("Verified by community validators");
   });
 
-  it("shows no class at all on a draft", () => {
+  it("says a draft is awaiting validators rather than lacking a class", () => {
     const html = renderEntry(ctx, entryData(baseSidecar, "draft"));
     expect(html).not.toContain("Verified by registered validators");
     expect(html).not.toContain("Verified by community validators");
-    expect(html).toContain("No verification class");
+    // D-142: "no class" reads as a verdict where a draft is simply waiting.
+    expect(html).toContain("Awaiting validators");
+    expect(html).toContain("nothing has been counted toward this entry yet");
   });
 
   it("shows a community validator with its kind, venue and handle", () => {
@@ -274,18 +277,22 @@ describe("the entry page and its JSON view model", () => {
     expect(html).toContain("community");
   });
 
-  it("carries the four class fields in the sidecar's own names", () => {
+  it("carries the five class fields in the sidecar's own names", () => {
     const view = entryVerificationView(communitySidecar);
     expect(view).toEqual({
       verification_class: communitySidecar.verification_class,
       verification_communities: communitySidecar.verification_communities,
       verification_single_venue: communitySidecar.verification_single_venue,
+      // The rung joined them at D-142, and the view is still the sidecar's own
+      // names carried verbatim: the page and the JSON door read one model.
+      verification_binding: communitySidecar.verification_binding ?? null,
       verification_layers: communitySidecar.verification_layers,
     });
     expect(Object.keys(view)).toEqual([
       "verification_class",
       "verification_communities",
       "verification_single_venue",
+      "verification_binding",
       "verification_layers",
     ]);
   });
@@ -306,6 +313,8 @@ function entryRow(
     claim: "The model refuses this prompt",
     tier: "stated",
     verification_class,
+    // A row the fixture says nothing about the rung of (D-142).
+    verification_binding: null,
     last_confirmed: "2026-09-08",
     expires_at: "2026-10-08",
     stale: false,
@@ -323,6 +332,7 @@ describe("the entries listing's class filter", () => {
         tier: null,
         fresh: null,
         min_class: null,
+        min_binding: null,
       },
       rows: [],
       total: 0,
@@ -346,6 +356,7 @@ describe("the entries listing's class filter", () => {
         tier: null,
         fresh: null,
         min_class: "mixed",
+        min_binding: null,
       },
       rows: [entryRow(ENTRY_ID, "mixed")],
       total: 1,
@@ -369,6 +380,7 @@ describe("the entries listing's class filter", () => {
         tier: null,
         fresh: null,
         min_class: null,
+        min_binding: null,
       },
       rows: [entryRow(ENTRY_ID, null)],
       total: 1,
@@ -447,6 +459,8 @@ describe("a community operator's page", () => {
     ],
     attestation: null,
     namedBy: null,
+    // No upgrade off the account rung (D-142).
+    bindings: [],
     validations: [
       {
         entryId: ENTRY_ID,

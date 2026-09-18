@@ -19,7 +19,12 @@
 import entrySchema from "../../schema/nomankind-entry-schema.json" with { type: "json" };
 
 import { checkParameters, readPosition } from "../params.js";
-import { VERIFICATION_CLASSES, type VerificationClass } from "../policy.js";
+import {
+  BINDING_RUNGS,
+  VERIFICATION_CLASSES,
+  type BindingRung,
+  type VerificationClass,
+} from "../policy.js";
 import { SOURCE_CLASSES } from "../sources.js";
 import type { EntriesFilter } from "./types.js";
 
@@ -80,6 +85,19 @@ export const ENTRY_MIN_CLASSES: readonly string[] = Object.freeze([
   ...VERIFICATION_CLASSES,
 ]);
 
+/**
+ * The two binding rungs, weakest first, as policy publishes them (D-142).
+ *
+ * The class chips' twin and a floor in exactly the same way: `min_binding=key`
+ * admits `key` and refuses `account`, which is the reading `min_binding` has on
+ * the read and the sync doors. Two rungs and not three, because a domain
+ * operator's key and a community operator's registry or profile binding are one
+ * thing to a reader — a key publicly bound to something the world can check.
+ */
+export const ENTRY_MIN_BINDINGS: readonly string[] = Object.freeze([
+  ...BINDING_RUNGS,
+]);
+
 /** Every parameter an entries listing may carry, and nothing else. */
 export const ENTRIES_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "category",
@@ -88,6 +106,7 @@ export const ENTRIES_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   "tier",
   "source",
   "min_class",
+  "min_binding",
   "fresh",
   "before",
 ]);
@@ -106,6 +125,7 @@ export const ENTRIES_QUERY_REFUSALS = [
   "bad_tier",
   "bad_source",
   "bad_min_class",
+  "bad_min_binding",
   "bad_fresh",
   "bad_before",
 ] as const;
@@ -186,6 +206,8 @@ export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
   if (!source.ok) return { ok: false, reason: "bad_source" };
   const minClass = readEnum(params, "min_class", ENTRY_MIN_CLASSES);
   if (!minClass.ok) return { ok: false, reason: "bad_min_class" };
+  const minBinding = readEnum(params, "min_binding", ENTRY_MIN_BINDINGS);
+  if (!minBinding.ok) return { ok: false, reason: "bad_min_binding" };
   const fresh = readEnum(params, "fresh", FRESHNESS_VALUES);
   if (!fresh.ok) return { ok: false, reason: "bad_fresh" };
 
@@ -210,6 +232,7 @@ export function parseEntriesQuery(params: URLSearchParams): EntriesQueryResult {
       tier: tier.value,
       source: source.value,
       min_class: minClass.value as VerificationClass | null,
+      min_binding: minBinding.value as BindingRung | null,
       fresh: fresh.value as "fresh" | "stale" | null,
     },
     before,

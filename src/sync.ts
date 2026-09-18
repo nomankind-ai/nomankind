@@ -35,13 +35,19 @@
 
 import entrySchema from "../schema/nomankind-entry-schema.json" with { type: "json" };
 
-import { classSatisfies, type EntryStatus } from "./derive.js";
+import {
+  bindingSatisfies,
+  classSatisfies,
+  type EntryStatus,
+} from "./derive.js";
 import type { Event } from "./events.js";
 import type { EvidenceTier } from "./evidence.js";
 import {
+  BINDING_RUNGS,
   DEFAULT_DOMAIN,
   LIST_PAGE_LIMIT,
   VERIFICATION_CLASSES,
+  type BindingRung,
   type VerificationClass,
 } from "./policy.js";
 import { tierSatisfies } from "./read.js";
@@ -69,6 +75,10 @@ export const SYNC_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   // into the stream: a trainer building a corpus of registered-class facts asks
   // for one here and is handed nothing weaker.
   "min_class",
+  // How strongly the deciders were bound (decision D-142), the same demand the
+  // read door takes: a trainer building a corpus that rests on keys alone asks
+  // for `key` here and is handed nothing the account rung carried.
+  "min_binding",
   "domain",
 ]);
 
@@ -81,6 +91,7 @@ export const SYNC_QUERY_REFUSALS = [
   "bad_min_tier",
   "bad_min_source",
   "bad_min_class",
+  "bad_min_binding",
   "unknown_domain",
 ] as const;
 
@@ -114,6 +125,13 @@ export interface SyncQuery {
    * decided it.
    */
   readonly min_class: VerificationClass | null;
+  /**
+   * The weakest binding rung the stream will carry (decision D-142): `account`,
+   * `key`, weakest first, or null for no demand. A different question from the
+   * class — the class is who decided the entry, this is how strongly the
+   * weakest of them was bound to anything the world can check.
+   */
+  readonly min_binding: BindingRung | null;
   /**
    * The registered domain to stream. Null means every domain, which is what a
    * trainer replaying the whole log asks for.
@@ -199,6 +217,15 @@ export function parseSyncQuery(params: URLSearchParams): SyncQueryResult {
     return { ok: false, refusal: "bad_min_class" };
   }
 
+  const minBinding = params.getAll("min_binding");
+  if (minBinding.length > 1) return { ok: false, refusal: "bad_min_binding" };
+  if (
+    minBinding.length === 1 &&
+    !(BINDING_RUNGS as readonly string[]).includes(minBinding[0]!)
+  ) {
+    return { ok: false, refusal: "bad_min_binding" };
+  }
+
   const domain = params.getAll("domain");
   if (domain.length > 1) return { ok: false, refusal: "unknown_domain" };
   if (domain.length === 1 && !DOMAINS.includes(domain[0]!)) {
@@ -216,6 +243,8 @@ export function parseSyncQuery(params: URLSearchParams): SyncQueryResult {
         minSource.length === 0 ? null : (minSource[0] as SourceClass),
       min_class:
         minClass.length === 0 ? null : (minClass[0] as VerificationClass),
+      min_binding:
+        minBinding.length === 0 ? null : (minBinding[0] as BindingRung),
       domain: domain.length === 0 ? null : (domain[0] as string),
     },
   };
@@ -270,6 +299,12 @@ export interface SyncEntryState {
    * supply, and it fails any demand — `classSatisfies` says why.
    */
   readonly verification_class?: VerificationClass | null;
+  /**
+   * The rung the entry's weakest counted validator stood on, off the sidecar
+   * derivation wrote (decision D-142). Absent or null is a rung the caller did
+   * not supply, and it fails any demand — `bindingSatisfies` says why.
+   */
+  readonly verification_binding?: BindingRung | null;
 }
 
 /**
@@ -339,6 +374,18 @@ export function keepSyncItem(
   if (query.min_class !== null) {
     if (state.status !== "verified") return false;
     if (!classSatisfies(state.verification_class ?? null, query.min_class)) {
+      return false;
+    }
+  }
+  // And the rung demand beside it (D-142), applied the same way and for the
+  // same reason: a trainer that asked how strongly the deciders were bound is
+  // asking for facts to learn, and an unverified entry is not one of those
+  // whoever looked at it.
+  if (query.min_binding !== null) {
+    if (state.status !== "verified") return false;
+    if (
+      !bindingSatisfies(state.verification_binding ?? null, query.min_binding)
+    ) {
       return false;
     }
   }

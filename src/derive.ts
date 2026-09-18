@@ -37,6 +37,7 @@ import {
   DEFAULT_DOMAIN,
   isRegisteredDomain,
   REJECTIONS_TO_REJECT,
+  BINDING_RUNGS,
   isVersionStalenessCategory,
   stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
@@ -2383,6 +2384,38 @@ export function classSatisfies(
   return (
     VERIFICATION_CLASSES.indexOf(entryClass) >=
     VERIFICATION_CLASSES.indexOf(minClass)
+  );
+}
+
+/**
+ * Whether an entry's binding rung meets a reader's demand (decision D-142).
+ *
+ * `classSatisfies`'s twin, deliberately the same comparison over a different
+ * order: `BINDING_RUNGS` is weakest first, so `min_binding=key` admits an entry
+ * whose weakest counted validator stood on a key the world can check and
+ * refuses one that rested on a board having authenticated an account.
+ *
+ * The two questions are different and a reader may ask either. The class says
+ * *who* met the consensus — the maintainer's own operators, the communities, or
+ * both. The rung says how strongly whoever it was is bound to anything at all.
+ * A registered-class entry is key-bound by construction; a community-class one
+ * may be either, and a reader who will not take the lowest rung says so here.
+ *
+ * A null demand is no demand, and an absent one is no demand either — a query
+ * written before the decision carries no field here, and reading that as "the
+ * weakest rung only" would filter a stream nobody asked to filter. A null rung
+ * fails every demand, for the reason a null class does: the entry verified
+ * nothing, so there is no floor to promise, and answering "probably" to a
+ * reader who asked is the one thing these functions must never do.
+ */
+export function bindingSatisfies(
+  entryBinding: BindingRung | null,
+  minBinding: BindingRung | null,
+): boolean {
+  if (minBinding === null || minBinding === undefined) return true;
+  if (entryBinding === null) return false;
+  return (
+    BINDING_RUNGS.indexOf(entryBinding) >= BINDING_RUNGS.indexOf(minBinding)
   );
 }
 

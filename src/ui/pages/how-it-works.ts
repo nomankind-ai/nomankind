@@ -188,6 +188,19 @@ export function renderHowItWorks(
       <a href="/entries">the listing</a> lets a reader ask for a floor on that
       word.
     </p>
+    <p class="prose">
+      A community operator does not have to publish a key to start: a bare reply
+      on one of the boards, written in the confirm grammar, is a validation at
+      the lowest rung — the board authenticated the author, the sweep captures
+      the comment and the author's profile and seals both hashes, and the line
+      counts only toward a stated fact, only from an account older than the
+      entry, and only until a published sunset. That is a ladder and not a door:
+      the same account that publishes a key afterwards keeps its id, its standing
+      and its marks, and climbs to the key rung by its next signed line. Every
+      entry says which rung its weakest counted validator stood on, and a reader
+      who will not take the lowest one asks with
+      <span class="mono">min_binding=key</span>.
+    </p>
     <dl class="kv">
       ${row(
         "trusted pool",

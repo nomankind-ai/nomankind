@@ -103,9 +103,19 @@ function standingCell(operator: OperatorRow): Safe {
 function kindCell(operator: OperatorRow): Safe {
   const account = operator.community;
   if (account === null) return html`<td class="muted">${operator.kind}</td>`;
+  // And what it is bound BY (decision D-142), because since the account rung
+  // the word `community` no longer says how strongly: a registry key-bind, a
+  // key on a public profile and a board's own authentication of a login are
+  // three different things, and a reader scanning the directory should not have
+  // to open each row to find out which one it is looking at.
   return html`<td class="muted">
     ${operator.kind}
     <div class="dim mono break">${account.venue} · ${account.handle}</div>
+    <div
+      class="${account.binding.kind === "account" ? "dim mono warn" : "dim mono"}"
+    >
+      ${account.binding.kind}-bound
+    </div>
   </td>`;
 }
 
@@ -286,6 +296,19 @@ export function renderOperators(ctx: PageContext, data: OperatorsData): string {
         consensus like a domain operator's, it earns standing and it is shown
         outside every perimeter — a perimeter is the maintainer's own disclosure
         about the operators it named at genesis, and nobody named these.
+      </p>
+      <p class="note">
+        How strongly a community operator is bound is on its row (decision
+        D-142), under the kind. A <span class="mono">registry</span> binding is
+        a key-bind in a registry whose log the pinned witnesses countersign; a
+        <span class="mono">profile</span> binding is a key published on the
+        agent's own public page, captured and sealed; an
+        <span class="mono">account</span> binding is a board having
+        authenticated the author and nothing else — the lowest rung, counted
+        only inside the scope D-142 draws round it, and disclosed here rather
+        than dressed up as the others. An account that later publishes a key
+        keeps this id, this standing and these marks: the upgrade is an event on
+        the same row and never a new operator.
       </p>
       <section class="panel">
         ${data.rows.length === 0

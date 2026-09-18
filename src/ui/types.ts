@@ -19,7 +19,12 @@ import type { DerivedAttestation } from "../attest.js";
 import type { ConfidenceInputs } from "../confidence.js";
 import type { Sidecar } from "../derive.js";
 import type { CommunityBinding, Event } from "../events.js";
-import type { OperatorKind, Tier, VerificationClass } from "../policy.js";
+import type {
+  BindingRung,
+  OperatorKind,
+  Tier,
+  VerificationClass,
+} from "../policy.js";
 import type { RecordMarks, StandingCounts } from "../standing.js";
 import type { VOTE_QUESTIONS } from "../policy.js";
 import type { tallyOf } from "../vote.js";
@@ -103,6 +108,16 @@ export interface EntryRow {
    * rather than a word, because a draft has no consensus to have a class.
    */
   verification_class: VerificationClass | null;
+  /**
+   * The sidecar's `verification_binding` (decision D-142): the rung the weakest
+   * validator counted in this entry's consensus stood on — `key` or `account` —
+   * null while the entry is draft or rejected, exactly as the class is.
+   *
+   * Beside the class on the row because they answer different questions and a
+   * reader scanning a page needs both: the class says who decided, and this
+   * says how strongly the weakest of them was bound to anything checkable.
+   */
+  verification_binding: BindingRung | null;
   last_confirmed: string;
   expires_at: string | null;
   stale: boolean;
@@ -166,6 +181,14 @@ export interface EntriesFilter {
    * it without knowing anything about it.
    */
   min_class: VerificationClass | null;
+  /**
+   * The weakest binding rung the listing will show (decision D-142), null for
+   * every rung. `min_binding=key` admits an entry whose every counted validator
+   * stood on a key the world can check and refuses one that rested on a board
+   * having authenticated an account — a floor, like the class beside it, and the
+   * same reading `min_binding` has on the read and sync doors.
+   */
+  min_binding: BindingRung | null;
 }
 
 export interface EntriesData {
@@ -525,6 +548,26 @@ export interface OperatorData {
     decision: string;
     seq: number;
     signed_at: string;
+  }>;
+  /**
+   * How this operator's binding got stronger, oldest first (decision D-142).
+   *
+   * The upgrade history, and additive like the events it is read off: the
+   * registration that made the operator stays where it is and goes on saying
+   * what it said, and each row here is a `community_operator_bound` on the same
+   * id — the position, the instant, the kind the binding became and the key it
+   * became bound to.
+   *
+   * Empty for a domain operator, for a community operator registered on a key
+   * to begin with, and for one still standing on the account it registered
+   * with. An empty history is not an absent one: every line an operator made
+   * before an upgrade is still counted at the rung it was made on.
+   */
+  bindings: Array<{
+    kind: string;
+    agent: string;
+    at: string;
+    seq: number;
   }>;
   /**
    * Who this operator has signed beside, newest pair first, one page of them at
