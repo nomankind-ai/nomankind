@@ -20,7 +20,7 @@
  * nobody can paste.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   askable,
@@ -53,6 +53,7 @@ import {
   CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
   CONFIRMATION_FORM_PREFIX,
   CONFIRMATION_VENUES,
+  FETCH_TIMEOUT_MS,
   SEAL_INTERVAL_MINUTES,
 } from "../src/policy.js";
 import { ATTESTATION_VERSION } from "../src/registry.js";
@@ -404,6 +405,36 @@ describe("what the batch asks about", () => {
     expect(signals).toHaveLength(1);
     expect(signals[0]).toBeInstanceOf(AbortSignal);
     expect(signals[0]?.aborted).toBe(false);
+  });
+
+  // The deadline is a controller and a cleared timer (src/adapters/timeout.ts),
+  // never `AbortSignal.timeout`, whose timer cannot be cancelled and would hold
+  // a run open once per entry. What this pins is the behaviour either would
+  // have to give: a door that never answers is given up on, and the entry is
+  // asked about regardless.
+  it("gives up on a door that never answers, and asks anyway", async () => {
+    vi.useFakeTimers();
+    try {
+      const http: HttpClient = {
+        fetch(request: Request): Promise<Response> {
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => {
+              reject(request.signal.reason as Error);
+            });
+          });
+        },
+      };
+      const pending = readClaims(http, BASE, [
+        ask({ id: DRAFT_A, claim: "", citation: "" }),
+      ]);
+      await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
+      const filled = await pending;
+      expect(filled).toHaveLength(1);
+      expect(filled[0]?.claim).toBe("");
+      expect(filled[0]?.url).toBe(`${BASE}/entries/${DRAFT_A}`);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

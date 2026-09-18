@@ -57,6 +57,7 @@ import {
   type Poster,
   type PosterHttp,
 } from "../adapters/poster.js";
+import { withDeadline } from "../adapters/timeout.js";
 import {
   ACCOUNT_BOUND_RUNG,
   ACCOUNT_BOUND_SUNSET,
@@ -469,9 +470,16 @@ export async function readAsks(
  * fifty of them in a row against a deployment that may be mid-restart, and a
  * connection refused or a door that never answers must cost this run one
  * quotation rather than the whole day's ask — silence at every community
- * because one read threw is the worst outcome available here. So each read
- * carries `FETCH_TIMEOUT_MS`, the same bound a capture's own fetch takes, and a
- * rejection is read as "the door did not answer".
+ * because one read threw is the worst outcome available here. So each read is
+ * made under `withDeadline` (src/adapters/timeout.ts) at `FETCH_TIMEOUT_MS`,
+ * the same bound a capture's own fetch takes, and a rejection is read as "the
+ * door did not answer".
+ *
+ * `withDeadline` and never `AbortSignal.timeout`: that timer cannot be
+ * cancelled, and a run of a hundred and fifty reads would leave a hundred and
+ * fifty of them pending behind it. The deadline covers the body as well as the
+ * headers, because a door that answers 200 and then streams nothing is the same
+ * hang from this command's side.
  */
 async function readEntryDoor(
   http: HttpClient,
@@ -479,15 +487,17 @@ async function readEntryDoor(
   id: string,
 ): Promise<Record<string, unknown> | null> {
   try {
-    const response = await http.fetch(
-      new Request(urlFor(baseUrl, `/entries/${encodeURIComponent(id)}`), {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      }),
-    );
-    if (response.status !== 200) return null;
-    const body: unknown = await response.json();
-    return isRecord(body) ? body : null;
+    return await withDeadline(FETCH_TIMEOUT_MS, async (signal) => {
+      const response = await http.fetch(
+        new Request(urlFor(baseUrl, `/entries/${encodeURIComponent(id)}`), {
+          headers: { accept: "application/json" },
+          signal,
+        }),
+      );
+      if (response.status !== 200) return null;
+      const body: unknown = await response.json();
+      return isRecord(body) ? body : null;
+    });
   } catch {
     return null;
   }
