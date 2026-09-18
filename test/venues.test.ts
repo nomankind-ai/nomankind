@@ -63,6 +63,7 @@ import {
   CONFIRMATION_VENUES,
   COUNTING_BINDING_KINDS,
   PROFILE_KEY_PREFIX,
+  REGISTRY,
   communityCapPerEntry,
   countingCommunities,
   isSingleCountingCommunity,
@@ -459,6 +460,84 @@ describe("the boards an environment listens to", () => {
       // says why, rather than claiming a board said nothing.
       expect(await board.threads()).toBeNull();
     }
+  });
+
+  // The founding registry lists the citizen's own posts, and the citizen is
+  // one account across every environment: demo's threads and production's are
+  // posted by the same handle. So the listing is read against a floor.
+  const CITIZEN_DOOR = `${REGISTRY.origin}/api/citizen/nomankind`;
+
+  /** A fetcher that answers the citizen door with these post ids, and nothing else. */
+  function listing(ids: readonly number[], asked: string[]): typeof fetch {
+    return (async (url: string) => {
+      asked.push(url);
+      if (url !== CITIZEN_DOOR) return new Response("no", { status: 404 });
+      return new Response(JSON.stringify({ posts: ids.map((id) => ({ id })) }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+  }
+
+  it("discovers nothing below the environment's own pinned thread", async () => {
+    // Production pins 5891, so 5212 — demo's thread, posted by the same citizen
+    // before production had a record to be written to — is not production's,
+    // and the post the citizen makes tomorrow is.
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "production",
+      fetch: listing([5212, 5891, 6000], asked),
+    });
+    expect(await board.threads()).toEqual([5891, 6000]);
+    expect(asked).toEqual([CITIZEN_DOOR]);
+  });
+
+  it("reads the whole listing on demo, whose floor is the oldest thread there", async () => {
+    // Demo pins 5212 and every later post of this citizen is above it, so
+    // demo reads production's thread too. Harmless where it is: those lines
+    // name entries demo does not hold, and the sweep refuses an unknown entry
+    // before it registers anybody or seals anything.
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "demo",
+      fetch: listing([5212, 5891, 6000], asked),
+    });
+    expect(await board.threads()).toEqual([5212, 5891, 6000]);
+  });
+
+  it("discovers nothing at all where no thread is pinned, and asks no board", async () => {
+    // No floor, because there is no pin to be a floor: an environment the
+    // maintainer has not opened the door on reads nothing, and discovery is
+    // never the thing that opens it.
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "local",
+      fetch: listing([5212, 5891, 6000], asked),
+    });
+    expect(await board.threads()).toEqual([]);
+    expect(asked).toEqual([]);
+  });
+
+  it("keeps every pinned thread whatever the listing says", async () => {
+    // The floor bounds what discovery adds and nothing else: a listing that has
+    // lost a pinned post has not unsaid the maintainer's decision, and a board
+    // that answers nothing at all leaves the pinned ones standing.
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "production",
+      fetch: listing([], asked),
+    });
+    expect(await board.threads()).toEqual([5891]);
+    const silent = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "production",
+      fetch: (async () => new Response("no", { status: 500 })) as unknown as typeof fetch,
+    });
+    expect(await silent.threads()).toEqual([5891]);
   });
 
   it("listens to all three real boards on production, on the pinned threads", async () => {

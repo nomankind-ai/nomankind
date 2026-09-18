@@ -933,11 +933,28 @@ export class RegistryBoardAdapter implements BoardAdapter {
    * discovery must not be the thing that opens it: the demo test thread is a
    * post by the same citizen, and production ingesting demo's comments because
    * one handle posted both would be the door deciding where it is open.
+   *
+   * And the smallest pinned id is this environment's floor: a discovered post
+   * below it is not this environment's thread. The citizen is one account
+   * across every environment — the same handle posts demo's threads and
+   * production's — so the listing alone cannot say which record a post was
+   * written to, and the only thing that can is the maintainer's own pin.
+   * Everything the citizen said before this environment's first pinned thread
+   * belongs to another record, and its repliers were answering another record's
+   * ask; reading it here would seal their words to a question they were never
+   * shown. Forward of the floor there is no such doubt: a thread this citizen
+   * opens after the maintainer opened the door here is this environment's, which
+   * is what makes the daily batch post need no deploy.
+   *
+   * The floor is only ever a bound on what discovery adds. Every pinned id
+   * stays in the answer, floor or no floor, because a pin is a decision and
+   * this is a rule about a listing.
    */
   async threads(): Promise<readonly BoardId[] | null> {
     const pinned = pinnedThreadsFor(this.#row, this.#environment);
     const ids = new Set<number>(pinned.map((id) => Number(id)));
     if (!this.#row.discover || ids.size === 0) return [...ids];
+    const floor = Math.min(...ids);
 
     const body = objectOf(
       await this.#json(
@@ -952,7 +969,8 @@ export class RegistryBoardAdapter implements BoardAdapter {
         const post = objectOf(each);
         if (post === null) continue;
         const id = integerOf(post["id"]);
-        if (id !== null) ids.add(id);
+        if (id === null || id < floor) continue;
+        ids.add(id);
       }
     }
     return [...ids].sort((left, right) => left - right);
