@@ -818,7 +818,7 @@ describe("the home page", () => {
     for (const label of ["VERIFIED", "STALE", "TRUSTED POOL", "HEAD"]) {
       expect(document).toContain(label);
     }
-    expect(document).toContain("bounty accruing");
+    expect(document).toContain("awaiting reconfirmation");
     expect(document).toContain(`random draw active at ${TRUSTED_POOL_SWITCH}`);
     expect(document).toContain("sealed 2026-09-08 12:05:00Z · 1 witnesses");
   });
@@ -900,7 +900,7 @@ describe("the home page", () => {
     });
     expect(empty).toContain("no seal yet");
     expect(empty).toContain("Nothing has been submitted yet.");
-    expect(empty).not.toContain("bounty accruing");
+    expect(empty).not.toContain("awaiting reconfirmation");
   });
 });
 

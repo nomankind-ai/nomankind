@@ -106,8 +106,9 @@ describe("the API page points at it", () => {
     const section = one.slice(one.indexOf("Reader kit</h2>"));
     expect(section).toContain("User-Agent");
     expect(section).toContain("nomankind-reader-kit/&lt;version&gt;");
-    // The stock Python agents, which an edge exception lets through — the note
-    // the kit's own document carries, said here where a caller reads the doors.
+    // The stock Python user agent, which both hostnames answer with no edge
+    // rule behind it — the note the kit's own document carries, said here
+    // where a caller reads the doors.
     expect(section).toContain("Python-urllib");
   });
 });

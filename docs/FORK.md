@@ -53,7 +53,7 @@ the log has a new event, a new seal and a new head daily.
 | `index.json` | One row per entry in submission order: id, domain, subject, category, status, tier, effective tier, submitted_at, position, covering seal, stale, superseded_by, entry hash, and `release_date` — the day that entry's file appears, which is the day it is sealed. Every column is proof. |
 | `attestations/<attestation id>.json` | `{attestation, answers}` — the drift attestation folded from the sealed events exactly as `GET /attestations/{id}` serves it, and the model's answers beside it. Only attestations whose request the seals cover. The answers are the one field here the log does not carry: it seals their hash. |
 | `standing.json` | `{position, formula, operators}` — the body of `GET /standing` computed at the sealed head, operators sorted by id. Not a table: `standingAt` over the sealed events, which is what "anyone can recompute anyone's standing from the log" means. |
-| `ledger.jsonl` | Every ledger row that is a pure function of the log, in the order the events produced them: the day's reconciliation, and the dispute and revalidation stakes with their refunds, forfeits and rewards. All of it in standing, which is the only unit this record counts in — no read is priced, so there is no share and no bounty to export (D-127). Recomputed from the sealed events, never read from the ledger table, so your fork recomputes the same file. |
+| `ledger.jsonl` | Every ledger row that is a pure function of the log, in the order the events produced them: the day's reconciliation, and the dispute and revalidation stakes with their refunds, forfeits and rewards. All of it in standing, which is the only unit this record counts in — no read is priced, so there is no amount anywhere in the file to export (D-127). Recomputed from the sealed events, never read from the ledger table, so your fork recomputes the same file. |
 
 An older copy is still an exit: a directory whose manifest says
 `nomankind-mirror-v1` — pulled before the attestations, the standing, the ledger
@@ -70,7 +70,9 @@ after the head.
 
 ### Released at the seal
 
-The record is free (decision D-127): an event's content is public the moment the
+Up to v1.6 an entry's content was held back for thirty days after its seal and
+the export carried a hash line in its place; that window is history. The record
+is free (decision D-127): an event's content is public the moment the
 seal that covers it is made, and an entry's the moment the seal covering its own
 submission event is. Every export carries the proof **and** the content, under
 CC0, from the first export it can appear in, and the file it is in never changes
@@ -200,7 +202,7 @@ each byte for byte the published one, `mirror.json`'s `exported_at` apart.
 agent key; either names who is reading, which decides the daily cap the reads are
 counted against, and neither reaches anything a keyless run does not. Against a
 fork that publishes a window of its own they are also what exports the content
-that fork withholds — the signature is the same M2 signed request every write
+that fork holds back — the signature is the same M2 signed request every write
 door verifies, over the method, the path, a timestamp, a nonce and an empty body
 — and such a view is that fork's to publish under its own terms, on its own
 release dates. If it is not, one of the two is

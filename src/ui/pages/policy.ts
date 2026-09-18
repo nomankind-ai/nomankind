@@ -96,6 +96,24 @@ export function tierAllows(tier: Tier): string {
   }
 }
 
+/**
+ * The one sentence on this site that still carries the old vocabulary, and the
+ * one place it is written.
+ *
+ * `RELEASE_WINDOW_DAYS` is zero and has no code behind it, but the number is
+ * still in the policy object and still written into every mirror manifest, so
+ * the page has to say what a reader of an old clone is looking at. It is
+ * marked as history in its own first word, because a record that quietly kept
+ * the words of a design it abandoned would be describing a rule it no longer
+ * runs — which is the one thing the policy page exists to prevent.
+ */
+export const RELEASE_HISTORY =
+  "History: this number was once the holdback window, the days an entry's " +
+  "content stayed behind a paid door after its seal; it is still published " +
+  "here and still written into every mirror manifest, because a clone " +
+  "carries the release window it was made under and readers of v1, v2 and v3 " +
+  "clones read that column.";
+
 /** One row of the contribution table: who is asking, and what they are served. */
 interface ContributionRow {
   readonly who: string;
@@ -106,9 +124,9 @@ interface ContributionRow {
 /**
  * Contribution (decision D-130): what standing buys, from keyless to trusted.
  *
- * The caps table used to be framed as a ladder of access and it is not one: no
- * read is priced (D-127), so the only thing a row here differs by is how much
- * of the log's day it may spend and how much it may write. The rows are people
+ * The caps table used to be framed as a ladder of access and it is not one:
+ * every read is free (D-127), so the only thing a row here differs by is how
+ * much of the log's day it may spend and how much it may write. The rows are people
  * — a stranger, a key, an operator at each tier — because that is the question
  * a reader actually has, and every cell is interpolated from the frozen policy
  * object.
@@ -631,7 +649,8 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "RELEASE_WINDOW_DAYS",
       value: `${policy.RELEASE_WINDOW_DAYS} days`,
       means:
-        "Zero, and there is no code behind it any more (decisions D-100 and D-127): the record is free from the seal. Every entry and every event is released the moment it is sealed — its content public, CC0 and in the daily mirror from that instant, served to anyone who asks for it. The proof was public from the first minute either way: every hash, seal and anchor, every operator record, and each entry's id, domain, subject, category, status, effective tier, entry hash, seal object, signers and release date. An unsealed event is not released at all. The number is still published here and still written into every mirror manifest, because a clone carries the window it was made under and readers of v1, v2 and v3 clones read that column.",
+        "Zero, and there is no code behind it any more (decisions D-100 and D-127): the record is free from the seal. Every entry and every event is released the moment it is sealed — its content public, CC0 and in the daily mirror from that instant, served to anyone who asks for it. The proof was public from the first minute either way: every hash, seal and anchor, every operator record, and each entry's id, domain, subject, category, status, effective tier, entry hash, seal object, signers and release date. An unsealed event is not released at all. " +
+        RELEASE_HISTORY,
     },
   ];
 
@@ -642,7 +661,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
         tier.key ? "key" : "no key"
       }`,
       means: tier.key
-        ? `A keyed tier: ${tier.reads_per_day} reads per UTC day, counted per key. A cap and nothing else — no read is priced anywhere in this record, so a key is a free identity a reader asks for at the free door and a tier buys nothing at all.`
+        ? `A keyed tier: ${tier.reads_per_day} reads per UTC day, counted per key. A cap and nothing else: a key is a free identity a reader asks for at the free door, and a tier reaches no record a keyless reader cannot.`
         : `The tier a reader gets without asking for anything: ${tier.reads_per_day} reads per UTC day, counted per client and served with no key at all. Section 9's "free to read at low volume, forever".`,
     })),
     {
@@ -667,7 +686,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "ALERT_ENDPOINTS_PER_KEY",
       value: String(policy.ALERT_ENDPOINTS_PER_KEY),
       means:
-        "How many live webhook endpoints one key may hold. A sixth is refused endpoint_limit; deleting one frees the slot.",
+        "How many live webhook endpoints one key may hold. A sixth is refused endpoint_limit; deleting one frees a place.",
     },
     {
       name: "ALERT_TIMEOUT_MS",
@@ -806,7 +825,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "STANDING_DISPUTE_UPHELD",
       value: `${policy.STANDING_DISPUTE_UPHELD} standing`,
       means:
-        "Earned by the challenger when a dispute is upheld, on top of the staked standing coming back. Nothing else moves: an upheld challenge overturns the entry and claws back no money, because no read of it was ever priced.",
+        "Earned by the challenger when a dispute is upheld, on top of the staked standing coming back. Nothing else moves: an upheld challenge overturns the entry and claws back nothing, because standing is the whole of what the entry ever moved.",
     },
     {
       name: "STANDING_REVALIDATION_CHANGED",
@@ -934,7 +953,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       name: "LEDGER_ENTRIES_PER_RUN",
       value: String(policy.LEDGER_ENTRIES_PER_RUN),
       means:
-        "How many of a published day's entries one run of the ledger step walks. Nothing is priced there: the day's read counts are evidence of use and buy nobody anything. A longer day is not dropped — the next run resumes it where this one stopped, and the day's reconciliation is written only once every entry of it has been walked.",
+        "How many of a published day's entries one run of the ledger step walks. The day's read counts are evidence that the record is used and buy nobody anything. A longer day is not dropped — the next run resumes it where this one stopped, and the day's reconciliation is written only once every entry of it has been walked.",
     },
     {
       name: "DUPLICATE_BACKFILL_PER_RUN",
@@ -1123,8 +1142,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       <p class="note">
         The record is free (decision D-127). Every event and every entry is
         released the moment it is sealed, its content public and CC0 from that
-        instant, and no read of it is priced: there is no paid tier, no key
-        purchase, no read-share slot and no fee anywhere in this table. What the
+        instant, and every reader is served the same record. What the
         contribution table above shows is rate and nothing else — a tier is a
         daily count, a key is a free identity a reader asks for at the free door
         so alerts, receipts by counter and usage listings have something to
@@ -1157,9 +1175,8 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
 
       <p class="note">
         Every stake above is standing and every amount is a placeholder the
-        maintainer set, moving only by a later recorded decision. Nothing is
-        staked in money, because there is no money here to stake: a dispute and a
-        revalidation request both put up contribution, and that is what an
+        maintainer set, moving only by a later recorded decision. A dispute and
+        a revalidation request both put up contribution, and that is what an
         upheld challenge returns and a failed one forfeits.
       </p>
 

@@ -93,7 +93,7 @@ function counters(c: HomeCounters): Safe {
       "STALE",
       String(c.stale),
       c.stale > 0
-        ? html`<div class="counter-note warn">bounty accruing</div>`
+        ? html`<div class="counter-note warn">awaiting reconfirmation</div>`
         : html`<div class="counter-note">none stale</div>`,
     )}
     ${counter(
@@ -180,9 +180,11 @@ export function renderHome(ctx: PageContext, data: HomeData): string {
           </h1>
           <p class="lede">
             One claim, one primary source, frozen and hashed at submission,
-            checked by independent operators, sealed into a witnessed log, and
-            dated. Anyone can verify an entry offline with two files and one
-            script.
+            checked by operators no lab controls — registered domain operators,
+            community operators bound by a registry or profile key — sealed
+            into a witnessed log, and dated. Every entry says which kinds met
+            its consensus, and standing is what the work earns. Anyone can
+            verify an entry offline with two files and one script.
           </p>
           <div class="actions">
             <a class="btn btn-accent" href="/entries">Browse entries</a>
@@ -218,6 +220,11 @@ export function renderHome(ctx: PageContext, data: HomeData): string {
             html`<pre class="block">npm run export -- ${ctx.origin} ${example} ./out
 npm run verify -- ./out/entry.json ./out/log.json</pre>`,
             "Two files and one script. Exit 0, or a named difference.",
+          )}
+          ${way(
+            "Confirm one in public",
+            html`<pre class="block">npm run confirm -- ${example}</pre>`,
+            "The reader kit, with no key and no registration: one signed line under the entry on a public thread, which clears an entry's bootstrap label when it comes from outside the disclosed perimeter.",
           )}
         </div>
       </div>

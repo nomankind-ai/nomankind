@@ -15,7 +15,7 @@
  * would be handing two readers two different rehearsals.
  *
  * Every number here comes from src/policy.ts. Nothing on this page is a rule of
- * its own, and nothing on this page is money.
+ * its own, and every stake on this page is put up in standing.
  */
 
 import {
@@ -74,7 +74,7 @@ export function renderDryRun(ctx: PageContext): string {
         its own version; and the validate path is the production path, the same
         fetch, the same hash, the same signed record. What is not real is said
         so on this page: the witnesses are a published mock pair,
-        and nothing on demo is money.
+        and no row on demo is part of the record.
         Practice until the commands are boring, then do it once where it counts.
       </p>
       <p class="note">
@@ -439,10 +439,10 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
             </dd>
             <dt>Nothing here is the record</dt>
             <dd>
-              No row on demo is the production log. Money is not the difference:
-              there is none on either, here or in production — the record is
-              free to read from the seal, and the only thing anyone earns for
-              this work is standing.
+              No row on demo is the production log. What is the same on both is
+              what anyone earns for the work: the record is free to read from
+              the seal, here and in production, and standing is the whole of
+              what a decision, a reconfirmation or an upheld challenge moves.
             </dd>
           </dl>
         `,

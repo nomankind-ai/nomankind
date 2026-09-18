@@ -731,6 +731,8 @@ describe("the derived confirmations", () => {
         posted_at: "2026-09-15T09:00:00Z",
         registry_event_id: 11_709,
         counted: true,
+        // The line attested nothing, so the view carries null (D-140 item 7).
+        attestation_version: null,
         seq: derived.sidecar.confirmations[0]!.seq,
       },
     ]);

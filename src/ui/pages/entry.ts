@@ -44,8 +44,8 @@
  *
  * Section 9, and decision D-127: contribution is the currency, so what this
  * entry cost its contributors and what it earned them is one panel in standing
- * and nothing else. No read of this record is priced, so there is no money row
- * to show: the Contribution panel names who submitted, who decided, who
+ * and nothing else. Standing is the whole of it: the Contribution panel names
+ * who submitted, who decided, who
  * reconfirmed and who challenged, each with the published standing its own act
  * earns or burns. The acts are read off the sealed record this page already
  * holds — the core's author, the approvers, the reconfirmations and the
@@ -457,9 +457,9 @@ function confidence(ctx: PageContext, data: EntryData): Safe {
 /**
  * The state beside the entry that the schema cannot hold.
  *
- * No read-share slot among them since D-127: no read is priced, so a seat on an
- * entry's revenue is a seat on nothing, and a row for it would be publishing a
- * claim this record no longer makes.
+ * Standing and nothing beside it since D-127: every read of this entry is
+ * free, so there is no share of one to hold, and a row for it would be
+ * publishing a claim this record no longer makes.
  */
 /**
  * The bootstrap label, in one line (decision D-128).
@@ -873,8 +873,8 @@ function attribution(data: EntryData): Safe {
       <p class="note">
         Cite the validators, not only the log. They are the parties that went and
         fetched the source themselves and signed what they found, and
-        attribution is one of the things this record pays in — there is no money
-        here, so credit on every read is not a courtesy but the reward. The line
+        attribution is one of the things this record gives back — credit on every
+        read is not a courtesy but part of the reward. The line
         above is derived from the entry and its own sealed events, so two readers
         who copy it get the same line.
       </p>
@@ -1230,6 +1230,7 @@ function confirmations(data: EntryData): Safe {
             <th>posted_at</th>
             <th>registry_event</th>
             <th>counted</th>
+            <th>attestation</th>
           </tr>
         </thead>
         <tbody>
@@ -1265,12 +1266,25 @@ function confirmations(data: EntryData): Safe {
                   ? "counted"
                   : "account statement, not counted"}
               </td>
+              <td class="dim break mono">
+                ${each.attestation_version === null ||
+                each.attestation_version === undefined
+                  ? "no attestation"
+                  : `attested ${each.attestation_version}`}
+              </td>
             </tr>`,
           )}
         </tbody>
       </table>
     </div>
     <div class="panel-body">
+      <p class="note">
+        The attestation column is the independence sentence the line itself
+        carried, inside the fingerprint its author sealed: a line that attested
+        nothing says <span class="mono">no attestation</span>, and one that did
+        names the version, so a reader can tell a bare statement from one whose
+        author put the independence sentence behind it.
+      </p>
       <p class="note">
         A confirmation never changes this entry's status: status is what the
         counted validators decided, and a public statement is not a validation.
@@ -1345,8 +1359,8 @@ function passed(source: unknown): boolean {
  * Every act on this entry, in the order the record made them: the submission,
  * each decision, each reconfirmation, each challenge.
  *
- * Read off the sealed record this page already holds and priced from
- * src/policy.ts. Nothing is summed and nothing is stored: an operator's own
+ * Read off the sealed record this page already holds, with each act's amount
+ * read from src/policy.ts. Nothing is summed and nothing is stored: an operator's own
  * standing is the fold over the whole log, and it is on the operator page.
  */
 function contributionRows(data: EntryData): ContributionRow[] {
@@ -1457,11 +1471,11 @@ function contributionRows(data: EntryData): ContributionRow[] {
  * Who contributed to this entry, and what their acts earned or burned
  * (decision D-127, the record is free).
  *
- * One panel where the read shares and the stakes used to be two. Nothing on
- * this entry is priced and nothing is owed: the content is public and CC0 from
- * the seal that covers it, no read of it is charged, and the only thing an act
- * moves is standing. So the panel is the acts and the published amounts, with
- * no money anywhere and no total — the amounts are src/policy.ts's, applied to
+ * One panel where the shares and the stakes used to be two. Nothing on this
+ * entry is owed to anybody: the content is public and CC0 from the seal that
+ * covers it, every read of it is free, and the only thing an act moves is
+ * standing. So the panel is the acts and the published amounts, with
+ * no total — the amounts are src/policy.ts's, applied to
  * what the log already shows, and the authority on any operator's own number is
  * the fold on its page.
  */

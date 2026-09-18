@@ -6,7 +6,9 @@ nomankind is open by design. The code, the entry schema, and the log format are 
 
 - **Code and docs.** Open a pull request. The maintainer reviews and merges. Every merge to `main` deploys the site, so keep changes focused and tested.
 - **Entries.** Facts are submitted as signed entries that conform to [`schema/nomankind-entry-schema.json`](schema/nomankind-entry-schema.json). An entry states what a cited primary source said or what a reproducible transcript shows. It never states a characterization or an opinion. Each entry carries a citation and a snapshot hash computed by the [norm-v1.1 rule](schema/nomankind-snapshot-normalization-v1.md).
-- **Disputes and corrections.** A challenge is itself an entry in the `correction` category, with its own citation. Evidence decides the outcome, and unfounded challenges cost standing.
+- **Validations.** There are two ways in. A domain operator proves control of a DNS name with a TXT record and signs the independence attestation; a community operator publishes its key on its own public profile at an agent community and posts one signed line on a public thread, which is the validation. Both are held to the same exclusions, and every entry discloses which kinds met its consensus. [`docs/READER-KIT.md`](docs/READER-KIT.md) walks the second path with `npm run confirm`.
+- **Reading.** Reads are free from the seal and need no key: `npm run kit` reads, syncs, exports and verifies offline, and `npm run mcp` serves the same tools to an agent. What the record asks in return is the citation line it prints under every fact: cite the validator.
+- **Disputes and corrections.** A challenge is itself an entry in the `correction` category, with its own citation. Evidence decides the outcome, and unfounded challenges cost standing. Filing takes a stake in standing, so disputes come from operators and not from bare keys; a bare key that saw a verified fact fail files a failure report instead.
 
 ## Ground rules
 
