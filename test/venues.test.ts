@@ -38,6 +38,7 @@ import { describe, expect, it } from "vitest";
 import {
   ColonyBoardAdapter,
   GitHubBoardAdapter,
+  RegistryBoardAdapter,
   boardAdaptersFor,
   confirmationVenue,
   pinnedThreadsFor,
@@ -341,7 +342,9 @@ describe("the venue table", () => {
     ]);
     // A thread id here is a UUID, and the table says so in its own shape.
     expect(typeof pinnedThreadsFor(row, "demo")[0]).toBe("string");
-    expect(pinnedThreadsFor(row, "production")).toEqual([]);
+    expect(pinnedThreadsFor(row, "production")).toEqual([
+      "bae0e581-d7e2-4a25-9451-9a9bb3083a41",
+    ]);
     expect(pinnedThreadsFor(row, "local")).toEqual([]);
   });
 
@@ -356,7 +359,10 @@ describe("the venue table", () => {
     );
     expect(row.discover).toBe(false);
     expect(pinnedThreadsFor(row, "demo")).toEqual([1]);
-    expect(pinnedThreadsFor(row, "production")).toEqual([]);
+    // Issue 2 and not issue 1: production got its own thread on 2026-09-18,
+    // and demo keeps the one it has been read on since D-138.
+    expect(pinnedThreadsFor(row, "production")).toEqual([2]);
+    expect(pinnedThreadsFor(row, "local")).toEqual([]);
   });
 
   it("leaves the registry venue exactly where D-136 left it", () => {
@@ -365,6 +371,34 @@ describe("the venue table", () => {
     expect(row.discover).toBe(true);
     expect(row.profile_door).toBeNull();
     expect(pinnedThreadsFor(row, "demo")).toEqual([5212]);
+  });
+
+  it("pins the three threads today's first production batch was posted on", () => {
+    // 2026-09-18: the batch was said at all three venues, and each post is the
+    // production thread of its venue from that day on. Local names none, which
+    // is the door being open exactly where the maintainer opened it.
+    expect(
+      CONFIRMATION_VENUES.map((row) => pinnedThreadsFor(row, "production")),
+    ).toEqual([[5891], ["bae0e581-d7e2-4a25-9451-9a9bb3083a41"], [2]]);
+    for (const row of CONFIRMATION_VENUES) {
+      expect(pinnedThreadsFor(row, "local")).toEqual([]);
+      // Production's thread is never demo's: a comment on one must never be
+      // readable as having been written to the other record.
+      for (const id of pinnedThreadsFor(row, "production")) {
+        expect(pinnedThreadsFor(row, "demo")).not.toContain(id);
+      }
+    }
+  });
+
+  it("carries the cap each board says it has, and the registry's is its own", () => {
+    // The founding registry refused a 9647-character body on 2026-09-18 and
+    // published the number in the refusal, so the table carries the board's
+    // own 8000 rather than the maintainer's old guess of 10000.
+    expect(confirmationVenue("1f916")!.post_max_chars).toBe(8000);
+    // GitHub's published maximum for an issue comment body, unchanged.
+    expect(confirmationVenue("github")!.post_max_chars).toBe(65536);
+    // The Colony publishes none, so its conservative bound stands.
+    expect(confirmationVenue("colony")!.post_max_chars).toBe(10000);
   });
 
   it("counts all three, because both binding kinds count", () => {
@@ -416,14 +450,32 @@ describe("the boards an environment listens to", () => {
   });
 
   it("reads nothing anywhere the maintainer has not opened the door", async () => {
-    for (const environment of ["local", "production"]) {
-      const boards = boardAdaptersFor(envOf(environment));
-      expect(boards).toHaveLength(3);
-      for (const board of boards) {
-        // Null and not an empty list: the step counts `board_unavailable` and
-        // says why, rather than claiming a board said nothing.
-        expect(await board.threads()).toBeNull();
-      }
+    // Local only, now that production has its threads: the door is open where
+    // the maintainer opened it and nowhere else, and local is nowhere else.
+    const boards = boardAdaptersFor(envOf("local"));
+    expect(boards).toHaveLength(3);
+    for (const board of boards) {
+      // Null and not an empty list: the step counts `board_unavailable` and
+      // says why, rather than claiming a board said nothing.
+      expect(await board.threads()).toBeNull();
     }
+  });
+
+  it("listens to all three real boards on production, on the pinned threads", async () => {
+    const boards = boardAdaptersFor(envOf("production"));
+    expect(boards.map((board) => board.venue)).toEqual([
+      "1f916",
+      "colony",
+      "github",
+    ]);
+    expect(boards[0]).toBeInstanceOf(RegistryBoardAdapter);
+    expect(boards[1]).toBeInstanceOf(ColonyBoardAdapter);
+    expect(boards[2]).toBeInstanceOf(GitHubBoardAdapter);
+    // The two that discover nothing answer their pinned thread and only that,
+    // with no network read at all: the pinned list is the whole door there.
+    expect(await boards[1]!.threads()).toEqual([
+      "bae0e581-d7e2-4a25-9451-9a9bb3083a41",
+    ]);
+    expect(await boards[2]!.threads()).toEqual([2]);
   });
 });

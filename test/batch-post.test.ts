@@ -27,6 +27,7 @@ import {
   BATCH_ASK_LIMIT,
   BATCH_VENUES,
   batchPostPlan,
+  capRowAdvice,
   carriesConfirmForm,
   composeBatchPost,
   confirmationForm,
@@ -1007,6 +1008,51 @@ describe("the run", () => {
     expect(await runBatchPost(["all", BASE], deps)).toBe(1);
     expect(run.io.out.some((line) => line.startsWith("failed colony:"))).toBe(true);
     expect(run.posters.get("github")?.sent).toHaveLength(1);
+    // A refusal that names no cap says nothing about the policy table: 429 is
+    // the board asking for quiet, and there is no number to carry into it.
+    expect(run.io.out.some((line) => line.includes("post_max_chars"))).toBe(false);
+  });
+
+  it("names the policy row when a venue refuses a post for its length", async () => {
+    // The founding registry's own answer on 2026-09-18, verbatim: the run
+    // prints it whole, and adds the one thing it does not say — which row of
+    // src/policy.ts holds the number the composer fitted this batch to.
+    const answer =
+      '1f916 refused 400: {"error":"body too long: the cap is 8000. The cap is ' +
+      'published at GET / and in GET /api/surface; a rejected post does not ' +
+      'spend your daily post"}';
+    const state = memoryState();
+    const run = fixture(state);
+    const deps: BatchPostDeps = {
+      ...run.deps,
+      posterFor: async (venue: string, _plan: BatchPlan): Promise<Poster> => {
+        if (venue === "1f916") throw new Error(answer);
+        return run.posters.get(venue) as Poster;
+      },
+    };
+    expect(await runBatchPost(["all", BASE], deps)).toBe(1);
+    expect(run.io.out).toContain(`failed 1f916: ${answer}`);
+    const named = run.io.out.find((line) => line.startsWith("change post_max_chars"));
+    expect(named).toBeDefined();
+    expect(named).toContain("post_max_chars for 1f916 in src/policy.ts");
+    expect(named).toContain("cap of 8000");
+    // No retry and no re-fit: the refused venue sent nothing, and the run said
+    // so rather than quietly asking about fewer entries.
+    expect(run.posters.get("1f916")?.sent ?? []).toHaveLength(0);
+    expect(run.posters.get("colony")?.sent).toHaveLength(1);
+  });
+
+  it("says nothing about the table for a refusal that is only weather", () => {
+    // A 5xx that happens to carry the word is a server's bad day and not a
+    // published limit, and a status that is not the board's verdict on this
+    // post is not the board saying anything about the post at all.
+    expect(capRowAdvice("1f916", "1f916 refused 500: cap is 8000")).toBeNull();
+    expect(capRowAdvice("colony", "colony refused 429: slow down")).toBeNull();
+    expect(capRowAdvice("github", "github refused via gh (1): no token")).toBeNull();
+    // And a 4xx that names a cap without a number still names the row.
+    const advice = capRowAdvice("colony", "colony refused 413: body too long");
+    expect(advice).toContain("post_max_chars for colony in src/policy.ts");
+    expect(advice).not.toContain("cap of");
   });
 
   it("refuses arguments that are not a batch, before any read", async () => {

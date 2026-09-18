@@ -1030,6 +1030,42 @@ export function postedOn(state: BatchState, venue: string, day: string): boolean
   return row !== undefined && row.date === day;
 }
 
+/**
+ * One sentence naming the row to change, when a venue's refusal names a cap.
+ *
+ * On 2026-09-18 the founding registry refused a 9647-character body and said
+ * why in its own words — "the cap is 8000" — and the run printed that answer
+ * and nothing else, so the operator had to know on their own that the number
+ * the composer fits to is `post_max_chars` in src/policy.ts. The venue's answer
+ * still goes out verbatim; this only says where the record disagrees with the
+ * board, because a refusal that names a cap is the board publishing a limit,
+ * and a published limit belongs in the table rather than in somebody's memory.
+ *
+ * Nothing is retried and nothing is re-fitted. A post refused for length would
+ * fit if the composer dropped entries, but which entries wait and whether today
+ * gets a second post are the operator's to decide: this run would be deciding
+ * them silently, and a batch that quietly asks about fewer entries than it said
+ * it would is a batch nobody agreed to.
+ *
+ * Only a 4xx, because only a 4xx is the board saying something about the post
+ * itself; a 500 or a timeout is weather, and a cap named in the middle of one
+ * would be this command reading a number out of a server's bad day.
+ */
+export function capRowAdvice(venue: string, answer: string): string | null {
+  if (!/\brefused\b[^:]*\b4\d\d\b/.test(answer)) return null;
+  if (!/\bcap\b|\btoo long\b|\bmax(?:imum)? (?:length|characters)\b/i.test(answer)) {
+    return null;
+  }
+  const named = /\bcap (?:is|of) (\d{2,7})\b/i.exec(answer);
+  const cap = named === null ? "" : ` of ${named[1]}`;
+  return (
+    `change post_max_chars for ${venue} in src/policy.ts: the venue named a ` +
+    `cap${cap} and this run fitted the batch to ${venuePostLimit(venue)}, ` +
+    `and nothing was retried or re-fitted here because a second post today is ` +
+    `the operator's choice.`
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
@@ -1126,9 +1162,13 @@ export async function runBatchPost(
       const poster = await deps.posterFor(venue, plan);
       result = await poster.post(body);
     } catch (error) {
-      deps.io.stdout(
-        `failed ${venue}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      // The venue's own answer, whole and unedited, exactly as it has always
+      // been printed: the board said it, and a run that paraphrased a refusal
+      // would be a run the operator had to go and check.
+      const answer = error instanceof Error ? error.message : String(error);
+      deps.io.stdout(`failed ${venue}: ${answer}`);
+      const advice = capRowAdvice(venue, answer);
+      if (advice !== null) deps.io.stdout(advice);
       failed = true;
       continue;
     }
