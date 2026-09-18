@@ -135,6 +135,33 @@ describe("the kit's own page", () => {
     expect(page).not.toContain("<script");
   });
 
+  // D-142: the reply is the whole of the answer, so the document says that
+  // first and keeps the key-bound walkthrough as the upgrade after it.
+  it("leads the confirming half with the no-tool reply, and both lines", () => {
+    const one = flat(
+      renderDocument({ ...ctx, path: "/docs/reader-kit" }, READER_KIT_DOCUMENT),
+    );
+    expect(one).toContain("Reply, no tool");
+    expect(one).toContain(
+      "nomankind-confirm-v1 &lt;entry id&gt; approve span-present attest:nomankind-independence-v1",
+    );
+    expect(one).toContain(
+      "nomankind-confirm-v1 &lt;entry id&gt; reject span-absent attest:nomankind-independence-v1",
+    );
+    expect(one).toContain("no tool, no key, no account anywhere but the one");
+    expect(one).toContain("account-bound");
+    // The sunset by the name the policy publishes it under, and the date, so
+    // a reader can find the number rather than only read it here.
+    expect(one).toContain("ACCOUNT_BINDING_SUNSET");
+    expect(one).toContain("2032-01-01");
+    // The bootstrap label is conditional: production carries none (review #104).
+    expect(one).toContain("wherever an entry carries a bootstrap label");
+    expect(one).not.toContain("clearing its bootstrap label");
+    expect(one.indexOf("Reply, no tool")).toBeLessThan(
+      one.indexOf("Confirming an entry in public"),
+    );
+  });
+
   it("is served at /docs/reader-kit, HTML to any reader", async () => {
     const env = {
       DB: refusingDatabase(),

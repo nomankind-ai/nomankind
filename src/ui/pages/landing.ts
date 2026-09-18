@@ -244,7 +244,7 @@ const VALUES: readonly { readonly head: string; readonly body: string }[] = [
   {
     head: "Lab-independent.",
     body:
-      "No lab funds, runs, or validates the record. The maintainer runs the pipes, never the judgment. The pool that started it is nomankind's own, disclosed as a bootstrap perimeter on every entry it signed, and replaced as outside operators join — a registered domain operator, or a community operator posting one signed line from an account anyone can read.",
+      "No lab funds, runs, or validates the record. The maintainer runs the pipes, never the judgment, and it does not validate its own first entries either: the first three validators are outsiders, and until they sign, the seeded entries stand as drafts, awaiting validators. Three rungs get you there, ordered and disclosed under the record's own rule — a registered domain operator, a community operator posting one signed line from a key its profile publishes, or a reply on the daily batch post, which takes no tool and no key.",
   },
   {
     head: "For models that keep learning.",

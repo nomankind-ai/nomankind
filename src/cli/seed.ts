@@ -46,16 +46,24 @@ import { appendFile, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { WebFetcher } from "../adapters/fetch.js";
+import { DUPLICATE_REFUSALS, LIVE_STATUSES } from "../duplicate.js";
 import { hashText, normalizeText } from "../normalize.js";
-import { CORE_TEXT_MAX_CHARS } from "../policy.js";
+import {
+  CORE_TEXT_MAX_CHARS,
+  SEED_DUPLICATES_BEFORE_STOP,
+  SEED_HELD_CLAIMS_MAX,
+  SEED_READ_PAGES_MAX,
+} from "../policy.js";
 import { runCommand } from "./main.js";
 import { runSubmit, type SubmitDeps } from "./submit.js";
 import {
   containsSpan,
   fetchAndHash,
+  getJson,
   readKeyFile,
   reasonOf,
   WebHttpClient,
+  type HttpClient,
   type ValidatorIo,
   type ValidatorKey,
 } from "./validator.js";
@@ -78,6 +86,9 @@ export const CORE_TOO_LARGE = "core_too_large";
 
 /** The name of the log, in the directory the run writes it to. */
 export const SEED_LOG_NAME = "seed-log.jsonl";
+
+/** A row the record already holds: not filed again, and not a refusal either. */
+export const ALREADY_FILED = "already_filed";
 
 /**
  * One row of the source list.
@@ -179,12 +190,27 @@ export function checkSources(value: unknown): SourcesVerdict {
  * The fields file one row builds: the row's own fields, the span as the claim
  * exactly, and the three the row leaves to the tool.
  *
- * The defaults say what the capture supports and nothing more. A quotation
- * entry records that the cited page carries this passage; what the page said
- * before is not something this tool captured, so the `before` says so in those
- * words rather than asserting an absence nobody checked. `effective_at` is the
- * day the capture was taken, for the same reason the checkpoint's seeded entry
- * uses its own day: it is the one date the run actually knows.
+ * The defaults say what the capture supports and nothing more. What the page
+ * said before is not something this tool captured, so the `before` says so in
+ * those words rather than asserting an absence nobody checked. `effective_at`
+ * is the day the capture was taken, for the same reason the checkpoint's seeded
+ * entry uses its own day: it is the one date the run actually knows.
+ *
+ * `after` is the span, like the claim, and that is load-bearing rather than
+ * tidy. The duplicate key (decision D-085, src/duplicate.ts) is the domain, the
+ * subject, the category, the normalized `after` and the effective date — it
+ * reads `after` and nothing else of what the entry asserts. A constant sentence
+ * there, which is what this tool used to write, gave every quotation from one
+ * page one key: the first row of a list filed, and the second was refused
+ * `duplicate_claim` however different its passage. Today's first real run on
+ * demo showed exactly that, filing row 0 and stopping on row 1.
+ *
+ * Making the state after the change the passage itself is the honest reading as
+ * well as the working one. A quotation entry asserts that this page carries
+ * this passage, so the passage is the state it asserts; two different passages
+ * are two different assertions, and the same passage filed twice is the one
+ * thing the duplicate rule should still catch. The fix belongs here and not in
+ * the key: a key that ignored `after` would stop catching real duplicates.
  */
 export function fieldsForRow(row: SeedRow, now: Date): Record<string, unknown> {
   return {
@@ -193,16 +219,133 @@ export function fieldsForRow(row: SeedRow, now: Date): Record<string, unknown> {
     domain: row.domain,
     claim: row.span,
     before: row.before ?? "not recorded in nomankind",
-    after: row.after ?? "the cited page carries this passage verbatim",
+    after: row.after ?? row.span,
     effective_at: row.effective_at ?? now.toISOString().slice(0, 10),
     citation: row.citation,
   };
+}
+
+// ---------------------------------------------------------------------------
+// What the record already holds
+// ---------------------------------------------------------------------------
+
+/**
+ * The claims the record already holds for the subjects on a list, by subject.
+ *
+ * The key is the subject and the normalized claim with a newline between them.
+ * A newline cannot survive `normalizeText`, which folds every run of whitespace
+ * to one space, so the two halves of the key can never run into each other.
+ * The value is the entry id, which is what the run's log prints so a reader can
+ * go and look at the entry a row was skipped for.
+ */
+export type HeldClaims = ReadonlyMap<string, string>;
+
+/** The key one subject and one claim are held under. */
+export function heldKey(subject: string, claim: string): string {
+  return `${subject}\n${normalizeText(claim)}`;
+}
+
+/** One entry's claim off the entry door, or null when it did not answer. */
+async function claimOf(
+  http: HttpClient,
+  baseUrl: string,
+  id: string,
+): Promise<string | null> {
+  try {
+    const answer = await getJson(http, baseUrl, `/entries/${encodeURIComponent(id)}`);
+    if (answer.status !== 200 || !isRecord(answer.body)) return null;
+    const claim = answer.body["claim"];
+    return typeof claim === "string" && claim !== "" ? claim : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read what the record already holds for these subjects, through the free
+ * read doors and before a single write is spent.
+ *
+ * The reason this exists is the shape of the door: a submission is charged
+ * against the day's write cap before the duplicate rule is checked, so a row
+ * the record already holds costs a write to be told so. A re-run over a list of
+ * which ten rows are filed would spend ten writes learning nothing. Reads are
+ * free and uncapped by comparison, so the run reads first.
+ *
+ * The listing has no subject filter — `parseEntriesQuery` (src/ui/query.ts)
+ * takes category, status, domain, tier, source, the two floors and freshness,
+ * and refuses a parameter it does not know — so the narrowing is done here,
+ * over the pages the listing answers newest first. That is the right shape
+ * anyway: the entries a seeder is about to collide with are the ones it filed
+ * on an earlier run, which are the newest ones there are.
+ *
+ * The listing says what an entry is and not what it says (src/worker/pages.ts),
+ * so a claim is one read of the entry door apiece, and only for the rows whose
+ * subject is on this list. Both walks are bounded — `SEED_READ_PAGES_MAX`
+ * pages and `SEED_HELD_CLAIMS_MAX` claims — and what falls outside the bound is
+ * caught by the duplicate refusal itself, which the run steps over and counts.
+ *
+ * Only the live statuses (`LIVE_STATUSES`, src/duplicate.ts): after a rejection
+ * or a supersession the claim may be filed again, which is the duplicate rule's
+ * own reading and must not be a second one here.
+ */
+export async function readHeldClaims(
+  http: HttpClient,
+  baseUrl: string,
+  subjects: ReadonlySet<string>,
+): Promise<HeldClaims> {
+  const held = new Map<string, string>();
+  if (subjects.size === 0) return held;
+
+  for (const status of LIVE_STATUSES) {
+    let query = `status=${encodeURIComponent(status)}`;
+    for (let page = 0; page < SEED_READ_PAGES_MAX; page += 1) {
+      let answer;
+      try {
+        answer = await getJson(http, baseUrl, `/entries?${query}`);
+      } catch {
+        break;
+      }
+      if (answer.status !== 200 || !isRecord(answer.body)) break;
+      const rows = answer.body["entries"];
+      if (!Array.isArray(rows)) break;
+
+      for (const row of rows) {
+        if (!isRecord(row)) continue;
+        const subject = row["subject"];
+        const id = row["id"];
+        if (typeof subject !== "string" || typeof id !== "string") continue;
+        if (!subjects.has(subject)) continue;
+        if (held.size >= SEED_HELD_CLAIMS_MAX) break;
+        const claim = await claimOf(http, baseUrl, id);
+        if (claim === null) continue;
+        held.set(heldKey(subject, claim), id);
+      }
+
+      const next = answer.body["next"];
+      if (next === null || next === undefined || next === "") break;
+      if (held.size >= SEED_HELD_CLAIMS_MAX) break;
+      query =
+        `status=${encodeURIComponent(status)}` +
+        `&before=${encodeURIComponent(String(next))}`;
+    }
+  }
+  return held;
 }
 
 /** What one row came to. The log line carries exactly this, and the index. */
 export type RowOutcome =
   | { readonly result: "submitted"; readonly entry_id: string }
   | { readonly result: "checked" }
+  | {
+      /**
+       * The record already holds this claim, so nothing was sent. Not a
+       * refusal: the row's work is done, and a run of them is a list being
+       * finished rather than a list going wrong.
+       */
+      readonly result: "skipped";
+      readonly reason: string;
+      readonly entry_id?: string;
+    }
   | {
       readonly result: "refused";
       readonly reason: string;
@@ -228,6 +371,11 @@ export interface SeedRun {
   readonly submitted: number;
   readonly checked: number;
   readonly refused: number;
+  /**
+   * The rows the record already held, which cost nothing and are not failures:
+   * a re-run over a half-filled list is a list being finished.
+   */
+  readonly skipped: number;
   /** The rows the run never reached: the door stopped it, or --limit did. */
   readonly remaining: number;
   /** The door's refusal that stopped the run, or null when none did. */
@@ -248,8 +396,24 @@ export type SeedDeps = SubmitDeps;
  * refused at any of the first two is recorded and the run moves on, because one
  * bad row on a list of twenty is a fact about that row. A refusal from the door
  * stops the run, because the door's refusals are about the key and the day — the
- * daily write cap above all — and nineteen more submissions would earn nineteen
- * more copies of the same 429.
+ * daily write cap, `rate_limited`, above all — and nineteen more submissions
+ * would earn nineteen more copies of the same 429.
+ *
+ * With one exception, `duplicate_claim`, which is a door refusal about the row:
+ * this claim is already in the log, which says nothing about the next row. It
+ * is counted as a refusal, logged like any other, and the run carries on — so
+ * running the same list again after a partial run finishes the list rather than
+ * stopping on its first already-filed row.
+ *
+ * Carrying on is the second line of defence and not the first, because it is
+ * not free: the door charges a write before it checks the duplicate rule, so
+ * every refusal stepped over costs one of the day's writes. The first line is
+ * the read above the loop — what the record already holds for these subjects,
+ * bought with free reads — and a row found there is skipped before a capture is
+ * fetched or a write is spent. What that read missed still meets the refusal,
+ * and `SEED_DUPLICATES_BEFORE_STOP` in a row ends the run: duplicates arriving
+ * one after another mean the read missed something systematically, and the
+ * answer to that is to stop and look rather than to spend the day finding out.
  */
 export async function runSeed(input: {
   readonly key: ValidatorKey;
@@ -265,10 +429,24 @@ export async function runSeed(input: {
   const reach =
     limit === null ? input.rows.length : Math.min(limit, input.rows.length);
 
+  // What the record already holds for the subjects this run will reach, read
+  // before anything is written. Only the rows within reach: a list of a hundred
+  // run with --limit 10 asks about the ten subjects it will actually touch.
+  const held = await readHeldClaims(
+    deps.http,
+    input.baseUrl,
+    new Set(input.rows.slice(0, reach).map((row) => row.subject)),
+  );
+  if (held.size > 0) {
+    deps.io.stdout(`the record already holds ${held.size} of these claims`);
+  }
+
   const log: SeedLogLine[] = [];
   let submitted = 0;
   let checked = 0;
   let refused = 0;
+  let skipped = 0;
+  let duplicatesInARow = 0;
   let stopped: string | null = null;
   let index = 0;
 
@@ -300,6 +478,17 @@ export async function runSeed(input: {
       continue;
     }
 
+    // What the record already holds is not filed again, and the skip comes
+    // before the capture: a row whose work is done should cost this run neither
+    // a fetch nor a write. The entry id is printed so a reader of the log can
+    // go and look at the entry that made the decision.
+    const alreadyFiled = held.get(heldKey(row.subject, row.span));
+    if (alreadyFiled !== undefined) {
+      skipped += 1;
+      line({ result: "skipped", reason: ALREADY_FILED, entry_id: alreadyFiled });
+      continue;
+    }
+
     // The validator's own capture, through the validator's own code path.
     const captured = await fetchAndHash(deps.fetcher, row.citation);
     if (!captured.ok) {
@@ -327,6 +516,9 @@ export async function runSeed(input: {
     });
     if (run.ok && run.entryId !== null) {
       submitted += 1;
+      // A row that went in is evidence the run's picture of the record is good
+      // enough, so the count of duplicates in a row starts again from here.
+      duplicatesInARow = 0;
       line({ result: "submitted", entry_id: run.entryId });
       continue;
     }
@@ -339,9 +531,33 @@ export async function runSeed(input: {
       ...(run.status === null ? {} : { status: run.status }),
     });
     // A refusal the door made is about this key and this day -- the daily write
-    // cap above all -- so the run stops and says what is left. A refusal the
-    // submit path made for itself, before the door was asked, is about this row
-    // alone and the next row is still worth trying.
+    // cap, `rate_limited` (src/keys.ts), above all -- so the run stops and says
+    // what is left: nineteen more submissions would earn nineteen more copies
+    // of the same 429. A refusal the submit path made for itself, before the
+    // door was asked, is about this row alone and the next row is still worth
+    // trying.
+    //
+    // `duplicate_claim` is the one door refusal that is about the row rather
+    // than about the key or the day: it says this exact claim is already in the
+    // log, which is true of that row and says nothing about the next one. A
+    // re-run over a list whose first row was filed yesterday used to stall on
+    // it forever, which made the tool unusable for the thing it is for —
+    // running the same list again until the whole of it is in.
+    //
+    // It is stepped over and not ignored. Each one spent a write, because the
+    // door charges before it checks, so `SEED_DUPLICATES_BEFORE_STOP` of them
+    // in a row ends the run: that many together is the read above the loop
+    // having missed something rather than one unlucky row, and carrying on
+    // would spend the day's cap proving it.
+    if (DUPLICATE_REFUSALS.includes(reason)) {
+      duplicatesInARow += 1;
+      if (duplicatesInARow >= SEED_DUPLICATES_BEFORE_STOP) {
+        stopped = reason;
+        index += 1;
+        break;
+      }
+      continue;
+    }
     if (run.status !== null) {
       stopped = reason;
       index += 1;
@@ -356,12 +572,19 @@ export async function runSeed(input: {
     deps.io.stdout(`${remaining} rows remain`);
   }
 
+  if (skipped > 0) {
+    deps.io.stdout(`${skipped} rows the record already held were not filed again`);
+  }
+
+  // A skipped row is not a failure and does not colour the exit code: a run
+  // over a list the record already holds in full did everything asked of it.
   return {
     ok: stopped === null && refused === 0,
     code: stopped === null && refused === 0 ? 0 : 1,
     submitted,
     checked,
     refused,
+    skipped,
     remaining,
     stopped,
     log,

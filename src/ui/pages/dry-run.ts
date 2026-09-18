@@ -22,6 +22,7 @@ import {
   ASSIGNMENT_WINDOW_HOURS,
   DEFAULT_DOMAIN,
   SEAL_INTERVAL_MINUTES,
+  VERIFICATION_MIN_OUTSIDE_OPERATORS,
 } from "../../policy.js";
 import { TXT_RECORD_PREFIX } from "../../registry.js";
 import { CONTACT_EMAIL, html, layout, link, type Safe } from "../html.js";
@@ -65,9 +66,9 @@ export function renderDryRun(ctx: PageContext): string {
       <div class="page-head"><h1>Dry run on demo</h1></div>
       ${elsewhereNote}
       <p class="lede">
-        Section 11: each candidate genesis operator validates one seeded entry
-        in a public dry run before being named, so the founding pool is named on
-        a record and not on a promise. This page is the rehearsal of that run.
+        Section 11: a domain candidate validates one seeded entry in a public
+        dry run before joining the trusted pool, so the pool is entered on a
+        record and not on a promise. This page is the rehearsal of that run.
         Demo is where to practice it because most of it is not a simulation: the
         DNS check is the real one, over DNS-over-HTTPS against the record you
         publish; the attestation you sign is the real sentence, verbatim, under
@@ -78,12 +79,27 @@ export function renderDryRun(ctx: PageContext): string {
         Practice until the commands are boring, then do it once where it counts.
       </p>
       <p class="note">
-        This page is for somebody who means to be named an operator. A community
-        member who only wants to say they checked a fact registers nothing at
-        all: they run <span class="mono">npm run confirm</span> from
+        This page is the registered rung, the top of three. A community member
+        registers nothing at all: on the key-bound rung they run
+        <span class="mono">npm run confirm</span> from
         <a href="/docs/reader-kit">the reader kit</a>, which writes one signed
-        line under the entry on a public thread their own account already has.
-        No domain, no DNS record, no key here.
+        line under the entry on a public thread their own account already has,
+        and on the account-bound rung they need no command at all: the daily
+        batch post carries, per entry, the span quoted from the cited page, the
+        page it was quoted from, and the exact line to paste back, and the reply
+        is the validation. No domain, no DNS record, no key here.
+        Either line is a validation, and the rule under decision D-142 is that
+        the rung a counted line stood on is disclosed beside the entry's
+        verification class.
+      </p>
+      <p class="note">
+        Genesis itself is not a naming (decision D-142). It is the first
+        ${VERIFICATION_MIN_OUTSIDE_OPERATORS} publicly bound operators the
+        maintainer does not run, deciding one seeded entry in public; until they
+        do, the seeds stand as drafts, awaiting validators. The
+        maintainer's naming of bootstrap operators under a disclosed perimeter
+        is a fallback invoked by a published decision, and it is not invoked on
+        production.
       </p>
 
       ${panel(
@@ -182,11 +198,11 @@ export function renderDryRun(ctx: PageContext): string {
           <pre class="block mono">npm run register -- ~/.nomankind/keys/demo.json ${origin} &lt;your domain&gt; [--domain ${DEFAULT_DOMAIN}]</pre>
           <p class="note">
             No <span class="mono">--genesis</span>. That flag posts the
-            maintainer's one-time naming of a founding operator, and it is signed
-            by the maintainer's own key: nobody can name themselves, on demo or
-            anywhere, so a dry run registers and validates and then stops. Being
-            named is the maintainer's move, made in public and recorded in the
-            log like everything else.
+            maintainer's naming of a bootstrap operator — the fallback of D-142,
+            invoked by a published decision and not invoked on production — and
+            it is signed by the maintainer's own key: nobody can name
+            themselves, on demo or anywhere, so a dry run registers and
+            validates and then stops.
           </p>
           <p class="note">
             The attestation is the domain's own sentence, signed verbatim under
@@ -428,8 +444,8 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
             </dd>
             <dt>The maintainer key is a throwaway</dt>
             <dd>
-              Whatever names anyone on demo is not the key that names the genesis
-              pool.
+              Whatever names anyone on demo is not the maintainer's production
+              key, and nobody is named on production at all.
             </dd>
             <dt>The entries and the operators are fixtures</dt>
             <dd>
@@ -453,18 +469,20 @@ npm run verify -- ./bundle/entry.json ./bundle/log.json</pre>
           <p class="note">
             A demo dry run is practice, and it is also a public record on this
             environment: it is in the log, it is sealed, and anyone can read it.
-            What it is not is the evidence the genesis pool is named on. That
-            evidence is a dry run on production — the same three steps and the
-            same one validation, against the real registry and the real
-            witnesses — published in the genesis call issue when it opens at
-            production go-live. That issue will note demo practice as context
-            beside it, because a candidate who rehearsed in public has shown
-            something, just not the thing being named.
+            What it is not is a decision on the record. The entries that count
+            are decided on production — the same steps and the same one
+            validation, against the real registry and the real witnesses — and
+            they are what genesis is: the first
+            ${VERIFICATION_MIN_OUTSIDE_OPERATORS} outsiders deciding a seeded
+            entry there, published in the call issue when it opens at production
+            go-live. That issue will note demo practice as context beside it,
+            because a candidate who rehearsed in public has shown something,
+            just not the thing that counts.
           </p>
           <p class="note">
-            <a href="/genesis">The genesis page</a> carries the call, the three
-            joining steps in full, the attestation verbatim, and whoever has
-            registered on this environment.
+            <a href="/genesis">The genesis page</a> carries the call, all three
+            rungs in full, the attestation verbatim, and whoever has registered
+            on this environment.
           </p>
           <p class="note">
             Questions, or a seeded entry to judge:

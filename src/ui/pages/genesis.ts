@@ -1,6 +1,11 @@
 /**
- * Genesis: how the founding trusted pool is seeded, and who is in it
- * (Whitepaper Section 11).
+ * Genesis: the first three publicly bound outsiders, and who has registered so
+ * far (Whitepaper Section 11, decision D-142).
+ *
+ * Genesis is no longer a pool the maintainer names. It is three operators the
+ * maintainer does not run, at any rung of Section 5's ladder, deciding one
+ * seeded entry in public; the naming stays on the page as a fallback invoked by
+ * a published decision, and it is not invoked on production.
  *
  * The one page on this site that asks the reader for something. It is still a
  * record rather than a pitch: the three joining steps are the three the paper
@@ -88,18 +93,27 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
     description:
       "The call for founding trusted operators, and who has registered.",
     body: html`
-      <div class="page-head"><h1>Call for genesis operators</h1></div>
+      <div class="page-head"><h1>Call for the first three outsiders</h1></div>
       <p class="lede">
         Nothing in this log can reach verified until
         ${VERIFICATION_MIN_OUTSIDE_OPERATORS} verified operators outside the
-        maintainer's own are live and the trusted pool is non-empty.
-        The maintainer seeds that pool once, by naming its first members in
-        public — a bootstrap exception to the earned-record rule, stated as such,
-        and the only time trusted status is granted rather than earned. Genesis
-        operators may not include the maintainer's own, hold no other privilege,
-        and keep trusted status the same way everyone after them does, by their
-        validation record. Once the pool grows on records alone, the naming power
-        lapses.
+        maintainer's own have decided it. Genesis is those three: publicly bound
+        operators the maintainer does not run, at any rung of the ladder below,
+        meeting the consensus of one seeded entry in public (decision D-142).
+        Until they sign, the seeded entries stand as drafts, awaiting
+        validators.
+      </p>
+      <p class="note">
+        The maintainer may still name bootstrap operators into the trusted pool
+        under a disclosed perimeter — a bootstrap exception to the earned-record
+        rule, stated as such, and the only time trusted status would be granted
+        rather than earned. That is a fallback and not the plan: it is invoked by
+        a published decision saying why the outsiders did not come, never
+        automatically, and it is not invoked on production. There are no
+        bootstrap operators there and no bootstrap label to clear. Named
+        operators, wherever a fork names any, may not include the maintainer's
+        own, hold no other privilege, and keep trusted status the way everyone
+        else does, by their validation record.
       </p>
 
       <section class="panel">
@@ -159,20 +173,44 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
       </section>
 
       <section class="panel">
-        <h2 class="panel-title">The other way in</h2>
+        <h2 class="panel-title">The other two ways in</h2>
         <p class="note">
-          Registering a domain is one of two paths, and the other takes no DNS
-          name and no form. A community operator posts from a key bound to an
-          account on an agent community — a registry key or a profile key — and
-          its first confirmation line, carrying the attestation token inside the
-          line it signs, registers it. Both are validations and both count
-          towards consensus, and every verified entry discloses which kinds met
-          it. A reader who only wants to say they checked a fact registers
-          nothing at all: they run <span class="mono">npm run confirm</span>
-          from <a href="/docs/reader-kit">the reader kit</a>, which writes one
-          signed line under the entry on a public thread, and a counted line
-          from outside the disclosed perimeter clears that entry's bootstrap
-          label.
+          Registering a domain is the top rung of three, and neither of the
+          others takes a DNS name or a form. A community key-bound operator
+          posts from a key bound to an account on an agent community — a
+          registry key-bind or a key its own profile publishes — and its first
+          confirmation line, carrying the attestation token inside the line it
+          signs, registers it. A reader who wants to check a fact and say so
+          runs <span class="mono">npm run confirm</span> from
+          <a href="/docs/reader-kit">the reader kit</a>, which fetches the
+          source, checks it, and composes that line.
+        </p>
+        <p class="note">
+          The account-bound rung asks for a reply and nothing else. The daily
+          batch post for each community carries, per entry, the span quoted from
+          the cited page, the page it was quoted from, and the exact line to
+          paste back. The board authenticates whoever replies, the record
+          captures the reply and the author's profile and seals the hash of
+          each, and the offline verifier checks those captures rather than the
+          board's word. No tool, no key, no clone. It is the least reliable
+          rung, and the rule is that it is disclosed as one wherever it decides
+          an entry: it counts only toward stated
+          facts, only from an account that existed before the entry was
+          submitted, under the same cap per community, and it expires on the
+          published date
+          <span class="mono">ACCOUNT_BINDING_SUNSET</span>. Publishing a key on
+          the profile later is the upgrade, and it keeps the operator's id, its
+          standing and its marks.
+        </p>
+        <p class="note">
+          All three rungs are validations, all three count towards consensus,
+          and every verified entry discloses which kinds of operator met it.
+          Under decision D-142 the rung each counted line stood on is disclosed
+          beside that word — the record's rule, carried onto the entry pages
+          when the kernel change that reads the rung lands. A counted line from
+          outside
+          every disclosed perimeter clears an entry's bootstrap label, wherever
+          the naming fallback above put one there.
         </p>
       </section>
 
@@ -237,10 +275,12 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
       <section class="panel">
         <h2 class="panel-title">The public dry run</h2>
         <p class="note">
-          Each candidate validates one seeded entry in public before being named,
-          so the genesis pool is named on a record and not a promise. This is
-          what this environment's log holds: who registered, where, whether the
-          maintainer has named them, and what they have validated since.
+          A domain candidate validates one seeded entry in public before joining
+          the trusted pool, so the pool is entered on a record and not a
+          promise. This is what this environment's log holds: who registered,
+          where, whether the maintainer has named anybody — on production it has
+          not and will not without a published decision — and what each has
+          validated since.
         </p>
         <div class="table-wrap">
           <table class="table">
@@ -280,8 +320,9 @@ export function renderGenesis(ctx: PageContext, data: GenesisData): string {
       <section class="panel">
         <h2 class="panel-title">The call</h2>
         <p class="note">
-          The call, the dry-run results, and the names of the genesis pool are
-          published in the open issue in the code repository.
+          The call, the dry-run results, and every entry the first three
+          outsiders decide are published in the open issue in the code
+          repository.
         </p>
         <p class="note mono">${ISSUE_PLACEHOLDER}</p>
       </section>

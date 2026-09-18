@@ -1673,6 +1673,23 @@ export interface ConfirmationVenue {
    * both venues, so the hourly read is one request per thread.
    */
   readonly comments_door: string;
+  /**
+   * The most characters one post at this venue may carry (decision D-142).
+   *
+   * The batch names every entry that is waiting, and the ask is now several
+   * lines an entry — the quoted claim, the cited page, and the two lines a
+   * replier pastes back — so a full batch is longer than a board will take. The
+   * composer fits as many whole entries as this allows and says how many wait,
+   * because a post cut off in the middle would cut a confirmation line in half,
+   * and half a line is a line nobody can paste.
+   *
+   * GitHub publishes its own number and that is what is here: 65536 characters
+   * for an issue comment body. Neither the founding registry nor The Colony
+   * publishes one, so theirs is the maintainer's own conservative bound rather
+   * than the board's — a batch that stays under it is a batch no server has to
+   * refuse. It moves only by a later decision, or by a published limit.
+   */
+  readonly post_max_chars: number;
 }
 
 export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
@@ -1695,6 +1712,8 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     // reads it through `BoardAdapter.record`.
     profile_door: null,
     comments_door: "/api/post/{thread}",
+    // No published limit; the maintainer's own bound (above).
+    post_max_chars: 10000,
   }),
   Object.freeze({
     venue: "colony",
@@ -1717,6 +1736,8 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     binding: "profile",
     profile_door: "/api/v1/users/{handle}",
     comments_door: "/api/v1/posts/{thread}/context",
+    // No published limit; the maintainer's own bound (above).
+    post_max_chars: 10000,
   }),
   Object.freeze({
     venue: "github",
@@ -1736,6 +1757,8 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     binding: "profile",
     profile_door: "/users/{handle}",
     comments_door: "/repos/{repository}/issues/{thread}/comments?per_page={limit}",
+    // GitHub's own published maximum for an issue comment body.
+    post_max_chars: 65536,
   }),
 ]);
 
@@ -1837,6 +1860,45 @@ export const BATCH_ASK_LIMIT = 150;
  * amount of a growing log and leaves the rest to the next one.
  */
 export const BATCH_READ_PAGES_MAX = 8;
+
+/**
+ * How many pages of the entry listing the seeder reads before it files a list.
+ *
+ * The seeding tool reads what the record already holds for the subjects on its
+ * list, so that a re-run over a list half of which is already filed does not
+ * spend the day's writes on submissions the door will refuse: the door charges
+ * the write before it checks the duplicate rule, so a refusal costs exactly as
+ * much as a submission. Reads cost nothing, which is why the check is a read.
+ *
+ * Bounded like every other walk of a growing log. A list whose entries are
+ * older than this many pages is not fully seen, and what is not seen is caught
+ * by the duplicate refusal itself — the second line of defence, which the run
+ * steps over and counts.
+ */
+export const SEED_READ_PAGES_MAX = 8;
+
+/**
+ * How many entries' claims the seeder reads while building that picture.
+ *
+ * The listing answers what an entry is and not what it says, so the claim of a
+ * listed entry is one read of the entry door apiece. The bound is over the
+ * whole run rather than per subject: a list naming one subject with hundreds of
+ * entries behind it is the shape that would otherwise turn a bounded check into
+ * an unbounded one.
+ */
+export const SEED_HELD_CLAIMS_MAX = 200;
+
+/**
+ * How many duplicate refusals in a row end a seeding run.
+ *
+ * A `duplicate_claim` is about its own row and not about the key or the day, so
+ * the run steps over one and carries on. But each one still spends a write, and
+ * a run meeting them one after another is a run whose read of the record missed
+ * something — a listing stale, a page bound reached, a subject spelled another
+ * way. Three is enough to tell that from an unlucky row, and small enough that
+ * being wrong costs three writes rather than a day's worth.
+ */
+export const SEED_DUPLICATES_BEFORE_STOP = 3;
 
 /**
  * How many comments one run reads from one thread before it stops.
@@ -2737,6 +2799,10 @@ export const POLICY = Object.freeze({
   // item 6).
   BATCH_ASK_LIMIT,
   BATCH_READ_PAGES_MAX,
+  // What the seeder reads before it writes, and when it gives up (D-085).
+  SEED_READ_PAGES_MAX,
+  SEED_HELD_CLAIMS_MAX,
+  SEED_DUPLICATES_BEFORE_STOP,
   ANCHOR_CALENDARS,
   FAILURE_REPORT_THRESHOLD,
   DISPUTE_STAKE_STANDING,

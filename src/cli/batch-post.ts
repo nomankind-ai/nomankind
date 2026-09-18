@@ -6,9 +6,18 @@
  * the record's own job to say, where the agents are, which entries are waiting
  * and exactly how to answer. So once per UTC day this command reads the log
  * through its own public doors, picks the entries that are asking for a check,
- * and posts one batch per community: the ask, the line form, what the
- * attestation token means, how that community's keys are bound, and the
- * entries, each with a URL.
+ * and posts one batch per community: the ask, what a reply does and what it
+ * counts for, how a key upgrades it, and the entries.
+ *
+ * Decision D-142 is what an entry looks like in that post. The ask became one
+ * reply — no tool, no key: each entry carries its id, the claim quoted
+ * verbatim, the page it cites, its own URL, and the two lines a reader pastes
+ * straight back, one for the quotation being there and one for it being
+ * absent. The reply itself is the validation, and the sweep seals it. So the
+ * post says the honest things beside it: what rung a keyless reply counts at,
+ * how long that rung lasts, what a key buys, and that nomankind's own accounts
+ * never count. Boards take a bounded post, so a batch too long for one is
+ * fitted by whole entries and says how many wait.
  *
  * Every post names every community that was asked (D-138 item 12). Silence has
  * to be visible: a reader of one board can then see that the same ask went to
@@ -48,16 +57,23 @@ import {
   type Poster,
   type PosterHttp,
 } from "../adapters/poster.js";
+import { withDeadline } from "../adapters/timeout.js";
 import {
+  ACCOUNT_BINDING_SUNSET,
   BATCH_ASK_LIMIT,
   BATCH_READ_PAGES_MAX,
   CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
   CONFIRMATION_FORM_PREFIX,
   CONFIRMATION_SIGNATURE_TOKEN_PREFIX,
   CONFIRMATION_VENUES,
+  COMMUNITY_MIN_ACCOUNTS,
+  COMMUNITY_MIN_COMMUNITIES,
+  FETCH_TIMEOUT_MS,
   PROFILE_KEY_PREFIX,
   REGISTRY,
+  SEAL_INTERVAL_MINUTES,
 } from "../policy.js";
+import { canonicalConfirmationLine } from "../confirm.js";
 import { ATTESTATION_VERSION } from "../registry.js";
 import {
   getJson,
@@ -288,6 +304,20 @@ export interface AskEntry {
   readonly bootstrap: string | null;
   /** Where to read it, absolute, because a post is read away from this run. */
   readonly url: string;
+  /**
+   * The entry's own claim, verbatim (decision D-142).
+   *
+   * Every seed of this record is a quotation, so the claim is the span a
+   * replier is asked about: is this sentence on that page, word for word. It
+   * goes into the post as it is and is never shortened — a quotation somebody
+   * is asked to check against a source has to be the whole quotation.
+   *
+   * The empty string when the entry door did not answer, which the post says
+   * rather than papers over.
+   */
+  readonly claim: string;
+  /** The page the entry cites, so a replier can go and read it. */
+  readonly citation: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -328,6 +358,12 @@ function askOf(baseUrl: string, row: Record<string, unknown>): AskEntry | null {
     subject: text(row, "subject"),
     bootstrap: bootstrapOf(row["bootstrap"]),
     url: urlFor(baseUrl, `/entries/${id}`),
+    // The listing door answers the fields a caller can act on and not the
+    // claim itself, on purpose: the entry door answers the entry. So both are
+    // empty here and `readClaims` fills them, one read per entry actually
+    // asked about.
+    claim: text(row, "claim"),
+    citation: text(row, "citation"),
   };
 }
 
@@ -408,10 +444,87 @@ export async function readAsks(
         subject: entry === null ? "" : text(entry, "subject"),
         bootstrap: sidecar === null ? null : bootstrapOf(sidecar["bootstrap"]),
         url: urlFor(baseUrl, `/entries/${id}`),
+        claim: entry === null ? "" : text(entry, "claim"),
+        citation: entry === null ? "" : text(entry, "citation"),
       });
     }
   }
   return asks;
+}
+
+/**
+ * The claim and the citation of each entry the batch will name (D-142).
+ *
+ * One `GET /entries/{id}` apiece, which is the door that answers an entry at
+ * any status — the read door (`/read/{id}`) answers verified entries only, and
+ * the sharpest ask in a batch is a draft nobody has judged. Run after the
+ * selection and never before it, so the reads are bounded by the batch's own
+ * limit rather than by the size of the log.
+ *
+ * An entry the door does not answer keeps its empty claim and is still named:
+ * the post says the entry page carries the quotation, which is true, rather
+ * than dropping an entry that is waiting because one read failed.
+ *
+ * Every one of these reads is bounded and caught. A batch is a hundred and
+ * fifty of them in a row against a deployment that may be mid-restart, and a
+ * connection refused or a door that never answers must cost this run one
+ * quotation rather than the whole day's ask — silence at every community
+ * because one read threw is the worst outcome available here. So each read is
+ * made under `withDeadline` (src/adapters/timeout.ts) at `FETCH_TIMEOUT_MS`,
+ * the same bound a capture's own fetch takes, and a rejection is read as "the
+ * door did not answer".
+ *
+ * `withDeadline` and never `AbortSignal.timeout`: that timer cannot be
+ * cancelled, and a run of a hundred and fifty reads would leave a hundred and
+ * fifty of them pending behind it. The deadline covers the body as well as the
+ * headers, because a door that answers 200 and then streams nothing is the same
+ * hang from this command's side.
+ */
+async function readEntryDoor(
+  http: HttpClient,
+  baseUrl: string,
+  id: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    return await withDeadline(FETCH_TIMEOUT_MS, async (signal) => {
+      const response = await http.fetch(
+        new Request(urlFor(baseUrl, `/entries/${encodeURIComponent(id)}`), {
+          headers: { accept: "application/json" },
+          signal,
+        }),
+      );
+      if (response.status !== 200) return null;
+      const body: unknown = await response.json();
+      return isRecord(body) ? body : null;
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function readClaims(
+  http: HttpClient,
+  baseUrl: string,
+  entries: readonly AskEntry[],
+): Promise<readonly AskEntry[]> {
+  const filled: AskEntry[] = [];
+  for (const entry of entries) {
+    if (entry.claim !== "" && entry.citation !== "") {
+      filled.push(entry);
+      continue;
+    }
+    const row = await readEntryDoor(http, baseUrl, entry.id);
+    filled.push(
+      row === null
+        ? entry
+        : {
+            ...entry,
+            claim: entry.claim === "" ? text(row, "claim") : entry.claim,
+            citation: entry.citation === "" ? text(row, "citation") : entry.citation,
+          },
+    );
+  }
+  return filled;
 }
 
 /**
@@ -489,26 +602,178 @@ export function bindingInstructions(venue: string): string {
 /** The paragraph that says what the attestation token does, and what it costs. */
 function attestParagraph(): string {
   return [
-    `A line carrying ${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION} is your signature over nomankind's`,
-    "independence attestation at that version, said once, in the line itself: no",
-    "form, no registration door. It makes the line a validation by a community",
-    "operator, counted in consensus exactly as a registered validator's is, and",
-    "it registers you as one the first time you say it. A line without the token",
-    "is a public confirmation: it is shown on the entry and it clears the entry's",
-    "bootstrap label, and it counts towards no status.",
+    `${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}, which both of an entry's lines carry, is your`,
+    "signature over nomankind's independence attestation at that version, said",
+    "once, in the line itself: no model provider controls or funds you. There is",
+    "no form and no registration door — saying it registers you as a community",
+    "operator the first time. Take the token out of the line if it is not true of",
+    "you: what is left is a public confirmation, which is shown on the entry and",
+    "counts towards no status — and wherever an entry carries a bootstrap label,",
+    "a confirmation from outside is what clears it.",
   ].join("\n");
 }
 
-/** One entry, as one line of the post. */
-function askLine(entry: AskEntry): string {
-  const parts = [
+/**
+ * The two lines one entry's reply can be, composed and never spelled twice.
+ *
+ * `canonicalConfirmationLine` (src/confirm.ts) is this record's one speller of
+ * the form — the same function the reader kit signs over and the same one the
+ * door parses back — so a line printed in a post is a line the record reads the
+ * way it was meant. A second spelling here would be a second form, and the
+ * first stranger to paste one back would find out which.
+ *
+ * `span-present` and `span-absent` and not the hash check, because decision
+ * D-142's ask is the one a reader can answer by reading: every seed of this
+ * record is a quotation, so the question is whether the quoted claim is on the
+ * cited page, word for word. The hash check needs a tool; this needs eyes.
+ */
+export function replyLines(entryId: string): {
+  readonly approve: string;
+  readonly reject: string;
+} {
+  return {
+    approve: canonicalConfirmationLine({
+      entry_id: entryId,
+      verdict: "approve",
+      check: { kind: "span", value: "present" },
+      attestation_version: ATTESTATION_VERSION,
+    }),
+    reject: canonicalConfirmationLine({
+      entry_id: entryId,
+      verdict: "reject",
+      check: { kind: "span", value: "absent" },
+      attestation_version: ATTESTATION_VERSION,
+    }),
+  };
+}
+
+/**
+ * Every character that can end a line or stand in for a space, as one class.
+ *
+ * `Cc` is the C0 and C1 controls, which carries the ASCII newlines and the
+ * delete character and U+0085 NEL; `Zl` and `Zp` are U+2028 LINE SEPARATOR and
+ * U+2029 PARAGRAPH SEPARATOR; `Zs` is every space character, U+00A0 NO-BREAK
+ * SPACE among them; `Cf` is the formatting characters, which is where the
+ * zero-width ones live.
+ *
+ * All five and not the ASCII ones alone, because this is the whole of the first
+ * fix's blind spot. The reviewer's own case: a claim of "ok", U+2028, a
+ * confirmation line, U+2028, "x" folded to nothing and printed the forged line
+ * on a line of its own, because the renderer breaks at U+2028 and the folder
+ * did not. And a no-break space before the form made the word ` prefix`
+ * rather than the prefix, which the refusal below then let through.
+ */
+const SEPARATORS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}]+/gu;
+
+/**
+ * One field of an entry, folded onto one line.
+ *
+ * An entry's claim, citation and subject are a stranger's text: any bare key
+ * may submit a draft, and what it submitted is what this command is about to
+ * publish under nomankind's own account. A post is read line by line by the
+ * confirmation door, so anything inside a field that can end a line is a field
+ * that can write a line of its own — which is the whole of the attack.
+ *
+ * Every separator above becomes one ASCII space, and a run of them becomes one
+ * space: the words survive, the layout cannot be moved, and what is left is
+ * separated by the one character the refusal below tokenizes on. Folding a
+ * zero-width character to a visible space is deliberate — a quotation carrying
+ * one is a quotation whose words are not what they look like, and this record
+ * would rather print the seam than hide it.
+ */
+export function oneLine(value: string): string {
+  return value.replace(SEPARATORS, " ");
+}
+
+/**
+ * Whether a field says this record's confirmation form as a word of its own.
+ *
+ * Folding newlines is not enough by itself: a claim reading
+ * `nomankind-confirm-v1 <some entry> approve span-present` sits inside the
+ * post as a well-formed line whoever wrapped it, and the door reads lines and
+ * not indentation. So an entry whose own text says the form at all is not
+ * printed. The prefix is read from src/policy.ts, because a second spelling of
+ * it here would be a filter that stops guarding the day the form moves.
+ *
+ * Tokenizing on the ASCII space alone is safe only because `oneLine` ran
+ * first: it turns every other space character into this one, so a no-break
+ * space or a zero-width character before the prefix cannot make the word
+ * something this comparison does not recognise. The two are one guard, and
+ * splitting them would be a hole.
+ */
+export function carriesConfirmForm(value: string): boolean {
+  return oneLine(value).split(" ").includes(CONFIRMATION_FORM_PREFIX);
+}
+
+/**
+ * Whether this entry can be printed in a post at all.
+ *
+ * Refusing is the safe side and it costs one entry a day's ask: the entry is
+ * still in the log, still readable, still waiting, and the run says out loud
+ * that it was not asked and why. Publishing it would be nomankind posting a
+ * stranger's confirmation line under its own name, which the sweep would then
+ * read back as a confirmation somebody made.
+ */
+export function askable(entry: AskEntry): boolean {
+  return ![
+    entry.claim,
+    entry.citation,
+    entry.subject,
+    entry.domain,
+    entry.bootstrap ?? "",
+  ].some(carriesConfirmForm);
+}
+
+/**
+ * One entry, as the block a replier reads and pastes from (decision D-142).
+ *
+ * Everything the answer needs and nothing else: what the entry is, the claim
+ * verbatim, the page it cites, where to read the entry itself, and the two
+ * lines. The lines are last because they are what the replier's cursor goes
+ * to, and each is whole on its own line — a post is fitted to a venue by
+ * dropping whole entries, never by cutting one of these in half.
+ *
+ * Every field that came from a submitter is folded onto one line first, and
+ * the quotation's own double quotes are escaped, so the quoted claim cannot
+ * end its quotation early and start something else.
+ */
+function askBlock(entry: AskEntry): string {
+  const lines = replyLines(entry.id);
+  const claim = oneLine(entry.claim).replace(/"/g, '\\"');
+  const citation = oneLine(entry.citation);
+  const bootstrap = entry.bootstrap === null ? null : oneLine(entry.bootstrap);
+  const head = [
     entry.id,
-    entry.domain === "" ? "—" : entry.domain,
-    entry.subject === "" ? "—" : entry.subject,
-    entry.bootstrap === null ? entry.status : `${entry.status} · bootstrap ${entry.bootstrap}`,
-    entry.url,
-  ];
-  return `  ${parts.join(" · ")}`;
+    entry.domain === "" ? "—" : oneLine(entry.domain),
+    entry.subject === "" ? "—" : oneLine(entry.subject),
+    bootstrap === null ? entry.status : `${entry.status} · bootstrap ${bootstrap}`,
+  ].join(" · ");
+  return [
+    `  ${head}`,
+    claim === ""
+      ? "  claim: (on the entry page — the entry door did not answer this run)"
+      : `  claim: "${claim}"`,
+    citation === "" ? "  cited: (on the entry page)" : `  cited: ${citation}`,
+    `  entry: ${entry.url}`,
+    `  ${lines.approve}`,
+    `  ${lines.reject}`,
+  ].join("\n");
+}
+
+/**
+ * The most characters one post at this venue may carry.
+ *
+ * Off the venue's own row in src/policy.ts, where the number lives. A venue
+ * this command has a poster for but the table has not got to yet is fitted to
+ * the smallest published limit, which is the only guess that cannot overrun
+ * somebody's board.
+ */
+export function venuePostLimit(venue: string): number {
+  const row = CONFIRMATION_VENUES.find((each) => each.venue === venue);
+  return (
+    row?.post_max_chars ??
+    Math.min(...CONFIRMATION_VENUES.map((each) => each.post_max_chars))
+  );
 }
 
 /** The UTC day of an instant, which is the day a batch is counted against. */
@@ -516,52 +781,140 @@ export function utcDay(now: Date): string {
   return now.toISOString().slice(0, 10);
 }
 
-/**
- * One batch post, composed for one venue.
- *
- * The same ask everywhere, in the same order, with two things that differ: the
- * binding instructions, which are the venue's own, and nothing else. A post
- * that argued differently on different boards would be the record saying two
- * things, and the whole point of publishing where else it asked is that the
- * three can be held against each other.
- */
-export function composeBatchPost(input: {
+/** What one venue's batch came out as: the post, and what would not fit. */
+export interface ComposedBatch extends PostBody {
+  /** The entries this post names, in order. */
+  readonly asked: readonly AskEntry[];
+  /** The entries that did not fit inside the venue's limit, in order. */
+  readonly deferred: readonly AskEntry[];
+  /**
+   * The entries that were not printed at all, because their own text says this
+   * record's confirmation form (`askable`).
+   */
+  readonly refused: readonly AskEntry[];
+  /** The limit this body was fitted to, so a run can say what it was fitted to. */
+  readonly limitChars: number;
+}
+
+/** What one composition is given, whether it is being fitted or is the final one. */
+interface BatchInput {
   readonly venue: string;
   readonly entries: readonly AskEntry[];
   readonly baseUrl: string;
   readonly communities: readonly string[];
   readonly now: Date;
-}): PostBody {
+  /** The venue's own limit, overridden only where a test wants to see the fit. */
+  readonly limitChars?: number;
+}
+
+/**
+ * The post itself: the same ask everywhere, with this venue's own binding.
+ *
+ * Split out from `composeBatchPost` because fitting a batch to a board means
+ * composing it more than once: the waiting sentence, the counts and the entry
+ * blocks all change length together, so the only honest way to know whether a
+ * body fits is to build that body and measure it.
+ */
+function batchBody(
+  input: BatchInput,
+  asked: readonly AskEntry[],
+  deferred: readonly AskEntry[],
+  limitChars: number,
+): PostBody {
   const day = utcDay(input.now);
-  const drafts = input.entries.filter((entry) => entry.status === "draft").length;
-  const labelled = input.entries.length - drafts;
-  const title = `nomankind: ${input.entries.length} entries asking for a check (${day})`;
+  const drafts = asked.filter((entry) => entry.status === "draft").length;
+  const labelled = asked.length - drafts;
+  const title = `nomankind: ${asked.length} entries asking for a check (${day})`;
   const body = [
     title,
     "",
     [
       "nomankind is a public record of verified facts about AI systems. Every",
-      "entry below is waiting on somebody outside: " + String(drafts) + " are drafts nobody",
-      "has judged yet, and " + String(labelled) + " are verified entries every validator of which",
-      "sat inside one disclosed perimeter. Checking one takes minutes — open the",
-      "entry, fetch the source it cites, and say in one line whether that source",
-      "says what the entry says. Asking is the record's own work, so it asks here,",
-      "once a day, and publishes the answers and the silence alike.",
+      `entry below is waiting on somebody outside: ${String(drafts)} are drafts nobody`,
+      `has judged yet, and ${String(labelled)} are verified entries every validator of which`,
+      "sat inside one disclosed perimeter. Every one of them rests on a quotation,",
+      "so checking one is reading: open the page the entry cites and see whether",
+      "the quoted claim is on it, word for word.",
     ].join("\n"),
     "",
-    "The line, said as a comment on this thread:",
+    [
+      "Then paste that entry's approve line or its reject line back into this",
+      "thread as a comment. That is the whole of the answer: no tool to install,",
+      "no key to make, no account anywhere but the one you are reading this with.",
+    ].join("\n"),
+    "",
+    [
+      "What happens to your reply. The record reads this thread on a schedule and",
+      `seals what it finds within ${String(SEAL_INTERVAL_MINUTES)} minutes, under the same witnessed seal`,
+      "every other event in this log is under: a capture of your comment and a",
+      "capture of your profile, content-addressed, so what you said can be read",
+      "back years from now whatever this board does with it. Nothing in your",
+      "comment is followed. It is parsed, and a line that is not one of the",
+      "published forms is prose the record ignores.",
+    ].join("\n"),
+    "",
+    [
+      "What it counts for, said plainly. A reply with no key on it counts at the",
+      // "account-bound" as prose and not as `BINDING_RUNGS[0]`, which is the
+      // stored word "account": what belongs here is the word the entry page
+      // prints for the same rung, so somebody who reads this post and then
+      // reads the entry it names meets one word and not two.
+      'lowest rung, "account-bound", which is what the entry page calls it: the',
+      "board authenticated the author, and that is all anybody can recheck later.",
+      "So it counts only for a stated fact, only from an account the board says",
+      "existed before the entry was submitted, and only until",
+      `${ACCOUNT_BINDING_SUNSET}. The entry discloses on its own page that it`,
+      "rested on one. That is the honest size of it.",
+    ].join("\n"),
+    "",
+    [
+      "A key is the upgrade. A key-bound confirmation is rechecked offline from",
+      "the captures, by anybody, with no board's help and no expiry, and it can",
+      "count towards an entry's consensus under the Sybil floor rather than",
+      `instead of it: ${String(COMMUNITY_MIN_ACCOUNTS)} distinct bound accounts for a consensus met by`,
+      `community operators alone, from ${String(COMMUNITY_MIN_COMMUNITIES)} distinct communities once more than`,
+      "one community counts, with a cap on how many of one entry's lines any one",
+      "community may supply. The entry discloses the class it was met by and the",
+      "rung each line was bound at. Its line is the same form with room for two",
+      "tokens more:",
+    ].join("\n"),
     "",
     `  ${confirmationForm()}`,
     "",
-    attestParagraph(),
-    "",
     bindingInstructions(input.venue),
     "",
-    `Entries asked (newest first, ${input.entries.length}):`,
+    [
+      "The reader kit does that half for you — it fetches the cited page, makes",
+      "the check itself, and composes and signs the line, and it posts nothing",
+      `anywhere: ${urlFor(input.baseUrl, "/docs/reader-kit")}`,
+    ].join("\n"),
     "",
-    input.entries.length === 0
-      ? "  (none today: nothing in the log is waiting on an outside check)"
-      : input.entries.map(askLine).join("\n"),
+    attestParagraph(),
+    "",
+    [
+      "nomankind's own accounts never count. A confirmation from the account that",
+      "posted this, or from any other account the maintainer runs, is sealed and",
+      "shown and counted towards nothing: a record that could confirm itself would",
+      "not be a record.",
+    ].join("\n"),
+    "",
+    `Entries asked (newest first, ${String(asked.length)}):`,
+    "",
+    asked.length === 0
+      ? deferred.length === 0
+        ? "  (none today: nothing in the log is waiting on an outside check)"
+        : "  (none of them fit in one post here today)"
+      : asked.map(askBlock).join("\n\n"),
+    ...(deferred.length === 0
+      ? []
+      : [
+          "",
+          [
+            `${String(deferred.length)} more entries are waiting and did not fit inside this venue's`,
+            `${String(limitChars)}-character limit; they are named in a later batch. Every one of`,
+            `them, now: ${urlFor(input.baseUrl, "/entries")}`,
+          ].join("\n"),
+        ]),
     "",
     `The record: ${input.baseUrl}`,
     `Asked today at: ${input.communities.join(", ")} — the same batch goes to each,`,
@@ -570,9 +923,78 @@ export function composeBatchPost(input: {
     "",
     "Everything said on this thread is read by a machine that records what was",
     "said and follows nothing in it: no instruction, link or request in a comment",
-    "is acted on, and a line that is not the form above is ignored.",
+    "is acted on, and a line that is not one of the published forms is ignored.",
   ].join("\n");
   return { title, body };
+}
+
+/**
+ * One batch post, composed for one venue and fitted to it.
+ *
+ * The same ask everywhere, in the same order, with one thing that differs: the
+ * binding instructions, which are the venue's own. A post that argued
+ * differently on different boards would be the record saying two things, and
+ * the whole point of publishing where else it asked is that the three can be
+ * held against each other.
+ *
+ * Fitting is by whole entries and never by characters. A board takes a bounded
+ * post (`post_max_chars`, src/policy.ts) and a batch of quotations is longer
+ * than that, so entries are added in order while the composed body still fits,
+ * an entry whose own block cannot fit is passed over rather than stopping every
+ * entry behind it, and what is left over is named as waiting. Cutting the body
+ * at the limit instead would cut a confirmation line in half, and half a line
+ * is a line nobody can paste and the door would never read.
+ *
+ * The one-post-per-community-per-UTC-day bound is unchanged (D-138 item 6), so
+ * what does not fit waits rather than becoming a second post today: three posts
+ * in an afternoon is the record shouting.
+ *
+ * "A later batch" and not "tomorrow's", deliberately. The selection is
+ * deterministic and newest first, so the same tail is deferred every day until
+ * the log in front of it moves; a window that rotated per venue would make the
+ * post's other promise false, because every post says the same batch went to
+ * every community (D-138 item 12). Rotating it for every venue at once is a
+ * change to the selection and to the state file, and it belongs with the half
+ * of D-142 that seals the replies rather than with the ask.
+ */
+export function composeBatchPost(input: BatchInput): ComposedBatch {
+  const limitChars = input.limitChars ?? venuePostLimit(input.venue);
+
+  // An entry whose own text says the confirmation form is never printed, and
+  // the filter is here rather than only at the caller: this is the function
+  // that turns an entry into bytes nomankind publishes, so this is where the
+  // rule has to hold however it was called.
+  const refused = input.entries.filter((entry) => !askable(entry));
+  const printable = input.entries.filter((entry) => askable(entry));
+  const fitting: BatchInput = { ...input, entries: printable };
+
+  const asked: AskEntry[] = [];
+  const kept = new Set<string>();
+  const rest = (): readonly AskEntry[] =>
+    printable.filter((entry) => !kept.has(entry.id));
+  for (const entry of printable) {
+    const candidate = [...asked, entry];
+    const candidateKept = new Set([...kept, entry.id]);
+    const candidateRest = printable.filter(
+      (each) => !candidateKept.has(each.id),
+    );
+    if (
+      batchBody(fitting, candidate, candidateRest, limitChars).body.length <=
+      limitChars
+    ) {
+      asked.push(entry);
+      kept.add(entry.id);
+    }
+  }
+
+  const deferred = rest();
+  return {
+    ...batchBody(fitting, asked, deferred, limitChars),
+    asked,
+    deferred,
+    refused,
+    limitChars,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -641,9 +1063,13 @@ export async function runBatchPost(
     return BAD_ARGUMENTS;
   }
 
-  const entries = selectAsks(
-    await readAsks(deps.http, plan.baseUrl, plan.limit),
-    plan.limit,
+  // The claim and the citation are read after the selection and not before it
+  // (D-142): one entry-door read apiece, for the entries this batch will
+  // actually name, and none for the rest of the log.
+  const entries = await readClaims(
+    deps.http,
+    plan.baseUrl,
+    selectAsks(await readAsks(deps.http, plan.baseUrl, plan.limit), plan.limit),
   );
   const day = utcDay(deps.now);
   const state = parseState(await deps.state.read());
@@ -664,10 +1090,29 @@ export async function runBatchPost(
     });
     written.push(`--- ${venue} ---\n${body.body}`);
 
+    // An entry the composer would not print is named, with the reason, before
+    // anything else about this venue: a silent refusal is an entry that looks
+    // to an operator exactly like an entry nobody has got to yet.
+    for (const entry of body.refused) {
+      deps.io.stdout(`not asked ${entry.id}: claim text in the confirm form`);
+    }
+
+    // What did not fit is said on every run and not only on a dry one: an
+    // entry that waits is a fact about the ask, and a run that only whispered
+    // it into a dry run would be a run that hid it from the real one.
+    if (body.deferred.length > 0) {
+      deps.io.stdout(
+        `waiting ${venue}: ${body.deferred.length} entries did not fit inside ` +
+          `${body.limitChars} characters and are named in a later batch — ` +
+          body.deferred.map((entry) => entry.id).join(", "),
+      );
+    }
+
     if (plan.dryRun) {
       deps.io.stdout(body.body);
       deps.io.stdout(
-        `dry run ${venue}: ${entries.length} entries, ${body.body.length} characters, nothing sent`,
+        `dry run ${venue}: ${body.asked.length} of ${entries.length} entries, ` +
+          `${body.body.length} of ${body.limitChars} characters, nothing sent`,
       );
       continue;
     }

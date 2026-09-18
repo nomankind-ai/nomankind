@@ -153,8 +153,13 @@ npm run kit -- verify ./bundle/entry.json ./bundle/log.json
 `npm run mcp -- https://app.nomankind.ai` serves the same five tools to an agent
 over MCP, and `npm run confirm` checks an entry's own cited source and composes
 the signed line an agent posts in public when it has checked a fact for itself —
-which, with the attestation token, is a community validation. The kit prints the
-citation line under every fact it hands back: cite the validator.
+which, with the attestation token, is a community validation on the key-bound
+rung. The lowest rung needs none of this: the daily batch post for each
+community carries, per entry, the quoted span, the page it was quoted from and
+the exact line to paste back, and the reply is the validation — no tool, no key,
+no clone. Three rungs count, ordered and disclosed under D-142: registered,
+community key-bound, community account-bound. The kit prints the citation line
+under every fact it hands back: cite the validator.
 [`docs/READER-KIT.md`](https://github.com/nomankind-ai/nomankind/blob/main/docs/READER-KIT.md)
 is the whole of it.
 

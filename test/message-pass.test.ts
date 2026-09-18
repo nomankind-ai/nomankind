@@ -12,12 +12,16 @@
  * is still in the policy object and still written into every mirror manifest,
  * and a reader of a v1 clone has to be told what they are looking at.
  *
- * Three other things are pinned here. The landing page's one sentence, exactly
+ * Four other things are pinned here. The landing page's one sentence, exactly
  * (D-131 item 1), because a sentence that is nearly right is a different
  * sentence. The entry page's attestation column (D-140 item 7), which says
- * which independence sentence a public confirmation stood behind. And the docs
+ * which independence sentence a public confirmation stood behind. The docs
  * hub's whitepaper card, which must read the version the paper itself says it
- * is once `npm run gen:docs` has rendered it.
+ * is once `npm run gen:docs` has rendered it. And who goes first (D-142): no
+ * page and no document may say the first operators are named at genesis
+ * without the fallback wording, because genesis is now the first three
+ * publicly bound outsiders and the naming is a door the maintainer opens by a
+ * published decision, on no environment so far.
  *
  * Pure: every page in src/ui/pages/ is a function of a gathered object, so the
  * fixtures below are written by hand and nothing here opens a store, a clock or
@@ -685,7 +689,7 @@ describe("the landing page's one sentence (D-131 item 1)", () => {
     );
   });
 
-  it("follows the five words, and says whose the bootstrap pool is", () => {
+  it("follows the five words, and says who validates first", () => {
     const flat = page.replace(/\s+/g, " ");
     for (const word of [
       "Free.",
@@ -699,9 +703,11 @@ describe("the landing page's one sentence (D-131 item 1)", () => {
     }
     expect(flat).toContain("No lab funds, runs, or validates the record.");
     expect(flat).toContain(
-      "The pool that started it is nomankind&#39;s own, disclosed as a " +
-        "bootstrap perimeter on every entry it signed, and replaced as outside " +
-        "operators join",
+      "the first three validators are outsiders, and until they sign, the " +
+        "seeded entries stand as drafts, awaiting validators",
+    );
+    expect(flat).toContain(
+      "or a reply on the daily batch post, which takes no tool and no key",
     );
   });
 });
@@ -728,13 +734,96 @@ describe("the entry page's attestation column (D-140 item 7)", () => {
 
 describe("the docs hub's whitepaper card", () => {
   it("reads the version the paper says it is, once gen:docs has rendered it", () => {
-    expect(WHITEPAPER_VERSION).toBe("v1.7");
+    expect(WHITEPAPER_VERSION).toBe("v1.8");
     expect(PAGES["/docs"]).toContain(
       `The specification, consolidated at ${WHITEPAPER_VERSION}.`,
     );
     // The rendered module is the paper's own bytes, so this fails until
-    // `npm run gen:docs` has run over F1's v1.7.
-    expect(WHITEPAPER_MARKDOWN).toContain("This is v1.7");
+    // `npm run gen:docs` has run over the v1.8 amendment.
+    expect(WHITEPAPER_MARKDOWN).toContain("This is v1.8");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Who goes first (D-142)
+// ---------------------------------------------------------------------------
+
+/**
+ * Genesis is the first three publicly bound outsiders, and the maintainer's
+ * naming of bootstrap operators is a fallback it invokes by a published
+ * decision.
+ *
+ * A page may still describe that fallback — it is a real door, a fork may use
+ * it, and the perimeter disclosure is defined in terms of it — but a page that
+ * says the first operators are named at genesis, flatly, is describing the
+ * design this decision replaced. So the phrase is allowed only in a sentence
+ * that also carries the fallback wording, and "named at genesis" as the
+ * definition of a perimeter (a grouping the maintainer discloses about
+ * operators it named) is what that wording looks like in practice.
+ */
+const FALLBACK_WORDS: readonly RegExp[] = [
+  /\bfallback\b/i,
+  /\bmay (?:still )?name\b/i,
+  /\bwould be\b/i,
+  /\bwherever a fork\b/i,
+  /\bpublished decision\b/i,
+  // The perimeter's own definition: a disclosure about operators the
+  // maintainer named, which is a fact about perimeters and not a claim that
+  // this record's first operators were named.
+  /\b(?:grouping|disclosure)[^.]{0,80}named at genesis\b/i,
+  /\babout the operators it named at genesis\b/i,
+];
+
+/** Every sentence of a page that says the first operators are named at genesis. */
+function namedAtGenesisSentences(document: string): string[] {
+  const text = document.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => /named at genesis|named trusted at genesis/i.test(sentence));
+}
+
+describe("genesis is the first three outsiders (D-142)", () => {
+  for (const [path, document] of Object.entries(PAGES)) {
+    it(`${path} never says the first operators are named at genesis without the fallback`, () => {
+      for (const sentence of namedAtGenesisSentences(document)) {
+        expect(
+          FALLBACK_WORDS.some((pattern) => pattern.test(sentence)),
+          `${path} says the first operators are named at genesis, with no fallback wording: …${sentence}…`,
+        ).toBe(true);
+      }
+    });
+  }
+
+  it("says on the genesis page what genesis is, and that production is not named", () => {
+    const flat = PAGES["/genesis"]!.replace(/\s+/g, " ");
+    expect(flat).toContain("publicly bound");
+    expect(flat).toContain("awaiting validators");
+    expect(flat).toContain("not invoked on production");
+  });
+
+  it("puts the reply path on the pages that list the ways in", () => {
+    for (const path of ["/genesis", "/dry-run"]) {
+      const flat = PAGES[path]!.replace(/\s+/g, " ");
+      expect(flat, `${path} drops the reply path`).toMatch(
+        /line to paste back|exact line to paste/,
+      );
+    }
+    expect(PAGES["/"]!.replace(/\s+/g, " ")).toContain("awaiting validators");
+  });
+
+  it("holds the documents to the same rule", () => {
+    for (const path of DOCUMENTS) {
+      const markdown = readFileSync(
+        new URL(`../${path}`, import.meta.url),
+        "utf8",
+      );
+      for (const sentence of namedAtGenesisSentences(markdown)) {
+        expect(
+          FALLBACK_WORDS.some((pattern) => pattern.test(sentence)),
+          `${path} says the first operators are named at genesis, with no fallback wording: …${sentence}…`,
+        ).toBe(true);
+      }
+    }
   });
 });
 
@@ -799,7 +888,7 @@ const DOCUMENT_HISTORY: Readonly<Record<string, readonly string[]>> = {
 };
 
 /** The paper's change note: one line, allowed by its opening. */
-const CHANGE_NOTE = "*Changes in v1.7,";
+const CHANGE_NOTE = "*Changes in v1.8,";
 
 /** Inline code and fenced blocks are not prose: a door's own word is its own. */
 function prose(markdown: string): string {
@@ -846,6 +935,6 @@ describe("the message pass: no document sells anything either", () => {
       .split("\n")
       .filter((line) => line.startsWith(CHANGE_NOTE));
     expect(notes).toHaveLength(1);
-    expect(notes[0]).toContain("D-127");
+    expect(notes[0]).toContain("D-142");
   });
 });

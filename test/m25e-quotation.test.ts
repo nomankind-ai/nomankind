@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { extractCore, type Core } from "../src/core.js";
+import { duplicateKey, sameDuplicateKey } from "../src/duplicate.js";
 import {
   checkSources,
   fieldsForRow,
@@ -57,6 +58,8 @@ const RUN_URL = "https://github.com/nomankind-ai/bootstrap/actions/runs/42";
 const SPAN = "We will not deploy a model that we cannot switch off.";
 /** The same sentence, said differently: a paraphrase is not a quotation. */
 const PARAPHRASE = "We will not deploy any model we are unable to switch off.";
+/** A second passage the same page carries: two quotations, one citation. */
+const SECOND_SPAN = "Every change to this page is dated and kept in public.";
 
 const PAGE: FixturePage = {
   body: new Uint8Array(
@@ -97,20 +100,44 @@ class StubLog implements HttpClient {
   entry: Record<string, unknown> | null = null;
   submitStatus = 201;
   submitBody: unknown = { status: "draft" };
+  /**
+   * Answers for the next submissions, in order, before the pair above is used.
+   * A run whose rows are answered differently is the only way to see what one
+   * row's refusal does to the rows behind it.
+   */
+  readonly submitAnswers: { status: number; body: unknown }[] = [];
+  /**
+   * The free read doors the seeder asks before it writes: one listing page per
+   * status, and the entries those pages point at, by id. Empty by default, so a
+   * test that says nothing about them is a run against a record holding nothing.
+   */
+  readonly listing = new Map<string, { entries: unknown[]; next: unknown }>();
+  readonly held = new Map<string, Record<string, unknown>>();
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (request.method === "GET" && path.startsWith("/agents/")) {
       return Response.json({ operator: { id: OPERATOR } });
     }
+    if (request.method === "GET" && path === "/entries") {
+      const status = new URL(request.url).searchParams.get("status") ?? "";
+      return Response.json(
+        this.listing.get(status) ?? { entries: [], next: null },
+      );
+    }
     if (request.method === "GET" && path.startsWith("/entries/")) {
+      const byId = this.held.get(path.slice("/entries/".length));
+      if (byId !== undefined) return Response.json(byId);
       if (this.entry === null) return Response.json({ error: "not_found" }, { status: 404 });
       return Response.json(this.entry);
     }
     const body = await request.json();
     this.posted.push({ path, body });
     if (path === "/entries") {
-      return Response.json(this.submitBody, { status: this.submitStatus });
+      const next = this.submitAnswers.shift();
+      return next === undefined
+        ? Response.json(this.submitBody, { status: this.submitStatus })
+        : Response.json(next.body, { status: next.status });
     }
     return Response.json({ sealed: true }, { status: 201 });
   }
@@ -226,6 +253,189 @@ describe("npm run seed builds one entry per source row", () => {
     expect(run.remaining).toBe(2);
     // One submission was attempted, and the two behind it were not.
     expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(1);
+  });
+
+  // The first real run on demo filed row 0 and was refused `duplicate_claim`
+  // on row 1: `after` was one constant sentence for every row, and the
+  // duplicate key (D-085) reads `after`, so sixty quotations off one page
+  // shared one key. The state a quotation entry asserts is the passage itself.
+  it("asserts the span as the state after, so one page can carry two quotations", async () => {
+    const fields = fieldsForRow(rowFor(SPAN), NOW);
+    expect(fields["after"]).toBe(SPAN);
+    expect(fields["claim"]).toBe(SPAN);
+    expect(fields["before"]).toBe("not recorded in nomankind");
+    // A row that says its own `after` still wins: the default is a default.
+    expect(fieldsForRow({ ...rowFor(SPAN), after: "said" }, NOW)["after"]).toBe(
+      "said",
+    );
+  });
+
+  it("gives two spans off one citation two duplicate keys", async () => {
+    const first = duplicateKey(await seededCore(SPAN, pageHashValue));
+    const second = duplicateKey(await seededCore(SECOND_SPAN, pageHashValue));
+    // Same page, same subject, same category, same day — and not the same key,
+    // which is the whole of the bug that stopped the first run.
+    expect(first.subject).toBe(second.subject);
+    expect(first.category).toBe(second.category);
+    expect(first.effective_at).toBe(second.effective_at);
+    expect(sameDuplicateKey(first, second)).toBe(false);
+  });
+
+  it("still gives the same span twice one duplicate key", async () => {
+    const once = duplicateKey(await seededCore(SPAN, pageHashValue));
+    const again = duplicateKey(await seededCore(SPAN, pageHashValue));
+    expect(sameDuplicateKey(once, again)).toBe(true);
+    // And a passage differing only in whitespace is the same passage, because
+    // the key normalizes what it reads.
+    const spaced = duplicateKey(await seededCore(`  ${SPAN}  `, pageHashValue));
+    expect(sameDuplicateKey(once, spaced)).toBe(true);
+  });
+
+  it("logs a duplicate row and carries on to the next", async () => {
+    const http = new StubLog();
+    http.submitAnswers.push({ status: 409, body: { error: "duplicate_claim" } });
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN), rowFor(SECOND_SPAN), rowFor(SECOND_SPAN)],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect(run.stopped).toBeNull();
+    expect([run.submitted, run.refused, run.remaining]).toEqual([2, 1, 0]);
+    expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(3);
+    // The refusal is in the log, named, on the row it happened to.
+    const first = run.log[0]!.outcome as { result: string; reason: string };
+    expect([first.result, first.reason]).toEqual(["refused", "duplicate_claim"]);
+    // A run that refused anything is still not ok: it says so and exits 1.
+    expect([run.ok, run.code]).toEqual([false, 1]);
+  });
+
+  // The door charges the write before it checks the duplicate rule, so a row
+  // the record already holds costs a write to be told so. The run reads what
+  // is held through the free doors first, and files nothing it finds there.
+  it("skips a row the record already holds, and files the one it does not", async () => {
+    const http = new StubLog();
+    const filed = "nmk_00000000000000000000000000000001";
+    http.listing.set("draft", {
+      entries: [{ id: filed, subject: rowFor(SPAN).subject, status: "draft" }],
+      next: null,
+    });
+    http.held.set(filed, { id: filed, claim: SPAN, subject: rowFor(SPAN).subject });
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN), rowFor(SECOND_SPAN)],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    // One write for the row that was not held, and none for the row that was.
+    expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(1);
+    expect([run.skipped, run.submitted, run.refused]).toEqual([1, 1, 0]);
+    // A skip is not a failure: a list the record already holds is a list done.
+    expect([run.ok, run.code, run.stopped]).toEqual([true, 0, null]);
+    const skippedRow = run.log[0]!.outcome as {
+      result: string;
+      reason: string;
+      entry_id: string;
+    };
+    expect([skippedRow.result, skippedRow.reason, skippedRow.entry_id]).toEqual([
+      "skipped",
+      "already_filed",
+      filed,
+    ]);
+    expect((run.log[1]!.outcome as { result: string }).result).toBe("submitted");
+  });
+
+  it("matches what is held by the normalized claim, not by its spelling", async () => {
+    const http = new StubLog();
+    const filed = "nmk_00000000000000000000000000000002";
+    http.listing.set("verified", {
+      entries: [{ id: filed, subject: rowFor(SPAN).subject, status: "verified" }],
+      next: null,
+    });
+    // The same passage, respaced: `normalizeText` is the rule on both sides.
+    http.held.set(filed, { id: filed, claim: `  ${SPAN.replace(/ /gu, "  ")}  ` });
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN)],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect([run.skipped, run.submitted]).toEqual([1, 0]);
+    expect(http.posted.filter((post) => post.path === "/entries")).toEqual([]);
+  });
+
+  // The read above the loop can miss — a stale page, a bound reached — and the
+  // refusal is the second line of defence. It is not a free one: each stepped
+  // over spent a write, so three in a row ends the run.
+  it("stops after three duplicate refusals in a row", async () => {
+    const http = new StubLog();
+    const duplicate = { status: 409, body: { error: "duplicate_claim" } };
+    http.submitAnswers.push(duplicate, duplicate, duplicate);
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [
+        rowFor(SPAN),
+        rowFor(SECOND_SPAN),
+        rowFor(SPAN),
+        rowFor(SECOND_SPAN),
+      ],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect(run.stopped).toBe("duplicate_claim");
+    expect([run.submitted, run.refused, run.remaining]).toEqual([0, 3, 1]);
+    // Three writes spent and no more: the fourth row was never attempted.
+    expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(3);
+  });
+
+  it("counts duplicates in a row, and a submission starts the count again", async () => {
+    const http = new StubLog();
+    const duplicate = { status: 409, body: { error: "duplicate_claim" } };
+    // Two, then one that goes in, then two more: five rows and no stop.
+    http.submitAnswers.push(duplicate, duplicate, { status: 201, body: { status: "draft" } }, duplicate, duplicate);
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [
+        rowFor(SPAN),
+        rowFor(SECOND_SPAN),
+        rowFor(SPAN),
+        rowFor(SECOND_SPAN),
+        rowFor(SPAN),
+      ],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect(run.stopped).toBeNull();
+    expect([run.submitted, run.refused, run.remaining]).toEqual([1, 4, 0]);
+  });
+
+  it("still stops at the cap, even after carrying on past a duplicate", async () => {
+    const http = new StubLog();
+    http.submitAnswers.push(
+      { status: 409, body: { error: "duplicate_claim" } },
+      { status: 429, body: { error: "write_quota", bucket: "agent", limit: 100 } },
+    );
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN), rowFor(SECOND_SPAN), rowFor(SECOND_SPAN)],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect(run.stopped).toBe("write_quota");
+    expect([run.submitted, run.refused, run.remaining]).toEqual([0, 2, 1]);
+    expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(2);
   });
 
   it("leaves the rows past --limit for a later run", async () => {
