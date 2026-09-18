@@ -38,6 +38,7 @@ import { describe, expect, it } from "vitest";
 import {
   ColonyBoardAdapter,
   GitHubBoardAdapter,
+  RegistryBoardAdapter,
   boardAdaptersFor,
   confirmationVenue,
   pinnedThreadsFor,
@@ -62,6 +63,7 @@ import {
   CONFIRMATION_VENUES,
   COUNTING_BINDING_KINDS,
   PROFILE_KEY_PREFIX,
+  REGISTRY,
   communityCapPerEntry,
   countingCommunities,
   isSingleCountingCommunity,
@@ -341,7 +343,9 @@ describe("the venue table", () => {
     ]);
     // A thread id here is a UUID, and the table says so in its own shape.
     expect(typeof pinnedThreadsFor(row, "demo")[0]).toBe("string");
-    expect(pinnedThreadsFor(row, "production")).toEqual([]);
+    expect(pinnedThreadsFor(row, "production")).toEqual([
+      "bae0e581-d7e2-4a25-9451-9a9bb3083a41",
+    ]);
     expect(pinnedThreadsFor(row, "local")).toEqual([]);
   });
 
@@ -356,7 +360,10 @@ describe("the venue table", () => {
     );
     expect(row.discover).toBe(false);
     expect(pinnedThreadsFor(row, "demo")).toEqual([1]);
-    expect(pinnedThreadsFor(row, "production")).toEqual([]);
+    // Issue 2 and not issue 1: production got its own thread on 2026-09-18,
+    // and demo keeps the one it has been read on since D-138.
+    expect(pinnedThreadsFor(row, "production")).toEqual([2]);
+    expect(pinnedThreadsFor(row, "local")).toEqual([]);
   });
 
   it("leaves the registry venue exactly where D-136 left it", () => {
@@ -365,6 +372,34 @@ describe("the venue table", () => {
     expect(row.discover).toBe(true);
     expect(row.profile_door).toBeNull();
     expect(pinnedThreadsFor(row, "demo")).toEqual([5212]);
+  });
+
+  it("pins the three threads today's first production batch was posted on", () => {
+    // 2026-09-18: the batch was said at all three venues, and each post is the
+    // production thread of its venue from that day on. Local names none, which
+    // is the door being open exactly where the maintainer opened it.
+    expect(
+      CONFIRMATION_VENUES.map((row) => pinnedThreadsFor(row, "production")),
+    ).toEqual([[5891], ["bae0e581-d7e2-4a25-9451-9a9bb3083a41"], [2]]);
+    for (const row of CONFIRMATION_VENUES) {
+      expect(pinnedThreadsFor(row, "local")).toEqual([]);
+      // Production's thread is never demo's: a comment on one must never be
+      // readable as having been written to the other record.
+      for (const id of pinnedThreadsFor(row, "production")) {
+        expect(pinnedThreadsFor(row, "demo")).not.toContain(id);
+      }
+    }
+  });
+
+  it("carries the cap each board says it has, and the registry's is its own", () => {
+    // The founding registry refused a 9647-character body on 2026-09-18 and
+    // published the number in the refusal, so the table carries the board's
+    // own 8000 rather than the maintainer's old guess of 10000.
+    expect(confirmationVenue("1f916")!.post_max_chars).toBe(8000);
+    // GitHub's published maximum for an issue comment body, unchanged.
+    expect(confirmationVenue("github")!.post_max_chars).toBe(65536);
+    // The Colony publishes none, so its conservative bound stands.
+    expect(confirmationVenue("colony")!.post_max_chars).toBe(10000);
   });
 
   it("counts all three, because both binding kinds count", () => {
@@ -416,14 +451,144 @@ describe("the boards an environment listens to", () => {
   });
 
   it("reads nothing anywhere the maintainer has not opened the door", async () => {
-    for (const environment of ["local", "production"]) {
-      const boards = boardAdaptersFor(envOf(environment));
-      expect(boards).toHaveLength(3);
-      for (const board of boards) {
-        // Null and not an empty list: the step counts `board_unavailable` and
-        // says why, rather than claiming a board said nothing.
-        expect(await board.threads()).toBeNull();
-      }
+    // Local only, now that production has its threads: the door is open where
+    // the maintainer opened it and nowhere else, and local is nowhere else.
+    const boards = boardAdaptersFor(envOf("local"));
+    expect(boards).toHaveLength(3);
+    for (const board of boards) {
+      // Null and not an empty list: the step counts `board_unavailable` and
+      // says why, rather than claiming a board said nothing.
+      expect(await board.threads()).toBeNull();
     }
+  });
+
+  // The founding registry lists the citizen's own posts, and the citizen is
+  // one account across every environment: demo's threads and production's are
+  // posted by the same handle. So the listing is read against a floor.
+  const CITIZEN_DOOR = `${REGISTRY.origin}/api/citizen/nomankind`;
+
+  /** A fetcher that answers the citizen door with these post ids, and nothing else. */
+  function listing(ids: readonly number[], asked: string[]): typeof fetch {
+    return (async (url: string) => {
+      asked.push(url);
+      if (url !== CITIZEN_DOOR) return new Response("no", { status: 404 });
+      return new Response(JSON.stringify({ posts: ids.map((id) => ({ id })) }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+  }
+
+  it("discovers nothing below the environment's own pinned thread", async () => {
+    // Production pins 5891, so 5212 — demo's thread, posted by the same citizen
+    // before production had a record to be written to — is not production's,
+    // and the post the citizen makes tomorrow is.
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "production",
+      fetch: listing([5212, 5891, 6000], asked),
+    });
+    expect(await board.threads()).toEqual([5891, 6000]);
+    expect(asked).toEqual([CITIZEN_DOOR]);
+  });
+
+  it("reads the whole listing on demo, whose floor is the oldest thread there", async () => {
+    // Demo pins 5212 and every later post of this citizen is above it, so
+    // demo reads production's thread too. Harmless where it is: those lines
+    // name entries demo does not hold, and the sweep refuses an unknown entry
+    // before it registers anybody or seals anything.
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "demo",
+      fetch: listing([5212, 5891, 6000], asked),
+    });
+    expect(await board.threads()).toEqual([5212, 5891, 6000]);
+  });
+
+  it("discovers nothing at all where no thread is pinned, and asks no board", async () => {
+    // No floor, because there is no pin to be a floor: an environment the
+    // maintainer has not opened the door on reads nothing, and discovery is
+    // never the thing that opens it.
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "local",
+      fetch: listing([5212, 5891, 6000], asked),
+    });
+    expect(await board.threads()).toEqual([]);
+    expect(asked).toEqual([]);
+  });
+
+  it("keeps every pinned thread whatever the listing says", async () => {
+    // The floor bounds what discovery adds and nothing else: a listing that has
+    // lost a pinned post has not unsaid the maintainer's decision, and a board
+    // that answers nothing at all leaves the pinned ones standing.
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "production",
+      fetch: listing([], asked),
+    });
+    expect(await board.threads()).toEqual([5891]);
+    const silent = new RegistryBoardAdapter({
+      venue: confirmationVenue("1f916")!,
+      environment: "production",
+      fetch: (async () => new Response("no", { status: 500 })) as unknown as typeof fetch,
+    });
+    expect(await silent.threads()).toEqual([5891]);
+  });
+
+  it("drops a pin this board cannot number, and discovers nothing without one", async () => {
+    // A pin that is not a number is another venue's id in this venue's row. It
+    // is no thread here, and it must not become a floor either: NaN compares
+    // false against everything, so leaving it in would take the floor away and
+    // let the whole listing back in.
+    const row = confirmationVenue("1f916")!;
+    const mistyped = {
+      ...row,
+      threads: { ...row.threads, production: ["bae0e581-d7e2-4a25"] },
+    };
+    const asked: string[] = [];
+    const board = new RegistryBoardAdapter({
+      venue: mistyped,
+      environment: "production",
+      fetch: listing([5212, 5891, 6000], asked),
+    });
+    expect(await board.threads()).toEqual([]);
+    expect(asked).toEqual([]);
+
+    // And beside a real pin it is dropped, while the real one still floors the
+    // listing: one bad row does not cost the environment its door.
+    const half = {
+      ...row,
+      threads: { ...row.threads, production: ["bae0e581-d7e2-4a25", 5891] },
+    };
+    const alsoAsked: string[] = [];
+    const board2 = new RegistryBoardAdapter({
+      venue: half,
+      environment: "production",
+      fetch: listing([5212, 5891, 6000], alsoAsked),
+    });
+    expect(await board2.threads()).toEqual([5891, 6000]);
+  });
+
+  it("listens to all three real boards on production, on the pinned threads", async () => {
+    const boards = boardAdaptersFor(envOf("production"));
+    expect(boards.map((board) => board.venue)).toEqual([
+      "1f916",
+      "colony",
+      "github",
+    ]);
+    expect(boards[0]).toBeInstanceOf(RegistryBoardAdapter);
+    expect(boards[1]).toBeInstanceOf(ColonyBoardAdapter);
+    expect(boards[2]).toBeInstanceOf(GitHubBoardAdapter);
+    // The two that discover nothing answer their pinned thread and only that,
+    // with no network read at all: the pinned list is the whole door there.
+    expect(await boards[1]!.threads()).toEqual([
+      "bae0e581-d7e2-4a25-9451-9a9bb3083a41",
+    ]);
+    expect(await boards[2]!.threads()).toEqual([2]);
   });
 });

@@ -1609,8 +1609,10 @@ export const WITNESS_PIN: readonly Readonly<{
  * `GET /api/citizen/<handle>` answers that citizen's own posts), so M25g's
  * daily batch posts need no deploy. `threads` is the pinned floor per
  * environment, kept for two reasons: a board that stops listing posts still has
- * the threads the maintainer pinned by decision, and production names none
- * until the first production batch post exists.
+ * the threads the maintainer pinned by decision, and an environment names none
+ * until its first batch post exists. Production's three were pinned on
+ * 2026-09-18, the day the first production batch was posted at all three
+ * venues; local still names none, and reads no board.
  *
  * Not a whitepaper list. The maintainer's published choice; it moves only by a
  * later decision.
@@ -1684,10 +1686,13 @@ export interface ConfirmationVenue {
    * and half a line is a line nobody can paste.
    *
    * GitHub publishes its own number and that is what is here: 65536 characters
-   * for an issue comment body. Neither the founding registry nor The Colony
-   * publishes one, so theirs is the maintainer's own conservative bound rather
-   * than the board's — a batch that stays under it is a batch no server has to
-   * refuse. It moves only by a later decision, or by a published limit.
+   * for an issue comment body. The founding registry published its own on
+   * 2026-09-18, by refusing a post: a board that answers with its limit has
+   * stated one, and a guess kept beside a stated number is a guess this table
+   * would be choosing over the board. The Colony still publishes none, so
+   * its number is the maintainer's own conservative bound rather than the
+   * board's — a batch that stays under it is a batch no server has to refuse.
+   * A number here moves only by a later decision, or by a published limit.
    */
   readonly post_max_chars: number;
 }
@@ -1700,7 +1705,9 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     repository: null,
     threads: Object.freeze({
       demo: Object.freeze([5212]),
-      production: Object.freeze([]),
+      // The first production batch post, by the citizen nomankind, pinned the
+      // day it was said: https://1f916.ai/api/post/5891 (2026-09-18).
+      production: Object.freeze([5891]),
       local: Object.freeze([]),
     }),
     discover: true,
@@ -1712,8 +1719,13 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     // reads it through `BoardAdapter.record`.
     profile_door: null,
     comments_door: "/api/post/{thread}",
-    // No published limit; the maintainer's own bound (above).
-    post_max_chars: 10000,
+    // The board's own published limit, said in its own words on 2026-09-18
+    // when it refused a 9647-character body: "the cap is 8000. The cap is
+    // published at GET / and in GET /api/surface; a rejected post does not
+    // spend your daily post". So this is the board's number and not a bound of
+    // the maintainer's own: the composer now fits the batch to what the board
+    // says it will take, and the refusal cost the day's post nothing.
+    post_max_chars: 8000,
   }),
   Object.freeze({
     venue: "colony",
@@ -1724,7 +1736,10 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
       // The maintainer's own post, read on 2026-09-17:
       // https://thecolony.ai/posts/09ed63ba-438a-41e8-b352-f065b376106e
       demo: Object.freeze(["09ed63ba-438a-41e8-b352-f065b376106e"]),
-      production: Object.freeze([]),
+      // The first production batch post, in the colony `general`, pinned the
+      // day it was said (2026-09-18):
+      // https://thecolony.ai/posts/bae0e581-d7e2-4a25-9451-9a9bb3083a41
+      production: Object.freeze(["bae0e581-d7e2-4a25-9451-9a9bb3083a41"]),
       local: Object.freeze([]),
     }),
     // The public API answers one user and one post's comment tree, and lists
@@ -1747,7 +1762,12 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     threads: Object.freeze({
       // https://github.com/nomankind-ai/bootstrap/issues/1
       demo: Object.freeze([1]),
-      production: Object.freeze([]),
+      // Issue 2, opened on 2026-09-18 as production's own thread:
+      // https://github.com/nomankind-ai/bootstrap/issues/2. A separate issue
+      // and not demo's, because which issue is a batch thread is the
+      // maintainer's decision, and one issue carrying both environments would
+      // be a comment nobody could say which record it was written to.
+      production: Object.freeze([2]),
       local: Object.freeze([]),
     }),
     // The issues of one repository are listable, but which issue is a batch

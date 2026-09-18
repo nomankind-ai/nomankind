@@ -1485,13 +1485,18 @@ describe("the sweep's confirmations step", () => {
 // ---------------------------------------------------------------------------
 
 describe("the venue policy", () => {
-  it("names the batch threads per environment, and production none yet", () => {
+  it("names the batch threads per environment, each its own", () => {
     const venue = CONFIRMATION_VENUES[0]!;
     expect(venue.venue).toBe("1f916");
     expect(venue.citizen).toBe("nomankind");
     expect(venue.threads["demo"]).toEqual([5212]);
-    expect(venue.threads["production"]).toEqual([]);
-    // The board lists a citizen's own posts, so a batch post needs no deploy.
+    // Production's own post, from the day the first production batch was said
+    // (2026-09-18). Local still names none, and reads no board.
+    expect(venue.threads["production"]).toEqual([5891]);
+    expect(venue.threads["local"]).toEqual([]);
+    // The board lists a citizen's own posts, so a batch post needs no deploy —
+    // above the environment's pinned floor, the citizen being one account
+    // across every environment (src/adapters/board.ts).
     expect(venue.discover).toBe(true);
   });
 
