@@ -1081,9 +1081,14 @@ POST
           such a comment over whole, taking nothing and fetching no capture, and
           counts it
           <span class="mono">confirmation_form_not_statement</span> in the run's
-          detail. Approving one entry and rejecting another in a single reply is
-          an ordinary answer and is read as one: the contradiction that names a
-          form is two verdicts about the same id.
+          detail. Whole means whole: a reply that quotes the block and answers
+          under it loses its own line too, so a line belongs in a comment of its
+          own. Approving one entry and rejecting another in a single reply is an
+          ordinary answer and is read as one: the contradiction that names a form
+          is two verdicts about the same id. Offline, the same rule is asked of
+          the one comment a binding names inside its capture — never of the
+          capture whole, because two of the three venues archive a thread's whole
+          post, and a batch thread's post is this ask.
         </p>
         <p class="note">
           Which of the two a venue takes is the venue's own binding kind

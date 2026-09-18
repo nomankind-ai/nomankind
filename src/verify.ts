@@ -1278,11 +1278,15 @@ async function checkCommunityBindings(
         // Read off the capture and not off the sealed payload, because the
         // payload holds one line's verdict and the fault is what the COMMENT
         // held. The bytes are the ones `accountCapturesHold` just re-hashed, so
-        // this asks nothing the bundle has not already proved.
+        // this asks nothing the bundle has not already proved — and the ONE
+        // comment inside them is found by the id this validation sealed, never
+        // the capture whole, because two of the three venues archive the whole
+        // thread and a batch thread's own post is the ask.
         if (
           captureCarriesBothVerdicts(
             bundle,
             (proof as Json)["comment_capture_hash"],
+            payload["comment_id"],
             entryId,
           )
         ) {
@@ -1681,21 +1685,37 @@ function captureNames(capture: unknown, token: string): boolean {
 }
 
 /**
- * Whether the comment a binding archived carries both of one entry's lines
+ * Whether the ONE comment a binding names carries both of one entry's lines
  * (decision D-144).
  *
- * The bytes under the hash the proof names, read with the kernel's own rule
- * (`carriesBothVerdicts`, src/confirm.ts) and with no rule of this file's own:
- * the door and the verifier have to agree about what a form is, and a second
- * reading here would be a second rule.
+ * The capture is not the comment. Only GitHub has a per-comment door
+ * (`/repos/<repo>/issues/comments/<id>`, so those bytes are that comment and
+ * nothing else); The Colony's comment door is a post's whole context and
+ * 1F916's is the whole post, so a capture from either holds the thread's own
+ * post beside every comment on it — and on a batch thread the thread's post IS
+ * the ask this record published, which carries both lines for every entry it
+ * names (src/cli/batch-post.ts). Asking the rule of those bytes would refuse
+ * every honest counted line on every Colony and 1F916 thread, and would let one
+ * bystander who pasted the block make every other line on the thread
+ * permanently unverifiable — captures are content-addressed and the log is
+ * append-only, so there would be no way back. That is the fault this locates
+ * around.
  *
- * False for a hash the bundle holds nothing under and false for bytes that do
- * not decode. Both are already `account_binding_proof_invalid` by the time this
- * is asked, and a missing capture is not evidence that a comment was a form.
+ * So the comment is found first, by the id the validation sealed, and the rule
+ * is asked of its body alone (`carriesBothVerdicts`, src/confirm.ts) with no
+ * rule of this file's own: the door and the verifier have to agree about what a
+ * form is, and a second reading here would be a second rule.
+ *
+ * False whenever the comment cannot be located — a hash the bundle holds
+ * nothing under, bytes that do not decode, a rendering this build does not
+ * recognise, an id that is not in the document. Under-firing is the safe
+ * direction: a reader refusing somebody's mirror is owed a fault that is
+ * certain, and a missing capture is not evidence that a comment was a form.
  */
 function captureCarriesBothVerdicts(
   bundle: LogBundle,
   hash: unknown,
+  commentId: unknown,
   entryId: string,
 ): boolean {
   if (typeof hash !== "string") return false;
@@ -1703,10 +1723,68 @@ function captureCarriesBothVerdicts(
   if (!isRecord(capture)) return false;
   try {
     const bytes = base64Decode(capture["body_base64"] as string);
-    return carriesBothVerdicts(new TextDecoder().decode(bytes), entryId);
+    const body = commentBodyIn(new TextDecoder().decode(bytes), commentId);
+    if (body === null) return false;
+    return carriesBothVerdicts(body, entryId);
   } catch {
     return false;
   }
+}
+
+/**
+ * One comment's body inside an archived capture, or null when it is not
+ * findable there (decision D-144).
+ *
+ * The three renderings this record's own adapters document (src/adapters/board.ts)
+ * and no guess beyond them:
+ *
+ * - a post's context or a whole post, `{..., comments: [...]}`, where the row
+ *   is the one whose `id` — or `comment_id`, which is 1F916's other spelling —
+ *   is this comment's. The Colony's ids are UUIDs and 1F916's are integers, so
+ *   they are compared as the strings the payload and the document both spell
+ *   them with. The thread's own post is never fallen back to: on a batch thread
+ *   that post is the ask, and reading it as somebody's comment is the whole
+ *   fault this exists to avoid.
+ * - one comment on its own door, `{..., body: "..."}`, which is GitHub's shape
+ *   and the fixture board's. An `id` on it must be this comment's; a document
+ *   with no id at all is taken as the comment, because a per-comment door
+ *   answers one comment by construction and the capture was fetched at that
+ *   comment's own address.
+ *
+ * Anything else is null, and null is not a refusal: a rendering this build does
+ * not recognise is a reading it cannot make, not evidence of a fault.
+ *
+ * The text is parsed as JSON and read for two fields. Nothing in it is followed
+ * and nothing else in it is looked at, which is the stance every reading of a
+ * stranger's bytes in this record takes.
+ */
+function commentBodyIn(text: string, commentId: unknown): string | null {
+  if (commentId === undefined || commentId === null) return null;
+  const wanted = String(commentId);
+  if (wanted === "") return null;
+  let document: unknown;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isRecord(document)) return null;
+
+  const rows = document["comments"];
+  if (Array.isArray(rows)) {
+    for (const each of rows) {
+      if (!isRecord(each)) continue;
+      const id = each["id"] ?? each["comment_id"];
+      if (id === undefined || id === null) continue;
+      if (String(id) !== wanted) continue;
+      return typeof each["body"] === "string" ? each["body"] : null;
+    }
+    return null;
+  }
+
+  const own = document["id"];
+  if (own !== undefined && own !== null && String(own) !== wanted) return null;
+  return typeof document["body"] === "string" ? document["body"] : null;
 }
 
 /**

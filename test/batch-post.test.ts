@@ -629,7 +629,12 @@ describe("the composed post", () => {
   it("tells a replier to paste one of the two lines and not both", () => {
     for (const body of bodies) {
       expect(body.body).toContain("One of the two, not both");
-      expect(body.body).toContain("seals nothing from it");
+      // And what the whole-comment skip costs, said where the replier reads:
+      // quoting the block and answering under it loses the answer too, and
+      // nothing tells them afterwards.
+      expect(body.body).toContain("nothing in it is sealed");
+      expect(body.body).toContain("not a line you wrote under it");
+      expect(body.body).toContain("write your line in a comment of its");
     }
   });
 

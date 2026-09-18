@@ -586,35 +586,19 @@ describe("the form, told from a statement (D-144)", () => {
     expect(carriesBothVerdicts("", A)).toBe(false);
   });
 
-  it("reads the lines out of a JSON rendering of the same comment", () => {
-    // A capture is whatever the venue's public door answered, and on two of the
-    // three venues that is JSON, where the body's newlines are two characters
-    // rather than one. A rule that saw the form in a raw capture and missed it
-    // in a rendered one would be a fact about the venue, not about the comment.
-    const rendered = JSON.stringify({
-      id: 4_221_001,
-      body: `here are the two lines:\n${approve(A)}\n${reject(A)}\nthanks`,
-    });
-    expect(rendered).toContain("\\n");
-    expect(carriesBothVerdicts(rendered, A)).toBe(true);
-    expect(
-      carriesBothVerdicts(
-        JSON.stringify({ body: `one line:\n${approve(A)}` }),
-        A,
-      ),
-    ).toBe(false);
-  });
-
-  it("reads no line that a rendering glued to something else", () => {
-    // The one thing the unwrapping deliberately does not buy: a line whose
-    // first word is the rendering's own (`{"body":"nomankind-confirm-v1 ...`)
-    // is not the form, exactly as a line beginning with any other word is not.
-    // The rule under-fires there rather than guessing, which is the safe
-    // direction for a refusal — an offline reader refusing a mirror needs the
-    // fault to be certain, and a form the door now passes over never reaches
-    // the log to be refused in the first place.
-    const glued = JSON.stringify({ body: `${approve(A)}\n${reject(A)}` });
-    expect(carriesBothVerdicts(glued, A)).toBe(false);
+  it("reads a comment body exactly as the door reads it", () => {
+    // The rule normalizes nothing of its own. What the offline verifier hands
+    // it is the body it located inside a capture — a decoded JSON string field,
+    // so its newlines are newlines again — and the same parser reads it, so the
+    // door and the verifier can never disagree about the same comment. A
+    // rendering's own escaped break is not a break here, because it is not one
+    // at the door either.
+    const body = `${approve(A)}\n${reject(A)}`;
+    expect(carriesBothVerdicts(body, A)).toBe(true);
+    expect(formEntryIds(parsed(body)).has(A)).toBe(true);
+    const escaped = `${approve(A)}\\n${reject(A)}`;
+    expect(carriesBothVerdicts(escaped, A)).toBe(false);
+    expect(formEntryIds(parsed(escaped)).size).toBe(0);
   });
 
   it("is not fooled by a sentence about the form", () => {

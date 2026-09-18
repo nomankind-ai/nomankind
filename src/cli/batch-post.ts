@@ -845,10 +845,14 @@ function batchBody(
       // something to paste, and a reply that pastes both says nothing: the
       // reader treats a comment carrying both of one entry's lines as the form
       // rather than as a statement, and seals none of it. Said here, beside the
-      // paste instruction, because this is where somebody decides what to copy.
-      "One of the two, not both — a reply carrying both of an entry's lines is",
-      "this form quoted back, not an answer, and the record reads it as the form",
-      "and seals nothing from it.",
+      // paste instruction, because this is where somebody decides what to copy
+      // — and the second sentence is the cost said out loud: the skip is the
+      // whole comment, so a reply that quotes the block and then answers under
+      // it loses its own line too, and nothing tells the replier afterwards.
+      "One of the two, not both. A comment that carries both of an entry's lines",
+      "is read as this form and nothing in it is sealed — not the quoted block",
+      "and not a line you wrote under it — so write your line in a comment of its",
+      "own.",
     ].join("\n"),
     "",
     [

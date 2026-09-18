@@ -294,54 +294,42 @@ export function formEntryIds(
 }
 
 /**
- * The same rule asked of raw text: does this text carry both verdicts for this
- * entry (decision D-144).
+ * The same rule asked of one comment's body: does this text carry both verdicts
+ * for this entry (decision D-144).
  *
- * The twin the offline verifier needs. What a reader holding a bundle has of a
- * comment is the archived capture's bytes, not a parsed line, so the rule has
- * to be askable of a text — and it is asked the one way this module asks
- * anything of a stranger's text: `parseConfirmationComment` reads it line by
- * line for the published form, and `formEntryIds` says what the lines add up
- * to. No pattern is matched against the text directly, because a loose match
- * for the prefix and a verdict would fire on a sentence ABOUT the form, and a
- * sentence about the form is prose.
+ * The twin the offline verifier needs. What a reader holding a bundle has is an
+ * archived capture rather than a parsed line, so the rule has to be askable of
+ * a text — and it is asked the one way this module asks anything of a
+ * stranger's text: `parseConfirmationComment` reads it line by line for the
+ * published form, and `formEntryIds` says what the lines add up to. No pattern
+ * is matched against the text directly, because a loose match for the prefix
+ * and a verdict would fire on a sentence ABOUT the form, and a sentence about
+ * the form is prose.
+ *
+ * ONE COMMENT'S BODY, and never a capture whole. Two of the three venues have
+ * no per-comment door at all — The Colony answers a post's whole context and
+ * 1F916 answers the whole post — so a capture from either holds the thread's
+ * own post, which on a batch thread IS the ask and carries both lines for every
+ * entry in it. A rule asked of those bytes would call every honest reply on
+ * such a thread a form. The caller locates the one comment the binding names
+ * first (`commentBodyIn`, src/verify.ts) and hands its body here.
  *
  * Only this entry's lines are read — `isKnownEntry` here means "the one we are
- * asking about" — so a capture of a thread naming fifty entries answers a
- * question about one of them.
+ * asking about" — so a body answering fifty entries answers a question about
+ * one of them.
  *
- * The line breaks are the one place this is wider than the door's own reading.
- * A capture is whatever the venue's public door answered, and on two of the
- * three venues that is a JSON rendering of the comment (D-138 item 2), where
- * the body's newlines are the two characters `\` and `n` rather than one
- * newline. A reading that split on real newlines alone would see the form in a
- * raw capture and miss it in a rendered one, which would make this rule a fact
- * about the venue rather than about the comment. So an escaped break is a break
- * too. That widens what counts as a line and nothing else: each line is still
- * parsed by `parseConfirmationLine` exactly, or it is prose.
- *
- * What that deliberately does not buy is a line the rendering glued its own
- * text to — `{"body":"nomankind-confirm-v1 ...` begins with a word that is not
- * the prefix, so it is prose here as it would be at the door. This rule
- * under-fires there rather than guessing at where a field began, which is the
- * safe direction for a refusal: a reader refusing somebody's mirror is owed a
- * fault that is certain, and the door now passes a form over before it can
- * reach a log at all.
+ * The text is read exactly as the door reads it and by the same parser, with no
+ * normalization of its own: the door and the offline verifier have to agree
+ * about what a form is, and a reading that unfolded something here would make
+ * them disagree about the same comment.
  *
  * Never throws: a stranger's bytes are always answered with a verdict.
  */
 export function carriesBothVerdicts(text: string, entryId: string): boolean {
   if (typeof text !== "string" || entryId === "") return false;
-  const unwrapped = text.replace(ESCAPED_BREAKS, "\n");
-  const lines = parseConfirmationComment(
-    unwrapped,
-    (id) => id === entryId,
-  );
+  const lines = parseConfirmationComment(text, (id) => id === entryId);
   return formEntryIds(lines).has(entryId);
 }
-
-/** A line break as a JSON rendering of a comment spells one: `\r\n` or `\n`. */
-const ESCAPED_BREAKS = /\\r\\n|\\n/g;
 
 /**
  * The key a profile publishes, or null when its bytes publish none.
