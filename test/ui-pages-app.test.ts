@@ -158,6 +158,7 @@ const sidecar: Sidecar = {
   verification_class: "registered",
   verification_communities: [],
   verification_single_venue: false,
+  verification_binding: null,
   verification_layers: [
     {
       kind: "decision",

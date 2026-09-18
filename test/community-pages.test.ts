@@ -82,6 +82,7 @@ const baseSidecar: Sidecar = {
   verification_class: null,
   verification_communities: [],
   verification_single_venue: false,
+  verification_binding: null,
   verification_layers: [],
 };
 

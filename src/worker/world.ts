@@ -67,6 +67,11 @@ export const REGISTRY_EVENT_TYPES: readonly EventType[] = Object.freeze([
   // counted by nobody.
   "community_operator_registered",
   "community_operator_joined_domain",
+  // Decision D-142: a binding that got stronger moves which rung an operator's
+  // later lines are counted at, and the read filter that rests on it -- so a
+  // world without it would judge a key-bound operator by the account it
+  // registered as, at every door at once.
+  "community_operator_bound",
   // Decisions D-095, D-097 item 3 and D-140 item 5: a rotation says which key
   // stopped answering for an operator and which one answers now, so it moves
   // exactly what `agent_bound` moves -- `agentOperatorsAt` and

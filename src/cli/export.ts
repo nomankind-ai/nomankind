@@ -248,15 +248,37 @@ export async function readRegistry(
  */
 export function bindingCaptureHashes(events: readonly unknown[]): string[] {
   const hashes: string[] = [];
+  const add = (value: unknown): void => {
+    if (typeof value === "string" && !hashes.includes(value)) hashes.push(value);
+  };
   for (const event of events) {
     if (!isRecord(event)) continue;
-    if (event["type"] !== "community_operator_registered") continue;
+    const type = event["type"];
+    // The registration, and the upgrade that may follow it (D-142): a binding
+    // that got stronger publishes a key on a page, and a bundle carrying the
+    // later validations without that page would carry a binding nobody could
+    // recheck — the same hole this function was written to close.
+    if (
+      type !== "community_operator_registered" &&
+      type !== "community_operator_bound"
+    ) {
+      continue;
+    }
     const payload = event["payload"];
     if (!isRecord(payload)) continue;
     const binding = payload["binding"];
-    if (!isRecord(binding) || binding["kind"] !== "profile") continue;
-    const hash = binding["capture_hash"];
-    if (typeof hash === "string" && !hashes.includes(hash)) hashes.push(hash);
+    if (!isRecord(binding)) continue;
+    if (binding["kind"] === "profile") {
+      add(binding["capture_hash"]);
+      continue;
+    }
+    // An account binding (D-142) archives two pages rather than one: the
+    // comment the line was read from, and the profile that shows whose account
+    // said it. Both are what the verifier checks, so both travel.
+    if (binding["kind"] === "account") {
+      add(binding["comment_capture_hash"]);
+      add(binding["profile_capture_hash"]);
+    }
   }
   return hashes;
 }

@@ -1102,7 +1102,7 @@ POST
           else.
         </p>
         <p class="note">
-          Three event types carry it, and every one of them is sealed and
+          Four event types carry it, and every one of them is sealed and
           public like the rest of the log:
           <span class="mono">community_operator_registered</span>, one key's
           first counted attested line read back as a registration, carrying the
@@ -1113,7 +1113,13 @@ POST
           <span class="mono">community_validation</span>, one counted line as a
           decision on one entry — entry_id, operator, venue, handle, agent,
           decision, check, reason, attestation_version, fingerprint,
-          binding_proof, comment_id, line and posted_at. They sit in
+          binding_proof, binding_kind, perimeter, comment_id, line and
+          posted_at; and
+          <span class="mono">community_operator_bound</span> (decision D-142),
+          the same operator's binding getting stronger — an account that
+          published a key keeps its id, its standing and its marks, and the key
+          arrives as an additive event carrying the operator, agent, binding,
+          capture_hash and fingerprint. They sit in
           <span class="mono">GET /events</span> beside
           <span class="mono">validation</span> and
           <span class="mono">operator_registered</span>, so a reader folding the

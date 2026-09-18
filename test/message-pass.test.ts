@@ -233,6 +233,7 @@ const sidecar: Sidecar = {
   verification_class: "mixed",
   verification_communities: ["1f916"],
   verification_single_venue: true,
+  verification_binding: null,
   verification_layers: [
     {
       kind: "decision",

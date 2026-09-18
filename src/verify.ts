@@ -287,6 +287,41 @@ export const CHECKS: readonly EntryCheck[] = Object.freeze([
   "seal",
 ] as const);
 
+/**
+ * The five ways an account-bound line can be wrong (decision D-142).
+ *
+ * Named here rather than written inline where they are raised, because each one
+ * is a different sentence to the reader holding the bundle and a report that
+ * blurred them would send that reader looking for the wrong thing:
+ *
+ * `account_binding_proof_invalid` — the captures do not check out: a hash the
+ * binding names is not in the bundle, or the bytes under it are not the comment
+ * or the profile the binding says they are.
+ * `account_binding_out_of_scope` — the entry's tier is not one the rung may
+ * count toward (`ACCOUNT_BINDING_TIERS`, `stated` alone).
+ * `account_binding_too_new` — the account was created at or after the entry was
+ * submitted, so it was made for this entry as far as the record can tell.
+ * `account_binding_after_sunset` — the promoting decision was signed at or
+ * after `ACCOUNT_BINDING_SUNSET`, where the rung no longer forms a consensus.
+ * `perimeter_line_counted` — a line from one of nomankind's own accounts
+ * (`PERIMETER_ACCOUNTS`) was counted into a consensus. Sealing and showing such
+ * a line is correct; counting it is the record verifying itself.
+ *
+ * All five are raised under the existing `community_binding` check: an account
+ * binding is a community binding, and a sixth check name would say a reader has
+ * two things to look at where it has one. D-142: logic in the kernel pass.
+ */
+export const ACCOUNT_BINDING_REFUSALS = Object.freeze({
+  proof_invalid: "account_binding_proof_invalid",
+  out_of_scope: "account_binding_out_of_scope",
+  too_new: "account_binding_too_new",
+  after_sunset: "account_binding_after_sunset",
+  perimeter_counted: "perimeter_line_counted",
+} as const);
+
+export type AccountBindingRefusal =
+  (typeof ACCOUNT_BINDING_REFUSALS)[keyof typeof ACCOUNT_BINDING_REFUSALS];
+
 /** Every attestation check, in run order. */
 export const ATTESTATION_CHECKS: readonly AttestationCheck[] = Object.freeze([
   "attestation_id",

@@ -97,15 +97,18 @@ function domains(rows: readonly OperatorDomainRow[]): Safe {
 /**
  * What a community operator's binding points at (decision D-138).
  *
- * The three kinds are three different things a reader can go and check, so each
- * is shown as the thing it is. A `registry` binding is a key-bind in the
+ * The kinds are different things a reader can go and check, so each is shown as
+ * the thing it is. A `registry` binding is a key-bind in the
  * founding registry's log, and the reference is that citizen's own record at
  * the registry — the document the proof on the event is against. A `profile`
  * binding is the key published on the agent's public profile, so the reference
  * is that page, run through `safeHref` like every other stranger's URL on these
  * pages. A `platform` binding is a platform's statement about an account: it is
  * named and never linked, because it is somebody else's assertion rather than
- * something anyone can recheck offline, and it counts towards nothing.
+ * something anyone can recheck offline, and it counts towards nothing. An
+ * `account` binding (D-142) is the board's own authentication of the author,
+ * with the comment and the profile captured beside it; the profile is the half
+ * a reader can open, and the captures are what the verifier checks.
  */
 function bindingReference(account: CommunityOperator): Safe {
   const binding = account.binding;
@@ -119,6 +122,17 @@ function bindingReference(account: CommunityOperator): Safe {
     const href = safeHref(binding.url);
     return href === null
       ? html`<span class="break">${binding.url}</span>`
+      : html`${link(href, href, true)}`;
+  }
+  if (binding.kind === "account") {
+    // D-142: logic in the kernel pass. An account binding's reference is the
+    // captured comment and profile, which this page will show as the two
+    // captures they are once the kernel seals them; the profile URL is the half
+    // a reader can open today, and it goes through `safeHref` like every other
+    // stranger's URL here.
+    const href = safeHref(binding.profile_url);
+    return href === null
+      ? html`<span class="break">${binding.profile_url}</span>`
       : html`${link(href, href, true)}`;
   }
   return html`<span class="break">${binding.platform}</span>`;

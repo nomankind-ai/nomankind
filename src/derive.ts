@@ -39,6 +39,7 @@ import {
   versionedSubjectOf,
   VERIFICATION_CLASSES,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
+  type BindingRung,
   type OperatorKind,
   type VerificationClass,
 } from "./policy.js";
@@ -271,6 +272,27 @@ export interface Sidecar {
    * one party can act on it; nothing in the rules does.
    */
   readonly verification_single_venue: boolean;
+  /**
+   * The weakest binding among the validators counted in the promoting
+   * consensus (decision D-142), or null while the entry has verified nothing.
+   *
+   * `key` when every counted validator stood on a key the world can check — a
+   * domain operator, or a community operator bound by registry or by profile.
+   * `account` when at least one counted line rested on nothing but a board
+   * having authenticated its author. The weakest and not the strongest, because
+   * this is a floor a reader can rely on: an entry that says `key` was decided
+   * by keys alone, and one that says `account` tells the reader exactly which
+   * rung its weakest seat stood on.
+   *
+   * Disclosed on every entry and sealed like the class beside it: a later line
+   * from a key-bound operator is an additive layer, never a relabel. The read
+   * doors take it as `min_binding` (D-142), which is why the order lives in
+   * src/policy.ts's `BINDING_RUNGS` rather than here.
+   *
+   * Absent on a row stored before the decision, which reads as null. Every
+   * reader takes it as `verification_binding ?? null`.
+   */
+  readonly verification_binding: BindingRung | null;
   /**
    * The dated layers of evidence behind this entry, oldest first (D-138 item
    * 11): the decision itself, then one per reconfirmation by a domain operator
@@ -702,6 +724,11 @@ interface Consensus {
   readonly verificationClass: VerificationClass | null;
   /** The distinct communities among the counted community approvers. */
   readonly verificationCommunities: readonly string[];
+  /**
+   * The weakest rung among the counted approvers (D-142), or null while draft
+   * or rejected. Sealed with the class beside it and never recomputed later.
+   */
+  readonly verificationBinding: BindingRung | null;
   /** The `at` of the promoting decision's event; null unless it verified. */
   readonly promotingAt: string | null;
 }
@@ -880,6 +907,7 @@ function consensusFor(
   let promotingAt: string | null = null;
   let verificationClass: VerificationClass | null = null;
   let verificationCommunities: readonly string[] = [];
+  let verificationBinding: BindingRung | null = null;
 
   for (const decision of decisionsFor(events, entryId)) {
     if (decision.kind === "domain") approvers.push(decision.record);
@@ -1016,6 +1044,13 @@ function consensusFor(
               ? "community"
               : "mixed";
         verificationCommunities = [...approvingVenues];
+        // The rung, sealed beside the class and read the same way (D-142): the
+        // weakest binding among the approvers this consensus was counted from.
+        // `key` unconditionally for now — no counted line can rest on an
+        // account binding until the kernel pass lets one, so saying anything
+        // else here would be a disclosure about a rung nothing stands on.
+        // D-142: logic in the kernel pass.
+        verificationBinding = "key";
       } else if (rejections >= REJECTIONS_TO_REJECT) {
         status = "rejected";
         trustedCountAtDecision = trustedCount;
@@ -1046,6 +1081,7 @@ function consensusFor(
     countedOperators: [...countedOperators],
     verificationClass,
     verificationCommunities,
+    verificationBinding,
     promotingAt,
   };
 }
@@ -2407,6 +2443,10 @@ export function deriveEntry(
     // Disclosed, never enforced: one community is still a community class, and
     // the page says "community (single venue)" beside it.
     verification_single_venue: consensus.verificationCommunities.length === 1,
+    // The rung the weakest counted seat stood on (D-142), off the same fold the
+    // class came from, so the floor a reader filters on and the class it sits
+    // beside can never come from two readings of the log.
+    verification_binding: consensus.verificationBinding,
     verification_layers: verificationLayersOf(events, entryId, consensus),
     // Off the consensus already folded above, so the label and the counts it
     // is a statement about can never come from two readings of the log.

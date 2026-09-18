@@ -250,6 +250,10 @@ function communityApproval(
     attestation_version: ATTESTATION_VERSION,
     fingerprint: `sha256:${"d".repeat(64)}`,
     binding_proof: { kind: "registry", proof: null as never },
+    // The rung the line stood on and the perimeter it sat in (D-142): a
+    // registry binding, and an account that is not one of nomankind's own.
+    binding_kind: "registry",
+    perimeter: null,
     comment_id: log.nextComment(),
     line: 0,
     posted_at: "2026-09-16T10:00:00.000Z",

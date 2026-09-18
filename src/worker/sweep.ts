@@ -154,6 +154,8 @@ import {
   LEDGER_ENTRIES_PER_RUN,
   LIST_PAGE_LIMIT,
   NORM_VERSION,
+  PERIMETER_ACCOUNTS,
+  PERIMETER_WORD,
   RELEASE_WINDOW_DAYS,
   SEAL_MAX_EVENTS,
   SWEEP_INTERVAL_MINUTES,
@@ -2321,6 +2323,16 @@ async function communityLine(
                   capture_hash: binding.capture_hash,
                 }
               : { kind: "registry", proof: binding.sealed.proof },
+          // The rung this line stood on when it counted, and the perimeter word
+          // where the account is one of nomankind's own (D-142). The sweep
+          // seals no account binding yet, so the rung here is always the one
+          // the binding above carries; the perimeter is read off the published
+          // list, which is the half that is a fact today.
+          // D-142: logic in the kernel pass.
+          binding_kind: binding.kind === "profile" ? "profile" : "registry",
+          perimeter: PERIMETER_ACCOUNTS.includes(operator)
+            ? PERIMETER_WORD
+            : null,
           comment_id: comment.id,
           line: line.line,
           posted_at: comment.posted_at,
