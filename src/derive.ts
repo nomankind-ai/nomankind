@@ -43,6 +43,7 @@ import {
   type VerificationClass,
 } from "./policy.js";
 import { communityOperatorId, isExcludedParty } from "./registry.js";
+import { retiredAgentsAt } from "./rotation.js";
 import type { Entry } from "./schema.js";
 import type { EntrySeal } from "./seal.js";
 import {
@@ -508,8 +509,24 @@ export function agentOperatorsAt(
   const operators = new Map<string, string>();
   for (const event of inSeqOrder(events)) {
     if (event.seq > position) break;
-    if (!isType(event, "agent_bound")) continue;
-    operators.set(event.payload.agent, event.payload.operator);
+    if (isType(event, "agent_bound")) {
+      operators.set(event.payload.agent, event.payload.operator);
+      continue;
+    }
+    // A rotation is both halves at once (D-095, D-097 item 3, D-140 item 5):
+    // the retired key stops answering for the operator here and the new one
+    // starts. Read at a position like everything else, so an agent retired at
+    // seq 40 still answers for its operator at 39 — every signature it made
+    // before the rotation is as good as it ever was, and losing a key is not a
+    // way to unmake what it signed.
+    if (!isType(event, "key_rotated")) continue;
+    const payload = event.payload;
+    if (typeof payload.new_agent === "string" && payload.new_agent !== "") {
+      operators.set(payload.new_agent, payload.operator);
+    }
+    if (typeof payload.retired_agent === "string") {
+      operators.delete(payload.retired_agent);
+    }
   }
   return operators;
 }
@@ -881,7 +898,19 @@ function consensusFor(
     // every other rule here, and it is one predicate for both kinds of operator
     // (D-138): a community operator is registered in the same registry and is
     // excluded by the same seven rules.
-    if (!mayValidateEntry(events, position, target, decision.operator)) {
+    // The agent is handed in as well as the operator (D-095, D-097 item 3): a
+    // decision signed by a key that had already been retired at this position
+    // is counted by nobody, and every decision that key took before its
+    // rotation stays exactly where it is.
+    if (
+      !mayValidateEntry(
+        events,
+        position,
+        target,
+        decision.operator,
+        decision.record.agent,
+      )
+    ) {
       continue;
     }
 
@@ -1116,7 +1145,30 @@ export function mayValidateEntry(
   position: number,
   target: EligibilityTarget,
   operator: string,
+  /**
+   * The key the decision was signed by, when the caller knows it (D-095, D-097
+   * item 3, D-140 item 5).
+   *
+   * The eighth exclusion, and the only one about a key rather than about an
+   * operator: a key retired at or before this position had stopped answering
+   * for anybody, so a decision it took after its retirement is counted by
+   * nobody. Everything it took before stays counted, because this is asked at
+   * the record's own position like every other rule here.
+   *
+   * Optional, because two of the three callers ask about an operator and not
+   * about a key: the verification precondition counts who COULD sign, which is
+   * a question about operators, and a caller with no agent in hand is asking
+   * exactly that. A rotation never removes an operator, so the precondition's
+   * answer is unchanged by leaving it out.
+   */
+  agent?: string,
 ): boolean {
+  if (
+    agent !== undefined &&
+    retiredAgentsAt(events, position).has(agent)
+  ) {
+    return false;
+  }
   const registered = registeredOperatorsAt(events, position);
   // One registry, two kinds of operator (D-138): a community operator is
   // registered by the log like any other and is judged by the same seven

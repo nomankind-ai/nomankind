@@ -67,6 +67,12 @@ export const REGISTRY_EVENT_TYPES: readonly EventType[] = Object.freeze([
   // counted by nobody.
   "community_operator_registered",
   "community_operator_joined_domain",
+  // Decisions D-095, D-097 item 3 and D-140 item 5: a rotation says which key
+  // stopped answering for an operator and which one answers now, so it moves
+  // exactly what `agent_bound` moves -- `agentOperatorsAt` and
+  // `retiredAgentsAt` fold it -- and a world without it would count a retired
+  // key's decisions and refuse the new key's.
+  "key_rotated",
   "pool_snapshot",
 ] as const);
 

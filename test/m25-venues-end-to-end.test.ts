@@ -860,10 +860,13 @@ describe("the two community venues", () => {
     expect((await sealedOf("community_operator_registered")).length).toBe(3);
   }, 600_000);
 
-  it("refuses a line by a key the profile has since changed", async () => {
-    // One operator per venue account, and this build has no rule for rotating
-    // a community operator's key: a line signed by a new key is an account
-    // statement with `key_changed` against it, and it registers nothing.
+  it("rotates a community operator's key when its profile changes", async () => {
+    // Decision D-140 item 5: a community operator's key follows its profile.
+    // A counted line signed by a key the log does not hold, whose fresh profile
+    // capture publishes that key, is a rotation — `key_rotated` sealed before
+    // the validation, the operator keeping its id, its standing and its marks.
+    // `confirmation_key_changed`, the refusal that stood here until D-140, is
+    // retired with it.
     const rotated = await keypair();
     // An hour after the thread's own comments, so it is newer than the cursor
     // the first run left: this is a comment written after that run.
@@ -897,19 +900,33 @@ describe("the two community venues", () => {
       board: [board],
     });
 
-    expect(rotation.skipped["confirmation_key_changed"]).toBe(1);
-    expect(rotation.community_validations).toEqual([]);
-    // Three: the agent on each venue, and the second account on The Colony.
-    // The third account never registered, because the cap sent its line back
-    // before there was anything to register (D-138 item 10).
+    // The refusal is gone: nothing about a changed key is skipped any more.
+    expect(rotation.skipped["confirmation_key_changed"]).toBeUndefined();
+
+    // The rotation is sealed, and it names both halves.
+    const rotations = await sealedOf("key_rotated");
+    expect(rotations.length).toBe(1);
+    const payload = rotations[0]!.payload as unknown as Record<string, unknown>;
+    expect(payload["operator"]).toBe(`${COLONY}:${AGENT_HANDLE}`);
+    expect(payload["new_agent"]).toBe(`1F916:${rotated.publicKey}`);
+    expect(payload["retired_agent"]).not.toBe(payload["new_agent"]);
+    // A community operator signs no independence attestation: what it attested
+    // to is the token on its own line, so the attestation half is null and the
+    // profile capture is what a reader rechecks.
+    expect(payload["attestation"]).toBeNull();
+    expect(typeof payload["capture_hash"]).toBe("string");
+
+    // And the line counted, under the same operator id as before: standing and
+    // marks follow the operator, not the key.
+    expect(rotation.community_validations.length).toBe(1);
+    const validation = rotation.community_validations[0]!;
+    expect(validation.operator).toBe(`${COLONY}:${AGENT_HANDLE}`);
+    expect(validation.rotated).toBe(true);
+    expect(validation.registered).toBe(false);
+
+    // Three still: a rotation registers nobody. The agent on each venue and the
+    // second account on The Colony, exactly as before the key moved.
     expect((await sealedOf("community_operator_registered")).length).toBe(3);
-    const sealed = (await sealedOf("public_confirmation")).map(
-      (event) => event.payload as unknown as Record<string, unknown>,
-    );
-    const statement = sealed.find(
-      (one) => one["comment_id"] === "d36f5fb3-bc9e-4a6d-cf7e-70bf7e5d6c66",
-    )!;
-    expect(statement["counted"]).toBe(false);
   }, 600_000);
 
   it("reads one author's profile at most twice in a run, and never again", async () => {

@@ -213,6 +213,8 @@ describe("a published day, under D-127", () => {
       delivered: 0,
       failed: 0,
       retried: 0,
+      // Nothing to wrap: no key is configured here (D-118 item a).
+      wrapped: 0,
     });
   }, 600_000);
 

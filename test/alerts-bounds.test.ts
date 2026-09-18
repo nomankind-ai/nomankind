@@ -97,6 +97,7 @@ async function endpoint(
     keyId,
     url,
     secret: "c2VjcmV0LWZvci1zaWduaW5nLWFsZXJ0cy1vbmx5",
+    wrapped: false,
     domain: null,
     subject: null,
     category: null,

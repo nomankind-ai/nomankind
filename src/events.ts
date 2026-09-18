@@ -675,6 +675,58 @@ export type EventPayloads = {
     signed_at: string;
     signature: string;
   };
+  /**
+   * An operator's key changed hands: the old one retired, the new one bound
+   * (decisions D-095, D-097 item 3 and D-140 item 5).
+   *
+   * Whitepaper Section 5: "Every agent belongs to an operator", and standing is
+   * the operator's. A key is how an operator speaks and is not what it is, so a
+   * key that has to be replaced — expired, lost, or simply rotated on a
+   * schedule — must not cost the operator its id, its standing or its marks.
+   * This event is that fact, sealed: from here on the retired key is refused at
+   * every write door and its later decisions are counted by nobody, while every
+   * signature it made before this position stays exactly as valid as it was
+   * (src/derive.ts, `retiredAgentsAt`; src/verify.ts, the `key_rotation`
+   * check). A record that invalidated the past would be a record that could be
+   * rewritten by losing a key.
+   *
+   * Not entry-scoped, exactly like `agent_bound`: the rotation is a fact about
+   * the registry, and whatever entry occasioned it is named by the validation
+   * sealed beside it.
+   *
+   * One payload for both kinds of operator (D-138's one registry), with the
+   * halves that differ nulled rather than split into two event types:
+   *
+   * - A domain operator rotates at `POST /operators/{id}/agents/{agent}/rotate`,
+   *   signed by a key the operator holds. `attestation` is the new key's own
+   *   independence attestation for the operator's registration domain, verified
+   *   exactly as `agent_bound`'s is; `binding` and `capture_hash` are null.
+   * - A community operator rotates by publishing a new key on its profile and
+   *   signing its next counted line with it (D-140 item 5). The sweep seals
+   *   this before the `community_validation`: `binding` is the new profile
+   *   binding and `capture_hash` the hash of the capture that shows the new
+   *   key, so an offline reader rechecks the page that published it;
+   *   `attestation` is null, because a community operator signs none — what it
+   *   attested to is the token on its own line.
+   *
+   * `confirmation_key_changed` was the refusal this replaces: before D-140 a
+   * community operator whose profile key had changed had its line refused and
+   * registered nothing, because rotating a community key was a rule nobody had
+   * written. It is written now, and the refusal is retired.
+   */
+  key_rotated: {
+    operator: string;
+    /** The key that stops speaking for the operator at this position. */
+    retired_agent: string;
+    /** The key that speaks for it from here on. */
+    new_agent: string;
+    /** A domain rotation's attestation by the new key; null for a community one. */
+    attestation: Attestation | null;
+    /** A community rotation's new binding; null for a domain one. */
+    binding: CommunityBinding | null;
+    /** The capture that shows the new key; null for a domain rotation. */
+    capture_hash: string | null;
+  };
 };
 
 /**
@@ -888,6 +940,11 @@ export const EVENT_TYPES: readonly EventType[] = [
   // The governance vote (D-130 item 4): about a published question and not
   // about any entry, so it carries a null entry_id like every registry event.
   "vote_cast",
+  // A key changed hands (D-095, D-097 item 3, D-140 item 5). A registry event
+  // like the bindings it amends, so it carries a null entry_id: standing and
+  // trust follow the operator, and the key that carried them is the only thing
+  // that moved.
+  "key_rotated",
 ] as const;
 
 /**

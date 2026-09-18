@@ -224,10 +224,20 @@ describe("wrangler.jsonc routes and hostnames", () => {
     expect(raw).not.toMatch(/"REGISTRY_CREDENTIAL"\s*:/);
   });
 
-  it("leaves production's maintainer unset until M25", () => {
-    // Empty means no maintainer is configured, and the Worker refuses genesis
-    // naming outright rather than granting it to whoever asks first.
-    expect(config.env.production.vars.MAINTAINER_AGENT_ID).toBe("");
+  it("gives production the maintainer's own key (M25a, D-051)", () => {
+    // Set on 2026-09-18, and the one environment whose maintainer is a key
+    // somebody actually holds the private half of. A public value: the genesis
+    // naming power has to be checkable against the key that holds it.
+    expect(config.env.production.vars.MAINTAINER_AGENT_ID).toBe(
+      "1F916:BGqu99Po2X7PNPSDWg4wGgYfsUTzJ2EF9rPyXIKyLoM",
+    );
+    // And it is nobody else's: the two throwaway keys stay throwaway.
+    expect(config.env.production.vars.MAINTAINER_AGENT_ID).not.toBe(
+      config.vars.MAINTAINER_AGENT_ID,
+    );
+    expect(config.env.production.vars.MAINTAINER_AGENT_ID).not.toBe(
+      config.env.demo.vars.MAINTAINER_AGENT_ID,
+    );
   });
 });
 

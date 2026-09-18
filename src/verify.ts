@@ -77,7 +77,9 @@ import {
   verifySeal,
   type Seal,
 } from "./seal.js";
-import { verifyBytes } from "./identity.js";
+import { AGENT_ID_PREFIX, verifyBytes } from "./identity.js";
+import { verifyAttestation } from "./registry.js";
+import { retiredAgentsAt } from "./rotation.js";
 import { verifyEntrySignature } from "./sign.js";
 import { checkValidation, type OperatorInfo } from "./validate.js";
 import { verifyRecordSignature } from "./records.js";
@@ -179,6 +181,7 @@ export type EntryCheck =
   | "core"
   | "records"
   | "community_binding"
+  | "key_rotation"
   | "exclusions"
   | "derived"
   | "snapshot"
@@ -253,6 +256,11 @@ const BOUNDED_NOT_RUN: readonly SkippedCheck[] = Object.freeze([
   // bounded to one entry does not carry. Half a check reported as a whole one
   // would be worse than a named absence.
   "community_binding",
+  // The rotations (D-095, D-097 item 3, D-140 item 5) are the sixth, and for
+  // exactly the same reason: a `key_rotated` is a registry event, and which
+  // keys had been retired by a given position cannot be read off one entry's
+  // own events.
+  "key_rotation",
   "exclusions",
   "derived",
   "attestations",
@@ -271,6 +279,7 @@ export const CHECKS: readonly EntryCheck[] = Object.freeze([
   "core",
   "records",
   "community_binding",
+  "key_rotation",
   "exclusions",
   "derived",
   "snapshot",
@@ -1036,24 +1045,56 @@ async function checkCommunityBindings(
     // same kind of binding: a validation whose registration the log does not
     // hold is a validation by nobody, whatever its own proof verifies.
     let registration: Json | null = null;
+    // The key and the binding the operator is judged by AT THIS POSITION: the
+    // registration's, or the newest rotation's where the operator's key has
+    // followed its profile (D-140 item 5). The operator is the fixed point and
+    // the key is not — which is the whole of what a rotation says — so a
+    // validation after one is judged by the key the log moved to, and every
+    // validation before it is still judged by the key it was made under.
+    let boundAgent: string | null = null;
+    let boundBinding: Json | null = null;
     for (const earlier of ordered) {
       if (earlier.seq >= event.seq) break;
-      if ((earlier?.type as string) !== "community_operator_registered") {
+      const kind = earlier?.type as string;
+      if (kind === "community_operator_registered") {
+        const fields = isRecord(earlier.payload)
+          ? (earlier.payload as Json)
+          : {};
+        if (fields["operator"] !== operator) continue;
+        const binding = fields["binding"];
+        if (!isRecord(binding)) continue;
+        registration = fields;
+        boundAgent = typeof fields["agent"] === "string" ? fields["agent"] : null;
+        boundBinding = binding;
         continue;
       }
+      if (kind !== "key_rotated") continue;
       const fields = isRecord(earlier.payload) ? (earlier.payload as Json) : {};
       if (fields["operator"] !== operator) continue;
-      if (fields["agent"] !== agent) continue;
       const binding = fields["binding"];
+      // A domain operator's rotation carries no binding and says nothing about
+      // a community operator; an event about another kind of operator is not
+      // this one's to read.
       if (!isRecord(binding)) continue;
-      if (!isRecord(proof) || binding["kind"] !== proof["kind"]) continue;
-      registration = fields;
+      boundAgent =
+        typeof fields["new_agent"] === "string" ? fields["new_agent"] : null;
+      boundBinding = binding;
     }
-    if (registration === null) {
+    // Registered before it validated, under the key the log holds for it at
+    // this position and the same kind of binding: a validation whose
+    // registration the log does not hold is a validation by nobody, whatever
+    // its own proof verifies.
+    if (
+      registration === null ||
+      boundBinding === null ||
+      boundAgent !== agent ||
+      !isRecord(proof) ||
+      boundBinding["kind"] !== proof["kind"]
+    ) {
       report.add("community_binding", field, "community_operator_unregistered");
       continue;
     }
-    const registered = registration["binding"] as Json;
+    const registered = boundBinding;
 
     let bound = false;
     if (isRecord(proof) && proof["kind"] === "registry") {
@@ -1094,6 +1135,156 @@ async function checkCommunityBindings(
     if (!attested) {
       report.add("community_binding", field, "community_domain_unattested");
     }
+  }
+}
+
+/**
+ * h (key_rotation). Every rotation in the bundle, rechecked, and every decision
+ * a retired key took after its retirement, named (decisions D-095, D-097 item
+ * 3, D-140 item 5).
+ *
+ * Whitepaper Section 5: standing, trust and marks are the operator's, and a key
+ * is how an operator speaks. A rotation is therefore a claim with two halves
+ * that a reader has to be able to check alone: that the new key is really this
+ * operator's, and that the old one stopped speaking exactly where the log says
+ * it did.
+ *
+ * The first half, by the kind of operator:
+ *
+ * - A domain rotation carries the new key's own independence attestation, and
+ *   it is verified exactly as `agent_bound`'s is — the operator, the new agent
+ *   and the fixed sentence of the operator's domain, under the NEW key's
+ *   signature. A rotation whose attestation is by anything else is
+ *   `bad_attestation`: the old key's word that a new key exists is not evidence
+ *   that it does.
+ * - A community rotation carries no attestation and a profile binding instead
+ *   (D-140 item 5). The capture the binding names has to be IN the bundle,
+ *   under its own hash, with the new key in its bytes, and the event's
+ *   `new_agent` has to be that key — which is what makes the key public rather
+ *   than merely claimed, archived exactly as a citation's snapshot is.
+ *
+ * The second half is `agent_retired`, and it is the reason this check exists at
+ * all rather than being a line in `records`: every decision and every
+ * reconfirmation in the bundle is asked whether its own key had been retired at
+ * its own position. Before the rotation, nothing is said — those signatures are
+ * as good as they ever were, and a record that invalidated its own past would
+ * be a record anybody could rewrite by losing a key. At or after it, the
+ * decision is named, because derivation counts it for nobody (src/derive.ts,
+ * `mayValidateEntry`) and a report that stayed quiet would leave a reader
+ * unable to see why the entry derives as it does.
+ *
+ * The whole log or nothing, like the exclusions beside it: a rotation is a
+ * registry event, and which keys had been retired by a position cannot be read
+ * off one entry's own events.
+ */
+async function checkKeyRotations(
+  bundle: LogBundle,
+  entryId: string,
+  report: Report,
+): Promise<void> {
+  const ordered = inSeqOrder(bundle.events);
+
+  for (const event of ordered) {
+    if ((event?.type as string) !== "key_rotated") continue;
+    const payload = isRecord(event.payload) ? (event.payload as Json) : {};
+    const field = `/events/${event.seq}`;
+    const operator = payload["operator"];
+    const newAgent = payload["new_agent"];
+    const retired = payload["retired_agent"];
+    if (
+      typeof operator !== "string" ||
+      typeof newAgent !== "string" ||
+      typeof retired !== "string"
+    ) {
+      report.add("key_rotation", field, "rotation_invalid");
+      continue;
+    }
+
+    const attestation = payload["attestation"];
+    if (isRecord(attestation)) {
+      // A domain rotation: the new key's own attestation, for the operator it
+      // is joining, verified by the same function the registration door uses.
+      if (!(await verifyAttestation(operator, newAgent, attestation))) {
+        report.add("key_rotation", field, "bad_attestation");
+      }
+      continue;
+    }
+
+    // A community rotation: the profile capture that publishes the new key.
+    const binding = payload["binding"];
+    const captureHash = payload["capture_hash"];
+    if (
+      !isRecord(binding) ||
+      binding["kind"] !== "profile" ||
+      typeof binding["public_key"] !== "string" ||
+      typeof captureHash !== "string" ||
+      binding["capture_hash"] !== captureHash
+    ) {
+      report.add("key_rotation", field, "rotation_invalid");
+      continue;
+    }
+    const publicKey = binding["public_key"];
+    // The agent and the key are two spellings of one fact, and an event whose
+    // two spellings disagree names two keys at once.
+    if (newAgent !== AGENT_ID_PREFIX + publicKey) {
+      report.add(
+        "key_rotation",
+        field,
+        "rotation_invalid",
+        briefValue(AGENT_ID_PREFIX + publicKey),
+        briefValue(newAgent),
+      );
+      continue;
+    }
+    const capture = bundle.captures?.[captureHash];
+    if (capture === undefined) {
+      // A bundle carries the captures ITS OWN entry's records needed, and a
+      // rotation is a registry event: a log with two entries has rotations in
+      // both bundles and the profile page in only one. So a capture that is not
+      // here is not a fault of this rotation — it is a page this bundle was
+      // never going to carry, and the bundle that did carry it checked it.
+      //
+      // Nothing is lost by the silence. The rotation's real proof is the
+      // `community_validation` sealed beside it, whose `community_binding`
+      // check demands the capture, finds the key in its bytes and verifies the
+      // line's signature under it — and that check runs in the bundle where the
+      // page actually is.
+      continue;
+    }
+    let carries = false;
+    try {
+      carries = new TextDecoder()
+        .decode(base64Decode(capture.body_base64))
+        .includes(publicKey);
+    } catch {
+      carries = false;
+    }
+    if (!carries) {
+      report.add("key_rotation", field, "rotation_invalid", briefValue(captureHash));
+    }
+  }
+
+  // Every decision and reconfirmation this entry took, against the retirements
+  // above. `retiredAgentsAt` is asked at each record's own position, so the
+  // answer is what the log said at that moment and never what it says now.
+  for (const event of ordered) {
+    const type = event?.type as string;
+    if (type !== "validation" && type !== "reconfirmation") continue;
+    if (event.entry_id !== entryId) continue;
+    const payload = isRecord(event.payload) ? (event.payload as Json) : {};
+    const record = payload["record"];
+    if (!isRecord(record)) continue;
+    const agent = record["agent"];
+    if (typeof agent !== "string") continue;
+    const at = retiredAgentsAt(bundle.events, event.seq).get(agent);
+    if (at === undefined) continue;
+    report.add(
+      "key_rotation",
+      `/events/${event.seq}`,
+      "agent_retired",
+      briefValue(at),
+      briefValue(agent),
+    );
   }
 }
 
@@ -1743,6 +1934,11 @@ async function runChecks(
       report,
     );
   }
+
+  // g (key_rotation). Every rotation, and every decision by a key that had
+  // already been retired (D-095, D-097 item 3, D-140 item 5). The whole log or
+  // nothing, for the reason the exclusions below are.
+  if (!bounded) await checkKeyRotations(readable, entryId, report);
 
   // g. The exclusions, replayed at each decision's position.
   //

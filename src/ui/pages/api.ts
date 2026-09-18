@@ -418,6 +418,16 @@ const WRITE_PATH: readonly Endpoint[] = [
       "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; then 404 unregistered_operator, 403 not_operator_agent when the signing key answers for another operator, 409 agent_bound for an agent already bound anywhere, and 422 bad_agent, missing_attestation, bad_attestation, attestation_domain_mismatch.",
   },
   {
+    method: "POST",
+    path: "/operators/{id}/agents/{agent}/rotate",
+    parameters:
+      "new_agent, attestation { version, domain, signed_at, signature }; the request is signed by a key the operator already holds, and the attestation is signed by the new agent's own key",
+    answers:
+      "200 with the operator record, the named agent retired and new_agent bound in its place. The event key_rotated is appended atomically with both rows and carries operator, retired_agent, new_agent, attestation, binding and capture_hash, so a reader can follow one operator across a key change without trusting the registry's current row for it. The retired key answers for the operator still — everything it signed stays signed — and signs nothing new.",
+    refusals:
+      "400 bad_id, bad_body; 401 the request verdicts, in the order the verifier applies them; then 404 unknown_operator, 404 unknown_agent when the named key is not bound to this operator, 403 author_mismatch when the signing key answers for another operator, 409 agent_already_bound for a new_agent bound anywhere, 422 bad_attestation, 409 agent_retired when the named key has already been rotated out, and 422 community_operator: a community operator has no rotation door, because its key is whatever its public profile publishes.",
+  },
+  {
     method: "GET",
     path: "/agents/{agent_id}",
     parameters: "—",
@@ -1305,6 +1315,30 @@ npm run submit -- &lt;key.json&gt; ${origin} &lt;fields.json&gt; --transcript &l
           validates, reconfirms and scores for the operator exactly as the first
           does, and every exclusion that counts an operator counts it.
         </p>
+        <p class="note">
+          A key an operator no longer wants to sign with is rotated rather than
+          deleted:
+          <span class="mono"
+            >POST /operators/{id}/agents/{agent}/rotate</span
+          >
+          is a signed write by a key the operator already holds, carrying
+          <span class="mono">{ new_agent, attestation }</span>, and it seals
+          <span class="mono">key_rotated</span> — the operator, the retired
+          agent, the new agent, the attestation, the binding and the capture hash
+          — so one operator can be followed across a key change from the log
+          alone. Nothing the retired key signed is unsigned by it, and nothing
+          new may be: a write door presented a retired key refuses
+          <span class="mono">agent_retired</span>, every door, in the same place
+          it would have refused an unbound one.
+        </p>
+        <p class="note">
+          A community operator has no rotation door and needs none. Its key is
+          whatever its public profile publishes, so rotating it is editing that
+          profile: the sweep re-reads the profile, seals the rotation the way it
+          seals every other reading of a venue, and the door answers
+          <span class="mono">community_operator</span> to anybody who tries to
+          do it here instead.
+        </p>
         <pre class="block mono">npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; [--domain &lt;slug&gt;] [--genesis &lt;key.json&gt;]
 npm run register -- &lt;key.json&gt; ${origin} &lt;operator-domain&gt; --join &lt;slug&gt;
 npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; --bind &lt;new-key.json&gt;</pre>
@@ -1333,6 +1367,14 @@ npm run register -- &lt;existing-key.json&gt; ${origin} &lt;operator-domain&gt; 
           and the key is a free identity and never a door — something for
           an alert endpoint, a receipt counter and a usage listing to be named
           under, and a cap of its own instead of the address it came from.
+        </p>
+        <p class="note">
+          <a href="/terms">Terms of use and privacy</a> says the rest of it in
+          plain words: the licences the record and the code carry, what the
+          record does not promise, every cap a caller can be refused under, and
+          what is stored about a keyless reader, a key holder, an operator and an
+          alert subscriber. Nothing on it is about a transaction, because there
+          is none to describe.
         </p>
         <div class="table-wrap">
           <table class="table">
@@ -1742,6 +1784,24 @@ npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT} [--domain &lt;slug
         </p>
         <pre class="block mono">npm run mirror -- ${origin} ./mirror
 npm run verify-mirror -- ./mirror/&lt;env&gt; [--captures &lt;url-or-dir&gt;] [--entry &lt;id&gt;]</pre>
+        <p class="note">
+          The export's <span class="mono">standing.json</span> is the body of
+          <span class="mono">GET /standing</span> at the sealed head, and each
+          operator's row carries its <span class="mono">counts</span> — the
+          validations volunteered and assigned, the ones that reproduced, the
+          attestations scored, the submissions verified, the disputes upheld, the
+          revalidations changed, and the three marks — beside
+          <span class="mono">earned</span>,
+          <span class="mono">burned</span>, <span class="mono">locked</span>,
+          <span class="mono">standing</span> and
+          <span class="mono">available</span>. That is what lets a fresh fork's
+          operator directory read rank, tier, standing and counts exactly as this
+          one does from its first minute, rather than showing a number with
+          nothing behind it until its own first sweep runs. A clone pushed before
+          the counts were part of the row is still checked and still imported:
+          the verifier reads its rows as carrying no counts and holds them to
+          everything else they do carry.
+        </p>
       </section>
 
       <section class="panel" id="reader-kit">

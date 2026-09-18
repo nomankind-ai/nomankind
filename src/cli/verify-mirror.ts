@@ -86,10 +86,12 @@ import {
   mirrorLedgerRows,
   mirrorStanding,
   sealFileName,
+  standingRowCounts,
   v1Sidecar,
   type MirrorAttestationRecord,
   type MirrorFormat,
   type MirrorStanding,
+  type MirrorStandingRow,
 } from "../mirror.js";
 import {
   sealsForEntries,
@@ -1150,6 +1152,31 @@ async function checkVotes(
   }
 }
 
+/**
+ * The expected row, with `counts` dropped when the file carries none.
+ *
+ * Decision D-140 item 7 put the fold's counts into every standing row, and a
+ * mirror pushed before that is still somebody's exit — the same reason
+ * `MIRROR_FORMATS` keeps three layouts alive. A v1, v2 or v3 clone whose rows
+ * hold no counts reads as null counts (`standingRowCounts`) and is checked on
+ * everything it does carry; a clone that holds them is checked on those too,
+ * against the fold, so a hand-edited count is still a named failure.
+ */
+function expectedStandingRow(
+  row: MirrorStandingRow,
+  actual: unknown,
+): Record<string, unknown> {
+  const held = row as unknown as Record<string, unknown>;
+  if (standingRowCounts(actual) !== null) return held;
+  if (isRecord(actual) && Object.prototype.hasOwnProperty.call(actual, "counts")) {
+    // It carries a `counts` that is not a set of counts. Left in place, so the
+    // diff names it rather than this function hiding it.
+    return held;
+  }
+  const { counts: _counts, ...rest } = held;
+  return rest;
+}
+
 /** `standing.json`, recomputed through `standingAt` over the clone's events. */
 async function checkStanding(
   io: ValidatorIo,
@@ -1158,7 +1185,6 @@ async function checkStanding(
   recomputed: Recomputed,
 ): Promise<void> {
   const actual = await readJson(join(dir, "standing.json"));
-  const expected = recomputed.standing as unknown as Record<string, unknown>;
   if (!isRecord(actual)) {
     fail(io, tally, "standing", "standing", "/standing", "malformed");
     return;
@@ -1167,11 +1193,13 @@ async function checkStanding(
   // The operators row by row before the document as a whole, so an edited
   // number names the operator it was edited on rather than the whole list.
   const rows = actual["operators"];
+  const operators = recomputed.standing.operators.map((one, index) =>
+    expectedStandingRow(one, Array.isArray(rows) ? rows[index] : undefined),
+  );
   if (Array.isArray(rows)) {
-    for (let index = 0; index < recomputed.standing.operators.length; index += 1) {
-      const one = recomputed.standing.operators[index]!;
+    for (let index = 0; index < operators.length; index += 1) {
       const difference = firstDifference(
-        one as unknown as Record<string, unknown>,
+        operators[index]!,
         rows[index],
         `/operators/${index}`,
       );
@@ -1179,12 +1207,18 @@ async function checkStanding(
       fail(io, tally, "standing", "standing", difference.field, difference.reason);
       return;
     }
-    if (rows.length !== recomputed.standing.operators.length) {
+    if (rows.length !== operators.length) {
       fail(io, tally, "standing", "standing", "/operators", "count");
       return;
     }
   }
 
+  // The document as a whole, over the same rows the loop above accepted, so the
+  // two checks cannot disagree about a file the older layout is allowed to be.
+  const expected: Record<string, unknown> = {
+    ...(recomputed.standing as unknown as Record<string, unknown>),
+    operators,
+  };
   const difference = firstDifference(expected, actual, "");
   if (difference !== null) {
     fail(io, tally, "standing", "standing", difference.field, difference.reason);

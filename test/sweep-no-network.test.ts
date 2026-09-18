@@ -210,6 +210,7 @@ describe("a sweep with work in every step and a network that never answers", () 
       keyId: KEY_ID,
       url: "https://hook.example.com/alerts",
       secret: "c2VjcmV0LWZvci1zaWduaW5nLWFsZXJ0cy1vbmx5",
+      wrapped: false,
       domain: null,
       subject: null,
       category: null,
@@ -337,6 +338,8 @@ describe("a sweep with work in every step and a network that never answers", () 
       delivered: 0,
       failed: 0,
       retried: 2,
+      // Nothing to wrap: no key is configured here (D-118 item a).
+      wrapped: 0,
     });
     // The whole account of the run, exactly: the one step whose call never
     // answered says so, the day's counts are current, and the anchor is still

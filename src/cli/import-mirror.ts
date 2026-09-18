@@ -96,8 +96,8 @@ import {
   putOperator,
   putOperatorDomain,
   putSeal,
+  putStandings,
   setLedgerCursor,
-  setOperatorStanding,
 } from "../storage/repository.js";
 import { LEDGER_CURSOR, sealedLog } from "../worker/sweep.js";
 import { runCommand } from "./main.js";
@@ -434,14 +434,13 @@ async function writeRecomputed(
   await putLedgerRows(db, ledger);
   await setLedgerCursor(db, LEDGER_CURSOR, plan.head);
 
-  for (const standing of mirrorStanding(layout.events, plan.head).operators) {
-    await setOperatorStanding(
-      db,
-      standing.operator,
-      standing.standing,
-      plan.head,
-    );
-  }
+  // The accumulator and not only the number (decision D-140 item 7).
+  // `setOperatorStanding` wrote the cached column the directory reads and left
+  // the fold's own rows empty, so a fresh fork answered `/operators` with every
+  // operator's counts null until its first sweep ran — the numbers agreed and
+  // the work behind them was missing. `putStandings` writes both halves in one
+  // batch, at the position the fold is as of, which is the imported head.
+  await putStandings(db, mirrorStanding(layout.events, plan.head).operators);
 
   return { attestations: attestations.length, ledgerRows: ledger.length };
 }

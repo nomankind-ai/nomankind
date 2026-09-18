@@ -254,6 +254,10 @@ describe("GET /sitemap.xml", () => {
       // every other documentation page named here.
       "/independence",
       "/status",
+      // The terms of use and privacy note (D-097 item 2 as rewritten under
+      // D-127), which a reader looks for by name rather than by following a
+      // link, so a crawler has to be able to find it.
+      "/terms",
       "/docs",
       "/docs/fork",
       "/docs/whitepaper",

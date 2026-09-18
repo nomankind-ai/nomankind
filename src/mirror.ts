@@ -89,6 +89,7 @@ import {
   STANDING_FORMULA,
   standingAt,
   type Standing,
+  type StandingCounts,
 } from "./standing.js";
 import {
   disputeOutcomeStakes,
@@ -273,11 +274,71 @@ export interface MirrorAttestationRecord {
   readonly answers: readonly ProbeAnswer[] | null;
 }
 
+/**
+ * One row of `standing.json`: `Standing` whole, and whole on purpose.
+ *
+ * Decision D-140 item 7. The row carries `counts` — the accumulator the sweep
+ * keeps, which is what the leaderboard prints beside each operator's number —
+ * as well as the number itself, because a fork that imports this file has to be
+ * able to answer `/operators` the way the source answers it. A number with
+ * nothing behind it is a score, and standing is not one: the counts are what
+ * make the total checkable by a reader who disagrees with it.
+ *
+ * An alias rather than a narrower shape, so the export and `GET /standing` can
+ * never drift into two answers to one question.
+ */
+export type MirrorStandingRow = Standing;
+
 /** `standing.json`: the body of `GET /standing`, at the sealed head. */
 export interface MirrorStanding {
   readonly position: number;
   readonly formula: readonly string[];
-  readonly operators: readonly Standing[];
+  readonly operators: readonly MirrorStandingRow[];
+}
+
+/** The ten count keys one accumulator carries, in the order it holds them. */
+const STANDING_COUNT_KEYS = Object.freeze([
+  "validations_volunteered",
+  "validations_assigned",
+  "validations_reproduced",
+  "attestations_scored",
+  "submissions_verified",
+  "disputes_upheld",
+  "revalidations_changed",
+  "overturned",
+  "missed",
+  "forfeits",
+] as const);
+
+/**
+ * The counts one row of a standing file carries, or null when it carries none.
+ *
+ * Null and not a row of zeroes, which is the distinction the leaderboard already
+ * draws (src/ui/types.ts): zero is "did nothing" and null is "nobody has folded
+ * this yet". A mirror pushed before the counts were part of the row is still
+ * somebody's exit — the same reason `MIRROR_FORMATS` keeps three layouts alive —
+ * so a file without them reads as null rather than as a malformed file, and the
+ * verifier and the importer both take that answer rather than refusing.
+ *
+ * Strict about what it does accept: a `counts` object missing a key, or holding
+ * anything that is not a finite integer, is not a set of counts and comes back
+ * null, so a half-written row is never read as a whole one.
+ */
+export function standingRowCounts(row: unknown): StandingCounts | null {
+  if (typeof row !== "object" || row === null) return null;
+  const counts = (row as { counts?: unknown }).counts;
+  if (typeof counts !== "object" || counts === null) return null;
+  const held = counts as Record<string, unknown>;
+  const read: Record<string, number> = {};
+  for (const key of STANDING_COUNT_KEYS) {
+    const value = held[key];
+    if (typeof value !== "number" || !Number.isInteger(value)) return null;
+    read[key] = value;
+  }
+  for (const key of Object.keys(held)) {
+    if (!(STANDING_COUNT_KEYS as readonly string[]).includes(key)) return null;
+  }
+  return read as unknown as StandingCounts;
 }
 
 /** Everything one export is built from, gathered at one sealed head. */
@@ -530,6 +591,11 @@ export function mirrorAttestations(
  * is a leaderboard a person reads; this is a file two exports have to agree on
  * byte for byte, and an order that moves when a number moves would rewrite the
  * whole file on a day one validation landed.
+ *
+ * Each row carries its `counts` as well as its number (D-140 item 7), from this
+ * one fold: the leaderboard's counts are the sweep's cache of exactly this
+ * answer, so a fork that replays the file reads `/operators` the way the source
+ * does rather than a page of nulls until its own first sweep runs.
  */
 export function mirrorStanding(
   events: readonly Event[],

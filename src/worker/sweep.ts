@@ -272,6 +272,7 @@ import {
   recordAttestationExpired,
   recordCommunityOperatorJoinedDomain,
   recordCommunityOperatorRegistered,
+  recordKeyRotation,
   recordCommunityValidation,
   recordPoolSnapshot,
   recordPublicConfirmation,
@@ -320,7 +321,11 @@ import {
   countFailedDeliveries,
 } from "../storage/alerts.js";
 import { checkWitnesses, witnessedCount, type Witness } from "../witness.js";
-import { runAlertStep, type AlertStepReport } from "./alerts.js";
+import {
+  alertSigningKey,
+  runAlertStep,
+  type AlertStepReport,
+} from "./alerts.js";
 import {
   ENVIRONMENT_MISCONFIGURED,
   environmentConfigured,
@@ -572,6 +577,12 @@ export interface SweepCommunityValidation {
   readonly verdict: "approve" | "reject";
   readonly registered: boolean;
   readonly joined: boolean;
+  /**
+   * Whether this line also sealed a `key_rotated` first (D-140 item 5): the
+   * operator's profile publishes a new key, the line is signed by it, and the
+   * operator kept its id, its standing and its marks.
+   */
+  readonly rotated: boolean;
   /** Position of the `community_validation` event this run appended. */
   readonly seq: number;
 }
@@ -1287,13 +1298,40 @@ async function confirmationsStep(
   // operator id (D-138 item 2). Read once per run, for the one thing a later
   // line needs from an earlier registration: a `profile` binding's signature is
   // judged by the key the operator REGISTERED under and by no other, exactly as
-  // the offline verifier judges it (src/verify.ts). A key that has changed on
-  // the profile since is not a new key for an old operator — it is a rotation,
-  // and this build has no rule for one.
+  // the offline verifier judges it (src/verify.ts) — or, once the operator has
+  // rotated, by the key its newest `key_rotated` named, which is the second
+  // loop below.
   const registeredProfiles = new Map<string, ProfileRegistration>();
   for (const event of await eventsOfType(
     db,
     "community_operator_registered",
+    -1,
+    SEAL_MAX_EVENTS,
+  )) {
+    const payload = event.payload as unknown as Record<string, unknown>;
+    const binding = payload["binding"];
+    if (typeof payload["operator"] !== "string") continue;
+    if (!isRecordValue(binding) || binding["kind"] !== "profile") continue;
+    const key = binding["public_key"];
+    const capture = binding["capture_hash"];
+    const url = binding["url"];
+    if (typeof key !== "string" || typeof capture !== "string") continue;
+    registeredProfiles.set(payload["operator"], {
+      public_key: key,
+      capture_hash: capture,
+      url: typeof url === "string" ? url : "",
+    });
+  }
+
+  // And the rotations on top of them, in seq order, so the key a line is judged
+  // by is the operator's newest (D-140 item 5). A community operator's key
+  // follows its profile: the operator keeps its id, its standing and its marks,
+  // and what moves is which key its lines have to be signed by. Read after the
+  // registrations and applied over them, which is the same fold
+  // `communityOperatorsAt` makes over the same two facts.
+  for (const event of await eventsOfType(
+    db,
+    "key_rotated",
     -1,
     SEAL_MAX_EVENTS,
   )) {
@@ -1613,14 +1651,19 @@ async function confirmationsInComment(
     // would change what the log says, so nothing is asked of any of them.
     //
     // A line sealed as an account statement at a `profile` venue is finished
-    // too. Nothing about it can change: the event it would seal again is the
-    // same account statement (a confirmation's evidence is a registry proof and
-    // this venue has no registry), and it cannot become a validation either,
-    // because the key it would have to verify under is the one the operator
-    // registered and a key that has changed since is refused rather than
-    // rotated. So the line is passed over without a fetch — which is what keeps
-    // one bad line on a thread with no id cursor from re-reading a profile
-    // every hour forever.
+    // too. The event it would seal again is the same account statement (a
+    // confirmation's evidence is a registry proof and this venue has no
+    // registry), and it is not re-judged: a line at a `profile` venue is a
+    // claim about a key at the moment it was read, and the log has read it. So
+    // the line is passed over without a fetch — which is what keeps one bad
+    // line on a thread with no id cursor from re-reading a profile every hour
+    // forever.
+    //
+    // D-140 item 5 does not change that. A rotation is read off the line being
+    // judged now, not off a line the log already settled: an account statement
+    // does not become a validation because its author later published the key
+    // it was signed with, because the profile read that would say so is exactly
+    // the read this rule exists to stop.
     //
     // What that costs is stated rather than hidden: a line said while the
     // author's profile door was down, or before they had published their key,
@@ -1804,6 +1847,19 @@ type LineBinding =
        * under, and its page is already archived and already named.
        */
       readonly taken: ProfileCapture | null;
+      /**
+       * The key this line's key replaces, when the profile has rotated
+       * (decision D-140 item 5), and null in every ordinary case.
+       *
+       * Set only where the operator is already registered, the line did NOT
+       * verify under the key the log holds for it, the profile has been read
+       * again, and the line DOES verify under the key the fresh page now
+       * publishes. That is the whole of what a community rotation is: the key
+       * follows the profile, and the profile is what the world checks. The
+       * sweep seals a `key_rotated` for it before the validation, and the
+       * operator keeps its id, its standing and its marks.
+       */
+      readonly retires: string | null;
     };
 
 /**
@@ -1844,15 +1900,24 @@ async function registryBindingFor(
  * a line carrying no signature, a profile door that did not answer, a profile
  * publishing no key, and a signature that does not verify.
  *
- * The key the signature is judged by is the one the operator REGISTERED under,
- * whenever the log already holds a registration — which is the same key the
- * offline verifier judges it by (src/verify.ts), and the reason the two agree.
- * So a registered operator costs no profile read at all while its signatures
- * verify; the page is fetched again only when one does not, because the one
- * thing that could have changed is the key. A key that HAS changed is refused
- * with `confirmation_key_changed` and registers nothing: one operator per venue
- * account is what the registry holds, and rotating a community operator's key
- * is a rule D-138 has not written. GAP: key rotation, for a later decision.
+ * The key the signature is judged by is the one the log holds for the operator,
+ * whenever it already holds a registration — which is the same key the offline
+ * verifier judges it by (src/verify.ts), and the reason the two agree. So a
+ * registered operator costs no profile read at all while its signatures verify;
+ * the page is fetched again only when one does not, because the one thing that
+ * could have changed is the key.
+ *
+ * A key that HAS changed is a rotation, and since decision D-140 item 5 it is
+ * one this build can read: the fresh capture publishes a new key, the line
+ * verifies under it, and the binding comes back naming the key it retires. The
+ * sweep seals a `key_rotated` for it before the validation and the operator
+ * keeps its id, its standing and its marks — a key is how an operator speaks
+ * and is not what it is. `confirmation_key_changed`, the refusal that stood
+ * here until then, is retired with it.
+ *
+ * A changed key whose line does NOT verify under it is `confirmation_signature_invalid`
+ * like any other bad signature: a new key on a page is not evidence about a
+ * line nobody signed with it.
  */
 async function profileBindingFor(
   board: BoardAdapter,
@@ -1888,9 +1953,10 @@ async function profileBindingFor(
         capture_hash: registered.capture_hash,
         url: registered.url,
         taken: null,
+        retires: null,
       };
     }
-    // It did not verify under the registered key, so the page is read again:
+    // It did not verify under the key the log holds, so the page is read again:
     // either the key on it has changed, or the signature is simply bad.
     const fresh = await profileCaptureFor(
       board,
@@ -1900,12 +1966,42 @@ async function profileBindingFor(
       handle,
       true,
     );
-    if (fresh === null) skip("confirmation_profile_unavailable");
-    else if (fresh.public_key === null) skip("confirmation_profile_unkeyed");
-    else if (fresh.public_key !== registered.public_key) {
-      skip("confirmation_key_changed");
-    } else skip("confirmation_signature_invalid");
-    return null;
+    if (fresh === null) {
+      skip("confirmation_profile_unavailable");
+      return null;
+    }
+    if (fresh.public_key === null) {
+      skip("confirmation_profile_unkeyed");
+      return null;
+    }
+    if (fresh.public_key === registered.public_key) {
+      // The page publishes the same key it always did, so the signature is
+      // simply bad. Nothing about the operator has changed.
+      skip("confirmation_signature_invalid");
+      return null;
+    }
+    // The page publishes a different key. That is a rotation only if the line
+    // was actually signed by it (D-140 item 5): a new key on a profile proves
+    // the author changed their key, and the signature is what proves this line
+    // is theirs. Both, or neither.
+    const rotated = await verifyLineSignature(
+      fresh.public_key,
+      canonical,
+      signature,
+    );
+    if (!rotated) {
+      skip("confirmation_signature_invalid");
+      return null;
+    }
+    return {
+      kind: "profile",
+      public_key: fresh.public_key,
+      signature,
+      capture_hash: fresh.capture_hash,
+      url: fresh.url,
+      taken: fresh,
+      retires: registered.public_key,
+    };
   }
 
   const profile = await profileCaptureFor(
@@ -1939,6 +2035,7 @@ async function profileBindingFor(
     capture_hash: profile.capture_hash,
     url: profile.url,
     taken: profile,
+    retires: null,
   };
 }
 
@@ -2060,6 +2157,7 @@ async function communityLine(
   try {
     let registered = false;
     let joined = false;
+    let rotated = false;
 
     const record = await getOperator(db, operator);
     if (record === null) {
@@ -2124,6 +2222,60 @@ async function communityLine(
       // the registry again.
       cache.registry = null;
     } else {
+      // The key changed on the profile and the line is signed by the new one
+      // (D-140 item 5): the rotation is sealed BEFORE the validation, so the
+      // validation is folded against a registry that already knows which key
+      // speaks for this operator. The operator keeps its id, its standing and
+      // its marks; what moves is the key and the binding the world checks it
+      // against.
+      if (binding.kind === "profile" && binding.retires !== null) {
+        extra.push(
+          await recordKeyRotation(db, {
+            at,
+            type: "key_rotated",
+            entry_id: null,
+            payload: {
+              operator,
+              retired_agent: AGENT_ID_PREFIX + binding.retires,
+              new_agent: agent,
+              // A community operator signs no independence attestation: what it
+              // attested to is the token on its own line.
+              attestation: null,
+              binding: recorded,
+              capture_hash: binding.capture_hash,
+            },
+          }),
+        );
+        rotated = true;
+        // The page that published the new key, indexed so it can be served
+        // (D-138 item 5): the offline verifier rechecks the rotation against
+        // exactly these bytes, so the bundle and the mirror have to carry them
+        // for the same reason they carry the registration's page.
+        if (binding.taken !== null) {
+          await putCapture(db, {
+            entryId,
+            role: `profile:${operator}`,
+            contentHash: binding.capture_hash,
+            archiveHash: binding.capture_hash,
+            normVersion: NORM_VERSION,
+            kind: "json",
+            mediaType: binding.taken.media_type,
+            size: binding.taken.size,
+            fetchedAt: at,
+          });
+        }
+        // Every later line by this account in this run is judged by the key the
+        // rotation fixed, exactly as the next run's will be.
+        registeredProfiles.set(operator, {
+          public_key: binding.public_key,
+          capture_hash: binding.capture_hash,
+          url: binding.url,
+        });
+        // The run's reading of the registry is now one event out of date, for
+        // the reason a registration makes it out of date: a validation folded
+        // against a registry that still holds the retired key would not count.
+        cache.registry = null;
+      }
       const held = await operatorDomains(db, operator);
       if (!held.some((row) => row.domain === domain)) {
         extra.push(
@@ -2197,6 +2349,7 @@ async function communityLine(
         verdict: line.verdict,
         registered,
         joined,
+        rotated,
         seq: validated.seq,
       },
     };
@@ -4698,6 +4851,7 @@ export async function runSweep(
       delivered: 0,
       failed: 0,
       retried: 0,
+      wrapped: 0,
     };
     const sealedHead = await latestSeal(db);
     enter("ledger");
@@ -4723,6 +4877,10 @@ export async function runSweep(
           // The bodies carry paths and the reader knows the host it subscribed
           // to, so no origin is invented here (contract section 8.2).
           origin: "",
+          // The key an endpoint's stored secret is wrapped under (D-118 item
+          // a), or null where none is configured: the step unwraps with it
+          // before signing and wraps the legacy plain rows a few at a time.
+          signingKey: alertSigningKey(env),
           ...(deps.alertTimeoutMs === undefined
             ? {}
             : { timeoutMs: deps.alertTimeoutMs }),
@@ -4881,7 +5039,7 @@ function nothingSwept(
     upgraded: null,
     mirror: null,
     ledger: null,
-    alerts: { created: 0, delivered: 0, failed: 0, retried: 0 },
+    alerts: { created: 0, delivered: 0, failed: 0, retried: 0, wrapped: 0 },
     standing: null,
     counters: null,
     swept: null,

@@ -70,6 +70,10 @@ import {
   type RegistrationRefusal,
 } from "../registry.js";
 import {
+  checkKeyRotation,
+  type KeyRotationRefusal,
+} from "../rotation.js";
+import {
   marksOf,
   standingAt,
   tierOf,
@@ -112,6 +116,8 @@ import {
   storedStandings,
   recordAgentBind,
   recordDomainJoin,
+  recordKeyRotation,
+  retiredAgents,
   registerOperator,
   trustOperator,
   type AgentRecord,
@@ -234,6 +240,27 @@ const AGENT_BIND_STATUS: Record<AgentBindRefusal, number> = {
   missing_attestation: 422,
   bad_attestation: 422,
   attestation_domain_mismatch: 422,
+};
+
+/**
+ * The status each rotation refusal answers with (D-095, D-097 item 3).
+ *
+ * `community_operator` is 409 and not 404: the operator is registered and the
+ * caller is not wrong about it existing, but its key rotates by its profile
+ * and not at this door (D-140 item 5), so the request is in conflict with what
+ * that operator is rather than about nobody. `agent_retired` is 409 for the
+ * same reason -- the key exists and its retirement is already in the log.
+ */
+const KEY_ROTATION_STATUS: Record<KeyRotationRefusal, number> = {
+  unknown_operator: 404,
+  community_operator: 409,
+  unknown_agent: 403,
+  author_mismatch: 403,
+  agent_retired: 409,
+  bad_agent: 422,
+  agent_already_bound: 409,
+  missing_attestation: 422,
+  bad_attestation: 422,
 };
 
 /**
@@ -801,6 +828,21 @@ export async function authenticate(
     return { ok: false, response: refuse(401, verdict.reason) };
   }
 
+  // The key is the key it claims to be — and from the seal of its rotation on,
+  // it is a key that stopped answering for its operator (D-095, D-097 item 3).
+  // Asked here rather than at each door, because a retired key is refused at
+  // every write door and not at some of them, and one question after the
+  // signature is one question: the fold is over the `key_rotated` events alone,
+  // which is an indexed range over a handful of rows.
+  //
+  // 403 and not 401: the signature is good and the caller is who they say. What
+  // is gone is the standing to write, which is exactly what a forbidden is.
+  // Nothing about the past is touched — the signatures this key made before its
+  // rotation stay valid, and derivation and the verifier both read positions.
+  if (await isRetired(env.DB, verdict.agentId)) {
+    return { ok: false, response: refuse(403, "agent_retired") };
+  }
+
   if (options.charge !== false) {
     const charged = await chargeWrite(env.DB, request, verdict.agentId, deps.now);
     if (!charged.ok) return { ok: false, response: charged.response };
@@ -821,6 +863,20 @@ export async function authenticate(
  */
 function maintainerOf(env: Env): string | null {
   return maintainerAgentId(env);
+}
+
+/**
+ * Whether this key has been retired by a rotation (D-095, D-097 item 3).
+ *
+ * One read of the `key_rotated` events, folded by src/rotation.ts's own
+ * `retiredAgentsAt` through the repository, so the doors and derivation cannot
+ * come to two different answers about which keys have stopped speaking.
+ *
+ * A log that has never held a rotation — which is every log until the first one
+ * — costs one empty indexed range per signed write.
+ */
+async function isRetired(db: D1Like, agent: string): Promise<boolean> {
+  return (await retiredAgents(db, LIST_PAGE_LIMIT)).has(agent);
 }
 
 /** The log's last event, or nothing when the log is empty. */
@@ -1216,6 +1272,155 @@ async function bindAgent(
       ...record,
       agents: [...agents.map((held) => held.agentId), bound.payload.agent],
       domains: domains.map((row) => row.domain),
+    },
+    201,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// POST /operators/{id}/agents/{agent}/rotate
+// ---------------------------------------------------------------------------
+
+/**
+ * The body a rotation carries: the new key and its attestation, in the shape
+ * `parseAgentBindBody` already reads, because they are the same two fields.
+ *
+ * `new_agent` rather than `agent`, and that is the whole difference: the path
+ * already names an agent — the one being retired — so a body naming a second
+ * one as `agent` would be two agents under one word.
+ */
+function parseRotationBody(
+  body: unknown,
+): { ok: true; value: { newAgent: string; attestation: unknown } } | {
+  ok: false;
+  reason: string;
+} {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return { ok: false, reason: "bad_body" };
+  }
+  const fields = body as Record<string, unknown>;
+  const newAgent = fields["new_agent"];
+  if (typeof newAgent !== "string" || newAgent === "") {
+    return { ok: false, reason: "bad_body" };
+  }
+  const attestation = fields["attestation"];
+  if (
+    typeof attestation !== "object" ||
+    attestation === null ||
+    Array.isArray(attestation)
+  ) {
+    return { ok: false, reason: "bad_body" };
+  }
+  return { ok: true, value: { newAgent, attestation } };
+}
+
+/**
+ * Rotate one of an operator's keys.
+ *
+ * Whitepaper Section 5: an operator runs agents, and standing, trust and marks
+ * are the operator's. Decisions D-095 and D-097 item 3: a key that has to be
+ * replaced is replaced by a signed act in the log, and the operator keeps
+ * everything but the key.
+ *
+ * The same two signatures the bind door asks for: the request is signed by a
+ * key this operator already holds — the retiring one or another, because the
+ * usual reason to rotate is that the retiring key can no longer sign — and the
+ * new key signs the independence attestation for the operator's registration
+ * domain. Neither stands for the other.
+ *
+ * The DNS TXT record is not looked up again, for `bindAgent`'s reason: it
+ * proves control of the domain and it proved it when the first agent was bound.
+ *
+ * From the seal of this event on, the retired key is refused at every write
+ * door with `agent_retired` (`authenticate` above), and every signature it made
+ * before this position stays valid — derivation and the offline verifier both
+ * read positions, so the record the key made is exactly as good as it was.
+ */
+async function rotateAgent(
+  request: Request,
+  env: Env,
+  deps: RegistryDeps,
+  path: string,
+  operator: string,
+  retiredAgent: string,
+): Promise<Response> {
+  const auth = await authenticate(request, env, deps, path);
+  if (!auth.ok) return auth.response;
+
+  const parsed = parseRotationBody(auth.body);
+  if (!parsed.ok) return refuse(400, parsed.reason);
+  const { newAgent, attestation } = parsed.value;
+
+  const record = await getOperator(env.DB, operator);
+  const agents =
+    record === null
+      ? []
+      : await agentsForOperator(env.DB, operator, LIST_PAGE_LIMIT);
+  const domains = record === null ? [] : await operatorDomains(env.DB, operator);
+  const retired = await retiredAgents(env.DB, LIST_PAGE_LIMIT);
+
+  const check = await checkKeyRotation({
+    operator,
+    signer: auth.agent,
+    retiredAgent,
+    newAgent,
+    attestation,
+    registered: record !== null,
+    // One registry, two kinds (D-138), and only one of them rotates here: a
+    // community operator's key follows its profile and is rotated by the
+    // sweep's own path (D-140 item 5), never by a door.
+    community: record !== null && record.kind === "community",
+    // The domain registration attested to, exactly as `bindAgent` reads it.
+    registrationDomain: domains[0]?.domain ?? DEFAULT_DOMAIN,
+    agents: agents.map((bound) => bound.agentId),
+    newAgentOperator: await operatorForAgent(env.DB, newAgent),
+    retiredAlready: retired.has(retiredAgent),
+    now: deps.now,
+  });
+  if (!check.ok) {
+    return refuse(KEY_ROTATION_STATUS[check.reason], check.reason);
+  }
+  if (record === null) {
+    // Unreachable: checkKeyRotation refuses an unregistered operator above.
+    return refuse(KEY_ROTATION_STATUS.unknown_operator, "unknown_operator");
+  }
+
+  // The event is the record and the agents row is the index into it, written in
+  // one batch (`recordKeyRotation`), for the reason `recordAgentBind` is one
+  // batch: a bound key with no event would be a key nobody can check offline,
+  // and an event with no row would be a key the Worker cannot resolve.
+  const rotated = await withChainRetry(() =>
+    recordKeyRotation(env.DB, {
+      at: deps.now.toISOString(),
+      type: "key_rotated",
+      entry_id: null,
+      payload: {
+        operator,
+        retired_agent: retiredAgent,
+        new_agent: newAgent,
+        // Exactly what was signed, never the request's own object, for
+        // `attestationOf`'s reason.
+        attestation: attestationOf(attestation),
+        // The community half of the payload, null on a domain rotation: this
+        // operator is bound to a DNS name and not to a profile.
+        binding: null,
+        capture_hash: null,
+      },
+    }),
+  );
+
+  return json(
+    {
+      ...record,
+      agents: [...agents.map((held) => held.agentId), rotated.payload.new_agent],
+      retired: [...retired.keys(), retiredAgent],
+      domains: domains.map((row) => row.domain),
+      event: {
+        seq: rotated.seq,
+        type: rotated.type,
+        at: rotated.at,
+        hash: rotated.hash,
+      },
     },
     201,
   );
@@ -1699,6 +1904,43 @@ function subresourceUnder(
 }
 
 /**
+ * The operator and the agent in `/operators/{id}/agents/{agent}/rotate`, or
+ * null when the path is not that shape (D-095, D-097 item 3).
+ *
+ * Two ids and no third slash in either, read the way `subresourceUnder` reads
+ * one: an id that will not percent-decode comes back as the empty string, so
+ * the route answers `bad_id` rather than a 404 claiming the path does not
+ * exist.
+ *
+ * It sits under the bind door's own collection on purpose. Binding a key and
+ * retiring one are the same subject — which keys speak for this operator — and
+ * a rotation named anywhere else would be a second place to look for it.
+ */
+function rotationPath(
+  path: string,
+): { operator: string; agent: string } | null {
+  const PREFIX = "/operators/";
+  const SUFFIX = "/rotate";
+  if (!path.startsWith(PREFIX) || !path.endsWith(SUFFIX)) return null;
+  const middle = path.slice(PREFIX.length, -SUFFIX.length);
+  const MARK = "/agents/";
+  const mark = middle.indexOf(MARK);
+  if (mark <= 0) return null;
+  const rawOperator = middle.slice(0, mark);
+  const rawAgent = middle.slice(mark + MARK.length);
+  if (rawOperator === "" || rawAgent === "") return null;
+  if (rawOperator.includes("/") || rawAgent.includes("/")) return null;
+  const decode = (raw: string): string => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return "";
+    }
+  };
+  return { operator: decode(rawOperator), agent: decode(rawAgent) };
+}
+
+/**
  * Route one request to the registry, or answer null when the path is not one of
  * ours, which leaves the Worker's own not_found untouched.
  *
@@ -1747,6 +1989,25 @@ async function route(
     if (joiner === "") return refuse(400, "bad_id");
     if (request.method !== "POST") return methodNotAllowed("POST");
     return joinDomain(request, env, deps, path, joiner);
+  }
+
+  // Before the bind door: `/operators/{id}/agents/{agent}/rotate` ends in
+  // `/rotate` and so is no shape `subresourceOperator` matches, but reading it
+  // first keeps the two doors of one collection beside each other.
+  const rotation = rotationPath(path);
+  if (rotation !== null) {
+    if (rotation.operator === "" || rotation.agent === "") {
+      return refuse(400, "bad_id");
+    }
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    return rotateAgent(
+      request,
+      env,
+      deps,
+      path,
+      rotation.operator,
+      rotation.agent,
+    );
   }
 
   const binder = subresourceOperator(path, "/agents");

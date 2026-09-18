@@ -67,6 +67,7 @@ import { renderOperator } from "../src/ui/pages/operator.js";
 import { renderOperators } from "../src/ui/pages/operators.js";
 import { RELEASE_HISTORY, renderPolicy } from "../src/ui/pages/policy.js";
 import { renderStatus } from "../src/ui/pages/status.js";
+import { renderTerms } from "../src/ui/pages/terms.js";
 import type {
   EntriesData,
   EntryData,
@@ -611,6 +612,12 @@ const PAGES: Readonly<Record<string, string>> = Object.freeze({
   ),
   "/mirror/latest": renderMirror({ ...ctx, path: "/mirror/latest" }, mirrorData),
   "/status": renderStatus({ ...ctx, path: "/status" }, statusData),
+  // The terms of use and privacy note (D-097 item 2 as rewritten under D-127).
+  // The page whose whole subject is that none of this is bought, which is the
+  // one page most likely to reach for the vocabulary of the thing it is denying:
+  // "no purchase terms" is a sentence about purchase terms, exactly as "no
+  // read-share" is a sentence about read shares.
+  "/terms": renderTerms({ ...ctx, path: "/terms" }),
 });
 
 // ---------------------------------------------------------------------------

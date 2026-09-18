@@ -703,6 +703,7 @@ describe("the 0018 backfill on a database written before it", () => {
         "0023_money_removed.sql",
         "0024_derived_kernel.sql",
         "0025_operator_kind.sql",
+        "0026_alert_secret_wrapped.sql",
       ]);
 
       // The column says exactly what the JSON beside it has always said.

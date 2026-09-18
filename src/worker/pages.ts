@@ -180,6 +180,7 @@ import { renderOperator } from "../ui/pages/operator.js";
 import { renderOperators } from "../ui/pages/operators.js";
 import { renderPolicy } from "../ui/pages/policy.js";
 import { renderStatus } from "../ui/pages/status.js";
+import { renderTerms } from "../ui/pages/terms.js";
 import { renderVotes } from "../ui/pages/votes.js";
 import { ENTRY_DOMAINS, parseEntriesQuery } from "../ui/query.js";
 import { APP_CSS } from "../ui/styles.js";
@@ -248,6 +249,10 @@ const PAGE_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/landing",
   "/policy",
   "/api",
+  // The terms of use and privacy note (D-097 item 2 as rewritten under D-127):
+  // an HTML page with no door of its own under it, so a wrong method here is
+  // this route's to refuse, exactly as it is on /api.
+  "/terms",
   "/docs",
   "/docs/fork",
   "/docs/reader-kit",
@@ -1774,6 +1779,9 @@ const SITEMAP_STATIC_PATHS: readonly string[] = Object.freeze([
   // like every other documentation page named here. The question pages under it
   // are not named: a vote is a published handful and the list is the way in.
   "/votes",
+  // The terms of use and privacy note (D-097 item 2 as rewritten under D-127),
+  // which a reader looks for by name: a crawler should be able to find it.
+  "/terms",
   "/docs",
   "/docs/fork",
   "/docs/reader-kit",
@@ -2199,6 +2207,12 @@ async function route(
   // and /dry-run they answer HTML to any GET: there is no JSON twin of a
   // whitepaper for a request to have meant instead, and the markdown they
   // render is in the repository for anyone who wants the source.
+  // The terms of use and privacy note (D-097 item 2 as rewritten under D-127).
+  // HTML to any GET like /api and /docs: there is no JSON twin of a terms page
+  // for a request to have meant instead, and every number on it is already
+  // answered in the record's own shape by `GET /policy`.
+  if (path === "/terms") return htmlResponse(renderTerms(ctx));
+
   if (path === "/docs") return htmlResponse(renderDocs(ctx));
   if (path === "/docs/fork") return htmlResponse(renderDocument(ctx, FORK_DOCUMENT));
   if (path === "/docs/reader-kit") {

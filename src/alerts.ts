@@ -10,8 +10,9 @@
  * subscribed. Nothing here is a fact of its own, and an alert that was never
  * delivered changes nothing about the record.
  *
- * Pure, except for the two WebCrypto calls — the HMAC and the digest a stale
- * alert's id is made of — which never go through
+ * Pure, except for the WebCrypto calls — the HMAC, the digest a stale alert's
+ * id is made of, and the HKDF and AES-GCM a stored secret is wrapped under
+ * (decision D-118 item a) — which never go through
  * `node:crypto` so this file runs unchanged on Workers. No storage, no clock,
  * no network: `src/storage/alerts.ts` holds the endpoints and the deliveries,
  * and `src/worker/alerts.ts` decides what is derived, matched and posted.
@@ -21,6 +22,7 @@
  * tag and nothing else.
  */
 
+import { base64urlDecode, base64urlEncode } from "./encoding.js";
 import { sha256Hex } from "./hash.js";
 import type { Entry } from "./schema.js";
 import type { Event } from "./events.js";
@@ -207,6 +209,146 @@ export async function staleDeliveryId(
  * the hex on a delivery was made with when a second one exists.
  */
 export const HASH_TAG_ALERT = "nomankind-alert-v1";
+
+// ---------------------------------------------------------------------------
+// The secret at rest (decision D-118 item a)
+// ---------------------------------------------------------------------------
+
+/**
+ * The HKDF salt every endpoint's wrapping key is derived under.
+ *
+ * A constant in this module and not a column: a salt is not a secret, it is
+ * domain separation, and one that varied per row would be a second thing to
+ * keep in step with the ciphertext for no gain. What makes one endpoint's key
+ * different from another's is the info — the endpoint's own id — so a
+ * ciphertext lifted from one row cannot be unwrapped as another's.
+ *
+ * A format constant and not a policy number: it names the construction.
+ */
+const ALERT_WRAP_SALT = "nomankind-alert-wrap-v1";
+
+/** How many bytes an AES-GCM IV is. A format fact: it is what GCM asks for. */
+const WRAP_IV_BYTES = 12;
+
+/** How many bits the wrapping key is. A format fact: it is what AES-256 is. */
+const WRAP_KEY_BITS = 256;
+
+/**
+ * The per-endpoint wrapping key: HKDF-SHA-256 over the environment's
+ * ALERT_SIGNING_KEY, salted by the constant above and infoed by the endpoint's
+ * own id.
+ *
+ * Never exported, and never returned to a caller in any form: the key is a
+ * non-extractable CryptoKey the moment it exists, so code in this isolate can
+ * encrypt and decrypt with it and cannot read it back out.
+ */
+async function wrappingKey(
+  signingKey: string,
+  endpointId: string,
+): Promise<CryptoKey> {
+  const encoder = new TextEncoder();
+  const material = await globalThis.crypto.subtle.importKey(
+    "raw",
+    encoder.encode(signingKey) as unknown as BufferSource,
+    "HKDF",
+    false,
+    ["deriveKey"],
+  );
+  return globalThis.crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: encoder.encode(ALERT_WRAP_SALT) as unknown as BufferSource,
+      info: encoder.encode(endpointId) as unknown as BufferSource,
+    },
+    material,
+    { name: "AES-GCM", length: WRAP_KEY_BITS },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/**
+ * The stored form of a wrapped secret: `<iv>.<ciphertext>`, both unpadded
+ * base64url.
+ *
+ * One string and not two columns, for the reason the delivery signature header
+ * is one string: an IV is not a secret, it is useless without the key, and a
+ * second column for it would be a second thing a write could leave behind.
+ */
+export function wrappedSecretText(iv: Uint8Array, sealed: Uint8Array): string {
+  return `${base64urlEncode(iv)}.${base64urlEncode(sealed)}`;
+}
+
+/**
+ * Wrap one endpoint's secret for storage.
+ *
+ * AES-GCM under a key derived from the environment's ALERT_SIGNING_KEY and this
+ * endpoint's id, with a fresh IV every time — so wrapping the same secret twice
+ * produces two different strings, and a database holding two identical
+ * ciphertexts is holding them for two different reasons than "the same secret".
+ *
+ * The secret goes in as its own UTF-8 bytes, which is exactly what `signAlert`
+ * takes, so unwrapping gives back the string a subscriber was handed at the
+ * door and nothing about the signature changes.
+ */
+export async function wrapAlertSecret(
+  signingKey: string,
+  endpointId: string,
+  secret: string,
+): Promise<string> {
+  const key = await wrappingKey(signingKey, endpointId);
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(WRAP_IV_BYTES));
+  const sealed = await globalThis.crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv as unknown as BufferSource },
+    key,
+    new TextEncoder().encode(secret) as unknown as BufferSource,
+  );
+  return wrappedSecretText(iv, new Uint8Array(sealed));
+}
+
+/**
+ * Unwrap one, or null when it cannot be unwrapped under this key.
+ *
+ * Null and not a throw, and null for every way it can fail — a string that is
+ * not the two-part shape, an IV of the wrong length, a tag that does not
+ * authenticate — because the caller has exactly one thing to do about all of
+ * them: not sign, and not send. A wrong ALERT_SIGNING_KEY is the important
+ * case, and GCM's tag is what makes it a refusal rather than a delivery signed
+ * with rubbish: the ciphertext does not authenticate under the wrong key, so
+ * nothing comes back.
+ *
+ * The secret never reaches an error message, here or anywhere: an error
+ * carrying it would publish it.
+ */
+export async function unwrapAlertSecret(
+  signingKey: string,
+  endpointId: string,
+  wrapped: string,
+): Promise<string | null> {
+  const dot = wrapped.indexOf(".");
+  if (dot <= 0 || dot === wrapped.length - 1) return null;
+  let iv: Uint8Array;
+  let sealed: Uint8Array;
+  try {
+    iv = base64urlDecode(wrapped.slice(0, dot));
+    sealed = base64urlDecode(wrapped.slice(dot + 1));
+  } catch {
+    return null;
+  }
+  if (iv.length !== WRAP_IV_BYTES) return null;
+  try {
+    const key = await wrappingKey(signingKey, endpointId);
+    const plain = await globalThis.crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: iv as unknown as BufferSource },
+      key,
+      sealed as unknown as BufferSource,
+    );
+    return new TextDecoder().decode(plain);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The bytes a delivery's signature covers: the timestamp, a dot, and the body

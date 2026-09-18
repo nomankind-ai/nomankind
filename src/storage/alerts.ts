@@ -14,6 +14,13 @@
  * signs with it — and it leaves through exactly one door, once, at
  * registration. Nothing here logs it, and `AlertDeliveryRecord` has no field it
  * could reach.
+ *
+ * Since migration 0026 (decision D-118 item a) it is in one of two columns: the
+ * plain one 0015 created, or `secret_wrapped`, the AES-GCM ciphertext under the
+ * environment's ALERT_SIGNING_KEY. This module writes and returns whichever the
+ * row holds and unwraps nothing: the key is the Worker's, not the store's, and
+ * a storage layer that could read the secrets back would be the thing 0026
+ * exists to stop.
  */
 
 import { SWEEP_BATCH_STATEMENTS, type AlertKind } from "../policy.js";
@@ -49,7 +56,7 @@ const ALERT_CURSOR = "alerts";
  */
 const STALE_ALERT_CURSOR = "alerts_stale";
 
-const ENDPOINT_COLUMNS = `id, key_id, url, secret, domain, subject, category, kinds_json, created_at, disabled_at`;
+const ENDPOINT_COLUMNS = `id, key_id, url, secret, secret_wrapped, domain, subject, category, kinds_json, created_at, disabled_at`;
 
 const DELIVERY_COLUMNS = `id, endpoint_id, event_seq, kind, entry_id, body_json, status, attempts, next_at, delivered_at, last_status, last_error, created_at`;
 
@@ -58,8 +65,28 @@ export interface AlertEndpointRecord {
   id: string;
   key_id: string;
   url: string;
-  /** The shared secret, base64url. Never returned by a door after the first. */
-  secret: string;
+  /**
+   * The shared secret in the plain column, base64url, or null once it has been
+   * wrapped (migration 0026, decision D-118 item a). Never returned by a door
+   * after the first.
+   *
+   * Exactly one of this and `secret_wrapped` is set on every row this build
+   * writes: the plain one on a deployment with no ALERT_SIGNING_KEY, the
+   * wrapped one everywhere the key is configured and the row has been through
+   * the wrapping pass. Which of the two a delivery signs with is
+   * src/worker/alerts.ts's `secretOf`, and nothing else asks.
+   */
+  secret: string | null;
+  /**
+   * The same secret as AES-GCM ciphertext under the environment's
+   * ALERT_SIGNING_KEY, `<iv>.<ciphertext>` (src/alerts.ts, `wrapAlertSecret`),
+   * or null while it is still plain.
+   *
+   * Useless without the Worker secret, which is in no column: a copy of this
+   * database is a copy of the ciphertext and not of the subscriber's key, which
+   * is the whole of what 0026 changes.
+   */
+  secret_wrapped: string | null;
   /** The filters, each null for "any". */
   domain: string | null;
   subject: string | null;
@@ -95,7 +122,8 @@ function toEndpoint(row: Row): AlertEndpointRecord {
     id: readText(row, "id"),
     key_id: readText(row, "key_id"),
     url: readText(row, "url"),
-    secret: readText(row, "secret"),
+    secret: readNullableText(row, "secret"),
+    secret_wrapped: readNullableText(row, "secret_wrapped"),
     domain: readNullableText(row, "domain"),
     subject: readNullableText(row, "subject"),
     category: readNullableText(row, "category"),
@@ -132,7 +160,14 @@ export interface AlertEndpointInput {
   readonly id: string;
   readonly keyId: string;
   readonly url: string;
+  /**
+   * The secret as it goes into the row: the plain string in the `secret`
+   * column, or the AES-GCM ciphertext in `secret_wrapped` (decision D-118 item
+   * a). The door decides which by whether the environment has an
+   * ALERT_SIGNING_KEY, and this module writes what it was handed.
+   */
   readonly secret: string;
+  readonly wrapped: boolean;
   readonly domain: string | null;
   readonly subject: string | null;
   readonly category: string | null;
@@ -140,20 +175,29 @@ export interface AlertEndpointInput {
   readonly createdAt: string;
 }
 
-/** Store one endpoint, and answer it back as the record it became. */
+/**
+ * Store one endpoint, and answer it back as the record it became.
+ *
+ * One of the two secret columns is written and the other is left null, never
+ * both: a row holding a plain copy beside a wrapped one would be a row whose
+ * wrapping bought nothing.
+ */
 export async function putAlertEndpoint(
   db: D1Like,
   input: AlertEndpointInput,
 ): Promise<AlertEndpointRecord> {
+  const plain = input.wrapped ? null : input.secret;
+  const wrapped = input.wrapped ? input.secret : null;
   await db
     .prepare(
-      `INSERT INTO alert_endpoints (${ENDPOINT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      `INSERT INTO alert_endpoints (${ENDPOINT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
     )
     .bind(
       input.id,
       input.keyId,
       input.url,
-      input.secret,
+      plain,
+      wrapped,
       input.domain,
       input.subject,
       input.category,
@@ -165,7 +209,8 @@ export async function putAlertEndpoint(
     id: input.id,
     key_id: input.keyId,
     url: input.url,
-    secret: input.secret,
+    secret: plain,
+    secret_wrapped: wrapped,
     domain: input.domain,
     subject: input.subject,
     category: input.category,
@@ -173,6 +218,71 @@ export async function putAlertEndpoint(
     created_at: input.createdAt,
     disabled_at: null,
   };
+}
+
+/**
+ * Replace one endpoint's plain secret with the wrapped one, in a single
+ * statement (migration 0026, decision D-118 item a).
+ *
+ * The two halves are one UPDATE because they are one fact: the row stops
+ * holding the plain secret at exactly the moment it starts holding the wrapped
+ * one, and a pass killed between two statements would otherwise leave an
+ * endpoint nothing can sign for.
+ *
+ * `WHERE secret IS NOT NULL` is the guard that makes a second pass over the
+ * same row do nothing rather than wrap a null: two runs racing on one row both
+ * ask, one wins, and the loser's UPDATE matches nothing and overwrites nothing.
+ */
+export async function wrapAlertEndpointSecret(
+  db: D1Like,
+  id: string,
+  wrapped: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE alert_endpoints SET secret_wrapped = ?, secret = NULL
+       WHERE id = ? AND secret IS NOT NULL`,
+    )
+    .bind(wrapped, id)
+    .run();
+}
+
+/**
+ * A bounded page of live endpoints still holding a plain secret, in id order.
+ *
+ * What the wrapping pass reads, and the only read in this module that asks
+ * about the shape of a secret rather than about an endpoint. Served by the
+ * partial index 0026 creates, so a deployment that has finished wrapping pays
+ * an empty index seek per run and not a scan of every endpoint it has.
+ *
+ * Disabled rows are left alone: an endpoint its holder turned off is never
+ * signed for again, so wrapping it would be work in exchange for nothing. Its
+ * plain secret stays in the row it was already in, which is the state 0015 left
+ * every row in, and deleting it is not this pass's to decide.
+ */
+export async function plainSecretEndpoints(
+  db: D1Like,
+  limit: number,
+): Promise<AlertEndpointRecord[]> {
+  const rows = await db
+    .prepare(
+      `SELECT ${ENDPOINT_COLUMNS} FROM alert_endpoints
+       WHERE secret IS NOT NULL AND disabled_at IS NULL ORDER BY id LIMIT ?`,
+    )
+    .bind(limit)
+    .all<Row>();
+  return rows.results.map(toEndpoint);
+}
+
+/** How many live endpoints are still holding a plain secret. */
+export async function countPlainSecretEndpoints(db: D1Like): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM alert_endpoints
+       WHERE secret IS NOT NULL AND disabled_at IS NULL`,
+    )
+    .first<Row>();
+  return row === null ? 0 : readInteger(row, "n");
 }
 
 /**

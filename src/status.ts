@@ -218,6 +218,18 @@ export interface StatusInput {
     readonly cursor: number;
     readonly due: number;
     readonly failed: number;
+    /**
+     * How the subscribers' shared secrets are held at rest (decision D-118 item
+     * a): `wrapped` where an ALERT_SIGNING_KEY is configured and every live row
+     * has been converted, `plain` where none is configured, and `wrapping`
+     * while the bounded pass still has legacy rows to convert.
+     *
+     * On the line because it is the one thing about the alerts stage a reader
+     * cannot check for themselves. Optional, and absent reads as `plain`: a
+     * caller that gathered the four counts without it is describing the
+     * deployment 0026 found, which is exactly what plain means.
+     */
+    readonly secrets?: "wrapped" | "wrapping" | "plain";
   };
   readonly exercised: ExercisedFacts;
 }
@@ -1147,12 +1159,24 @@ function changeAlerts(input: StatusInput, now: string): Stage {
   const evidence = [{ label: "/api", href: "/api" }];
   const { endpoints, cursor, due, failed } = input.alerts;
   const failedNote = failed === 0 ? "" : `${failed} failed`;
+  // How the subscribers' secrets are held at rest (decision D-118 item a),
+  // said in every state including the idle ones: a deployment with no endpoint
+  // yet is exactly the deployment whose maintainer wants to know whether the
+  // key is set before the first subscriber arrives. `plain` names the binding
+  // that would change it, because "plain" alone would read as a fact of the
+  // design rather than as the one thing left to configure.
+  const secretsNote =
+    input.alerts.secrets === "wrapped"
+      ? "secrets: wrapped"
+      : input.alerts.secrets === "wrapping"
+        ? "secrets: wrapping"
+        : "secrets: plain (no ALERT_SIGNING_KEY)";
 
   if (endpoints === 0) {
     return {
       stage: "change alerts",
       state: "idle",
-      last: line("no endpoint", failedNote),
+      last: line("no endpoint", secretsNote, failedNote),
       rule,
       evidence,
     };
@@ -1161,7 +1185,7 @@ function changeAlerts(input: StatusInput, now: string): Stage {
     return {
       stage: "change alerts",
       state: "idle",
-      last: line("nothing sealed", failedNote),
+      last: line("nothing sealed", secretsNote, failedNote),
       rule,
       evidence,
     };
@@ -1176,6 +1200,7 @@ function changeAlerts(input: StatusInput, now: string): Stage {
       last: line(
         `${endpoints} endpoints`,
         `read to ${head}`,
+        secretsNote,
         failedNote,
         step === null ? "" : stamp(step.last_run_at, now),
       ),
@@ -1193,6 +1218,7 @@ function changeAlerts(input: StatusInput, now: string): Stage {
       `${endpoints} endpoints`,
       cursor === head ? `read to ${head}` : `read to ${cursor} of ${head}`,
       due === 0 ? "" : `${due} due`,
+      secretsNote,
       failedNote,
       step === null ? "never run" : stamp(step.last_run_at, now),
     ),
