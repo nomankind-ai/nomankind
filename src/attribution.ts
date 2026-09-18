@@ -25,7 +25,7 @@
  * I/O — so a door can answer it beside the entry it already read.
  */
 
-import type { OperatorKind } from "./policy.js";
+import type { BindingRung, OperatorKind } from "./policy.js";
 import type { ApproverRecord, Event } from "./events.js";
 import type { Entry } from "./schema.js";
 
@@ -34,6 +34,19 @@ export interface AttributionValidator {
   readonly agent: string;
   readonly operator: string;
   readonly kind: OperatorKind;
+  /**
+   * The rung this validator stood on when it signed (decision D-142): `key` for
+   * a domain operator and for a community operator bound by registry or by
+   * profile, `account` for one the board merely authenticated.
+   *
+   * Read off the line's own sealed `binding_kind` and not off the registry, for
+   * the reason the field is sealed at all: an account that publishes a key
+   * later is the same operator under the same id, and an attribution block
+   * naming today's rung would say the entry was checked by a key that had not
+   * been published when it was checked. A row sealed before the decision names
+   * no rung and is `key`, because the account rung did not exist to stand on.
+   */
+  readonly binding: BindingRung;
   readonly decision: "approve" | "reject";
   /** True when the draw picked this validator rather than it volunteering. */
   readonly assigned_random: boolean;
@@ -156,6 +169,9 @@ export function attributionOf(
         agent: record.agent,
         operator: record.operator,
         kind: kindOf(operatorKinds, record.operator),
+        // A domain operator is a key bound to a DNS name by a signed
+        // attestation, which is the `key` rung by every reading of it.
+        binding: "key",
         decision: record.decision,
         assigned_random: record.assigned_random === true,
       });
@@ -179,6 +195,7 @@ export function attributionOf(
         // and a bundle that carries the entry's events without the registry's
         // still labels it right.
         kind: "community",
+        binding: payload["binding_kind"] === "account" ? "account" : "key",
         decision,
         // Nobody draws a community validation: it is said in public, by
         // whoever chose to say it.

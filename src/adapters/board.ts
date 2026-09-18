@@ -192,17 +192,19 @@ export interface BoardRecord {
 }
 
 /**
- * One account's public profile, as the venue served it (decision D-138 item 2).
+ * One bounded public read, whole, ready to be archived under its own hash.
  *
- * The bytes rather than a parsed key, because the bytes are the evidence: they
- * are hashed and archived under their own address exactly as a citation's
- * snapshot is, and the binding a registration carries names that hash. A key
- * read out and thrown away would leave a claim nobody could recheck.
+ * The shape every capture this adapter offers has: the door it was read from,
+ * the bytes that came back, and the two sidecar facts that travel beside them.
+ * The bytes rather than anything parsed out of them, because the bytes are the
+ * evidence — they are hashed and archived content-addressed exactly as a
+ * citation's snapshot is, and what a capture proves is that these bytes hashed
+ * to this hash.
  *
- * UNTRUSTED, like a comment body: scanned for one token (src/confirm.ts,
- * `profileKeyIn`), escaped wherever it is shown, never followed.
+ * UNTRUSTED, like a comment body: read for what the caller came for, escaped
+ * wherever it is shown, never followed.
  */
-export interface BoardProfile {
+export interface BoardCapture {
   /** The door this was read from, which the binding records. */
   readonly url: string;
   /** The raw bytes, bounded by `BOARD_READ_MAX_BYTES`. */
@@ -211,6 +213,35 @@ export interface BoardProfile {
   readonly content_type: string | null;
   /** The status the door answered, for the capture's sidecar. */
   readonly status: number;
+}
+
+/**
+ * One account's public profile, as the venue served it (decision D-138 item 2).
+ *
+ * A capture like any other, plus the one fact only a profile door can answer:
+ * when the platform says the account came into being.
+ */
+export interface BoardProfile extends BoardCapture {
+  /**
+   * The instant the venue publishes for the account's creation, ISO 8601, or
+   * null when the door published none (decision D-142).
+   *
+   * What makes "the account existed before the entry was submitted" a fact a
+   * reader can recheck rather than a claim: the account rung counts only from
+   * an account older than the submission, and a rung that read the age off
+   * nothing would be a rung that counted anybody who signed up this morning.
+   *
+   * Null is not a guess and not a zero: a venue that publishes no creation
+   * date is a venue where the account rung cannot be reached at all, which the
+   * sweep counts by name (`account_created_at_unknown`).
+   *
+   * Per venue, from each platform's own published surface: `created_at` on The
+   * Colony's `GET /api/v1/users/<username>` and on GitHub's `GET /users/<login>`
+   * (both ISO), and the citizen's registration instant on the 1F916 registry —
+   * the oldest `identity.key_bind` the record lists, or the citizen row's own
+   * creation, whichever the record answers.
+   */
+  readonly created_at: string | null;
 }
 
 /**
@@ -253,6 +284,37 @@ export interface BoardAdapter {
    * binds them in its own log, which is `record` above.
    */
   profile?(handle: string): Promise<BoardProfile | null>;
+  /**
+   * The platform's own representation of this one comment, fetched and bounded,
+   * or null (decision D-142).
+   *
+   * What the account rung's other half is: the board authenticated the author
+   * and published what they wrote, so the two things the sweep can seal about
+   * an account-bound line are the comment and the account. Both are captured
+   * content-addressed under the same rule a profile capture uses, and both
+   * hashes travel on the binding, so a reader with the bundle checks exactly
+   * what the rung claims — that these bytes were archived under these hashes,
+   * and that the comment is the line this validation was read from.
+   *
+   * What "the platform's own representation" is, per venue, from each surface
+   * as it publishes it:
+   *
+   * - GitHub numbers its comments and serves one on its own:
+   *   `GET /repos/<owner>/<repo>/issues/comments/<id>` answers the canonical
+   *   JSON of that single comment, which is stable whatever else is written on
+   *   the issue afterwards.
+   * - The Colony and the 1F916 board publish no per-comment door (probed
+   *   2026-09-17 and read 2026-09-16), so the capture is the thread door's own
+   *   answer with the comment named in the fragment — the permalink to the
+   *   comment, whose bytes are the page that carried it. The hash covers the
+   *   thread as it stood when the sweep read it, which is what a citation
+   *   capture is and is sealed the same way: the archived bytes are the
+   *   evidence, and a later fetch that differs is a later fetch.
+   *
+   * Null for an adapter with no comment door and for a door that did not
+   * answer, each of which leaves the line uncounted and says why.
+   */
+  comment?(comment: BoardComment): Promise<BoardCapture | null>;
   /**
    * Where in those bytes this venue's key lives, when the venue has a shape
    * worth saying so about (decision D-140 item 2).
@@ -467,6 +529,32 @@ function isoOf(value: unknown): string | null {
   }
 }
 
+/**
+ * The account's creation instant out of a profile door's own bytes (D-142).
+ *
+ * Both community venues publish the same field under the same name on the same
+ * door the profile binding is already read from — `created_at`, ISO, on The
+ * Colony's `GET /api/v1/users/<username>` and on GitHub's `GET /users/<login>`
+ * (read from their published surfaces on 2026-09-17) — so one reading serves
+ * both and there is no second fetch to make.
+ *
+ * Null for bytes that are not JSON, for an object with no such field, and for a
+ * field that is not an instant. Never a guess and never `now`: an account whose
+ * age the platform does not publish is an account the rung cannot be reached
+ * on, which the sweep counts by name rather than filling in.
+ */
+function createdAtIn(bytes: Uint8Array): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+  const profile = objectOf(parsed);
+  if (profile === null) return null;
+  return isoOf(profile["created_at"]);
+}
+
 /** The venue row for a name, or null when policy names no such venue. */
 export function confirmationVenue(venue: string): ConfirmationVenue | null {
   return CONFIRMATION_VENUES.find((row) => row.venue === venue) ?? null;
@@ -541,6 +629,26 @@ export interface MockBoardOptions {
    * no profile, which is what a door that does not know an account answers.
    */
   readonly profiles?: ReadonlyMap<string, string> | null;
+  /**
+   * When each account was created, keyed by handle (decision D-142).
+   *
+   * What the venue's profile door publishes about the account's own beginning,
+   * which is what the account rung's "older than the submission" rule is read
+   * from. A handle with no entry has a profile that publishes no creation date,
+   * which is a line the account rung cannot be reached on — exactly what a
+   * venue that publishes none answers.
+   */
+  readonly accounts?: ReadonlyMap<string, string> | null;
+  /**
+   * The comment captures, keyed by comment id (decision D-142).
+   *
+   * Absent means the fixture board answers a capture synthesised from the
+   * comment itself, which is what a board with a per-comment door does. A map
+   * that is present and does not hold a comment's id is a capture that failed,
+   * which is how a test drives the line that stays uncounted; null is a board
+   * with no comment door at all.
+   */
+  readonly commentCaptures?: ReadonlyMap<string, string> | null;
   /** Sealed fingerprints, keyed `<handle> <fingerprint>`. */
   readonly seals?: ReadonlyMap<string, BoardSealProof> | null;
   /**
@@ -568,10 +676,14 @@ export class MockBoardAdapter implements BoardAdapter {
   readonly #seals: ReadonlyMap<string, BoardSealProof> | null;
   readonly #records: ReadonlyMap<string, BoardRecord> | null;
   readonly #profiles: ReadonlyMap<string, string> | null;
+  readonly #accounts: ReadonlyMap<string, string> | null;
+  readonly #commentCaptures: ReadonlyMap<string, string> | null | undefined;
   /** How many times each thread was read: what a "second run" test asserts on. */
   readonly reads: BoardId[] = [];
   /** Which handles' profiles were fetched, in order: what the cache is asserted on. */
   readonly profileReads: string[] = [];
+  /** Which comments were captured, in order: what the account rung is asserted on. */
+  readonly commentReads: BoardId[] = [];
 
   constructor(options: MockBoardOptions = {}) {
     this.venue = options.venue ?? "1f916";
@@ -582,6 +694,8 @@ export class MockBoardAdapter implements BoardAdapter {
     this.#seals = options.seals ?? new Map();
     this.#records = options.records ?? new Map();
     this.#profiles = options.profiles ?? null;
+    this.#accounts = options.accounts ?? null;
+    this.#commentCaptures = options.commentCaptures;
   }
 
   async threads(): Promise<readonly BoardId[] | null> {
@@ -618,6 +732,44 @@ export class MockBoardAdapter implements BoardAdapter {
     if (text === undefined) return null;
     return {
       url: `https://${this.venue}.test/profile/${encodeURIComponent(handle)}`,
+      bytes: new TextEncoder().encode(text),
+      content_type: "application/json",
+      status: 200,
+      // What the fixture venue publishes about the account's beginning, and
+      // null where it publishes nothing — which is the venue answering that
+      // this account's age is not a fact anybody can check (D-142).
+      created_at: this.#accounts?.get(handle) ?? null,
+    };
+  }
+
+  /**
+   * The fixture board's own representation of one comment (decision D-142).
+   *
+   * Synthesised from the comment by default, which is what a board with a
+   * per-comment door answers: the same fields the fixture served on the thread,
+   * as the JSON of that one comment. A fixture that names its captures answers
+   * only the ones it names, so a test can drive a capture that fails — and a
+   * fixture with no map at all is a board with no comment door.
+   */
+  async comment(comment: BoardComment): Promise<BoardCapture | null> {
+    if (this.#commentCaptures === null) return null;
+    this.commentReads.push(comment.id);
+    const url = `https://${this.venue}.test/comment/${encodeURIComponent(
+      String(comment.id),
+    )}`;
+    const named = this.#commentCaptures?.get(String(comment.id));
+    if (this.#commentCaptures !== undefined && named === undefined) return null;
+    const text =
+      named ??
+      JSON.stringify({
+        id: comment.id,
+        thread: comment.thread,
+        handle: comment.handle,
+        body: comment.body,
+        posted_at: comment.posted_at,
+      });
+    return {
+      url,
       bytes: new TextEncoder().encode(text),
       content_type: "application/json",
       status: 200,
@@ -958,6 +1110,98 @@ export class RegistryBoardAdapter implements BoardAdapter {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The citizen's record, as this venue's profile (decision D-142).
+   *
+   * The venue row publishes no `profile_door`, and it does not need one: the
+   * registry binds keys in its own log and the record door is where it says so.
+   * So the account rung's profile capture here is that record — the same bytes
+   * `record()` reads its binding out of, archived whole under their own hash —
+   * and the creation instant is the citizen's registration: the oldest
+   * `identity.key_bind` the record lists, which is the moment the registry
+   * first said this handle was somebody, and the citizen row's own creation
+   * where the record answers that instead.
+   *
+   * That ordering is the honest one. A key-bind is the oldest thing in a
+   * record, and on this board it is countersigned by the pinned witnesses —
+   * which is why a 1F916 account reads above an account on a board that merely
+   * authenticated a login, and why the entry page says so in words.
+   */
+  async profile(handle: string): Promise<BoardProfile | null> {
+    const url = `${this.#origin}/api/record/${encodeURIComponent(handle)}`;
+    const answer = await publicRead(this.#fetch, url, this.#maxBytes);
+    if (answer === null) return null;
+    return {
+      url,
+      bytes: answer.bytes,
+      content_type: answer.content_type,
+      status: answer.status,
+      created_at: this.#registeredAt(answer.bytes),
+    };
+  }
+
+  /**
+   * The citizen's registration instant out of their record's own bytes.
+   *
+   * The registry times its identity events in epoch milliseconds, exactly as it
+   * times a comment (`instantOf`), and an ISO string is read too for a record
+   * that answers one. Null and never a guess for anything else.
+   */
+  #registeredAt(bytes: Uint8Array): string | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      return null;
+    }
+    const body = objectOf(parsed);
+    if (body === null) return null;
+
+    let oldest: string | null = null;
+    let oldestMs = Number.POSITIVE_INFINITY;
+    const rows = body["events"];
+    if (Array.isArray(rows)) {
+      for (const each of rows) {
+        const event = objectOf(each);
+        if (event === null || event["kind"] !== KEY_BIND) continue;
+        const at =
+          instantOf(event["created_at"]) ?? isoOf(event["created_at"]);
+        if (at === null) continue;
+        const ms = Date.parse(at);
+        if (!Number.isFinite(ms) || ms >= oldestMs) continue;
+        oldestMs = ms;
+        oldest = at;
+      }
+    }
+    if (oldest !== null) return oldest;
+
+    const citizen = objectOf(body["citizen"]);
+    const created = citizen === null ? body["created_at"] : citizen["created_at"];
+    return instantOf(created) ?? isoOf(created);
+  }
+
+  /**
+   * The comment, as the board publishes it (decision D-142).
+   *
+   * The board serves a post and its whole comment tree (`/api/post/<id>`, read
+   * 2026-09-16) and no comment on its own, so the capture is that door's answer
+   * with the comment named in the fragment — the permalink, whose bytes are the
+   * page that carried the line.
+   */
+  async comment(comment: BoardComment): Promise<BoardCapture | null> {
+    const url = `${doorFor(this.#row, this.#row.comments_door, {
+      thread: comment.thread,
+    })}#comment-${encodeURIComponent(String(comment.id))}`;
+    const answer = await publicRead(this.#fetch, url, this.#maxBytes);
+    if (answer === null) return null;
+    return {
+      url,
+      bytes: answer.bytes,
+      content_type: answer.content_type,
+      status: answer.status,
+    };
   }
 
   /**
@@ -1395,6 +1639,40 @@ abstract class CommunityBoardAdapter implements BoardAdapter {
       bytes: answer.bytes,
       content_type: answer.content_type,
       status: answer.status,
+      created_at: createdAtIn(answer.bytes),
+    };
+  }
+
+  /**
+   * The permalink to one comment: the door this venue publishes the comment
+   * through, with the comment named in the fragment (decision D-142).
+   *
+   * The default is the thread door, because neither community venue serves one
+   * comment on its own — The Colony's public API answers a post's whole context
+   * and nothing narrower (probed 2026-09-17). A venue that does serve one says
+   * so by overriding this, and GitHub does.
+   *
+   * The fragment is the comment's own id and is never sent to the server, which
+   * is what a fragment is: the bytes captured are the door's, and the URL
+   * sealed beside them names which comment inside them the line was read from.
+   */
+  protected commentDoor(comment: BoardComment): string {
+    const thread = doorFor(this.row, this.row.comments_door, {
+      thread: comment.thread,
+    });
+    return `${thread}#comment-${encodeURIComponent(String(comment.id))}`;
+  }
+
+  /** The comment as this venue publishes it, bounded and raw (D-142). */
+  async comment(comment: BoardComment): Promise<BoardCapture | null> {
+    const url = this.commentDoor(comment);
+    const answer = await this.read(url);
+    if (answer === null) return null;
+    return {
+      url,
+      bytes: answer.bytes,
+      content_type: answer.content_type,
+      status: answer.status,
     };
   }
 
@@ -1500,6 +1778,27 @@ export class ColonyBoardAdapter extends CommunityBoardAdapter {
 export class GitHubBoardAdapter extends CommunityBoardAdapter {
   /** An issue numbers its comments, so the cursor is the newest id taken. */
   readonly cursor: BoardCursorKind = "id";
+
+  /**
+   * The one comment, on its own door (decision D-142).
+   *
+   * GitHub numbers its issue comments and serves each one:
+   * `GET /repos/<owner>/<repo>/issues/comments/<id>` answers the canonical JSON
+   * of that comment alone. So the capture here is the comment and not the page
+   * it sits on — the same bytes whatever anybody writes on the issue afterwards
+   * — which is what the account rung should seal wherever a platform offers it.
+   * The repository is the venue row's own, encoded per segment exactly as
+   * `doorFor` encodes it.
+   */
+  protected override commentDoor(comment: BoardComment): string {
+    const repository = (this.row.repository ?? "")
+      .split("/")
+      .map((part) => encodeURIComponent(part))
+      .join("/");
+    return `${this.row.origin}/repos/${repository}/issues/comments/${encodeURIComponent(
+      String(comment.id),
+    )}`;
+  }
 
   /**
    * The key this account published about itself, and nothing else on the page

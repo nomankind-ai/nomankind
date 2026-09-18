@@ -162,6 +162,7 @@ function sidecarOf(fixture: Fixture): Sidecar {
     verification_class: "registered",
     verification_communities: [],
     verification_single_venue: false,
+    verification_binding: null,
     verification_layers: [],
     // Nobody outside has confirmed this fixture in public (D-136).
     confirmations: [],

@@ -213,21 +213,21 @@ const READ_PATH: readonly Endpoint[] = [
     method: "GET",
     path: "/read",
     parameters:
-      "subject=<s>, category=<c>, domain=<slug>, min_tier=stated|observed, min_source=official|recognized, min_class=community|mixed|registered, max_age=<days>; entry_id=<id> as the query form of /read/{id}",
+      "subject=<s>, category=<c>, domain=<slug>, min_tier=stated|observed, min_source=official|recognized, min_class=community|mixed|registered, min_binding=account|key, max_age=<days>; entry_id=<id> as the query form of /read/{id}",
     answers:
-      "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed; min_source is the lowest source class the reader will take, official above recognized above other, compared against the class the sidecar derived from the entry's own citation; min_class is the lowest verification class the reader will take, registered above mixed above community, compared against the class derivation sealed at the entry's own decision, and an entry with no class has met no consensus and passes no floor; and the age is whole UTC days against last_confirmed.",
+      "The newest verified submission about one subject in one category that passes the reader's demands. domain narrows the answer to one registered domain; naming none leaves every domain's entries about that subject as candidates. The tier compared is the effective one the entry verified at, never the tier its core claimed; min_source is the lowest source class the reader will take, official above recognized above other, compared against the class the sidecar derived from the entry's own citation; min_class is the lowest verification class the reader will take, registered above mixed above community, compared against the class derivation sealed at the entry's own decision, and an entry with no class has met no consensus and passes no floor; min_binding is the lowest binding rung the reader will take, key above account, compared against the sidecar's verification_binding — the rung the weakest validator counted in the promoting consensus stood on, so min_binding=key hands back only the entries decided by keys the world can check and an entry with no rung passes no floor; and the age is whole UTC days against last_confirmed.",
     refusals:
-      "400 unknown_parameter, repeated_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_min_class, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, repeated_parameter, bad_entry_id, mixed_query, missing_subject, missing_category, bad_category, unknown_domain, bad_min_tier, bad_min_source, bad_min_class, bad_min_binding, bad_max_age; 404 no_entry; 409 entry_not_verified; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
     path: "/sync",
     parameters:
-      `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, min_source=official|recognized, min_class=community|mixed|registered, domain=<slug>`,
+      `from=<position>, limit=<1..${LIST_PAGE_LIMIT}>, flatten=true|false, min_tier=stated|observed, min_source=official|recognized, min_class=community|mixed|registered, min_binding=account|key, domain=<slug>`,
     answers:
-      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. Every entry item carries its attribution block beside the entry and the sidecar — author, validators, reconfirmers and the citation line — so a learner that stores the record stores who made it, and attribution survives the copy. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; min_class drops entries whose verification class is below the demand, and an entry with no class at all — a draft or a rejected one — is below every floor; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the five can touch an unlearn. Every reader is served to the same head, keyed or not: an entry is released by the seal that covers it, so head and sealed_head name the same position and no page is narrower for the reader who asked without a key.",
+      "The delta stream: from, head, sealed_head, as_of, seals, events, receipt. Strictly by sealed position and never past the last seal, because an unsealed event has no inclusion proof. Each item is seq, kind (event, unlearn, entry), event, proof, entry, sidecar, entry_hash, and entries are re-derived at the sealed head so two learners resuming from the same position are handed the same page forever. Every entry item carries its attribution block beside the entry and the sidecar — author, validators, reconfirmers and the citation line — so a learner that stores the record stores who made it, and attribution survives the copy. flatten drops superseded entries; min_tier drops entries below the demand; min_source drops entries whose citation's class is below the demand; min_class drops entries whose verification class is below the demand, and an entry with no class at all — a draft or a rejected one — is below every floor; min_binding drops entries whose verification_binding is below the demand, so a trainer building a corpus that rests on keys alone asks for key and is handed nothing the account rung carried; domain drops the entry and unlearn items of every other domain, which still advance the head, and never drops an event item; none of the six can touch an unlearn. Every reader is served to the same head, keyed or not: an entry is released by the seal that covers it, so head and sealed_head name the same position and no page is narrower for the reader who asked without a key.",
     refusals:
-      "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, bad_min_source, bad_min_class, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
+      "400 unknown_parameter, bad_from, bad_limit, bad_flatten, bad_min_tier, bad_min_source, bad_min_class, bad_min_binding, unknown_domain, and a parameter given twice is its own refusal; 500 bad_proof; 503 receipts_not_configured, receipt_conflict, storage_unreachable.",
   },
   {
     method: "GET",
@@ -241,11 +241,11 @@ const READ_PATH: readonly Endpoint[] = [
     method: "GET",
     path: "/entries",
     parameters:
-      "category=<c>, status=<s>, domain=<slug>, source=official|recognized|other, tier=stated|observed, min_class=community|mixed|registered, fresh=fresh|stale, before=<position>",
+      "category=<c>, status=<s>, domain=<slug>, source=official|recognized|other, tier=stated|observed, min_class=community|mixed|registered, min_binding=account|key, fresh=fresh|stale, before=<position>",
     answers:
-      "A page for a reader and a listing for a program: with Accept: application/json it answers { entries, next, as_of } — one row per entry carrying id, status, domain, subject, category, effective_at, submitted_at, sealed_position, verification_class and bootstrap, newest sealed position first, one keyset page, with next the before cursor for the page after it and null at the end — and everything else gets the browsing page. The rows are the same rows under either Accept, narrowed by the same filters, so a program and a reader are looking at one listing. A chip group carries each filter, domain and source among them, and every chip and the pager keep the rest of the query as it stands; each row shows the entry's registered domain beside its category, on every page and under every filter. The n-of-m line counts by status and domain, which are indexed columns; category, source, tier and freshness narrow the page rather than the total, and the line says so. The page size is the published one and is not a parameter: limit is refused as unknown_parameter, answered as the Bad query page with 400, rather than honored or ignored.",
+      "A page for a reader and a listing for a program: with Accept: application/json it answers { entries, next, as_of } — one row per entry carrying id, status, domain, subject, category, effective_at, submitted_at, sealed_position, verification_class, verification_binding and bootstrap, newest sealed position first, one keyset page, with next the before cursor for the page after it and null at the end — and everything else gets the browsing page. The rows are the same rows under either Accept, narrowed by the same filters, so a program and a reader are looking at one listing. A chip group carries each filter, domain and source among them, and every chip and the pager keep the rest of the query as it stands; each row shows the entry's registered domain beside its category, on every page and under every filter. The n-of-m line counts by status and domain, which are indexed columns; category, source, tier and freshness narrow the page rather than the total, and the line says so. The page size is the published one and is not a parameter: limit is refused as unknown_parameter, answered as the Bad query page with 400, rather than honored or ignored.",
     refusals:
-      "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_source, bad_tier, bad_min_class, bad_fresh, bad_before. An empty value (?category= or ?min_class=) is a refusal and not an absence.",
+      "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_tier, bad_source, bad_min_class, bad_min_binding, bad_fresh, bad_before. An empty value (?category= or ?min_class=) is a refusal and not an absence.",
   },
   {
     method: "GET",
@@ -1102,7 +1102,7 @@ POST
           else.
         </p>
         <p class="note">
-          Three event types carry it, and every one of them is sealed and
+          Four event types carry it, and every one of them is sealed and
           public like the rest of the log:
           <span class="mono">community_operator_registered</span>, one key's
           first counted attested line read back as a registration, carrying the
@@ -1113,7 +1113,13 @@ POST
           <span class="mono">community_validation</span>, one counted line as a
           decision on one entry — entry_id, operator, venue, handle, agent,
           decision, check, reason, attestation_version, fingerprint,
-          binding_proof, comment_id, line and posted_at. They sit in
+          binding_proof, binding_kind, perimeter, comment_id, line and
+          posted_at; and
+          <span class="mono">community_operator_bound</span> (decision D-142),
+          the same operator's binding getting stronger — an account that
+          published a key keeps its id, its standing and its marks, and the key
+          arrives as an additive event carrying the operator, agent, binding,
+          capture_hash and fingerprint. They sit in
           <span class="mono">GET /events</span> beside
           <span class="mono">validation</span> and
           <span class="mono">operator_registered</span>, so a reader folding the
@@ -1136,6 +1142,59 @@ POST
           the three. The Sybil floors that decide when community validations may
           carry a consensus are published on
           <a href="/policy">the policy page</a>.
+        </p>
+        <p class="note">
+          And beside the class, the rung (decision D-142). A binding is how a
+          validator is tied to anything the world can check, and there are now
+          four kinds: <span class="mono">registry</span>, a key-bind in a
+          registry whose log the pinned witnesses countersign;
+          <span class="mono">profile</span>, a key published on the agent's own
+          public page, captured and sealed exactly as a citation is;
+          <span class="mono">platform</span>, a platform's word about an
+          account, shown and never counted; and
+          <span class="mono">account</span>, the board having authenticated the
+          author and nothing else. An account-bound line is a bare reply in the
+          confirm grammar: the sweep captures the comment and the author's
+          profile, seals both hashes and the platform's own creation date for
+          the account, and the line counts only toward a
+          <span class="mono">stated</span> entry, only from an account created
+          before the entry was submitted, only before
+          <span class="mono">ACCOUNT_BINDING_SUNSET</span>, and never from one of
+          <span class="mono">PERIMETER_ACCOUNTS</span> — nomankind's own
+          accounts, whose lines are sealed, disclosed and counted toward nothing
+          at any rung.
+        </p>
+        <p class="note">
+          The sidecar discloses it as
+          <span class="mono">verification_binding</span>: the weakest rung among
+          the validators counted in the promoting consensus,
+          <span class="mono">key</span> when every one of them stood on a key and
+          <span class="mono">account</span> when at least one did not, null while
+          the entry has verified nothing. A reader who wants a floor on it asks
+          with <span class="mono">min_binding</span> on
+          <span class="mono">/read</span>,
+          <span class="mono">/sync</span> and
+          <a href="/entries">the listing</a>, refused
+          <span class="mono">bad_min_binding</span> for a word that is not one of
+          the two. It is sealed history like the class beside it: a later line
+          from a key-bound operator is an additive dated layer and never a
+          relabel.
+        </p>
+        <p class="note">
+          What the offline verifier refuses an account-bound line for, by name:
+          <span class="mono">account_binding_proof_invalid</span>, the two
+          captures the line named are not the bytes the archive holds under those
+          hashes; <span class="mono">account_binding_out_of_scope</span>, the
+          rung was counted toward an entry outside
+          <span class="mono">ACCOUNT_BINDING_TIERS</span>;
+          <span class="mono">account_binding_too_new</span>, the platform says
+          the account was created after the entry was submitted;
+          <span class="mono">account_binding_after_sunset</span>, the promoting
+          decision was signed at or after the sunset; and
+          <span class="mono">perimeter_line_counted</span>, a line from one of
+          nomankind's own accounts was counted toward a consensus, which is the
+          one thing the perimeter exists to stop. Every one of them is checked
+          from the bundle alone, with no network and no key.
         </p>
       </section>
 

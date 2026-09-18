@@ -47,6 +47,16 @@
  * left off, and the line says so in words. A failed check on a legacy record is
  * a FAIL line and exit 1 like any other.
  *
+ * One half of that derivation is the exception D-142 writes down. The consensus
+ * rules have moved since the oldest rows were decided, and the record's answer
+ * to a row today's kernel derives differently is to rewrite it — except that a
+ * rewrite runs past the published v0.7 schema first, so a v0.6 row is refused
+ * there and keeps the verdict it was given, forever, on purpose. A legacy row
+ * whose ONLY differences are the fields the consensus fold decides
+ * (`CONSENSUS_DECIDED`) is therefore reported as legacy with those fields named,
+ * rather than as a clone somebody edited; a legacy row differing anywhere else
+ * is a FAIL exactly as before.
+ *
  * After the entries come the three families the export recomputes rather than
  * reads: every `attestations/<id>.json` re-derived from the clone's own events
  * and then the whole set put through `verifyAttestations` — the ids, the score
@@ -75,10 +85,23 @@ import { join, resolve } from "node:path";
 
 import { verifyAnchor, type Anchor } from "../anchor.js";
 import { coreVersion, domainOf, extractCore, type Core } from "../core.js";
-import { deriveEntry, type DerivedEntry } from "../derive.js";
+import {
+  deriveEntry,
+  registeredOperatorsAt,
+  trustedOperatorsAt,
+  type DerivedEntry,
+} from "../derive.js";
+import { evidenceGate } from "../evidence.js";
 import { base64Encode } from "../encoding.js";
-import { eventHash, type Event } from "../events.js";
+import { eventHash, type ApproverRecord, type Event } from "../events.js";
 import { canonicalize, entryHash } from "../hash.js";
+import {
+  APPROVALS_TO_VERIFY_LARGE_POOL,
+  APPROVALS_TO_VERIFY_SMALL_POOL,
+  REJECTIONS_TO_REJECT,
+  TRUSTED_POOL_SWITCH,
+  VERIFICATION_MIN_OUTSIDE_OPERATORS,
+} from "../policy.js";
 import type { LedgerRow } from "../ledger.js";
 import {
   mirrorAttestations,
@@ -677,6 +700,18 @@ function isLegacy(entry: unknown): boolean {
   }
 }
 
+/**
+ * What a legacy line adds when the row's consensus fields derive differently
+ * today (decision D-111 and every rule that has moved since).
+ *
+ * Named in the line and not hidden: the record does not re-decide a v0.6 entry
+ * — the re-derivation refuses it at the published schema — so these fields are
+ * the verdict it was given, frozen, and this says which ones they are.
+ */
+function frozenNote(fields: readonly string[]): string {
+  return `(decided under the rules in force then and never rewritten: ${fields.join(", ")})`;
+}
+
 /** What the `legacy` line says, so the wording lives in one place. */
 const LEGACY_NOTE =
   "(v0.6 record, not decided on again; core, signature, derivation, chain, " +
@@ -732,6 +767,212 @@ function firstDifference(
     return { field: `${prefix}/${key}`, reason: "unexpected" };
   }
   return null;
+}
+
+/** Every named difference, not only the first: `firstDifference`, exhaustive. */
+function allDifferences(
+  expected: Record<string, unknown>,
+  actual: unknown,
+  prefix: string,
+): readonly Difference[] {
+  if (!isRecord(actual)) return [{ field: prefix, reason: "malformed" }];
+  const found: Difference[] = [];
+  for (const key of Object.keys(expected)) {
+    if (expected[key] === undefined) {
+      if (!Object.prototype.hasOwnProperty.call(actual, key)) continue;
+      found.push({ field: `${prefix}/${key}`, reason: "unexpected" });
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(actual, key)) {
+      found.push({ field: `${prefix}/${key}`, reason: "missing" });
+      continue;
+    }
+    if (safeCanonical(expected[key]) !== safeCanonical(actual[key])) {
+      found.push({ field: `${prefix}/${key}`, reason: "mismatch" });
+    }
+  }
+  for (const key of Object.keys(actual)) {
+    if (Object.prototype.hasOwnProperty.call(expected, key)) continue;
+    found.push({ field: `${prefix}/${key}`, reason: "unexpected" });
+  }
+  return found;
+}
+
+/**
+ * The derived fields the consensus fold decides, and a legacy row therefore
+ * cannot restate.
+ *
+ * Not an allowlist of rows and not a list of fields the verifier stops caring
+ * about: it is the answer to one question — which of an entry's derived fields
+ * are a function of the CONSENSUS RULES rather than of the log alone. The rules
+ * have moved since 2026-09-10 (D-111 narrowed the verification precondition to
+ * the operators that could actually sign, and every later decision has moved
+ * something else), and the record's answer to a row deriving differently is to
+ * rewrite it under the new rules — which is the whole point of
+ * `DERIVATION_VERSION` and the sweep's re-derivation step.
+ *
+ * A v0.6 row cannot be rewritten. The rewrite runs the derived entry past the
+ * published schema first (src/worker/sweep.ts, `passesSchemaForRewrite`), and a
+ * v0.6 core has no `domain` and no `version` and never will, so every legacy
+ * row is refused there and stays at the verdict it was given. That refusal is
+ * deliberate: the record does not re-decide entries sealed before the domain
+ * key existed, which is the same sentence `verifyOffline` already acts on when
+ * it leaves the v0.7 rules off a legacy record.
+ *
+ * So a legacy row differing HERE is the record keeping its word, and calling it
+ * a FAIL says the clone was edited, which is false. A legacy row differing
+ * anywhere else — its claim, its citation, its freshness, its seal — is still a
+ * FAIL, because none of those is a consensus rule and an edit to one is an edit.
+ * The `legacy` line names the frozen fields rather than hiding them.
+ *
+ * `status` and `verified_at` are deliberately NOT here, though the fold decides
+ * them too. They are the verdict itself, and a verdict nobody rechecks is a
+ * verdict anybody can type in (the review of #105): a status edited from draft
+ * to verified on a v0.6 row would have read as frozen history. So they are
+ * checked instead, against `legacyVerdict` — the rule the record decided them
+ * by — and the rest of this list is what remains: fields the record invented
+ * after these rows were sealed, which no rule of that time can restate.
+ */
+export const CONSENSUS_DECIDED: readonly string[] = Object.freeze([
+  "/sidecar/effective_tier",
+  "/sidecar/test_verdict",
+  "/sidecar/trusted_count_at_decision",
+  "/sidecar/read_share_slots",
+  "/sidecar/verification_class",
+  "/sidecar/verification_communities",
+  "/sidecar/verification_single_venue",
+  "/sidecar/verification_binding",
+  "/sidecar/verification_layers",
+]);
+
+/**
+ * The frozen fields when this row's differences are all the fold's to decide
+ * and the row is a legacy one, else null (decision D-142).
+ *
+ * The whole of the rule, in one predicate, so the thing a reader argues with is
+ * a function and not a branch: null means "these differences are differences",
+ * and a list means "this row was decided under rules that have since moved and
+ * the record does not rewrite it".
+ */
+export function frozenFieldsOf(
+  differences: readonly Difference[],
+  legacy: boolean,
+): readonly string[] | null {
+  if (!legacy || differences.length === 0) return null;
+  if (!differences.every((one) => CONSENSUS_DECIDED.includes(one.field))) {
+    return null;
+  }
+  return differences.map((one) => one.field);
+}
+
+/** What the rules of the time made of a legacy entry: the verdict, dated. */
+interface LegacyVerdict {
+  readonly status: "draft" | "rejected" | "verified";
+  readonly verifiedAt: string | null;
+}
+
+/**
+ * A v0.6 entry's verdict under the rules the record decided it by.
+ *
+ * The record does not re-decide a legacy row — the re-derivation refuses it at
+ * the published v0.7 schema — so today's fold is the wrong question to ask of
+ * its status. The right one is the fold as it stood, and this is that fold, in
+ * one function, with what has moved since named:
+ *
+ * - The verification precondition is the pre-D-111 one: a non-empty trusted
+ *   pool, and three registered non-maintainer operators other than the
+ *   submitter. The QA of 2026-09-13 narrowed "outside the submitter" to the
+ *   operators that could actually sign — the domain's excluded parties, the
+ *   subject's authority, the original signers of a challenged entry — and that
+ *   narrowing is exactly what a v0.6 correction cannot survive: two of its four
+ *   operators had signed the entry it corrects.
+ * - The exclusions are not applied to the decisions either, for the same
+ *   reason: `mayValidateEntry` is the predicate D-111 built, and a row decided
+ *   before it was decided without it.
+ * - The counts are the paper's and have not moved: two approvals verify below a
+ *   pool of ten and three above it with the drawn validator among them, two
+ *   rejections reject, one decision per operator.
+ * - The evidence gate is asked exactly as it is today, because it is not what
+ *   moved: a stated entry has no test to judge, and every v0.6 record is one.
+ *
+ * This is a statement about the past and not a second set of rules: nothing
+ * derives from it, no door reads it, and it is asked of v0.6 rows alone. What
+ * it buys is that an edited status on such a row still fails, which a freeze
+ * could not give.
+ */
+function legacyVerdict(
+  events: readonly Event[],
+  entryId: string,
+  core: Record<string, unknown>,
+): LegacyVerdict {
+  const submitter = core["author_operator"];
+  const approving = new Set<string>();
+  const rejecting = new Set<string>();
+  const records: ApproverRecord[] = [];
+  const seen = new Set<string>();
+  let hasRandom = false;
+
+  const ordered = [...events].sort((left, right) => left.seq - right.seq);
+  for (const event of ordered) {
+    if (event.type !== "validation") continue;
+    if (event.entry_id !== entryId) continue;
+    const payload = event.payload as unknown;
+    if (!isRecord(payload)) continue;
+    const record = payload["record"];
+    if (!isRecord(record)) continue;
+    const operator = record["operator"];
+    const decision = record["decision"];
+    if (typeof operator !== "string") continue;
+    if (decision !== "approve" && decision !== "reject") continue;
+
+    // One decision per operator, and the first is the one that counts.
+    if (!seen.has(operator)) {
+      seen.add(operator);
+      records.push(record as unknown as ApproverRecord);
+    }
+    if (decision === "approve") {
+      approving.add(operator);
+      if (record["assigned_random"] === true) hasRandom = true;
+    } else {
+      rejecting.add(operator);
+    }
+
+    const trusted = trustedOperatorsAt(events, event.seq).size;
+    const registered = registeredOperatorsAt(events, event.seq);
+    // The precondition as it stood: every registered non-maintainer that is not
+    // the submitter, counted, with no question about whether it could sign.
+    let outside = 0;
+    for (const id of registered.operators) {
+      if (registered.maintainers.has(id)) continue;
+      if (submitter !== null && id === submitter) continue;
+      outside += 1;
+    }
+    if (trusted === 0 || outside < VERIFICATION_MIN_OUTSIDE_OPERATORS) continue;
+
+    const largePool = trusted >= TRUSTED_POOL_SWITCH;
+    const needed = largePool
+      ? APPROVALS_TO_VERIFY_LARGE_POOL
+      : APPROVALS_TO_VERIFY_SMALL_POOL;
+    if (approving.size >= needed && (!largePool || hasRandom)) {
+      let verifiable = false;
+      try {
+        verifiable = evidenceGate(core as never, records).verifiable;
+      } catch {
+        verifiable = false;
+      }
+      if (verifiable) {
+        const signedAt = record["signed_at"];
+        return {
+          status: "verified",
+          verifiedAt: typeof signedAt === "string" ? signedAt : event.at,
+        };
+      }
+    }
+    if (rejecting.size >= REJECTIONS_TO_REJECT) {
+      return { status: "rejected", verifiedAt: null };
+    }
+  }
+  return { status: "draft", verifiedAt: null };
 }
 
 /** The `entry_submitted` event one id was sealed in, or null. */
@@ -822,9 +1063,15 @@ async function checkRecord(
   file: Record<string, unknown>,
   entrySeals: ReadonlyMap<string, EntrySeal>,
   row: Record<string, unknown> | undefined,
-): Promise<void> {
+): Promise<readonly string[] | null> {
   const entry = file["entry"] as Record<string, unknown>;
   const asOf = mirror.manifest["as_of"];
+  /**
+   * The consensus-decided fields a legacy row derives differently, when those
+   * are the only differences there are (see `CONSENSUS_DECIDED`). Null on every
+   * other record, and null on a legacy one that derives clean.
+   */
+  let frozen: readonly string[] | null = null;
 
   // derived: the entry and the sidecar, recomputed from the events.
   let derived: DerivedEntry | null = null;
@@ -848,18 +1095,65 @@ async function checkRecord(
     const actualSidecar = isV1(mirror)
       ? v1Sidecar(file["sidecar"])
       : file["sidecar"];
-    const difference =
-      firstDifference(
+    let differences = [
+      ...allDifferences(
         derived.entry as unknown as Record<string, unknown>,
         entry,
         "/entry",
-      ) ??
-      firstDifference(
+      ),
+      ...allDifferences(
         expectedSidecar as Record<string, unknown>,
         actualSidecar,
         "/sidecar",
+      ),
+    ];
+
+    // A legacy row whose verdict today's fold no longer reaches is asked again
+    // under the rules it was decided by (`legacyVerdict`), because the record
+    // does not re-decide such a row and today's fold is therefore the wrong
+    // question to put to it. Asked only where the two disagree: where today's
+    // fold reproduces the stored verdict there is nothing to ask, and where it
+    // does not, the honest historical answer either reproduces it — and the
+    // difference was the rules moving — or it does not, and the difference is a
+    // difference. An edited status fails either way, which is what a freeze
+    // could not give (the review of #105).
+    //
+    // The lifecycle words above the consensus are left alone: `overturned` and
+    // `superseded` are what a later dispute or version did to an entry, folded
+    // from events by rules that have not moved, so a row carrying one is
+    // compared exactly as it always was.
+    if (isLegacy(entry) && differences.length > 0) {
+      const verdictFields = differences.filter(
+        (one) =>
+          one.field === "/entry/status" || one.field === "/entry/verified_at",
       );
-    if (difference !== null) {
+      if (verdictFields.length > 0) {
+        const submitted = submissionOf(mirror.full, id);
+        const sealed = submitted === null ? null : sealedCore(submitted);
+        const historical =
+          sealed === null ? null : legacyVerdict(mirror.full, id, sealed);
+        differences = differences.filter((one) => {
+          if (historical === null) return true;
+          if (one.field === "/entry/status") {
+            return entry["status"] !== historical.status;
+          }
+          if (one.field === "/entry/verified_at") {
+            return (entry["verified_at"] ?? null) !== historical.verifiedAt;
+          }
+          return true;
+        });
+      }
+    }
+    // A legacy row whose only differences are the ones the consensus fold
+    // decides is a row the record has promised never to rewrite, compared
+    // against rules it has promised never to apply to it (see
+    // `CONSENSUS_DECIDED`). It is reported as legacy, with the fields named, and
+    // not as a clone somebody edited.
+    frozen = frozenFieldsOf(differences, isLegacy(entry));
+    if (frozen !== null) {
+      // Reported on the legacy line below, named field by field.
+    } else if (differences.length > 0) {
+      const difference = differences[0]!;
       fail(io, tally, id, "derived", difference.field, difference.reason);
     }
   }
@@ -923,6 +1217,7 @@ async function checkRecord(
   if (!(await verifyEntrySignature(entry))) {
     fail(io, tally, id, "signature", "/entry/signature", "bad_signature");
   }
+  return frozen;
 }
 
 /** Every entry the directory holds, or the one `--entry` named. */
@@ -970,13 +1265,27 @@ async function checkEntries(
     const entry = file["entry"];
 
     const before = tally.failed;
-    await checkRecord(io, tally, mirror, id, file, entrySeals, rows.get(id));
+    const frozen = await checkRecord(
+      io,
+      tally,
+      mirror,
+      id,
+      file,
+      entrySeals,
+      rows.get(id),
+    );
 
     if (isLegacy(entry)) {
       // Never `ok`, and never waved through either: the checks above have
-      // already run, and any FAIL line they wrote stands beside this one.
+      // already run, and any FAIL line they wrote stands beside this one. The
+      // fields today's fold decides differently are named rather than dropped,
+      // so a reader sees exactly what was not compared and why.
       tally.legacy += 1;
-      io.stdout(`legacy ${id} ${LEGACY_NOTE}`);
+      io.stdout(
+        frozen === null
+          ? `legacy ${id} ${LEGACY_NOTE}`
+          : `legacy ${id} ${LEGACY_NOTE} ${frozenNote(frozen)}`,
+      );
       continue;
     }
 

@@ -7,6 +7,12 @@
  * that set it, and they move only by a later decision.
  */
 
+// The one import this module has, and a type-only one: `EvidenceTier` is the
+// schema's own pair of words, declared in src/evidence.ts, and D-142 names a
+// list of them. Erased at emit, so policy stays what it has always been — the
+// root of the module graph, importing no code from anywhere.
+import type { EvidenceTier } from "./evidence.js";
+
 /**
  * Lifecycle of an entry. Once the trusted pool holds ten operators, three
  * approvals verify and one validator is drawn at random; below ten, two
@@ -54,6 +60,11 @@ export type OperatorKind = (typeof OPERATOR_KINDS)[number];
  * community, captured and sealed exactly as a citation is. Counts.
  * `platform`: a platform's statement about an account. Shown, never counted —
  * it is somebody else's assertion, not a proof anyone can recheck offline.
+ * `account`: the board authenticated the author, and the sweep captured the
+ * comment and the author's profile and sealed their hashes exactly as a profile
+ * capture is sealed (decision D-142). The least reliable rung, counted only
+ * within the scope D-142 draws around it — see `ACCOUNT_BINDING_TIERS`,
+ * `ACCOUNT_BINDING_SUNSET` and `PERIMETER_ACCOUNTS` below.
  *
  * A bare key never counts, whatever it signs: the point of a binding is that
  * the world can see whose key it is.
@@ -62,11 +73,27 @@ export const BINDING_KINDS = Object.freeze([
   "registry",
   "profile",
   "platform",
+  "account",
 ] as const);
 
 export type BindingKind = (typeof BINDING_KINDS)[number];
 
-/** The binding kinds a counted validation may rest on. */
+/**
+ * The binding kinds a counted validation may rest on unconditionally.
+ *
+ * `account` is deliberately not here, and its absence is not a refusal. The two
+ * kinds below count wherever they appear: a reader holding the bundle rechecks
+ * a key against a witnessed log or against a captured profile, and nothing
+ * about the entry changes the answer. An account-bound line counts only inside
+ * D-142's scope — a `stated` entry, an account older than the submission, under
+ * the per-community cap, outside `PERIMETER_ACCOUNTS`, before
+ * `ACCOUNT_BINDING_SUNSET` — which is a question about the line and the entry
+ * together and cannot be answered by a list of kinds.
+ *
+ * This list is also what `countingCommunities()` reads to decide which venues
+ * count at all, and that reading is unchanged by D-142: a venue whose own
+ * binding is an account binding is not a venue where keys are published.
+ */
 export const COUNTING_BINDING_KINDS: readonly BindingKind[] = Object.freeze([
   "registry",
   "profile",
@@ -130,6 +157,98 @@ export function isSingleCountingCommunity(
 export function countingCommunityCount(): number {
   return countingCommunities().length;
 }
+
+// ---------------------------------------------------------------------------
+// Genesis by path 2, and the account rung (decision D-142)
+// ---------------------------------------------------------------------------
+
+/**
+ * When the account rung stops counting toward a consensus.
+ *
+ * The least reliable rung there is: a board authenticated the author, the sweep
+ * captured the comment and the author's profile, and nothing else. That is
+ * enough to get a record started and it is not enough forever, so the rung
+ * carries its own end date rather than a promise to revisit it. Read at the
+ * promoting decision's own `signed_at`, like every other rule in the fold:
+ * before this instant an account-bound line may form the consensus, at or after
+ * it the line is still sealed and shown and counts toward nothing.
+ *
+ * Entries verified before it keep their sealed class words forever — a record
+ * that relabelled what it already said would be a record editing its own past —
+ * and a later check by a key-bound or registered operator is an additive dated
+ * layer (`verification_layers`), exactly as D-138 item 11 already has it.
+ *
+ * Not a whitepaper date. The maintainer's published choice under D-142, and it
+ * moves only by a later decision.
+ */
+export const ACCOUNT_BINDING_SUNSET = "2032-01-01T00:00:00Z";
+
+/**
+ * The evidence tiers an account-bound line may count toward (D-142 item 3).
+ *
+ * `stated` only. A stated entry is a claim somebody published and a reader can
+ * go and look at — a quotation seed is one — so a second pair of eyes on the
+ * same public page is worth what it is worth whoever owns them. An `observed`
+ * entry rests on a measurement somebody ran, and an account that has published
+ * no key has shown nothing about who ran it; counting one there would let the
+ * cheapest rung decide the claims that cost the most to check.
+ */
+export const ACCOUNT_BINDING_TIERS: readonly EvidenceTier[] = Object.freeze([
+  "stated",
+]);
+
+/**
+ * The perimeter word the maintainer disclosed at the genesis naming (D-128).
+ *
+ * D-128 put the word in the naming event and nowhere else, because a perimeter
+ * is a disclosure about a naming that happened and not a rule anybody applies.
+ * D-142 needs it in policy too, for the one thing the log cannot say: which
+ * accounts on a community board are nomankind's own. Those accounts register
+ * implicitly, by a line, with no naming event to carry a perimeter — so the
+ * word is published here beside the list, and the two say the same thing the
+ * naming events say about the domain operators.
+ */
+export const PERIMETER_WORD = "nomankind";
+
+/**
+ * Nomankind's own accounts on the communities, published as the perimeter.
+ *
+ * The community operator ids the maintainer controls, in the form both kinds of
+ * operator share (`communityOperatorId` in src/registry.ts, `<venue>:<handle>`,
+ * the venue tokens being `CONFIRMATION_VENUES`' own). A line from one of these
+ * is sealed and shown like any other, disclosed with `PERIMETER_WORD` beside
+ * it, and counted toward no consensus at any rung — not even where the account
+ * has published a key — and not counted in the "three eligible operators
+ * outside the submitter" precondition either.
+ *
+ * Published rather than inferred, for the reason the witness pin is: a record
+ * that asked itself at run time which accounts were its own could answer
+ * differently tomorrow. This is the maintainer marking its own perimeter in
+ * advance, where a reader can check it against the boards.
+ *
+ * Not a whitepaper list. The maintainer's published choice under D-142, and it
+ * moves only by a later decision.
+ */
+export const PERIMETER_ACCOUNTS: readonly string[] = Object.freeze([
+  "1f916:nomankind",
+  "colony:nomankind",
+  "github:nomankind-ai",
+  "github:rakeshm90",
+]);
+
+/**
+ * How strong the binding behind a consensus was, weakest first (D-142).
+ *
+ * Two rungs and not three: a domain operator's key and a community operator's
+ * `registry` or `profile` binding are one thing to a reader — a key publicly
+ * bound to something the world can check — and an account the board merely
+ * authenticated is the other. The order is the order of the `min_binding`
+ * filter on the read doors, exactly as `VERIFICATION_CLASSES` is the order of
+ * `min_class`: `min_binding=key` admits key and refuses account.
+ */
+export const BINDING_RUNGS = Object.freeze(["account", "key"] as const);
+
+export type BindingRung = (typeof BINDING_RUNGS)[number];
 
 /**
  * What an entry discloses about who met its consensus, weakest first.
@@ -2579,6 +2698,14 @@ export const POLICY = Object.freeze({
   COUNTING_BINDING_KINDS,
   COMMUNITY_MIN_ACCOUNTS,
   COMMUNITY_MIN_COMMUNITIES,
+  // Genesis by path 2, and the account rung (D-142): when the rung ends, the
+  // tiers it may count toward, the maintainer's own accounts and the word they
+  // are disclosed under, and the two rungs the read filter orders.
+  ACCOUNT_BINDING_SUNSET,
+  ACCOUNT_BINDING_TIERS,
+  PERIMETER_WORD,
+  PERIMETER_ACCOUNTS,
+  BINDING_RUNGS,
   VERIFICATION_CLASSES,
   CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
   ASSIGNMENT_WINDOW_HOURS,

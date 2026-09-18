@@ -118,6 +118,7 @@ const row: EntryRow = {
   tier: "stated",
   // Who met this entry's consensus (D-138): the listing prints the word.
   verification_class: "registered",
+  verification_binding: null,
   last_confirmed: "2026-09-08",
   expires_at: "2026-10-08",
   stale: true,
@@ -158,10 +159,12 @@ const sidecar: Sidecar = {
   verification_class: "registered",
   verification_communities: [],
   verification_single_venue: false,
+  verification_binding: null,
   verification_layers: [
     {
       kind: "decision",
       class: "registered",
+      binding: "key",
       seq: 14,
       at: "2026-09-08T13:00:00.000Z",
       operator: null,
@@ -730,6 +733,7 @@ function everyPage(): Record<string, string> {
         domain: DEFAULT_DOMAIN,
         source: null,
         min_class: null,
+        min_binding: null,
         tier: null,
         fresh: null,
       },
@@ -754,6 +758,8 @@ function everyPage(): Record<string, string> {
         signature: "YXR0ZXN0",
       },
       namedBy: "1F916:maintainer",
+      // No upgrade off the account rung (D-142).
+      bindings: [],
       validations: [
         {
           entryId: ENTRY_ID,
@@ -912,6 +918,7 @@ describe("the entries listing", () => {
       domain: null,
       source: null,
       min_class: null,
+      min_binding: null,
       tier: null,
       fresh: "stale",
     },
@@ -989,6 +996,7 @@ describe("the entries listing", () => {
         domain: null,
         source: null,
         min_class: null,
+        min_binding: null,
         tier: null,
         fresh: null,
       },
@@ -1019,6 +1027,7 @@ describe("the entries listing", () => {
         domain: DEFAULT_DOMAIN,
         source: null,
         min_class: null,
+        min_binding: null,
         tier: null,
         fresh: "stale",
       },
@@ -1065,6 +1074,7 @@ describe("the entries listing", () => {
         domain: null,
         source: "official",
         min_class: null,
+        min_binding: null,
         tier: null,
         fresh: "stale",
       },
@@ -1102,6 +1112,7 @@ describe("the entries listing", () => {
         domain: null,
         source: null,
         min_class: null,
+        min_binding: null,
         tier: null,
         fresh: null,
       },
@@ -1890,6 +1901,8 @@ describe("the operator pages", () => {
     domains: [],
     attestation: null,
     namedBy: null,
+    // No upgrade off the account rung (D-142).
+    bindings: [],
     validations: [],
     ledger: [],
     balance: ledgerBalance([], LEDGER_NOW),
@@ -1968,6 +1981,8 @@ describe("the operator pages", () => {
         signature: "YXR0ZXN0",
       },
       namedBy: "1F916:maintainer",
+      // No upgrade off the account rung (D-142).
+      bindings: [],
       validations: [
         {
           entryId: ENTRY_ID,
@@ -2003,6 +2018,8 @@ describe("the operator pages", () => {
       ],
       attestation: null,
       namedBy: null,
+      // No upgrade off the account rung (D-142).
+      bindings: [],
       validations: [],
       ledger: [],
       balance: ledgerBalance([], LEDGER_NOW),
@@ -2041,6 +2058,8 @@ describe("the operator pages", () => {
       domains: OPERATOR_DOMAINS,
       attestation: null,
       namedBy: null,
+      // No upgrade off the account rung (D-142).
+      bindings: [],
       validations: [
         {
           entryId: ENTRY_ID,
@@ -2090,6 +2109,8 @@ describe("the operator pages", () => {
       domains: OPERATOR_DOMAINS,
       attestation: null,
       namedBy: null,
+      // No upgrade off the account rung (D-142).
+      bindings: [],
       validations: [],
       ledger: operatorLedger,
       balance: operatorBalance,
@@ -2131,6 +2152,8 @@ describe("the operator page's attestations", () => {
     domains: OPERATOR_DOMAINS,
     attestation: null,
     namedBy: null,
+    // No upgrade off the account rung (D-142).
+    bindings: [],
     validations: [],
     ledger: operatorLedger,
     balance: operatorBalance,

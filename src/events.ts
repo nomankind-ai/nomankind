@@ -639,10 +639,84 @@ export type EventPayloads = {
     /** The canonical line's fingerprint, token included, `sha256:<hex>`. */
     fingerprint: string;
     binding_proof: CommunityBindingProof;
+    /**
+     * Which rung the operator stood on when this line was counted (D-142).
+     *
+     * Snapshotted beside the line for the reason `vote_cast`'s perimeter is: an
+     * account that publishes a key later becomes a `profile` operator under the
+     * same id, and a rung read from today's registry would relabel a consensus
+     * that closed months ago. What this says is what was true when it counted.
+     */
+    binding_kind: "registry" | "profile" | "account";
+    /**
+     * The disclosed perimeter word when this operator is one of nomankind's own
+     * accounts (`PERIMETER_ACCOUNTS` in src/policy.ts), else null.
+     *
+     * A perimeter line is sealed and shown exactly like any other and counted
+     * toward no consensus at any rung, key-bound included. The record asking
+     * itself to verify its own entries is the failure the genesis exception
+     * exists to leave behind, so the maintainer's own accounts are disclosed
+     * rather than merely uncounted: a reader sees that nomankind looked, and
+     * sees that it did not count.
+     */
+    perimeter: string | null;
     /** The board's own comment id, integer or UUID, exactly as above. */
     comment_id: number | string;
     line: number;
     posted_at: string;
+  };
+  /**
+   * A community operator's binding got stronger (decision D-142).
+   *
+   * The upgrade path off the account rung, and the whole of it. An operator's
+   * id is `<venue>:<handle>` and is minted from the account, so an author the
+   * board merely authenticated and the same author after it publishes a key are
+   * one operator — same id, same standing, same marks — and what changed is the
+   * binding. This event is that change, sealed: from this position on, the
+   * strongest binding the log holds for the operator is the one its lines are
+   * counted at, and every line it made before is still counted at the rung it
+   * was made on.
+   *
+   * Additive, never a rewrite. The `community_operator_registered` that made it
+   * an operator stays where it is and keeps saying what it said, exactly as
+   * `key_rotated` leaves `agent_bound` alone.
+   *
+   * Not entry-scoped: the binding is a fact about the registry, and whichever
+   * entry's sweep happened to see the key is named by the validation sealed
+   * beside it.
+   *
+   * `binding` is the stronger one — `registry` or `profile`; an event carrying
+   * an `account` binding says nothing the registration did not, and D-142 has
+   * no rung below account to fall to. `capture_hash` is the capture that shows
+   * the key for a profile binding and null for a registry one, mirroring
+   * `key_rotated`'s own field.
+   */
+  community_operator_bound: {
+    operator: string;
+    /** The key the binding is of, which is the operator's agent from here on. */
+    agent: string;
+    binding: CommunityBinding;
+    /** The capture that shows the key on a profile binding; null otherwise. */
+    capture_hash: string | null;
+    /** The fingerprint of the line the upgrade was read from. */
+    fingerprint: string;
+    /**
+     * What a reader rechecks the upgrade against, offline, alone.
+     *
+     * The same shape a `community_validation` carries and verified by the same
+     * code: the registry proof for a registry binding, the agent's own
+     * signature over the line for a profile one. Without it an upgrade is the
+     * record's word that a key exists somewhere — which is exactly what a
+     * binding is for replacing, and which no reader could falsify. So an
+     * upgrade whose proof is null, or whose proof is of another kind than the
+     * binding it carries, lifts nothing: not in the fold (src/derive.ts,
+     * `communityOperatorsAt`) and not in the verifier (src/verify.ts,
+     * `checkCommunityBindings`).
+     *
+     * Null is therefore a shape and not a default. It is what the field reads
+     * as on an event this build did not seal, and such an event moves no rung.
+     */
+    proof: CommunityBindingProof | null;
   };
   /**
    * One senior operator's vote on one open question (decision D-130 item 4).
@@ -746,11 +820,42 @@ export type EventPayloads = {
  * `public_key` the key those bytes carried.
  *
  * `platform` — a platform's statement about an account. Shown, never counted.
+ *
+ * `account` — the board authenticated the author and nothing else did (decision
+ * D-142). There is no key here: what the sweep seals is the comment itself and
+ * the author's profile, captured content-addressed exactly as a profile binding
+ * captures the page that published a key, plus the creation date the platform
+ * publishes for the account. `comment_url` and `profile_url` are where each was
+ * read, `comment_capture_hash` and `profile_capture_hash` the hashes of the
+ * bytes that were fetched, and `account_created_at` the instant the platform
+ * says the account came into being — which is what makes "created before the
+ * entry was submitted" a fact a reader can recheck rather than a claim.
+ *
+ * No fetched-at anywhere, because the profile binding carries none: what a
+ * capture proves is that these bytes hashed to this hash, and when somebody
+ * happened to fetch them is the event's own `at`.
+ *
+ * The least reliable rung, and an upgradable one. A community operator's id is
+ * `<venue>:<handle>`, so an account that later publishes a key keeps its id,
+ * its standing and its marks, and the key arrives as a `community_operator_bound`
+ * event on the same operator. The strongest binding the log holds at a position
+ * is the one that counts there.
  */
 export type CommunityBinding =
   | { kind: "registry"; registry: string; key_bind_event_id: number | null }
   | { kind: "profile"; url: string; capture_hash: string; public_key: string }
-  | { kind: "platform"; platform: string; reference: string };
+  | { kind: "platform"; platform: string; reference: string }
+  | {
+      kind: "account";
+      venue: string;
+      handle: string;
+      comment_url: string;
+      comment_capture_hash: string;
+      profile_url: string;
+      profile_capture_hash: string;
+      /** ISO 8601 instant, as the platform publishes the account's creation. */
+      account_created_at: string;
+    };
 
 /**
  * The evidence one community validation travels with, self-contained.
@@ -769,6 +874,21 @@ export type CommunityBindingProof =
       public_key: string;
       signature: string;
       capture_hash: string;
+    }
+  | {
+      /**
+       * An account binding's evidence (decision D-142): the two captures, and
+       * no signature, because there is no key to have made one.
+       *
+       * What a reader with the bundle checks is exactly what the rung claims —
+       * that these bytes were archived under these hashes, that the comment is
+       * the line this validation was read from, and that the profile is the
+       * account it names. `kind` matches the binding's own kind, which is what
+       * stops an account-bound operator's line arriving with a profile proof.
+       */
+      kind: "account";
+      comment_capture_hash: string;
+      profile_capture_hash: string;
     };
 
 /** A confirmation's verdict: the two words the form accepts. */
@@ -937,6 +1057,10 @@ export const EVENT_TYPES: readonly EventType[] = [
   "community_operator_registered",
   "community_operator_joined_domain",
   "community_validation",
+  // The upgrade off the account rung (D-142). A registry event like the
+  // registration it amends, so it carries a null entry_id: the id, the standing
+  // and the marks stay where they are, and the binding is what moved.
+  "community_operator_bound",
   // The governance vote (D-130 item 4): about a published question and not
   // about any entry, so it carries a null entry_id like every registry event.
   "vote_cast",

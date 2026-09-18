@@ -528,6 +528,46 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
     },
   ];
 
+  // Genesis by path 2 and the account rung (decision D-142): the five numbers
+  // that say what a board's own authentication of an author is worth, grouped
+  // under their own heading because they are one decision and a reader weighing
+  // the lowest rung should be able to read its whole scope in one table.
+  const bindings: Row[] = [
+    {
+      name: "BINDING_RUNGS",
+      value: policy.BINDING_RUNGS.join(", "),
+      means:
+        "How strong the binding behind a consensus was, weakest first. Two rungs and not three: a domain operator's key and a community operator's registry or profile binding are one thing to a reader — a key publicly bound to something the world can check — and an account the board merely authenticated is the other. The order is the order of the min_binding filter on the read, entries and sync doors, so min_binding=key admits key and refuses account.",
+    },
+    {
+      name: "ACCOUNT_BINDING_TIERS",
+      value: policy.ACCOUNT_BINDING_TIERS.join(", "),
+      means:
+        "The evidence tiers an account-bound line may count toward: stated only. A stated entry is a claim somebody published and a reader can go and look at, so a second pair of eyes on the same public page is worth what it is worth whoever owns them. An observed entry rests on a measurement somebody ran, and an account that has published no key has shown nothing about who ran it.",
+    },
+    {
+      name: "ACCOUNT_BINDING_SUNSET",
+      value: policy.ACCOUNT_BINDING_SUNSET,
+      means:
+        "When the account rung stops counting toward a consensus. Read at the promoting decision's own signed_at, like every other rule in the fold: before this instant an account-bound line may form the consensus, at or after it the line is still sealed and still shown and counts toward nothing. Entries verified before it keep their sealed class words forever, and a later check by a key-bound operator is an additive dated layer.",
+    },
+    {
+      name: "PERIMETER_WORD",
+      value: policy.PERIMETER_WORD,
+      means:
+        "The perimeter word the maintainer disclosed at the genesis naming, published here too for the one thing the log cannot say: which accounts on a community board are nomankind's own. Those accounts register implicitly, by a line, with no naming event to carry a perimeter, so the word is published beside the list below.",
+    },
+    {
+      name: "PERIMETER_ACCOUNTS",
+      value:
+        policy.PERIMETER_ACCOUNTS.length === 0
+          ? "none"
+          : policy.PERIMETER_ACCOUNTS.join(", "),
+      means:
+        "Nomankind's own accounts on the communities, in the form both kinds of operator share, <venue>:<handle>. A line from one of these is sealed and shown like any other, disclosed with PERIMETER_WORD beside it, and counted toward no consensus at any rung — not even where the account has published a key — and not counted in the three-eligible-operators precondition either. Published rather than inferred, for the reason the witness pin is: a record that asked itself at run time which accounts were its own could answer differently tomorrow.",
+    },
+  ];
+
   const validation: Row[] = [
     {
       name: "TRUSTED_POOL_SWITCH",
@@ -1116,7 +1156,7 @@ export function renderPolicy(ctx: PageContext, policy: typeof POLICY): string {
       </p>
 
       ${group("Validation", validation)}
-      ${group("Community operators", community)}
+      ${group("Community operators", community)} ${group("Bindings", bindings)}
       <p class="note">
         Two paths to being a validator, one registry (decision D-138). A
         community operator's lines are validations and count in consensus like a

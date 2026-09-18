@@ -536,6 +536,30 @@ export function operatorRows(
       continue;
     }
 
+    // D-142: the operator climbed off the account rung onto a key. Additive
+    // like the registration it follows — the row keeps its id, its standing and
+    // its domains — so the fold rewrites the two things the upgrade changed and
+    // binds the key beside them. A mirror that folded the registration and not
+    // this would show every upgraded operator still bound to a bare account,
+    // which is the record telling a reader less than the log says.
+    if (isType(event, "community_operator_bound")) {
+      const fold = folds.get(event.payload.operator);
+      if (fold === undefined) continue;
+      if (fold.community !== null) {
+        fold.community = {
+          ...fold.community,
+          agent: event.payload.agent,
+          binding: event.payload.binding,
+        };
+      }
+      fold.agents.push({
+        agentId: event.payload.agent,
+        operatorId: event.payload.operator,
+        registeredSeq: event.seq,
+      });
+      continue;
+    }
+
     if (isType(event, "community_operator_joined_domain")) {
       const fold = folds.get(event.payload.operator);
       if (fold === undefined) continue;

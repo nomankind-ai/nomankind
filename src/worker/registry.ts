@@ -94,8 +94,13 @@ import type {
   D1LikeExecResult,
   D1LikeResult,
   D1LikeStatement,
+  Row,
 } from "../storage/d1.js";
-import { addQuota, quotaOn } from "../storage/keys.js";
+import {
+  addQuotaStatement,
+  quotaFrom,
+  quotaStatement,
+} from "../storage/keys.js";
 import { D1NonceStore } from "../storage/nonces.js";
 import {
   EventAppendError,
@@ -110,7 +115,9 @@ import {
   operatorDomains,
   operatorForAgent,
   operatorTier,
-  operatorTierForAgent,
+  operatorTierForAgentStatement,
+  operatorTierFrom,
+  type OperatorTierRow,
   standingByOperator,
   standingForOperators,
   storedStandings,
@@ -666,11 +673,11 @@ function writeQuotaResetsAt(day: string): string {
  * is the bottom band — which is also what keeps the key factory the client
  * bucket exists to bound from buying anything by minting operators instead.
  *
- * One keyed read (`operatorTierForAgent`), on a path that already reads the
- * nonce store and writes two counters.
+ * A pure reading of a row the caller already has, because the row arrives in
+ * the same batch as the two counters it will be compared against: one round
+ * trip for the three facts this step needs, rather than one apiece.
  */
-async function agentWriteCap(db: D1Like, agent: string): Promise<number> {
-  const row = await operatorTierForAgent(db, agent);
+function writeCapFor(row: OperatorTierRow | null): number {
   const tier =
     row === null
       ? "probation"
@@ -712,17 +719,28 @@ export async function chargeWrite(
   now: Date,
 ): Promise<{ ok: true } | { ok: false; response: Response }> {
   const day = utcDay(now.toISOString());
-  // Which cap this key writes under (decision D-130): the tier of the operator
-  // behind it at the moment of the request. One keyed read, before the counters,
-  // because the cap has to be known before it can be compared against — and a
-  // bare key reads as probation, which is what it is: nobody's established
-  // operator.
-  const agentCap = await agentWriteCap(db, agent);
   const agentScope = writeScopeForAgent(agent);
   const clientScope = await writeScopeForClient(request);
 
-  const agentUsed = await quotaOn(db, agentScope, day);
-  const clientUsed = await quotaOn(db, clientScope, day);
+  // The three facts this step decides on, in one round trip: which cap this key
+  // writes under (decision D-130 — the tier of the operator behind it at the
+  // moment of the request, and a bare key reads as probation, which is what it
+  // is: nobody's established operator), and how much each bucket has spent
+  // today.
+  //
+  // One batch and not three reads, because the cost of this step is round trips
+  // and nothing else: the three statements are the same three, keyed and
+  // indexed, and they are all read at the same instant either way. The door
+  // that charges every write is the wrong place to pay three latencies for
+  // three rows nobody has to read in order.
+  const [tierRead, agentRead, clientRead] = await db.batch<Row>([
+    operatorTierForAgentStatement(db, agent),
+    quotaStatement(db, agentScope, day),
+    quotaStatement(db, clientScope, day),
+  ]);
+  const agentCap = writeCapFor(operatorTierFrom(tierRead));
+  const agentUsed = quotaFrom(agentRead);
+  const clientUsed = quotaFrom(clientRead);
 
   const spent = (
     bucket: "agent" | "client",
@@ -753,8 +771,13 @@ export async function chargeWrite(
     return spent("client", WRITES_PER_CLIENT_PER_DAY, clientUsed);
   }
 
-  await addQuota(db, agentScope, day, 1);
-  await addQuota(db, clientScope, day, 1);
+  // And both counters in one batch, which is cheaper and stricter than two
+  // writes: D1 applies a batch whole or not at all, so a crash between them can
+  // no longer leave a write counted against one bucket and not the other.
+  await db.batch([
+    addQuotaStatement(db, agentScope, day, 1),
+    addQuotaStatement(db, clientScope, day, 1),
+  ]);
   return { ok: true };
 }
 

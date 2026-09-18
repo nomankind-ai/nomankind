@@ -29,11 +29,18 @@
 import entrySchema from "../schema/nomankind-entry-schema.json" with { type: "json" };
 
 import { utcDay } from "./anchor.js";
-import { classSatisfies, type EntryStatus, type Sidecar } from "./derive.js";
+import {
+  bindingSatisfies,
+  classSatisfies,
+  type EntryStatus,
+  type Sidecar,
+} from "./derive.js";
 import type { EvidenceTier } from "./evidence.js";
 import { checkParameters } from "./params.js";
 import {
+  BINDING_RUNGS,
   VERIFICATION_CLASSES,
+  type BindingRung,
   type Category,
   type VerificationClass,
 } from "./policy.js";
@@ -67,6 +74,12 @@ export const READ_QUERY_PARAMETERS: readonly string[] = Object.freeze([
   // says how the claim was checked, the source who said it, and this who
   // decided it.
   "min_class",
+  // How strongly whoever decided it was bound (decision D-142): a sixth demand
+  // of the same kind, and the last question the other five leave open. The
+  // class says who met the consensus; this says whether the weakest seat in it
+  // stood on a key the world can check or on a board having authenticated an
+  // account.
+  "min_binding",
   "max_age",
 ]);
 
@@ -105,6 +118,14 @@ export type ReadQuery =
        * made no demand about who decided the entry.
        */
       readonly min_class: VerificationClass | null;
+      /**
+       * The weakest binding rung the reader will accept (decision D-142):
+       * `account` or `key`, weakest first, so `min_binding=key` admits an entry
+       * whose every counted validator stood on a key and refuses one that
+       * rested on an account. Null means the reader made no demand about how
+       * strongly the deciders were bound.
+       */
+      readonly min_binding: BindingRung | null;
       /** Whole calendar days. Absent means the reader set no age demand. */
       readonly max_age?: number;
     };
@@ -122,6 +143,7 @@ export const READ_QUERY_REFUSALS = [
   "bad_min_tier",
   "bad_min_source",
   "bad_min_class",
+  "bad_min_binding",
   "bad_max_age",
 ] as const;
 
@@ -218,6 +240,14 @@ export function parseReadQuery(params: URLSearchParams): ReadQueryResult {
     return { ok: false, reason: "bad_min_class" };
   }
 
+  const minBinding = params.get("min_binding");
+  if (
+    minBinding !== null &&
+    !(BINDING_RUNGS as readonly string[]).includes(minBinding)
+  ) {
+    return { ok: false, reason: "bad_min_binding" };
+  }
+
   const maxAge = params.get("max_age");
   if (maxAge !== null && !MAX_AGE_PATTERN.test(maxAge)) {
     return { ok: false, reason: "bad_max_age" };
@@ -237,6 +267,7 @@ export function parseReadQuery(params: URLSearchParams): ReadQueryResult {
       ...(minTier === null ? {} : { min_tier: minTier as EvidenceTier }),
       ...(minSource === null ? {} : { min_source: minSource as SourceClass }),
       min_class: minClass === null ? null : (minClass as VerificationClass),
+      min_binding: minBinding === null ? null : (minBinding as BindingRung),
       ...(maxAgeDays === undefined ? {} : { max_age: maxAgeDays }),
     },
   };
@@ -353,6 +384,7 @@ export function chooseReadable(
   const minTier = query.by === "subject" ? query.min_tier : undefined;
   const minSource = query.by === "subject" ? query.min_source : undefined;
   const minClass = query.by === "subject" ? query.min_class : null;
+  const minBinding = query.by === "subject" ? query.min_binding : null;
   const maxAge = query.by === "subject" ? query.max_age : undefined;
 
   for (const candidate of candidates) {
@@ -362,6 +394,18 @@ export function chooseReadable(
         record["status"] as string,
         candidate.sidecar.verification_class ?? null,
         minClass,
+      )
+    ) {
+      continue;
+    }
+    // The rung floor beside the class floor (D-142), read off the sidecar the
+    // same way and defaulted the same way: a row stored before the decision
+    // carries no rung at all, which is null, which fails any demand a reader
+    // actually made and passes the absence of one.
+    if (
+      !bindingSatisfies(
+        candidate.sidecar.verification_binding ?? null,
+        minBinding,
       )
     ) {
       continue;

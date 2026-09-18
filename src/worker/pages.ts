@@ -61,7 +61,7 @@ import {
 // The class a listing may be floored at, and the rule that compares two of them
 // (decision D-138). The comparison is the kernel's: a page that decided for
 // itself that mixed satisfies community would be a second copy of the order.
-import { classSatisfies } from "../derive.js";
+import { bindingSatisfies, classSatisfies } from "../derive.js";
 import {
   disclosureWindowDays,
   DOMAIN_SLUGS,
@@ -380,6 +380,10 @@ function toRow(stored: StoredEntry, now: Date): EntryRow {
     // Who met this entry's consensus (decision D-138), as derivation sealed it.
     // Null while the entry is draft or rejected, exactly as the tier is.
     verification_class: stored.sidecar.verification_class,
+    // And the rung the weakest of them stood on (D-142), defaulted to null for
+    // a row stored before the decision: a sidecar that carries no rung is not a
+    // sidecar claiming the lowest one.
+    verification_binding: stored.sidecar.verification_binding ?? null,
     last_confirmed: field(entry, "last_confirmed"),
     expires_at: typeof expires === "string" ? expires : null,
     stale: entry["stale"] === true,
@@ -689,11 +693,26 @@ async function entries(
   // of those and drop entries that do have a class. An entry with no class is
   // a draft or a rejected one, which has met no consensus and so satisfies no
   // floor; the comparison itself is the kernel's `classSatisfies`.
-  const kept =
+  const byClass =
     filter.min_class === null
       ? bySource
       : bySource.filter((stored) =>
           classSatisfies(stored.sidecar.verification_class, filter.min_class),
+        );
+
+  // The rung floor beside the class floor (decision D-142), applied over the
+  // page for the reason both of the others are: the rung is a sidecar field a
+  // row stored before the decision does not carry at all, and a `json_extract`
+  // would read null on every one of those and drop entries that do have a rung.
+  // An entry with no rung has met no consensus and so satisfies no floor.
+  const kept =
+    filter.min_binding === null
+      ? byClass
+      : byClass.filter((stored) =>
+          bindingSatisfies(
+            stored.sidecar.verification_binding ?? null,
+            filter.min_binding,
+          ),
         );
 
   const rows = kept.map((stored) => toRow(stored, now));
@@ -743,6 +762,10 @@ async function entries(
             // (D-128). Both are null and false respectively while an entry is
             // draft, which is exactly what a draft is.
             verification_class: stored.sidecar.verification_class,
+            // And the rung the weakest counted validator stood on (D-142),
+            // beside the class for the reason the page carries both: a caller
+            // filtering by `min_binding` is handed the field it filtered on.
+            verification_binding: stored.sidecar.verification_binding ?? null,
             bootstrap: stored.sidecar.bootstrap !== null,
           };
         }),
@@ -1146,6 +1169,16 @@ async function operator(
     ...new Map(markEvents.map((event) => [event.seq, event])).values(),
   ].sort((left, right) => left.seq - right.seq);
   const balance = ledgerBalance(ledger, now.toISOString());
+  // Every upgrade off the account rung the log holds, one bounded page of them
+  // (decision D-142). Read by type like the marks, and narrowed to this
+  // operator below rather than in the query, because the door reads one type
+  // and this page reads one id out of it.
+  const bindingUpgrades = (await eventsOfType(
+    db,
+    "community_operator_bound",
+    -1,
+    LIST_PAGE_LIMIT,
+  )) as Event<"community_operator_bound">[];
   const attestation = record.details["attestation"];
   const namedBy = record.details["named_by"];
 
@@ -1175,6 +1208,18 @@ async function operator(
           ? (attestation as Record<string, unknown>)
           : null,
       namedBy: typeof namedBy === "string" ? namedBy : null,
+      // How this operator's binding got stronger (D-142), oldest first: one
+      // page of `community_operator_bound`, narrowed to this id. Read by name
+      // off the sealed payloads, exactly as the marks above are, so the page
+      // shows the upgrades the log holds and works none of them out.
+      bindings: bindingUpgrades
+        .filter((event) => event.payload.operator === id)
+        .map((event) => ({
+          kind: event.payload.binding.kind,
+          agent: event.payload.agent,
+          at: event.at,
+          seq: event.seq,
+        })),
       validations,
       cosigners: cosigners.map((each) => ({
         cosigner: each.cosigner,

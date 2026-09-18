@@ -1196,6 +1196,10 @@ describe("the two community venues", () => {
       submitted_at: SUBMITTED_AT,
       sealed_position: expect.any(Number) as unknown as number,
       verification_class: "mixed",
+      // D-142: and the rung its weakest counted validator stood on. Every
+      // validator here published a key the world can check — a domain
+      // operator's, and a community operator's on its own profile.
+      verification_binding: "key",
       bootstrap: false,
     });
 

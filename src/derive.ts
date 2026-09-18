@@ -27,22 +27,31 @@ import {
   communityCapPerEntry,
   countingCommunities,
   isSingleCountingCommunity,
+  ACCOUNT_BINDING_SUNSET,
+  ACCOUNT_BINDING_TIERS,
   COMMUNITY_MIN_ACCOUNTS,
   COMMUNITY_MIN_COMMUNITIES,
+  PERIMETER_WORD,
   CONFIRMATION_VENUES,
   DEFAULT_DOMAIN,
   isRegisteredDomain,
   REJECTIONS_TO_REJECT,
+  BINDING_RUNGS,
   isVersionStalenessCategory,
   stalenessWindowDays,
   TRUSTED_POOL_SWITCH,
   versionedSubjectOf,
   VERIFICATION_CLASSES,
   VERIFICATION_MIN_OUTSIDE_OPERATORS,
+  type BindingRung,
   type OperatorKind,
   type VerificationClass,
 } from "./policy.js";
-import { communityOperatorId, isExcludedParty } from "./registry.js";
+import {
+  communityOperatorId,
+  isExcludedParty,
+  isPerimeterOperator,
+} from "./registry.js";
 import { retiredAgentsAt } from "./rotation.js";
 import type { Entry } from "./schema.js";
 import type { EntrySeal } from "./seal.js";
@@ -91,7 +100,7 @@ export interface Clock {
  * The value is the date the rules last moved and the decision that moved them,
  * which is the only thing a reader of a row ever has to compare.
  */
-export const DERIVATION_VERSION = "2026-09-17-d138";
+export const DERIVATION_VERSION = "2026-09-18-d142";
 
 /** The schema's status enum. */
 export type EntryStatus =
@@ -272,6 +281,27 @@ export interface Sidecar {
    */
   readonly verification_single_venue: boolean;
   /**
+   * The weakest binding among the validators counted in the promoting
+   * consensus (decision D-142), or null while the entry has verified nothing.
+   *
+   * `key` when every counted validator stood on a key the world can check — a
+   * domain operator, or a community operator bound by registry or by profile.
+   * `account` when at least one counted line rested on nothing but a board
+   * having authenticated its author. The weakest and not the strongest, because
+   * this is a floor a reader can rely on: an entry that says `key` was decided
+   * by keys alone, and one that says `account` tells the reader exactly which
+   * rung its weakest seat stood on.
+   *
+   * Disclosed on every entry and sealed like the class beside it: a later line
+   * from a key-bound operator is an additive layer, never a relabel. The read
+   * doors take it as `min_binding` (D-142), which is why the order lives in
+   * src/policy.ts's `BINDING_RUNGS` rather than here.
+   *
+   * Absent on a row stored before the decision, which reads as null. Every
+   * reader takes it as `verification_binding ?? null`.
+   */
+  readonly verification_binding: BindingRung | null;
+  /**
    * The dated layers of evidence behind this entry, oldest first (D-138 item
    * 11): the decision itself, then one per reconfirmation by a domain operator
    * on an entry whose decision class was `community` or `mixed`.
@@ -296,10 +326,18 @@ export interface Sidecar {
  * `seq` and `at` are the position and the time of the event, so the layers read
  * as a dated history rather than as a verdict. `operator` is who added the
  * layer, and null on the decision, which was a set of validators and not one.
+ *
+ * `binding` is the rung the layer stood on (decision D-142): the consensus's
+ * own weakest seat on the decision, and `key` on every reconfirmation that
+ * makes a layer, because only a key-bound or registered operator makes one. It
+ * is what turns "the evidence got stronger later" from a sentence about the
+ * class into a fact a reader can see — an account-bound consensus with a
+ * key-bound layer under it is exactly that sentence, told in two dated lines.
  */
 export interface VerificationLayer {
   readonly kind: "decision" | "reconfirmation";
   readonly class: VerificationClass;
+  readonly binding: BindingRung;
   readonly seq: number;
   readonly at: string;
   readonly operator: string | null;
@@ -636,6 +674,35 @@ export function communityOperatorsAt(
       });
       continue;
     }
+    if (isType(event, "community_operator_bound")) {
+      const payload = event.payload;
+      const held = operators.get(payload.operator);
+      // An upgrade of an operator the log never registered is an event about
+      // nobody, exactly as a join by one is.
+      if (held === undefined) continue;
+      // The strongest binding wins, and only forward (decision D-142). An
+      // account that publishes a key keeps its id, its standing and its marks
+      // and stands on the key from here; an event that named a weaker binding
+      // than the one the log already holds would be an operator un-publishing
+      // a key it published, which is not a thing a page can say.
+      if (rungOf(payload.binding) !== "key") continue;
+      // And only on a proof of the kind the binding claims. A rung is a
+      // sentence about what a reader can recheck offline, so an upgrade
+      // carrying no proof — or a proof of another kind of binding — lifts
+      // nothing: it would otherwise be a line saying "trust me, there is a key
+      // somewhere", which is the one thing a binding exists to replace. The
+      // cryptography is the verifier's half (src/verify.ts,
+      // `checkCommunityBindings`); this is the half a synchronous fold can ask,
+      // and both have to hold.
+      if (payload.proof === null) continue;
+      if (payload.proof.kind !== payload.binding.kind) continue;
+      operators.set(payload.operator, {
+        ...held,
+        agent: payload.agent,
+        binding: payload.binding,
+      });
+      continue;
+    }
     if (isType(event, "community_operator_joined_domain")) {
       const payload = event.payload;
       const held = operators.get(payload.operator);
@@ -651,6 +718,28 @@ export function communityOperatorsAt(
     }
   }
   return operators;
+}
+
+/**
+ * The rung a binding stands on, or null for one that stands on nothing
+ * (decision D-142).
+ *
+ * `registry` and `profile` are `key`: a key publicly bound to something a
+ * reader rechecks offline, which is what `COUNTING_BINDING_KINDS` in
+ * src/policy.ts has always said counts. `account` is the rung D-142 added — the
+ * board authenticated the author, and that is the whole of it.
+ *
+ * `platform` is null, because a platform's statement about an account is
+ * somebody else's assertion and `COUNTING_BINDING_KINDS` has never held it. It
+ * was a rule the policy stated and the fold did not ask, so a platform-bound
+ * registration was counted here exactly as a key-bound one; introducing the
+ * rungs is what makes the question askable, and a line with no rung counts
+ * toward nothing.
+ */
+export function rungOf(binding: CommunityBinding): BindingRung | null {
+  if (binding.kind === "registry" || binding.kind === "profile") return "key";
+  if (binding.kind === "account") return "account";
+  return null;
 }
 
 /**
@@ -702,6 +791,11 @@ interface Consensus {
   readonly verificationClass: VerificationClass | null;
   /** The distinct communities among the counted community approvers. */
   readonly verificationCommunities: readonly string[];
+  /**
+   * The weakest rung among the counted approvers (D-142), or null while draft
+   * or rejected. Sealed with the class beside it and never recomputed later.
+   */
+  readonly verificationBinding: BindingRung | null;
   /** The `at` of the promoting decision's event; null unless it verified. */
   readonly promotingAt: string | null;
 }
@@ -813,6 +907,218 @@ function decisionsFor(
   return decisions;
 }
 
+/** One counted approval, as the counts at a position read it (decision D-142). */
+interface ApprovingSeat {
+  readonly kind: OperatorKind;
+  /** The community it spoke from, or null for a domain operator. */
+  readonly venue: string | null;
+  /** The rung it stood on when it was counted. */
+  readonly rung: BindingRung;
+}
+
+/** The counts a promotion test is decided on, over the seats that still count. */
+interface CountableSeats {
+  readonly approvals: number;
+  readonly domain: number;
+  readonly community: number;
+  readonly accounts: number;
+  readonly venues: readonly string[];
+}
+
+/**
+ * The approvals that count at `signedAt`, and the four numbers read off them
+ * (decision D-142 item 4).
+ *
+ * The one place the sunset is applied, so the approval count, the class, the
+ * Sybil floor and the list of communities can never disagree about which seats
+ * are in the room. Before `ACCOUNT_BINDING_SUNSET` every seat counts; at or
+ * after it the account-bound seats count toward nothing — not the approvals,
+ * not the floor, not the communities — which is what "they do not count" says.
+ *
+ * An entry that verified before the instant is untouched by this: its consensus
+ * closed at a position this function was asked about then and is never asked
+ * about again.
+ */
+function countableSeats(
+  approving: ReadonlyMap<string, ApprovingSeat>,
+  signedAt: string,
+): CountableSeats {
+  const open = isBeforeInstant(signedAt, ACCOUNT_BINDING_SUNSET);
+  let approvals = 0;
+  let domain = 0;
+  let community = 0;
+  let accounts = 0;
+  const venues: string[] = [];
+  for (const seat of approving.values()) {
+    if (!open && seat.rung === "account") continue;
+    approvals += 1;
+    if (seat.kind === "domain") {
+      domain += 1;
+      continue;
+    }
+    community += 1;
+    if (seat.rung === "account") accounts += 1;
+    if (seat.venue !== null && !venues.includes(seat.venue)) {
+      venues.push(seat.venue);
+    }
+  }
+  return { approvals, domain, community, accounts, venues };
+}
+
+/**
+ * Why an account-bound line is out of the rung's scope, or null when it is in
+ * (decision D-142 item 3).
+ *
+ * The one place the two entry-shaped clauses of the scope are decided, so the
+ * fold and the rule the sweep asks at ingestion cannot drift: a line the door
+ * seals as a validation must be a line the fold counts, and a line the fold
+ * will not count should never have been sealed as one.
+ *
+ * The third clause, the sunset, is not here: it is read at the promoting
+ * decision's instant and the promoting decision does not exist yet when the
+ * door is deciding what to seal. So the door seals a line the sunset will later
+ * refuse to count, exactly as it seals a line a later cap will not reach — and
+ * derivation is where that is settled.
+ */
+function accountScopeRefusal(
+  core: Core,
+  binding: CommunityBinding | undefined,
+  submittedAt: string | null,
+): AccountScopeRefusal | null {
+  const claimedTier = core["evidence_tier"];
+  if (
+    typeof claimedTier !== "string" ||
+    !(ACCOUNT_BINDING_TIERS as readonly string[]).includes(claimedTier)
+  ) {
+    return "account_out_of_scope";
+  }
+  const createdAt =
+    binding !== undefined && binding.kind === "account"
+      ? binding.account_created_at
+      : null;
+  // A log that says when neither the account nor the entry began cannot say
+  // which came first, and the honest answer to "was the account older?" is no.
+  if (submittedAt === null) return "account_too_new";
+  if (!isBeforeInstant(createdAt, submittedAt)) return "account_too_new";
+  return null;
+}
+
+/** The two ways an account-bound line falls outside the rung's scope. */
+export type AccountScopeRefusal = "account_out_of_scope" | "account_too_new";
+
+/**
+ * How many seats one community still holds at this instant (decision D-142).
+ *
+ * The cap's own count, taken over the seats that count: an account-bound seat
+ * the sunset has dropped is not occupying a place on its board, and a cap that
+ * went on counting it would hold that board's last seat empty forever on a rule
+ * that had already expired.
+ */
+function admittedFromVenue(
+  counted: ReadonlyMap<string, ApprovingSeat>,
+  venue: string,
+  at: string,
+): number {
+  const open = isBeforeInstant(at, ACCOUNT_BINDING_SUNSET);
+  let taken = 0;
+  for (const seat of counted.values()) {
+    if (seat.venue !== venue) continue;
+    if (!open && seat.rung === "account") continue;
+    taken += 1;
+  }
+  return taken;
+}
+
+/**
+ * The instant a decision is judged by the sunset at (decision D-142 item 7 of
+ * the review): the later of what the signer said and when the log sealed it.
+ *
+ * `signed_at` is the signer's own word and nothing checks it, so a key that
+ * wanted one more account-bound consensus after the rung closed could simply
+ * date its approval to 2031. The event's `at` is the record's own clock at the
+ * moment the decision entered the log, and a decision cannot have been taken
+ * after it was sealed — so the later of the two is the earliest instant the
+ * decision can honestly claim, and the sunset is read there.
+ *
+ * Every other rule in this fold goes on reading `signed_at`: this one is about
+ * a deadline, and a deadline is the one kind of rule a backdated claim can buy
+ * something from.
+ */
+function decisionInstant(decision: Decision): string {
+  const signed = Date.parse(decision.signedAt);
+  const sealed = Date.parse(decision.at);
+  if (Number.isNaN(signed)) return decision.at;
+  if (Number.isNaN(sealed)) return decision.signedAt;
+  return signed >= sealed ? decision.signedAt : decision.at;
+}
+
+/**
+ * The operators whose decisions this entry's consensus counted, in the order
+ * they were counted, or an empty list while nothing is counted.
+ *
+ * The fold's own `countedOperators`, re-folded for a caller holding only the
+ * log — the offline verifier, which asks whether a line it is looking at is one
+ * the consensus counted before it judges the line by the rules that apply to
+ * counted lines. One fold and one answer, so the verifier and derivation can
+ * never disagree about which lines were in the room.
+ */
+export function countedOperatorsFor(
+  events: readonly Event[],
+  entryId: string,
+): readonly string[] {
+  const submission = submissionOf(events, entryId);
+  if (submission === null) return [];
+  return consensusFor(events, entryId, submission.core).countedOperators;
+}
+
+/**
+ * Whether one instant is strictly earlier than another, both parsed.
+ *
+ * Strict, and false for anything unparseable on either side, because both
+ * callers are asking a question the record has to be able to answer from the
+ * bytes: an account whose creation date the platform did not publish is an
+ * account nobody can say was older than the entry, and the honest answer to
+ * "was it created before?" is no. The sunset reads the same way at its own
+ * boundary — the instant itself is already after, which is what "at or after"
+ * means (D-142 item 4).
+ */
+function isBeforeInstant(value: string | null, limit: string): boolean {
+  if (value === null) return false;
+  const at = Date.parse(value);
+  const bound = Date.parse(limit);
+  if (Number.isNaN(at) || Number.isNaN(bound)) return false;
+  return at < bound;
+}
+
+/**
+ * The instant this entry was submitted, as the account rung's age rule reads it
+ * (decision D-142 item 3).
+ *
+ * The submission event's own `signed_at` where the payload carries one, and the
+ * core's `submitted_at` otherwise — the same field the schema publishes and the
+ * author signed. Null when the log holds neither, which makes every account
+ * binding fail the age rule rather than pass it: a comparison against a missing
+ * instant is not a comparison anyone should be counted on.
+ */
+function submittedInstantOf(
+  events: readonly Event[],
+  entryId: string,
+  core: Core,
+): string | null {
+  for (const event of inSeqOrder(events)) {
+    if (!isType(event, "entry_submitted")) continue;
+    if (event.entry_id !== entryId) continue;
+    const payload = event.payload as unknown as Record<string, unknown>;
+    const signedAt = payload["signed_at"];
+    if (typeof signedAt === "string" && signedAt !== "") return signedAt;
+    break;
+  }
+  const submittedAt = core["submitted_at"];
+  return typeof submittedAt === "string" && submittedAt !== ""
+    ? submittedAt
+    : null;
+}
+
 /**
  * Fold an entry's validation events into a verdict.
  *
@@ -850,20 +1156,33 @@ function consensusFor(
   // the signed core and never passed in beside it.
   const target = eligibilityTargetOf(core);
   const approvers: ApproverRecord[] = [];
-  const approvingOperators = new Set<string>();
+  /**
+   * The counted approvals, one per distinct operator, in the order they were
+   * counted: which kind of operator it was, which community it spoke from, and
+   * which rung it stood on (decision D-142).
+   *
+   * One structure and not five sets, because the sunset makes every count a
+   * question asked at a position: at or after `ACCOUNT_BINDING_SUNSET` the
+   * account-bound approvals are not counted, and the approval count, the class,
+   * the Sybil floor and the communities all have to agree about which
+   * approvals those are. Five sets that each dropped the same seats would be
+   * the one rule written five times.
+   */
+  const approving = new Map<string, ApprovingSeat>();
   const rejectingOperators = new Set<string>();
   // The counted decisions themselves, one per distinct eligible operator and in
   // seq order: the same records the counts above are built from, kept so the
   // evidence gate reads exactly what consensus counted.
   const countedRecords: ApproverRecord[] = [];
-  const countedOperators = new Set<string>();
-  // The counted approvers, by kind and by community (D-138): what the class,
-  // the Sybil floor and the per-community cap are all read off.
-  const approvingDomain = new Set<string>();
-  const approvingCommunity = new Set<string>();
-  const approvingVenues: string[] = [];
-  /** How many counted decisions this entry has taken from each community. */
-  const countedPerVenue = new Map<string, number>();
+  /**
+   * The counted decisions, one per distinct eligible operator, with the seat
+   * each one took: which kind of operator, which community, which rung.
+   *
+   * A map rather than a set since D-142, because the per-community cap is now
+   * a question asked at a position — the seats an expired rung left are seats
+   * nobody is sitting in.
+   */
+  const counted = new Map<string, ApprovingSeat>();
   // How many communities count at all, read once: the cap and the floor below
   // are both functions of this one number, and src/policy.ts is where each of
   // them is decided.
@@ -880,6 +1199,11 @@ function consensusFor(
   let promotingAt: string | null = null;
   let verificationClass: VerificationClass | null = null;
   let verificationCommunities: readonly string[] = [];
+  let verificationBinding: BindingRung | null = null;
+  // When this entry was submitted, which is half of what the account rung is
+  // judged against (D-142 item 3): an account made after the entry was
+  // submitted is an account made for it, as far as the record can tell.
+  const submittedAt = submittedInstantOf(events, entryId, core);
 
   for (const decision of decisionsFor(events, entryId)) {
     if (decision.kind === "domain") approvers.push(decision.record);
@@ -889,6 +1213,42 @@ function consensusFor(
     if (status !== "draft") continue;
 
     const position = decision.seq;
+
+    // Nomankind's own accounts (decision D-142). A line from one of them is
+    // sealed, shown and disclosed with the perimeter word beside it, and
+    // counted toward nothing at any rung — a key it published later does not
+    // change that, because what is disqualifying is whose account it is. The
+    // record verifying its own entries is the failure the genesis exception
+    // exists to leave behind, so this is refused before the rung is even read.
+    if (isPerimeterOperator(decision.operator)) continue;
+
+    // Which rung this operator stands on at this position (D-142). The
+    // registration's binding, or the strongest one a `community_operator_bound`
+    // has since put under it — `communityOperatorsAt` folds both in seq order,
+    // so a line is judged by the binding the log held when it was made and
+    // never by one published afterwards. A domain operator stands on its DNS
+    // name and its attestation, which is a key by any reading.
+    let rung: BindingRung | null = "key";
+    if (decision.kind === "community") {
+      const account = communityOperatorsAt(events, position).get(
+        decision.operator,
+      );
+      rung = account === undefined ? null : rungOf(account.binding);
+      // The account rung's scope, through the same rule the door asks at
+      // ingestion (D-142 item 3). A line that falls outside it is not refused
+      // and not rejected: it is an account statement, sealed and shown,
+      // counting toward nothing — which is exactly what a counted line without
+      // the token has been since D-136.
+      if (
+        rung === "account" &&
+        accountScopeRefusal(core, account?.binding, submittedAt) !== null
+      ) {
+        continue;
+      }
+    }
+    // A binding on no rung at all — a `platform` statement about an account —
+    // has never been in `COUNTING_BINDING_KINDS`, and now the fold asks.
+    if (rung === null) continue;
 
     // Who may validate at all: `mayValidateEntry`'s seven exclusions, the same
     // seven the door applies, asked here because the log is append-only and
@@ -919,35 +1279,39 @@ function consensusFor(
     // supply a consensus by itself once a second community signs. Counted per
     // community and not per key, because the accounts on one board are as cheap
     // as each other.
+    //
+    // Over the seats that still count at this position, and not over every seat
+    // ever counted (D-142): an account-bound seat the sunset has dropped
+    // occupies nothing, and a cap that went on holding its place would let a
+    // rung that no longer counts keep a board's last seat empty forever.
     const venue = decision.venue;
     if (decision.kind === "community" && venue !== null) {
-      const taken = countedPerVenue.get(venue) ?? 0;
-      if (!countedOperators.has(decision.operator) && taken >= capPerEntry) {
+      const taken = admittedFromVenue(counted, venue, decisionInstant(decision));
+      if (!counted.has(decision.operator) && taken >= capPerEntry) {
         continue;
       }
     }
 
     // The first record from an operator is the one that counts, here as in the
     // distinct-operator sets below.
-    if (!countedOperators.has(decision.operator)) {
-      countedOperators.add(decision.operator);
+    if (!counted.has(decision.operator)) {
+      counted.set(decision.operator, {
+        kind: decision.kind,
+        venue: decision.kind === "community" ? venue : null,
+        rung,
+      });
       countedRecords.push(decision.record);
-      if (decision.kind === "community" && venue !== null) {
-        countedPerVenue.set(venue, (countedPerVenue.get(venue) ?? 0) + 1);
-      }
     }
 
     if (decision.decision === "approve") {
       // Distinct operators: a second record from the same operator is kept but
       // adds no count.
-      approvingOperators.add(decision.operator);
-      if (decision.kind === "domain") {
-        approvingDomain.add(decision.operator);
-      } else {
-        approvingCommunity.add(decision.operator);
-        if (venue !== null && !approvingVenues.includes(venue)) {
-          approvingVenues.push(venue);
-        }
+      if (!approving.has(decision.operator)) {
+        approving.set(decision.operator, {
+          kind: decision.kind,
+          venue: decision.kind === "community" ? venue : null,
+          rung,
+        });
       }
       if (decision.assignedRandom) hasRandomApproval = true;
     } else {
@@ -956,10 +1320,23 @@ function consensusFor(
 
     const trustedCount = trustedOperatorsAt(events, position).size;
     const largePool = trustedCount >= TRUSTED_POOL_SWITCH;
-    const approvals = approvingOperators.size;
+    // The sunset (D-142 item 4), read at this decision's own instant, because
+    // this is the decision that would promote the entry. Before it, an
+    // account-bound approval forms a consensus like any other; at or after it,
+    // it counts toward nothing and the counts below are taken over the seats
+    // that remain. A line counted yesterday keeps what it was counted into:
+    // nothing here recomputes a decision that closed.
+    const seats = countableSeats(approving, decisionInstant(decision));
+    const approvals = seats.approvals;
     const rejections = rejectingOperators.size;
 
-    if (preconditionsMet(events, position, target, trustedCount)) {
+    // Genesis by path 2 (D-142): the pool precondition is lifted exactly where
+    // the consensus standing at this position is community operators' alone,
+    // because that is the consensus that draws nobody.
+    const communityOnly = seats.domain === 0 && seats.community > 0;
+    if (
+      preconditionsMet(events, position, target, trustedCount, communityOnly)
+    ) {
       const approvalsToVerify = largePool
         ? APPROVALS_TO_VERIFY_LARGE_POOL
         : APPROVALS_TO_VERIFY_SMALL_POOL;
@@ -974,14 +1351,14 @@ function consensusFor(
       // community counts at all. A consensus a domain operator took part in is
       // judged exactly as it always was.
       const communityFloorMet =
-        approvingDomain.size > 0 ||
-        approvingCommunity.size === 0 ||
-        (approvingCommunity.size >= COMMUNITY_MIN_ACCOUNTS &&
+        seats.domain > 0 ||
+        seats.community === 0 ||
+        (seats.community >= COMMUNITY_MIN_ACCOUNTS &&
           // "Only while more than one counting community exists" is one
           // sentence and lives in one place, beside the cap it is the twin of
           // (src/policy.ts, `isSingleCountingCommunity`).
           (isSingleCountingCommunity(countingCommunityCount) ||
-            approvingVenues.length >= COMMUNITY_MIN_COMMUNITIES));
+            seats.venues.length >= COMMUNITY_MIN_COMMUNITIES));
       // Two tiers of evidence: the count says the validators agree, the gate
       // says whether what they brought is enough, and at which tier. The gate is
       // asked only where the count would promote, over exactly the decisions
@@ -1010,12 +1387,23 @@ function consensusFor(
         // the count on their own would have promoted the entry at an earlier
         // decision, with no community approval counted yet.
         verificationClass =
-          approvingCommunity.size === 0
+          seats.community === 0
             ? "registered"
-            : approvingDomain.size === 0
+            : seats.domain === 0
               ? "community"
               : "mixed";
-        verificationCommunities = [...approvingVenues];
+        verificationCommunities = [...seats.venues];
+        // The rung, sealed beside the class and read the same way (D-142): the
+        // weakest binding among the approvers this consensus was counted from.
+        // `key` unconditionally for now — no counted line can rest on an
+        // account binding until the kernel pass lets one, so saying anything
+        // else here would be a disclosure about a rung nothing stands on.
+        // The weakest seat in the consensus, sealed here and never recomputed
+        // (D-142). Domain operators and key-bound community operators are
+        // `key`; one account-bound approval among them makes the floor
+        // `account`, because that is what the weakest seat stood on and a
+        // reader filtering on it is asking for a floor rather than an average.
+        verificationBinding = seats.accounts > 0 ? "account" : "key";
       } else if (rejections >= REJECTIONS_TO_REJECT) {
         status = "rejected";
         trustedCountAtDecision = trustedCount;
@@ -1043,9 +1431,10 @@ function consensusFor(
     needsReplacement,
     approvers,
     promotingSeq,
-    countedOperators: [...countedOperators],
+    countedOperators: [...counted.keys()],
     verificationClass,
     verificationCommunities,
+    verificationBinding,
     promotingAt,
   };
 }
@@ -1287,8 +1676,29 @@ function preconditionsMet(
   position: number,
   target: EligibilityTarget,
   trustedCount: number,
+  /**
+   * Whether the approvals standing at this position are community operators'
+   * alone (decision D-142, genesis by path 2).
+   *
+   * The non-empty trusted pool is a precondition because of what it is FOR:
+   * "a non-empty trusted pool to draw the random validator from". A consensus
+   * met by community operators alone draws nobody — there is no assignment, no
+   * beacon and no seat to fill — so the pool it would have drawn from is a
+   * pool nothing needs, and refusing the consensus for its emptiness refuses
+   * it for failing to supply something it never asked for. That was genesis's
+   * deadlock: a record with no trusted operator could never verify the first
+   * entry that would have earned somebody the trust.
+   *
+   * What stands in its place is the Sybil floor, which is the same guard by
+   * another road: `COMMUNITY_MIN_ACCOUNTS` distinct bound accounts,
+   * `COMMUNITY_MIN_COMMUNITIES` distinct communities once more than one
+   * community counts, and `communityCapPerEntry` over each of them. A domain
+   * operator taking part puts the pool back where it was — the draw is real
+   * again — so the exemption is exactly as wide as the case it is for.
+   */
+  communityOnly: boolean,
 ): boolean {
-  if (trustedCount === 0) return false;
+  if (trustedCount === 0 && !communityOnly) return false;
   const registered = registeredOperatorsAt(events, position);
   let outside = 0;
   // Both kinds of operator (D-138): the precondition counts the operators that
@@ -1301,6 +1711,11 @@ function preconditionsMet(
     ...communityOperatorsAt(events, position).keys(),
   ]);
   for (const operator of candidates) {
+    // Nomankind's own accounts are not operators outside the submitter
+    // (D-142): they may never be counted into a consensus at any rung, so
+    // counting them here would promise signers that cannot sign — the same
+    // miscount the QA of 2026-09-12 found, from the third side.
+    if (isPerimeterOperator(operator)) continue;
     if (!mayValidateEntry(events, position, target, operator)) continue;
     outside += 1;
   }
@@ -1836,6 +2251,14 @@ function bootstrapLabelOf(
       if (event.entry_id !== entryId) continue;
       if (payload["entry_id"] !== entryId) continue;
       if (payload["decision"] !== "approve") continue;
+      // Except nomankind's own accounts (D-142). The label says "every
+      // validator counted here sat inside one disclosed perimeter", and a line
+      // from an account inside that perimeter is the perimeter looking at
+      // itself: it clears nothing, exactly as it counts toward nothing.
+      const operator = payload["operator"];
+      if (typeof operator === "string" && isPerimeterOperator(operator)) {
+        continue;
+      }
       if (!confirmationReproduces(payload["check"], snapshotHash)) continue;
       return null;
     }
@@ -1942,6 +2365,23 @@ export interface CommunityValidationView {
   readonly attestation_version: string;
   readonly fingerprint: string;
   readonly posted_at: string;
+  /**
+   * The rung the line stood on when it was counted, as the sweep sealed it
+   * (decision D-142): `registry`, `profile` or `account`. Null on a row sealed
+   * before the decision, which is a line that stood on a key by construction —
+   * the account rung did not exist yet — and is read as one nowhere: a null
+   * here says "the event did not say", and the fold asks the registry.
+   */
+  readonly binding_kind: "registry" | "profile" | "account" | null;
+  /**
+   * The disclosed perimeter word when this line came from one of nomankind's
+   * own accounts (decision D-142), else null.
+   *
+   * Shown and never counted: a reader sees that the record looked at its own
+   * entry, and sees that the look moved nothing — not the consensus, not the
+   * bootstrap label, not the count of operators outside the submitter.
+   */
+  readonly perimeter: string | null;
   /** Position of the event in the log, so a reader can go and look at it. */
   readonly seq: number;
 }
@@ -2008,10 +2448,25 @@ export function communityValidationsFor(
       attestation_version: version,
       fingerprint,
       posted_at: typeof postedAt === "string" ? postedAt : event.at,
+      binding_kind: bindingKindOf(payload["binding_kind"]),
+      // Read off the published list rather than off the payload (D-142): the
+      // event's own `perimeter` is the sweep's copy of the same sentence, and a
+      // fold that trusted it would let a line say it was outside a perimeter it
+      // is inside. The list is policy, and policy is what decides.
+      perimeter: isPerimeterOperator(operator) ? PERIMETER_WORD : null,
       seq: event.seq,
     });
   }
   return order.map((key) => byLine.get(key)!);
+}
+
+/** The sealed binding kind on a line, or null where the event named none. */
+function bindingKindOf(
+  value: unknown,
+): "registry" | "profile" | "account" | null {
+  return value === "registry" || value === "profile" || value === "account"
+    ? value
+    : null;
 }
 
 /** Whether a value is one of the two checks the form accepts. */
@@ -2053,6 +2508,38 @@ export function classSatisfies(
 }
 
 /**
+ * Whether an entry's binding rung meets a reader's demand (decision D-142).
+ *
+ * `classSatisfies`'s twin, deliberately the same comparison over a different
+ * order: `BINDING_RUNGS` is weakest first, so `min_binding=key` admits an entry
+ * whose weakest counted validator stood on a key the world can check and
+ * refuses one that rested on a board having authenticated an account.
+ *
+ * The two questions are different and a reader may ask either. The class says
+ * *who* met the consensus — the maintainer's own operators, the communities, or
+ * both. The rung says how strongly whoever it was is bound to anything at all.
+ * A registered-class entry is key-bound by construction; a community-class one
+ * may be either, and a reader who will not take the lowest rung says so here.
+ *
+ * A null demand is no demand, and an absent one is no demand either — a query
+ * written before the decision carries no field here, and reading that as "the
+ * weakest rung only" would filter a stream nobody asked to filter. A null rung
+ * fails every demand, for the reason a null class does: the entry verified
+ * nothing, so there is no floor to promise, and answering "probably" to a
+ * reader who asked is the one thing these functions must never do.
+ */
+export function bindingSatisfies(
+  entryBinding: BindingRung | null,
+  minBinding: BindingRung | null,
+): boolean {
+  if (minBinding === null || minBinding === undefined) return true;
+  if (entryBinding === null) return false;
+  return (
+    BINDING_RUNGS.indexOf(entryBinding) >= BINDING_RUNGS.indexOf(minBinding)
+  );
+}
+
+/**
  * The dated layers behind one entry (decision D-138 item 11).
  *
  * The decision first, then one layer per reconfirmation by a *domain* operator
@@ -2076,12 +2563,20 @@ function verificationLayersOf(
     {
       kind: "decision",
       class: consensus.verificationClass,
+      binding: consensus.verificationBinding ?? "key",
       seq: consensus.promotingSeq,
       at: consensus.promotingAt ?? (consensus.verifiedAt as string),
       operator: null,
     },
   ];
-  if (consensus.verificationClass === "registered") return layers;
+  // A registered consensus that rested on keys is the strongest thing this
+  // record has; nothing added later says anything it did not. An account-bound
+  // one is not, whatever its class — which is why the account rung reopens the
+  // question the class alone closed (D-142).
+  const accountBound = consensus.verificationBinding === "account";
+  if (consensus.verificationClass === "registered" && !accountBound) {
+    return layers;
+  }
 
   const kinds = operatorKindsAt(events, Number.MAX_SAFE_INTEGER);
   for (const event of inSeqOrder(events)) {
@@ -2089,15 +2584,36 @@ function verificationLayersOf(
     if (event.entry_id !== entryId) continue;
     const operator = (event.payload.record as unknown as { operator: string })
       .operator;
-    // A domain operator, and only one: a community operator reconfirming a
-    // community-class entry adds evidence of the kind the entry already has.
-    if ((kinds.get(operator) ?? "domain") !== "domain") continue;
+    // Nomankind's own accounts add no layer either (D-142): a perimeter line
+    // is shown and counted toward nothing, and a dated layer is a count.
+    if (isPerimeterOperator(operator)) continue;
+    const kind = kinds.get(operator) ?? "domain";
+    if (kind === "domain") {
+      layers.push({
+        kind: "reconfirmation",
+        // What this layer is, not what the entry becomes: a domain operator's
+        // signature is registered evidence, and the entry's own class above it
+        // stays exactly where the decision left it.
+        class: "registered",
+        binding: "key",
+        seq: event.seq,
+        at: event.at,
+        operator,
+      });
+      continue;
+    }
+    // A community operator reconfirming a community-class entry adds evidence
+    // of the kind the entry already has — unless the entry's weakest seat was
+    // an account and this operator stands on a key (D-142). Then it is
+    // stronger evidence of the same class, which is exactly what a layer is
+    // for, and the rung on the layer is what says so.
+    if (!accountBound) continue;
+    const account = communityOperatorsAt(events, event.seq).get(operator);
+    if (account === undefined || rungOf(account.binding) !== "key") continue;
     layers.push({
       kind: "reconfirmation",
-      // What this layer is, not what the entry becomes: a domain operator's
-      // signature is registered evidence, and the entry's own class above it
-      // stays exactly where the decision left it.
-      class: "registered",
+      class: "community",
+      binding: "key",
       seq: event.seq,
       at: event.at,
       operator,
@@ -2128,6 +2644,12 @@ export const COMMUNITY_LINE_REFUSALS = [
   "entry_closed",
   "already_validated",
   "community_cap",
+  // The account rung's scope (D-142 item 3). Two more words and not one,
+  // because they are two different things to tell the account that wrote the
+  // line: this entry is not the kind the rung may speak to, and this account is
+  // younger than the entry it is speaking about.
+  "account_out_of_scope",
+  "account_too_new",
 ] as const;
 
 export type CommunityLineRefusal = (typeof COMMUNITY_LINE_REFUSALS)[number];
@@ -2154,7 +2676,11 @@ export type CommunityLineDisposition =
  *   refused exactly as a domain operator is;
  * - an entry that is closed takes no further decision;
  * - one counted validation per account per entry;
- * - and the per-community cap for this entry is not reached.
+ * - the per-community cap for this entry is not reached;
+ * - and, where the operator stands on the account rung (D-142), the entry is
+ *   one of the tiers that rung may count toward and the account is older than
+ *   the entry — the same `accountScopeRefusal` the fold asks, so a line the
+ *   door seals as a validation is a line the fold counts.
  *
  * Otherwise a confirmation, with the word that says which rule it fell under.
  * A confirmation is not a refusal of the line: it is sealed, shown, and clears
@@ -2168,6 +2694,18 @@ export function communityLineDisposition(
   venue: string,
   agent: string,
   at: string,
+  /**
+   * The binding this line stands on, where the caller already holds it
+   * (decision D-142).
+   *
+   * Optional, and read off the log when it is not given: a first line registers
+   * its own operator, so at ingestion there may be no registration to read and
+   * the caller is the only one who knows what the sweep captured. Where neither
+   * has it, the operator is not on the account rung as far as this rule can
+   * tell and the two clauses below do not apply — derivation asks again at the
+   * position where the registration does exist.
+   */
+  binding?: CommunityBinding,
 ): CommunityLineDisposition {
   const no = (reason: CommunityLineRefusal): CommunityLineDisposition => ({
     kind: "confirmation",
@@ -2257,6 +2795,20 @@ export function communityLineDisposition(
     already.filter((each) => each.venue === venue).map((each) => each.operator),
   );
   if (fromVenue.size >= cap) return no("community_cap");
+
+  // The account rung's scope (D-142 item 3), asked last because it is the only
+  // clause about the rung rather than about the speaker, and asked through the
+  // same function the fold asks so the door and the fold cannot drift.
+  const held =
+    binding ?? communityOperatorsAt(events, position).get(operator)?.binding;
+  if (held !== undefined && rungOf(held) === "account") {
+    const outside = accountScopeRefusal(
+      core,
+      held,
+      submittedInstantOf(events, entryId, core),
+    );
+    if (outside !== null) return no(outside);
+  }
 
   // `at` is the sweep's own clock, carried so the rule has the same shape every
   // other rule here has and so a later rule that needs the moment has it. No
@@ -2407,6 +2959,10 @@ export function deriveEntry(
     // Disclosed, never enforced: one community is still a community class, and
     // the page says "community (single venue)" beside it.
     verification_single_venue: consensus.verificationCommunities.length === 1,
+    // The rung the weakest counted seat stood on (D-142), off the same fold the
+    // class came from, so the floor a reader filters on and the class it sits
+    // beside can never come from two readings of the log.
+    verification_binding: consensus.verificationBinding,
     verification_layers: verificationLayersOf(events, entryId, consensus),
     // Off the consensus already folded above, so the label and the counts it
     // is a statement about can never come from two readings of the log.

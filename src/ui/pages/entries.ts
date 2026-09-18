@@ -48,7 +48,7 @@ import { SOURCE_CLASSES } from "../../sources.js";
 // The verification classes come from the policy module that publishes them
 // (decision D-138), in its own order — weakest first — for the same reason the
 // source classes come from the kernel: the chips are the list, not a copy of it.
-import { VERIFICATION_CLASSES } from "../../policy.js";
+import { BINDING_RUNGS, VERIFICATION_CLASSES } from "../../policy.js";
 import {
   ENTRY_CATEGORIES,
   ENTRY_DOMAINS,
@@ -96,6 +96,10 @@ const GROUPS: readonly {
   // `registered` too — the same reading `min_class` has on the read and sync
   // doors, because one word must not mean two things.
   { name: "min_class", values: VERIFICATION_CLASSES },
+  // And the floor on how strongly whoever met it was bound (decision D-142),
+  // read the same way and for the same reason: `key` admits only the entries
+  // whose weakest counted seat stood on a key the world can check.
+  { name: "min_binding", values: BINDING_RUNGS },
   { name: "fresh", values: FRESHNESS_VALUES },
 ];
 

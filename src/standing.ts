@@ -52,7 +52,7 @@ import {
   registeredOperatorsAt,
   trustedOperatorsAt,
 } from "./derive.js";
-import { isExcludedParty } from "./registry.js";
+import { isExcludedParty, isPerimeterOperator } from "./registry.js";
 import {
   DEFAULT_DOMAIN,
   DISPUTE_STAKE_STANDING,
@@ -472,6 +472,13 @@ export function standingAfter(
       const payload = event.payload as unknown as Record<string, unknown>;
       const operator = payload["operator"];
       if (typeof operator !== "string" || operator === "") continue;
+      // Except nomankind's own accounts (decision D-142). A perimeter line is
+      // sealed and shown and counted toward nothing, and standing is a count —
+      // the record paying itself for looking at its own entry would be the one
+      // thing standing is not for. Which rung the line stood on changes
+      // nothing else here: an account-bound operator did the same work a
+      // key-bound one did, and Section 9 pays the work.
+      if (isPerimeterOperator(operator)) continue;
       const validator = of(operator);
       validator.earned += STANDING_VALIDATION_VOLUNTEERED;
       validator.validations_volunteered += 1;

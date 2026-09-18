@@ -69,6 +69,7 @@ import {
   writeBoolean,
   writeJson,
   type D1Like,
+  type D1LikeResult,
   type D1LikeStatement,
   type Row,
 } from "./d1.js";
@@ -1063,7 +1064,19 @@ export interface CaptureRecord {
      * two community operators may validate one entry, and a plain "profile"
      * would have each overwriting the other's page.
      */
-    | `profile:${string}`;
+    | `profile:${string}`
+    /**
+     * The comment an account-bound validation was read from (decision D-142),
+     * by the operator that wrote it.
+     *
+     * The account rung's other half, archived for the reason the profile above
+     * is: what the rung claims is that the board authenticated this author and
+     * published this line, so both the comment and the account have to be
+     * reachable from the bundle or a reader could recheck neither. Keyed by the
+     * operator for the same reason the profile is — the table's key is
+     * (entry_id, role), and two accounts may validate one entry.
+     */
+    | `comment:${string}`;
   readonly contentHash: string;
   readonly archiveHash: string;
   readonly normVersion: string;
@@ -1645,14 +1658,40 @@ export async function operatorTierForAgent(
   db: D1Like,
   agentId: string,
 ): Promise<OperatorTierRow | null> {
-  const row = await db
+  const row = await operatorTierForAgentStatement(db, agentId).first<Row>();
+  return operatorTierOf(row);
+}
+
+/**
+ * The same read, as a statement rather than an answer.
+ *
+ * For the write door, which asks this and the two write counters in the same
+ * breath and should pay one round trip rather than three. The SQL and the
+ * shape of the row stay here either way: `operatorTierFrom` reads a batched
+ * result back through the same `operatorTierOf` the keyed read uses.
+ */
+export function operatorTierForAgentStatement(
+  db: D1Like,
+  agentId: string,
+): D1LikeStatement {
+  return db
     .prepare(
       `SELECT o.id AS id, o.trusted AS trusted, o.standing AS standing
        FROM agents a JOIN operators o ON o.id = a.operator_id
        WHERE a.agent_id = ? ${ONE_ROW}`,
     )
-    .bind(agentId)
-    .first<Row>();
+    .bind(agentId);
+}
+
+/** One batched tier result, read as the keyed read reads its own row. */
+export function operatorTierFrom(
+  result: D1LikeResult<Row> | undefined,
+): OperatorTierRow | null {
+  return operatorTierOf(result?.results?.[0] ?? null);
+}
+
+/** The one reading of a tier row, whichever way it was fetched. */
+function operatorTierOf(row: Row | null): OperatorTierRow | null {
   if (row === null) return null;
   const standing = row["standing"];
   return {
@@ -8002,6 +8041,54 @@ export async function recordCommunityOperatorJoinedDomain(
   }
   await db.batch(statements);
   return joined;
+}
+
+/**
+ * Record a community operator's upgrade off the account rung (decision D-142).
+ *
+ * The whole of the upgrade path, and additive like every other event here: the
+ * `community_operator_registered` that made it an operator stays where it is
+ * and goes on saying what it said, exactly as `key_rotated` leaves `agent_bound`
+ * alone. What this appends is the fact that a key the world can check now
+ * stands behind the same id.
+ *
+ * Two rows follow it, for the reason `recordKeyRotation`'s do: the agents row,
+ * because the operator now speaks under a key and every later signature has to
+ * resolve to it, and the operators row's own copy of the agent and the binding,
+ * because the pages and the mirror read the record rather than the events and a
+ * record still naming the bare account would send a reader to look for a key
+ * that is not there. The id, the standing, the marks and the domains are
+ * untouched: the operator did not change, its binding did.
+ */
+export async function recordCommunityOperatorBound(
+  db: D1Like,
+  input: EventInput<"community_operator_bound">,
+): Promise<Event<"community_operator_bound">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  const bound = event as Event<"community_operator_bound">;
+  const payload = bound.payload;
+  statements.push(
+    agentStatement(db, {
+      agentId: payload.agent,
+      operatorId: payload.operator,
+      registeredSeq: bound.seq,
+    }),
+  );
+  const record = await getOperator(db, payload.operator);
+  if (record !== null) {
+    statements.push(
+      operatorStatement(db, {
+        ...record,
+        details: {
+          ...record.details,
+          agent: payload.agent,
+          binding: payload.binding,
+        },
+      }),
+    );
+  }
+  await db.batch(statements);
+  return bound;
 }
 
 /**

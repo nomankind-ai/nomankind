@@ -32,6 +32,7 @@ import {
   DEFAULT_DOMAIN,
   excludedPartyDomains,
   isRegisteredDomain,
+  PERIMETER_ACCOUNTS,
   REQUEST_CLOCK_SKEW_SECONDS,
 } from "./policy.js";
 
@@ -310,9 +311,44 @@ export function isOperatorDomain(value: unknown): value is string {
  * `isOperatorDomain` refuses a colon in every label, so no community operator
  * id can ever be read as a domain and no domain as a community operator id.
  * Two kinds of operator, one namespace, no collision possible.
+ *
+ * Trimmed and case-folded, for the reason a domain operator's id is lowercase
+ * ASCII and a perimeter word is one lowercase label: an id is a key this record
+ * groups by — the Sybil floor counts distinct ones, the cap counts them per
+ * board, `PERIMETER_ACCOUNTS` names four of them — and two spellings of one
+ * account must never be two operators. `Nomankind-AI` on a board where that is
+ * the same account as `nomankind-ai` would otherwise mint a second operator,
+ * outside the perimeter and counted toward a consensus (the review of #105).
+ *
+ * Folded on every venue and not only the ones whose handles are known to be
+ * case-insensitive, because the two mistakes are not the same size. Folding
+ * where a board really does distinguish case MERGES two accounts into one
+ * operator: one seat instead of two, a floor harder to meet, a cap reached
+ * sooner. Not folding where a board does not distinguish SPLITS one account
+ * into two operators: two seats for one party, which is the Sybil the floor
+ * exists to stop. A rule that can only err toward fewer seats is the one to
+ * have, and this is it.
  */
 export function communityOperatorId(venue: string, handle: string): string {
-  return `${venue}:${handle}`;
+  return `${venue.trim().toLowerCase()}:${handle.trim().toLowerCase()}`;
+}
+
+/**
+ * Whether an operator id is one of nomankind's own accounts (decision D-142).
+ *
+ * The one place `PERIMETER_ACCOUNTS` is compared against, and it compares
+ * through the same folding `communityOperatorId` mints by — so an id that
+ * arrived from somewhere this record did not mint it, in a stored row, in a
+ * bundle a stranger handed in, cannot walk past the perimeter on its
+ * capitalization. Every rule that reads the perimeter — the fold, the
+ * standing, the bootstrap label, the verifier — asks here.
+ */
+export function isPerimeterOperator(id: string): boolean {
+  if (typeof id !== "string") return false;
+  const folded = id.trim().toLowerCase();
+  return PERIMETER_ACCOUNTS.some(
+    (each) => each.trim().toLowerCase() === folded,
+  );
 }
 
 /** Whether an id is a community operator's, by that one separator. */

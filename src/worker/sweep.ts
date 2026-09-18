@@ -128,7 +128,12 @@ import {
   type EntryStatus,
   type Sidecar,
 } from "../derive.js";
-import { communityOperatorId } from "../registry.js";
+// The two halves of what a community operator id is: what mints one, and what
+// decides whether one is the maintainer's own. Both fold the venue and the
+// handle the same way, and both live in src/registry.ts so they cannot come to
+// disagree — an id that arrived from a stored row or a stranger's bundle must
+// not walk past the perimeter on its capitalization (the review of #105).
+import { communityOperatorId, isPerimeterOperator } from "../registry.js";
 import { AGENT_ID_PREFIX } from "../identity.js";
 import { openRevalidation, revalidationDrawExclusions } from "../dispute.js";
 import { duplicateKey, sameDuplicateKey } from "../duplicate.js";
@@ -137,6 +142,7 @@ import {
   appendEvent,
   eventHash,
   type CommunityBinding,
+  type CommunityBindingProof,
   type Event,
   type EventPayloads,
   type EventType,
@@ -154,14 +160,17 @@ import {
   LEDGER_ENTRIES_PER_RUN,
   LIST_PAGE_LIMIT,
   NORM_VERSION,
+  PERIMETER_WORD,
   RELEASE_WINDOW_DAYS,
   SEAL_MAX_EVENTS,
   SWEEP_INTERVAL_MINUTES,
   WITNESSES_REQUIRED,
+  type BindingKind,
 } from "../policy.js";
 import { cursorOf } from "../adapters/board.js";
 import type {
   BoardAdapter,
+  BoardCapture,
   BoardComment,
   BoardId,
   BoardProfile,
@@ -270,6 +279,7 @@ import {
   recordAssignment,
   recordAssignmentMissed,
   recordAttestationExpired,
+  recordCommunityOperatorBound,
   recordCommunityOperatorJoinedDomain,
   recordCommunityOperatorRegistered,
   recordKeyRotation,
@@ -583,6 +593,20 @@ export interface SweepCommunityValidation {
    * operator kept its id, its standing and its marks.
    */
   readonly rotated: boolean;
+  /**
+   * Whether this line also sealed a `community_operator_bound` first (D-142):
+   * the operator stood on the account rung and this line stood on a key, so its
+   * binding got stronger under the same id.
+   */
+  readonly upgraded: boolean;
+  /** The rung this line was counted at, as the validation sealed it (D-142). */
+  readonly binding_kind: BindingKind;
+  /**
+   * The disclosed perimeter word when the operator is one of nomankind's own
+   * accounts, else null (D-142). A perimeter line is sealed and shown like any
+   * other and counted toward no consensus at any rung.
+   */
+  readonly perimeter: string | null;
   /** Position of the `community_validation` event this run appended. */
   readonly seq: number;
 }
@@ -1302,6 +1326,13 @@ async function confirmationsStep(
   // rotated, by the key its newest `key_rotated` named, which is the second
   // loop below.
   const registeredProfiles = new Map<string, ProfileRegistration>();
+  // And which rung each operator stands on right now (decision D-142), read in
+  // the same pass and for the one question the upgrade needs answered: an
+  // operator the log registered by a bare account, whose line now carries a key
+  // the world can check, is an operator whose binding got stronger — and the
+  // event that says so is sealed before the validation that saw it. An operator
+  // the map does not name is one the log has not registered at all.
+  const bindingKinds = new Map<string, BindingKind>();
   for (const event of await eventsOfType(
     db,
     "community_operator_registered",
@@ -1311,7 +1342,38 @@ async function confirmationsStep(
     const payload = event.payload as unknown as Record<string, unknown>;
     const binding = payload["binding"];
     if (typeof payload["operator"] !== "string") continue;
-    if (!isRecordValue(binding) || binding["kind"] !== "profile") continue;
+    if (!isRecordValue(binding)) continue;
+    if (typeof binding["kind"] === "string") {
+      bindingKinds.set(payload["operator"], binding["kind"] as BindingKind);
+    }
+    if (binding["kind"] !== "profile") continue;
+    const key = binding["public_key"];
+    const capture = binding["capture_hash"];
+    const url = binding["url"];
+    if (typeof key !== "string" || typeof capture !== "string") continue;
+    registeredProfiles.set(payload["operator"], {
+      public_key: key,
+      capture_hash: capture,
+      url: typeof url === "string" ? url : "",
+    });
+  }
+
+  // The upgrades folded over them (D-142), in seq order, exactly as the
+  // rotations below are folded over the registrations: the strongest binding
+  // the log holds for an operator is the one its next line is counted at, and a
+  // profile upgrade also fixes the key that line has to be signed by.
+  for (const event of await eventsOfType(
+    db,
+    "community_operator_bound",
+    -1,
+    SEAL_MAX_EVENTS,
+  )) {
+    const payload = event.payload as unknown as Record<string, unknown>;
+    const binding = payload["binding"];
+    if (typeof payload["operator"] !== "string") continue;
+    if (!isRecordValue(binding) || typeof binding["kind"] !== "string") continue;
+    bindingKinds.set(payload["operator"], binding["kind"] as BindingKind);
+    if (binding["kind"] !== "profile") continue;
     const key = binding["public_key"];
     const capture = binding["capture_hash"];
     const url = binding["url"];
@@ -1356,6 +1418,16 @@ async function confirmationsStep(
   const profiles: ProfileRun = {
     byAuthor: new Map<string, ProfileReadState>(),
     archived: new Set<string>(),
+  };
+
+  // And what it has read of the boards' own comments (D-142). One capture per
+  // comment per run whatever the comment carries, archived once per set of
+  // bytes: a comment holding three account-bound lines costs one read, and the
+  // archive's own head-then-put keeps a run that reads a thread twice from
+  // writing the same page twice.
+  const captured: CommentRun = {
+    byComment: new Map<string, CommentCapture | null>(),
+    archived: profiles.archived,
   };
 
   for (const board of boards) {
@@ -1409,7 +1481,9 @@ async function confirmationsStep(
           skip,
           already,
           registeredProfiles,
+          bindingKinds,
           profiles,
+          captured,
           comment,
         );
         sealed.push(...inComment.taken);
@@ -1469,12 +1543,41 @@ interface ProfileReadState {
   readonly refetched: boolean;
 }
 
+/**
+ * What one run has read of the boards' comments (decision D-142).
+ *
+ * The comment's twin of `ProfileRun`, with one read per comment rather than two
+ * per author: there is no second question a re-read could answer about a
+ * comment, because the bytes are the evidence and not a claim about a key. The
+ * archive set is shared with the profile run's, so one run writes one set of
+ * bytes once whichever capture asked for them.
+ */
+interface CommentRun {
+  /** Keyed `<venue>:<comment id>`; null is a capture this run tried and failed. */
+  readonly byComment: Map<string, CommentCapture | null>;
+  readonly archived: Set<string>;
+}
+
+/** One comment, fetched once in a run and archived under its hash. */
+interface CommentCapture {
+  readonly url: string;
+  readonly capture_hash: string;
+  readonly media_type: string;
+  readonly size: number;
+}
+
 /** One author's profile, fetched once in a run and archived under its hash. */
 interface ProfileCapture {
   readonly url: string;
   readonly capture_hash: string;
   /** The key its bytes publish, or null when they publish none. */
   readonly public_key: string | null;
+  /**
+   * When the venue says the account came into being, or null when it says
+   * nothing (decision D-142). What the account rung's age rule is read from,
+   * and what an account-bound binding seals so a reader can recheck it.
+   */
+  readonly created_at: string | null;
   /** What the venue said the bytes are, for the capture row beside them. */
   readonly media_type: string;
   readonly size: number;
@@ -1503,7 +1606,10 @@ async function profileCaptureFor(
   handle: string,
   refetch = false,
 ): Promise<ProfileCapture | null> {
-  const key = `${board.venue}:${handle}`;
+  // Keyed by the operator id this handle mints, and so folded the way every
+  // other reading of it is: two spellings of one account are one account, and
+  // a run that read its profile twice would be paying twice for one answer.
+  const key = communityOperatorId(board.venue, handle);
   const held = run.byAuthor.get(key);
   // Two reads of one author's profile in one run at the very most, and only
   // ever two: the first, and one more for the first line whose signature did
@@ -1584,6 +1690,89 @@ async function takeProfile(
     // organization's `description`). Either way the bytes archived above are the
     // whole profile: this only decides what is read out of them.
     public_key: keyPublishedIn(board, new TextDecoder().decode(answered.bytes)),
+    // The venue's own word about when the account began (D-142), carried
+    // through rather than read again: the profile door answered it in the same
+    // breath as the bytes, and asking twice would be two answers to one
+    // question.
+    created_at: answered.created_at,
+    media_type: answered.content_type ?? "application/json",
+    size: answered.bytes.byteLength,
+  };
+}
+
+/**
+ * One comment, fetched at most once per run and archived like a citation
+ * (decision D-142).
+ *
+ * The profile capture's twin, and deliberately the same shape: the bytes the
+ * venue's comment door answered, stored content-addressed in the capture
+ * archive with the same helper and the same sidecar a submitted citation's
+ * snapshot gets. What an account-bound line rests on is the board having
+ * authenticated its author and published what they wrote, so both halves are
+ * archived and both hashes travel on the binding — a rung whose evidence
+ * nobody archived would be a rung nobody could recheck.
+ *
+ * Null for a board with no comment door, a door that did not answer, and an
+ * archive this deployment has not bound. Each of those leaves the line
+ * uncounted with a reason beside it, which is the whole of what "never a guess"
+ * costs here: a capture that failed is not a capture that nearly worked.
+ */
+async function commentCaptureFor(
+  board: BoardAdapter,
+  captures: R2Like | undefined,
+  at: string,
+  run: CommentRun,
+  comment: BoardComment,
+): Promise<CommentCapture | null> {
+  const key = `${board.venue}:${String(comment.id)}`;
+  const held = run.byComment.get(key);
+  if (held !== undefined) return held;
+
+  const taken = await takeComment(board, captures, at, run, comment);
+  run.byComment.set(key, taken);
+  return taken;
+}
+
+async function takeComment(
+  board: BoardAdapter,
+  captures: R2Like | undefined,
+  at: string,
+  run: CommentRun,
+  comment: BoardComment,
+): Promise<CommentCapture | null> {
+  if (board.comment === undefined || captures === undefined) return null;
+  let answered: BoardCapture | null;
+  try {
+    answered = await board.comment(comment);
+  } catch {
+    // An adapter that broke its own contract is a board that did not answer.
+    return null;
+  }
+  if (answered === null) return null;
+
+  const captureHash = await archiveAddress(answered.bytes);
+  if (!run.archived.has(captureHash)) {
+    run.archived.add(captureHash);
+    await archiveCapture(captures, {
+      archiveHash: captureHash,
+      bytes: answered.bytes,
+      mediaType: answered.content_type ?? "application/json",
+      sidecar: {
+        final_url: answered.url,
+        status: answered.status,
+        headers:
+          answered.content_type === null
+            ? {}
+            : { "content-type": answered.content_type },
+        fetched_at: at,
+        fetcher: "nomankind-worker",
+      },
+    });
+  }
+
+  return {
+    url: answered.url,
+    capture_hash: captureHash,
     media_type: answered.content_type ?? "application/json",
     size: answered.bytes.byteLength,
   };
@@ -1608,7 +1797,9 @@ async function confirmationsInComment(
   skip: Skip,
   already: Map<string, boolean>,
   registeredProfiles: Map<string, ProfileRegistration>,
+  bindingKinds: Map<string, BindingKind>,
   profiles: ProfileRun,
+  comments: CommentRun,
   comment: BoardComment,
 ): Promise<{
   taken: SweepConfirmation[];
@@ -1689,8 +1880,15 @@ async function confirmationsInComment(
     // of another line, a line with no signature, a profile with no key and a
     // signature that does not verify all answer the same way — the statement
     // stands, as an account statement, and counts towards nothing.
-    const bound =
-      board.binding === "profile"
+    // A line at a `profile` venue that carries no signature claims no key at
+    // all, and since D-142 that is a rung rather than a refusal: it is not
+    // asked of the key path, so `confirmation_unsigned` goes on meaning what it
+    // meant — a line that was trying to be key-bound and was not — instead of
+    // being counted against every bare reply on a public board.
+    const claimsKey = board.binding !== "profile" || line.signature !== null;
+    const keyBound = !claimsKey
+      ? null
+      : board.binding === "profile"
         ? await profileBindingFor(
             board,
             captures,
@@ -1702,6 +1900,33 @@ async function confirmationsInComment(
             line,
           )
         : await registryBindingFor(board, trust, skip, comment.handle, fingerprint);
+
+    // And the rung below it, when the key rungs answered no (decision D-142).
+    // A line in the published form that carries the attestation token is a
+    // statement by an author the board authenticated, whatever key it did or
+    // did not sign with — so the sweep captures the comment and the account and
+    // offers the line at the account rung, and the kernel says whether that is
+    // worth anything for this entry. Asked only for a token-bearing line,
+    // because a line with no token was never on its way to being a validation
+    // and the two captures would be two fetches for nothing.
+    //
+    // The key rung is asked first and its refusal still stands: a signature
+    // that did not verify is `confirmation_signature_invalid` and is not
+    // laundered into an account-bound line. What falls through to here is a
+    // line that claimed no key at all, or whose author has published none.
+    const bound =
+      keyBound ??
+      (line.attestation_version === null
+        ? null
+        : await accountBindingFor(
+            board,
+            captures,
+            at,
+            skip,
+            profiles,
+            comments,
+            comment,
+          ));
     const counted = bound !== null;
     if (!counted) skip("confirmation_unsealed");
     const sealedFingerprint = bound?.kind === "registry" ? bound.sealed : null;
@@ -1738,6 +1963,7 @@ async function confirmationsInComment(
         bound,
         fingerprint,
         registeredProfiles,
+        bindingKinds,
         skip,
       );
       if (outcome.kind === "halted") return stop(true);
@@ -1860,6 +2086,34 @@ type LineBinding =
        * operator keeps its id, its standing and its marks.
        */
       readonly retires: string | null;
+    }
+  | {
+      /**
+       * The account rung (decision D-142): the board authenticated the author,
+       * and nothing else did.
+       *
+       * No key and no signature anywhere in it, because there is none to have.
+       * What travels instead is the pair of captures — the comment this line
+       * was read from and the author's own profile — and the instant the
+       * platform publishes for the account's creation, which is what makes
+       * "older than the submission" a fact a reader can recheck rather than a
+       * claim this record makes about a stranger.
+       *
+       * The weakest thing the sweep will seal, and it is sealed with exactly
+       * the evidence the rung claims: these bytes were archived under these
+       * hashes, at this board, under this handle.
+       */
+      readonly kind: "account";
+      readonly venue: string;
+      readonly handle: string;
+      readonly comment_url: string;
+      readonly comment_capture_hash: string;
+      readonly profile_url: string;
+      readonly profile_capture_hash: string;
+      readonly account_created_at: string;
+      /** The two pages as this run fetched them, for the capture rows. */
+      readonly comment_taken: CommentCapture;
+      readonly profile_taken: ProfileCapture;
     };
 
 /**
@@ -2040,6 +2294,87 @@ async function profileBindingFor(
 }
 
 /**
+ * The account binding: the board authenticated the author, and that is the
+ * whole of it (decision D-142).
+ *
+ * The lowest rung, reached only after the key rungs have been asked and
+ * answered no — an unsigned line at a `profile` venue, a profile publishing no
+ * key, a handle the founding registry binds nothing to. What the sweep can
+ * seal about such a line is what the board actually published: the comment, and
+ * the account that wrote it. Both are captured content-addressed, both hashes
+ * go on the binding, and the platform's own creation date for the account goes
+ * with them.
+ *
+ * Three ways this answers "no rung at all", each counted by name and none of
+ * them a guess:
+ *
+ * `account_comment_unavailable` — the comment door did not answer, so there is
+ * nothing archived that says what this line said.
+ *
+ * `account_profile_unavailable` — the profile door did not answer, so there is
+ * nothing archived that says whose account it was.
+ *
+ * `account_created_at_unknown` — the platform publishes no creation date for
+ * the account, so "the account existed before the entry was submitted" is a
+ * question nobody can answer offline. The rung is refused rather than filled
+ * in: an age read off nothing would count anybody who signed up this morning.
+ *
+ * Whether a line that reaches this rung actually counts is not decided here and
+ * is not the sweep's to decide: the scope D-142 draws — a stated entry, an
+ * account older than the submission, before the sunset, outside the perimeter —
+ * is the kernel's, over the events and the line alone. This assembles the
+ * evidence; `communityLineDisposition` says what it is worth.
+ */
+async function accountBindingFor(
+  board: BoardAdapter,
+  captures: R2Like | undefined,
+  at: string,
+  skip: Skip,
+  profiles: ProfileRun,
+  comments: CommentRun,
+  comment: BoardComment,
+): Promise<LineBinding | null> {
+  const captured = await commentCaptureFor(
+    board,
+    captures,
+    at,
+    comments,
+    comment,
+  );
+  if (captured === null) {
+    skip("account_comment_unavailable");
+    return null;
+  }
+  const profile = await profileCaptureFor(
+    board,
+    captures,
+    at,
+    profiles,
+    comment.handle,
+  );
+  if (profile === null) {
+    skip("account_profile_unavailable");
+    return null;
+  }
+  if (profile.created_at === null) {
+    skip("account_created_at_unknown");
+    return null;
+  }
+  return {
+    kind: "account",
+    venue: board.venue,
+    handle: comment.handle,
+    comment_url: captured.url,
+    comment_capture_hash: captured.capture_hash,
+    profile_url: profile.url,
+    profile_capture_hash: profile.capture_hash,
+    account_created_at: profile.created_at,
+    comment_taken: captured,
+    profile_taken: profile,
+  };
+}
+
+/**
  * What became of one token-bearing line: a validation, a confirmation after
  * all, or a run that stopped confirming.
  */
@@ -2105,30 +2440,34 @@ async function communityLine(
   binding: LineBinding,
   fingerprint: string,
   registeredProfiles: Map<string, ProfileRegistration>,
+  bindingKinds: Map<string, BindingKind>,
   skip: Skip,
 ): Promise<CommunityOutcome> {
   // Who the line was by, in the form every agent id in this record has. A
   // registry binding asks the registry, which is the only thing that can say
   // which key stands behind a handle there; a profile binding already knows,
   // because the key is what the signature was checked against (D-138 item 2).
-  const agent =
-    binding.kind === "profile"
-      ? AGENT_ID_PREFIX + binding.public_key
-      : ((await board.record(comment.handle))?.agent ?? null);
-  if (agent === null) return { kind: "confirmation", reason: "unbound" };
+  //
+  // An account binding has no key to name (D-142), and does not pretend to one:
+  // what spoke is the account, under the id the board authenticated it as,
+  // which is the operator's own id. That is the honest answer to "whose key was
+  // this?" at this rung — there was none — and it is the same id the operator
+  // keeps when it later publishes one.
+  // The registry's word about this handle, read once where the venue has one
+  // and used for both halves of it: which key stands behind the handle, and
+  // which event bound it. Two reads of one record for one line was a cost
+  // nobody chose, and the second was only ever made because the two halves
+  // were read in two places.
+  const record =
+    binding.kind === "registry" ? await board.record(comment.handle) : null;
 
-  const disposition = communityLineDisposition(
-    eventsOf(world),
-    entryId,
-    line,
-    comment.handle,
-    board.venue,
-    agent,
-    at,
-  );
-  if (disposition.kind !== "validation") {
-    return { kind: "confirmation", reason: disposition.reason };
-  }
+  const agent =
+    binding.kind === "account"
+      ? communityOperatorId(board.venue, comment.handle)
+      : binding.kind === "profile"
+        ? AGENT_ID_PREFIX + binding.public_key
+        : (record?.agent ?? null);
+  if (agent === null) return { kind: "confirmation", reason: "unbound" };
 
   const operator = communityOperatorId(board.venue, comment.handle);
   const domain = domainOfWorld(world, entryId);
@@ -2137,27 +2476,99 @@ async function communityLine(
   // and as the offline verifier rereads it: the registry's own key-bind, or the
   // profile page that published the key, by the hash its bytes are archived
   // under (D-138).
+  //
+  // Built before the disposition rather than after it (D-142, the review of
+  // #105), because the disposition now asks what rung this line stands on. It
+  // has to be told: the log's answer is the registration's binding, and a first
+  // line has no registration to read while a key-bound line from an operator
+  // the log still holds at the account rung would be judged by a rung it has
+  // already climbed off. The binding of the line in hand is the only one that
+  // is true of the line in hand.
   const recorded: CommunityBinding =
-    binding.kind === "profile"
+    binding.kind === "account"
       ? {
-          kind: "profile",
-          url: binding.url,
-          capture_hash: binding.capture_hash,
-          public_key: binding.public_key,
+          // The account rung's whole evidence, sealed (D-142): the two captures
+          // by the hashes their bytes are archived under, the doors they were
+          // read from, and the platform's own word about when the account
+          // began. No key anywhere in it, because there is none.
+          kind: "account",
+          venue: binding.venue,
+          handle: binding.handle,
+          comment_url: binding.comment_url,
+          comment_capture_hash: binding.comment_capture_hash,
+          profile_url: binding.profile_url,
+          profile_capture_hash: binding.profile_capture_hash,
+          account_created_at: binding.account_created_at,
         }
-      : {
-          kind: "registry",
-          registry: board.venue,
-          key_bind_event_id:
-            (await board.record(comment.handle))?.key_bind_event_id ?? null,
-        };
+      : binding.kind === "profile"
+        ? {
+            kind: "profile",
+            url: binding.url,
+            capture_hash: binding.capture_hash,
+            public_key: binding.public_key,
+          }
+        : {
+            kind: "registry",
+            registry: board.venue,
+            key_bind_event_id: record?.key_bind_event_id ?? null,
+          };
+
+  // Whether this line is a validation at all, asked at the door with the rung
+  // it stands on (D-142). The same rule the fold asks, handed the same binding,
+  // so a line the door seals as a validation is a line the fold counts — and a
+  // line outside the account rung's scope is refused here, with the word that
+  // says which half of the scope it fell outside, rather than sealed as a
+  // validation the fold would go on to count toward nothing.
+  const disposition = communityLineDisposition(
+    eventsOf(world),
+    entryId,
+    line,
+    comment.handle,
+    board.venue,
+    agent,
+    at,
+    recorded,
+  );
+  if (disposition.kind !== "validation") {
+    return { kind: "confirmation", reason: disposition.reason };
+  }
+
   const attestation = { version, domain };
+  // What a reader with the bundle rechecks about this line, built once and
+  // sealed in two places: on the validation, where it always was, and on the
+  // upgrade this line may carry with it (decision D-142, the review of #105).
+  //
+  // An upgrade that named a stronger binding and carried nothing to check it by
+  // was a claim an offline reader had to take on the record's word — and a
+  // `registry` upgrade is exactly where that bites, because a registry binding
+  // names a key-bind event id and the proof of it is the thing this object
+  // holds. So the same proof travels on both, and the verifier rechecks the
+  // upgrade by the same code it rechecks the validation by.
+  const bindingProof: CommunityBindingProof =
+    binding.kind === "account"
+      ? {
+          // The account rung's evidence, and no signature, because there is no
+          // key to have made one (D-142). What a reader with the bundle checks
+          // is exactly what the rung claims.
+          kind: "account",
+          comment_capture_hash: binding.comment_capture_hash,
+          profile_capture_hash: binding.profile_capture_hash,
+        }
+      : binding.kind === "profile"
+        ? {
+            kind: "profile",
+            public_key: binding.public_key,
+            signature: binding.signature,
+            capture_hash: binding.capture_hash,
+          }
+        : { kind: "registry", proof: binding.sealed.proof };
   const extra: Event[] = [];
 
   try {
     let registered = false;
     let joined = false;
     let rotated = false;
+    let upgraded = false;
 
     const record = await getOperator(db, operator);
     if (record === null) {
@@ -2205,6 +2616,39 @@ async function communityLine(
           fetchedAt: at,
         });
       }
+      // And the account rung's two pages, indexed for the same reason and in
+      // the same shape (D-142): the comment the line was read from and the
+      // profile of the account that wrote it. Both hashes are on the binding,
+      // so both have to be servable or the bundle a reader checks offline would
+      // name evidence the mirror does not carry.
+      if (binding.kind === "account") {
+        await putCapture(db, {
+          entryId,
+          role: `comment:${operator}`,
+          contentHash: binding.comment_capture_hash,
+          archiveHash: binding.comment_capture_hash,
+          normVersion: NORM_VERSION,
+          kind: "json",
+          mediaType: binding.comment_taken.media_type,
+          size: binding.comment_taken.size,
+          fetchedAt: at,
+        });
+        await putCapture(db, {
+          entryId,
+          role: `profile:${operator}`,
+          contentHash: binding.profile_capture_hash,
+          archiveHash: binding.profile_capture_hash,
+          normVersion: NORM_VERSION,
+          kind: "json",
+          mediaType: binding.profile_taken.media_type,
+          size: binding.profile_taken.size,
+          fetchedAt: at,
+        });
+      }
+      // Which rung this run now holds the operator on, so a later line by the
+      // same account in the same run is read against the binding this
+      // registration fixed rather than against no binding at all (D-142).
+      bindingKinds.set(operator, recorded.kind);
       // The run's own reading of who is registered under which key moves with
       // it: every later line by this account in this same run is judged by the
       // key this registration fixed, exactly as the next run's will be.
@@ -2222,6 +2666,80 @@ async function communityLine(
       // the registry again.
       cache.registry = null;
     } else {
+      // The operator stood on the account rung and this line stands on a key
+      // (decision D-142): the upgrade is sealed BEFORE the validation, so the
+      // validation is folded against a registry that already holds the stronger
+      // binding. The operator keeps its id, its standing and its marks — an
+      // author the board authenticated and the same author after it publishes a
+      // key are one operator, because the id is minted from the account — and
+      // what changed is the binding.
+      //
+      // Only ever upward. An operator already bound by a key whose line arrives
+      // at the account rung seals nothing: there is no rung below account to
+      // fall to, and a binding that could weaken would be a record unsaying
+      // what it had checked.
+      if (
+        bindingKinds.get(operator) === "account" &&
+        recorded.kind !== "account"
+      ) {
+        extra.push(
+          await recordCommunityOperatorBound(db, {
+            at,
+            type: "community_operator_bound",
+            entry_id: null,
+            payload: {
+              operator,
+              agent,
+              binding: recorded,
+              // The capture that shows the key on a profile binding, and null
+              // on a registry one, mirroring `key_rotated`'s own field.
+              capture_hash:
+                binding.kind === "profile" ? binding.capture_hash : null,
+              // What a reader rechecks the upgrade against (D-142, the review
+              // of #105): the same object this very line's validation carries,
+              // built once above, so an upgrade is falsifiable offline exactly
+              // as the validation beside it is and the verifier rechecks both
+              // by one code path. An upgrade without one lifts no rung, in the
+              // fold or in the verifier.
+              //
+              // Never null here, and never the account arm: this branch runs
+              // only where the line reached a key rung, so the proof is the
+              // registry seal or the profile signature. A `registry` upgrade
+              // carrying nothing was the unfalsifiable claim the finding named.
+              proof: bindingProof,
+              fingerprint,
+            },
+          }),
+        );
+        upgraded = true;
+        bindingKinds.set(operator, recorded.kind);
+        if (recorded.kind === "profile" && binding.kind === "profile") {
+          // The page that published the key, indexed so it can be served, for
+          // the reason the registration's is: an offline reader rechecks the
+          // upgrade against exactly these bytes.
+          if (binding.taken !== null) {
+            await putCapture(db, {
+              entryId,
+              role: `profile:${operator}`,
+              contentHash: binding.capture_hash,
+              archiveHash: binding.capture_hash,
+              normVersion: NORM_VERSION,
+              kind: "json",
+              mediaType: binding.taken.media_type,
+              size: binding.taken.size,
+              fetchedAt: at,
+            });
+          }
+          registeredProfiles.set(operator, {
+            public_key: recorded.public_key,
+            capture_hash: recorded.capture_hash,
+            url: recorded.url,
+          });
+        }
+        // The run's reading of the registry is one event out of date, for the
+        // reason a registration makes it out of date.
+        cache.registry = null;
+      }
       // The key changed on the profile and the line is signed by the new one
       // (D-140 item 5): the rotation is sealed BEFORE the validation, so the
       // validation is folded against a registry that already knows which key
@@ -2312,15 +2830,15 @@ async function communityLine(
           reason: line.reason,
           attestation_version: version,
           fingerprint,
-          binding_proof:
-            binding.kind === "profile"
-              ? {
-                  kind: "profile",
-                  public_key: binding.public_key,
-                  signature: binding.signature,
-                  capture_hash: binding.capture_hash,
-                }
-              : { kind: "registry", proof: binding.sealed.proof },
+          binding_proof: bindingProof,
+          // The rung this line stood on when it counted, and the perimeter word
+          // where the account is one of nomankind's own (D-142). Snapshotted
+          // rather than read from the registry later: an account that publishes
+          // a key becomes a `profile` operator under the same id, and a rung
+          // read from today's registry would relabel a consensus that closed
+          // months ago. What this says is what was true when it counted.
+          binding_kind: binding.kind,
+          perimeter: isPerimeterOperator(operator) ? PERIMETER_WORD : null,
           comment_id: comment.id,
           line: line.line,
           posted_at: comment.posted_at,
@@ -2350,6 +2868,11 @@ async function communityLine(
         registered,
         joined,
         rotated,
+        upgraded,
+        // The rung and the perimeter as this line sealed them (D-142), so the
+        // run's own report says what its detail counts.
+        binding_kind: binding.kind,
+        perimeter: isPerimeterOperator(operator) ? PERIMETER_WORD : null,
         seq: validated.seq,
       },
     };
@@ -5185,6 +5708,38 @@ function stepRows(
             ).length,
             joined: report.community_validations.filter((one) => one.joined)
               .length,
+            // D-142: the three things the account rung added, each counted on
+            // its own because each is a different fact about a run. A single
+            // total would hide every one of them.
+            //
+            // `sealed_account_bound` is how many lines this run SEALED at the
+            // account rung, and that is all it can be: the sweep seals a line
+            // and derivation decides afterwards which lines a consensus counts,
+            // so a step detail that said "counted" would be the door reporting
+            // a number the kernel owns (the review of #105). What a consensus
+            // counted is on the entry, as `verification_binding`.
+            sealed_account_bound: report.community_validations.filter(
+              (one) => one.binding_kind === "account",
+            ).length,
+            // Lines sealed from nomankind's own accounts, disclosed here for
+            // the same reason they are disclosed on the entry: the record
+            // looked at its own entry, and a run that did not say so would be
+            // hiding the one thing the perimeter exists to show. Counted toward
+            // no consensus at any rung, which is derivation's doing and not
+            // this number's.
+            sealed_perimeter: report.community_validations.filter(
+              (one) => one.perimeter !== null,
+            ).length,
+            upgraded: report.community_validations.filter((one) => one.upgraded)
+              .length,
+            // Why each token-bearing line that did not become a validation
+            // fell back, by the kernel's own word for the rule it fell under —
+            // `community_cap`, `already_validated`, `own_entry`, and since
+            // D-142 `account_out_of_scope` and `account_too_new`, which are the
+            // account rung's scope refused at the door rather than only at the
+            // fold. Counted here and nowhere else, so a door nobody attested
+            // through and one whose every line is being sent back by a rule are
+            // different rows.
             fell_back: { ...report.confirmation_fallbacks },
           },
           publish: {

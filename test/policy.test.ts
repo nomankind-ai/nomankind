@@ -91,6 +91,15 @@ const EXPECTED_POLICY_KEYS = [
   "COUNTING_BINDING_KINDS",
   "COMMUNITY_MIN_ACCOUNTS",
   "COMMUNITY_MIN_COMMUNITIES",
+  // Genesis by path 2, and the account rung (D-142): when the rung stops
+  // counting, the tiers it may count toward, the maintainer's own accounts and
+  // the word they are disclosed under, and the two rungs the read filter
+  // orders.
+  "ACCOUNT_BINDING_SUNSET",
+  "ACCOUNT_BINDING_TIERS",
+  "PERIMETER_WORD",
+  "PERIMETER_ACCOUNTS",
+  "BINDING_RUNGS",
   "VERIFICATION_CLASSES",
   "CONFIRMATION_ATTESTATION_TOKEN_PREFIX",
   "ASSIGNMENT_WINDOW_HOURS",
@@ -590,7 +599,7 @@ describe("policy numbers", () => {
     }
   });
 
-  it("exports only numbers, six names, one flag, and frozen objects", () => {
+  it("exports only numbers, eight names, one flag, and frozen objects", () => {
     for (const [key, value] of Object.entries(POLICY)) {
       expect(value).not.toBeNull();
       if (
@@ -602,8 +611,15 @@ describe("policy numbers", () => {
         // D-136: the first word of the one line the confirmation door reads.
         key === "CONFIRMATION_FORM_PREFIX" ||
         // D-138: the token inside that line which makes it a validation. A
-        // format constant like the one above, and the sixth and last name here.
-        key === "CONFIRMATION_ATTESTATION_TOKEN_PREFIX"
+        // format constant like the one above.
+        key === "CONFIRMATION_ATTESTATION_TOKEN_PREFIX" ||
+        // D-142: the instant the account rung stops forming a consensus. An
+        // ISO date-time, which is a name to this test and a number to nobody:
+        // a rule read at a position, not an amount anything is measured in.
+        key === "ACCOUNT_BINDING_SUNSET" ||
+        // D-142: the perimeter word the maintainer's own accounts are
+        // disclosed under, and the eighth and last name here.
+        key === "PERIMETER_WORD"
       ) {
         expect(typeof value).toBe("string");
         continue;

@@ -250,15 +250,17 @@ describe("one cache over many entries", () => {
     }
     const with_ = counting.count(REGISTRY_QUERY);
 
-    // Nine registry event types, paged to exhaustion: nine statements for the
-    // one reading, and nine per entry without the cache. Eight since D-138 put
+    // Ten registry event types, paged to exhaustion: ten statements for the
+    // one reading, and ten per entry without the cache. Eight since D-138 put
     // the two community operator events in the registry set — one registry,
     // two kinds of operator, and a world that skipped either would tell every
-    // door no community operator had ever registered — and nine since D-095
+    // door no community operator had ever registered — nine since D-095
     // added `key_rotated`, without which a world would count a retired key's
-    // decisions and refuse the key that replaced it.
-    expect(without).toBe(9 * ENTRIES);
-    expect(with_).toBe(9);
+    // decisions and refuse the key that replaced it, and ten since D-142 added
+    // `community_operator_bound`, without which a world would judge a key-bound
+    // operator by the account it registered as.
+    expect(without).toBe(10 * ENTRIES);
+    expect(with_).toBe(10);
     expect(cached).toEqual(uncached);
   });
 
@@ -268,7 +270,7 @@ describe("one cache over many entries", () => {
     const worlds = await Promise.all(
       ids.map((id) => entryWorld(counting, id, cache)),
     );
-    expect(counting.count(REGISTRY_QUERY)).toBe(9);
+    expect(counting.count(REGISTRY_QUERY)).toBe(10);
     expect(worlds.every((world) => world.registry.length === 2)).toBe(true);
   });
 });

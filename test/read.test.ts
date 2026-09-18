@@ -57,6 +57,8 @@ describe("parseReadQuery", () => {
       by: "subject",
       subject: "openai/gpt-5",
       category: "pricing",
+      // Nor about how strongly they were bound (D-142), read the same way.
+      min_binding: null,
       // No demand about who decided it (D-138): null rather than absent, so
       // the shape of the query never depends on whether it was written.
       min_class: null,
@@ -71,6 +73,7 @@ describe("parseReadQuery", () => {
       category: "pricing",
       min_tier: "observed",
       min_class: null,
+      min_binding: null,
       max_age: 30,
     });
     expect(accepted("subject=x&category=behavior&max_age=0")).toMatchObject({
@@ -125,7 +128,7 @@ describe("parseReadQuery", () => {
     );
   });
 
-  it("names its twelve refusals in the order it checks them", () => {
+  it("names its thirteen refusals in the order it checks them", () => {
     expect(READ_QUERY_REFUSALS).toEqual([
       "unknown_parameter",
       "repeated_parameter",
@@ -139,6 +142,8 @@ describe("parseReadQuery", () => {
       "bad_min_source",
       // Who decided the entry (D-138), read after the source and before the age.
       "bad_min_class",
+      // And how strongly they were bound (D-142), read after it.
+      "bad_min_binding",
       "bad_max_age",
     ]);
   });
@@ -367,7 +372,9 @@ describe("chooseReadable", () => {
     by: "subject",
     subject: "x",
     category: "pricing",
-    // The reader made no demand about who decided the entry (D-138).
+    // The reader made no demand about who decided the entry (D-138), nor
+    // about how strongly they were bound (D-142).
+    min_binding: null,
     min_class: null,
   };
 

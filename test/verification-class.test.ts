@@ -250,6 +250,10 @@ function communityApproval(
     attestation_version: ATTESTATION_VERSION,
     fingerprint: `sha256:${"d".repeat(64)}`,
     binding_proof: { kind: "registry", proof: null as never },
+    // The rung the line stood on and the perimeter it sat in (D-142): a
+    // registry binding, and an account that is not one of nomankind's own.
+    binding_kind: "registry",
+    perimeter: null,
     comment_id: log.nextComment(),
     line: 0,
     posted_at: "2026-09-16T10:00:00.000Z",
@@ -280,6 +284,8 @@ describe("the class an entry is decided at", () => {
       {
         kind: "decision",
         class: "registered",
+        // Domain operators stand on keys, so the rung is `key` (D-142).
+        binding: "key",
         // The position of the decision that promoted it: the second approval.
         seq: log.events[log.events.length - 1]!.seq,
         at: log.events[log.events.length - 1]!.at,
@@ -543,6 +549,10 @@ describe("min_class", () => {
         subject: "x",
         category: "pricing",
         min_class: "mixed",
+        // D-142 added the binding floor to the same shape, the way D-138 added
+        // the class floor: null rather than absent, so the shape of a subject
+        // query never depends on whether the parameter was written.
+        min_binding: null,
       },
     });
     expect(

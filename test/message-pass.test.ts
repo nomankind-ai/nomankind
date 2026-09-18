@@ -181,6 +181,7 @@ const row: EntryRow = {
   claim: "The model refuses this prompt",
   tier: "stated",
   verification_class: "mixed",
+  verification_binding: null,
   last_confirmed: "2026-09-08",
   expires_at: "2026-10-08",
   stale: true,
@@ -233,10 +234,12 @@ const sidecar: Sidecar = {
   verification_class: "mixed",
   verification_communities: ["1f916"],
   verification_single_venue: true,
+  verification_binding: null,
   verification_layers: [
     {
       kind: "decision",
       class: "mixed",
+      binding: "key",
       seq: 14,
       at: "2026-09-08T13:00:00.000Z",
       operator: null,
@@ -420,6 +423,8 @@ const operatorData: OperatorData = {
   ],
   attestation: null,
   namedBy: null,
+  // No upgrade off the account rung (D-142).
+  bindings: [],
   marks: { overturned: [], missed: [], failed_disputes: [] },
   validations: [],
   cosigners: [],
@@ -437,6 +442,7 @@ const entriesData: EntriesData = {
     tier: null,
     fresh: null,
     min_class: null,
+    min_binding: null,
   },
   rows: [row],
   total: 1,

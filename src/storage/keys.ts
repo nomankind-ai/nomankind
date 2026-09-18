@@ -27,6 +27,8 @@ import {
   readNullableText,
   readText,
   type D1Like,
+  type D1LikeResult,
+  type D1LikeStatement,
   type Row,
 } from "./d1.js";
 
@@ -179,11 +181,32 @@ export async function quotaOn(
   scope: string,
   day: string,
 ): Promise<number> {
-  const row = await db
-    .prepare(`SELECT reads FROM quota WHERE scope = ? AND day = ? ${ONE_ROW}`)
-    .bind(scope, day)
-    .first<Row>();
+  const row = await quotaStatement(db, scope, day).first<Row>();
   return row === null ? 0 : readInteger(row, "reads");
+}
+
+/**
+ * The same read, as a statement rather than an answer.
+ *
+ * For a caller that needs several of these at once and should not pay a round
+ * trip for each: a door asking two scopes in the same breath batches them, and
+ * the SQL and the column live here either way. `quotaFrom` reads one result
+ * back, so the shape of a row is still decided in one place.
+ */
+export function quotaStatement(
+  db: D1Like,
+  scope: string,
+  day: string,
+): D1LikeStatement {
+  return db
+    .prepare(`SELECT reads FROM quota WHERE scope = ? AND day = ? ${ONE_ROW}`)
+    .bind(scope, day);
+}
+
+/** One batched `quotaStatement` result, read as `quotaOn` reads its own. */
+export function quotaFrom(result: D1LikeResult<Row> | undefined): number {
+  const row = result?.results?.[0];
+  return row === undefined ? 0 : readInteger(row, "reads");
 }
 
 /**
@@ -201,13 +224,28 @@ export async function addQuota(
   reads: number,
 ): Promise<void> {
   if (reads === 0) return;
-  await db
+  await addQuotaStatement(db, scope, day, reads).run();
+}
+
+/**
+ * The same UPSERT, as a statement rather than a write.
+ *
+ * For a caller adding to two scopes at once: batched, the two are one round
+ * trip and one transaction, which is both cheaper and stricter than two writes
+ * a crash could land half of. The arithmetic is still the database's.
+ */
+export function addQuotaStatement(
+  db: D1Like,
+  scope: string,
+  day: string,
+  reads: number,
+): D1LikeStatement {
+  return db
     .prepare(
       `INSERT INTO quota (scope, day, reads) VALUES (?, ?, ?)
        ON CONFLICT (scope, day) DO UPDATE SET reads = reads + excluded.reads`,
     )
-    .bind(scope, day, reads)
-    .run();
+    .bind(scope, day, reads);
 }
 
 /** One row of a scope's usage history. */

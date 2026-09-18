@@ -821,7 +821,12 @@ describe("the derived confirmations", () => {
   });
 
   it("is stamped by a derivation version that moved with the rule", () => {
-    expect(DERIVATION_VERSION).toBe("2026-09-17-d138");
+    // D-142 moved the consensus rules again (genesis by path 2, the account
+    // rung, the sunset) and the stamp moved with them. The pairing of a stamp
+    // with the shape it was taken under lives in
+    // test/derivation-version.test.ts, so this line is a date and that file is
+    // the mechanism.
+    expect(DERIVATION_VERSION).toBe("2026-09-18-d142");
   });
 });
 

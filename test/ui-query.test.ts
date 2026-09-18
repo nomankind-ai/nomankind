@@ -48,15 +48,18 @@ describe("the accepted values come from the schema", () => {
     expect([...ENTRY_TIERS]).toEqual(schema.properties.evidence_tier.enum);
   });
 
-  it("accepts exactly eight parameters", () => {
+  it("accepts exactly nine parameters", () => {
     expect([...ENTRIES_QUERY_PARAMETERS]).toEqual([
       "category",
       "status",
       "domain",
       "tier",
       "source",
-      // The class floor (D-138), beside the other chip groups.
+      // The class floor (D-138), beside the other chip groups, and the binding
+      // floor (D-142) beside it: who met the consensus, and how strongly the
+      // weakest of them was bound.
       "min_class",
+      "min_binding",
       "fresh",
       "before",
     ]);
@@ -81,6 +84,10 @@ describe("the accepted values come from the schema", () => {
       "bad_tier",
       "bad_source",
       "bad_min_class",
+      // D-142, read where the parser reads it: after the class floor and
+      // before the freshness chip, which is the order the parameters are
+      // listed in and the order the API page documents.
+      "bad_min_binding",
       "bad_fresh",
       "bad_before",
     ]);
@@ -98,6 +105,7 @@ describe("what parses", () => {
         tier: null,
         source: null,
         min_class: null,
+        min_binding: null,
         fresh: null,
       },
       before: null,
@@ -107,7 +115,7 @@ describe("what parses", () => {
   it("parses a full query", () => {
     expect(
       parse(
-        `category=pricing&status=verified&domain=${DEFAULT_DOMAIN}&tier=observed&source=official&min_class=mixed&fresh=stale&before=48213`,
+        `category=pricing&status=verified&domain=${DEFAULT_DOMAIN}&tier=observed&source=official&min_class=mixed&min_binding=key&fresh=stale&before=48213`,
       ),
     ).toEqual({
       ok: true,
@@ -118,6 +126,7 @@ describe("what parses", () => {
         tier: "observed",
         source: "official",
         min_class: "mixed",
+        min_binding: "key",
         fresh: "stale",
       },
       before: 48213,

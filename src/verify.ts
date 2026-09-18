@@ -45,6 +45,7 @@ import {
 } from "./confirm.js";
 import { CORE_KEYS, coreVersion, domainOf, extractCore } from "./core.js";
 import {
+  countedOperatorsFor,
   deriveEntry,
   registeredOperatorsAt,
   trustedOperatorsAt,
@@ -63,12 +64,21 @@ import { canonicalize } from "./hash.js";
 import { decodeProof, verifyInclusion } from "./merkle.js";
 import { snapshotHash } from "./normalize.js";
 import {
+  ACCOUNT_BINDING_SUNSET,
+  ACCOUNT_BINDING_TIERS,
   authorityHostsFor,
+  CONFIRMATION_VENUES,
+  COUNTING_BINDING_KINDS,
   DEFAULT_DOMAIN,
   NORM_VERSION,
+  PERIMETER_WORD,
   SCHEMA_VERSION,
   voteQuestion,
 } from "./policy.js";
+import {
+  isPerimeterOperator,
+  parseCommunityOperatorId,
+} from "./registry.js";
 import { validateEntry } from "./schema.js";
 import {
   sealFor,
@@ -286,6 +296,41 @@ export const CHECKS: readonly EntryCheck[] = Object.freeze([
   "seals",
   "seal",
 ] as const);
+
+/**
+ * The five ways an account-bound line can be wrong (decision D-142).
+ *
+ * Named here rather than written inline where they are raised, because each one
+ * is a different sentence to the reader holding the bundle and a report that
+ * blurred them would send that reader looking for the wrong thing:
+ *
+ * `account_binding_proof_invalid` — the captures do not check out: a hash the
+ * binding names is not in the bundle, or the bytes under it are not the comment
+ * or the profile the binding says they are.
+ * `account_binding_out_of_scope` — the entry's tier is not one the rung may
+ * count toward (`ACCOUNT_BINDING_TIERS`, `stated` alone).
+ * `account_binding_too_new` — the account was created at or after the entry was
+ * submitted, so it was made for this entry as far as the record can tell.
+ * `account_binding_after_sunset` — the promoting decision was signed at or
+ * after `ACCOUNT_BINDING_SUNSET`, where the rung no longer forms a consensus.
+ * `perimeter_line_counted` — a line from one of nomankind's own accounts
+ * (`PERIMETER_ACCOUNTS`) was counted into a consensus. Sealing and showing such
+ * a line is correct; counting it is the record verifying itself.
+ *
+ * All five are raised under the existing `community_binding` check: an account
+ * binding is a community binding, and a sixth check name would say a reader has
+ * two things to look at where it has one. D-142: logic in the kernel pass.
+ */
+export const ACCOUNT_BINDING_REFUSALS = Object.freeze({
+  proof_invalid: "account_binding_proof_invalid",
+  out_of_scope: "account_binding_out_of_scope",
+  too_new: "account_binding_too_new",
+  after_sunset: "account_binding_after_sunset",
+  perimeter_counted: "perimeter_line_counted",
+} as const);
+
+export type AccountBindingRefusal =
+  (typeof ACCOUNT_BINDING_REFUSALS)[keyof typeof ACCOUNT_BINDING_REFUSALS];
 
 /** Every attestation check, in run order. */
 export const ATTESTATION_CHECKS: readonly AttestationCheck[] = Object.freeze([
@@ -973,9 +1018,43 @@ async function checkCommunityBindings(
   bundle: LogBundle,
   entryId: string,
   entryDomain: string,
+  /**
+   * The entry's own signed core, for the two facts the account rung is judged
+   * against (decision D-142 item 3): the tier it claims, and the instant it was
+   * submitted. The core and not the stored entry, because both are fields the
+   * author signed — a rule read off a field nobody signed would be a rule an
+   * edit could switch off.
+   */
+  entryCore: Json,
   trust: ConfirmationTrust,
   report: Report,
 ): Promise<void> {
+  const claimedTier = entryCore["evidence_tier"];
+  const tierInScope =
+    typeof claimedTier === "string" &&
+    (ACCOUNT_BINDING_TIERS as readonly string[]).includes(claimedTier);
+  const submittedAt = entryCore["submitted_at"];
+  /**
+   * The operators this entry's consensus counted, off the bundle's own fold
+   * (decision D-142, the review of #105).
+   *
+   * Every rule below that is about a COUNTED line asks this first, because the
+   * rules are about counting. A line the fold did not count is a line that
+   * moved nothing — an account statement, sealed and shown — and judging it by
+   * the rules for counted lines would refuse a bundle for holding a comment
+   * that changed nothing, which is not a fault a clone can have.
+   *
+   * It is the same fold derivation runs, so the verifier and the record cannot
+   * disagree about which lines were in the room.
+   */
+  const counted = new Set(countedOperatorsFor(bundle.events, entryId));
+  /**
+   * When this entry's consensus closed, recomputed rather than read: the
+   * promoting decision's own instant, which is where the sunset is asked
+   * (D-142 item 4). Null while the entry has verified nothing, and then there
+   * is no promoting decision for the sunset to be read at.
+   */
+  const promotedAt = promotingInstantOf(bundle, entryId);
   const ordered = inSeqOrder(bundle.events);
   for (const event of ordered) {
     if ((event?.type as string) !== "community_validation") continue;
@@ -1068,6 +1147,23 @@ async function checkCommunityBindings(
         boundBinding = binding;
         continue;
       }
+      // The upgrade off the account rung (decision D-142), folded here for the
+      // reason the rotation below is: what a line is judged by is the binding
+      // the log held for its operator AT ITS OWN POSITION, and an account that
+      // published a key after this line was written did not publish it before.
+      if (kind === "community_operator_bound") {
+        const fields = isRecord(earlier.payload)
+          ? (earlier.payload as Json)
+          : {};
+        if (fields["operator"] !== operator) continue;
+        const binding = fields["binding"];
+        if (!isRecord(binding)) continue;
+        if (!isKeyBinding(binding)) continue;
+        boundAgent =
+          typeof fields["agent"] === "string" ? fields["agent"] : null;
+        boundBinding = binding;
+        continue;
+      }
       if (kind !== "key_rotated") continue;
       const fields = isRecord(earlier.payload) ? (earlier.payload as Json) : {};
       if (fields["operator"] !== operator) continue;
@@ -1096,6 +1192,109 @@ async function checkCommunityBindings(
     }
     const registered = boundBinding;
 
+    // Nomankind's own accounts (decision D-142). A line from one of them is
+    // sealed, shown, and counted toward nothing — and the fault this names is
+    // the last of those failing: a perimeter operator among the operators the
+    // consensus counted.
+    //
+    // Only among the counted ones. A perimeter line sitting uncounted beside a
+    // consensus is the rule working, and every such line sealed before D-142
+    // carries no perimeter word because the field did not exist — so a check
+    // on the word alone would fail every published mirror for rows that are
+    // exactly as they should be (the review of #105). What the word is for is
+    // the disclosure on the page; what this is for is the counting.
+    //
+    // With this build's fold the set can never hold one, because the fold
+    // refuses a perimeter operator before it reads the rung. That is the point:
+    // this is the invariant stated where a reader can see it, and it fires
+    // against a fork whose fold lost it. A record that really did verify an
+    // entry on its own account fails the `derived` check beside this one, on
+    // the status and the verified_at it cannot reproduce.
+    if (isPerimeterOperator(operator) && counted.has(operator)) {
+      report.add(
+        "community_binding",
+        field,
+        ACCOUNT_BINDING_REFUSALS.perimeter_counted,
+        briefValue(PERIMETER_WORD),
+        briefValue(payload["perimeter"]),
+      );
+      continue;
+    }
+
+    // The account rung. The captures are checked on every line that stands on
+    // it — they are what the rung IS, and a binding nobody can recheck is a
+    // fault whatever the line went on to do — and the three scope rules are
+    // checked only on the lines the consensus counted, because every one of
+    // them is a rule about counting. An out-of-scope line the fold left
+    // uncounted is the rules working, not a clone somebody edited (the review
+    // of #105); the door will stop sealing those at ingestion
+    // (`communityLineDisposition`), and a mirror written before it did is not
+    // wrong about anything.
+    if (registered["kind"] === "account") {
+      if (
+        !(await accountCapturesHold(
+          bundle,
+          registered,
+          proof,
+          typeof payload["venue"] === "string"
+            ? (payload["venue"] as string)
+            : "",
+          handle,
+          entryId,
+        ))
+      ) {
+        report.add(
+          "community_binding",
+          field,
+          ACCOUNT_BINDING_REFUSALS.proof_invalid,
+        );
+        continue;
+      }
+      if (counted.has(operator)) {
+        if (!tierInScope) {
+          report.add(
+            "community_binding",
+            field,
+            ACCOUNT_BINDING_REFUSALS.out_of_scope,
+            briefValue([...ACCOUNT_BINDING_TIERS].join(",")),
+            briefValue(claimedTier),
+          );
+          continue;
+        }
+        const createdAt = registered["account_created_at"];
+        if (
+          typeof submittedAt !== "string" ||
+          typeof createdAt !== "string" ||
+          !isBefore(createdAt, submittedAt)
+        ) {
+          report.add(
+            "community_binding",
+            field,
+            ACCOUNT_BINDING_REFUSALS.too_new,
+            briefValue(submittedAt),
+            briefValue(createdAt),
+          );
+          continue;
+        }
+        // The sunset, read at the promoting decision's own instant and nowhere
+        // else (D-142 item 4) — the same instant the fold reads it at, because
+        // it is one rule. A line posted years before a consensus that closed
+        // after the rung did is still a line that counted toward a consensus
+        // the rules refuse, and reading the sunset on the line instead would
+        // have called that bundle clean.
+        if (promotedAt !== null && !isBefore(promotedAt, ACCOUNT_BINDING_SUNSET)) {
+          report.add(
+            "community_binding",
+            field,
+            ACCOUNT_BINDING_REFUSALS.after_sunset,
+            briefValue(ACCOUNT_BINDING_SUNSET),
+            briefValue(promotedAt),
+          );
+          continue;
+        }
+      }
+    }
+
     let bound = false;
     if (isRecord(proof) && proof["kind"] === "registry") {
       bound = await verifyConfirmationProof(proof["proof"], trust, {
@@ -1109,6 +1308,13 @@ async function checkCommunityBindings(
         registered,
         canonicalConfirmationLine(line),
       );
+    } else if (isRecord(proof) && proof["kind"] === "account") {
+      // Already settled above, and settled harder than this line could be: the
+      // captures were checked against the binding and against the bundle. What
+      // is NOT here is a signature, and its absence is the rung — nobody signed
+      // this, which is exactly what "the board authenticated the author and
+      // nothing else did" means.
+      bound = true;
     }
     if (!bound) {
       report.add("community_binding", field, "community_binding_invalid");
@@ -1135,6 +1341,298 @@ async function checkCommunityBindings(
     if (!attested) {
       report.add("community_binding", field, "community_domain_unattested");
     }
+  }
+
+  // The upgrades (decision D-142), checked like the registrations they amend.
+  // An operator's id is its account, so the only thing an upgrade can say is
+  // that the same account now stands on a key — and the three ways of lying
+  // about that are all here: an operator the log never registered, a binding
+  // that is not stronger than the one it replaces, and a key nobody published
+  // on a page this bundle carries.
+  for (const event of ordered) {
+    if ((event?.type as string) !== "community_operator_bound") continue;
+    const payload = isRecord(event.payload) ? (event.payload as Json) : {};
+    const field = `/events/${event.seq}`;
+    const operator = payload["operator"];
+    const agent = payload["agent"];
+    const binding = payload["binding"];
+    if (
+      typeof operator !== "string" ||
+      typeof agent !== "string" ||
+      !isRecord(binding) ||
+      !isHash(payload["fingerprint"])
+    ) {
+      report.add("community_binding", field, "community_binding_invalid");
+      continue;
+    }
+    let registered = false;
+    for (const earlier of ordered) {
+      if (earlier.seq >= event.seq) break;
+      if ((earlier?.type as string) !== "community_operator_registered") {
+        continue;
+      }
+      const fields = isRecord(earlier.payload) ? (earlier.payload as Json) : {};
+      if (fields["operator"] === operator) registered = true;
+    }
+    if (!registered) {
+      report.add("community_binding", field, "community_operator_unregistered");
+      continue;
+    }
+    // Stronger, and only stronger: `registry` or `profile`. An upgrade naming
+    // an account binding says nothing the registration did not, and D-142 has
+    // no rung below account for one to fall to.
+    if (!isKeyBinding(binding)) {
+      report.add(
+        "community_binding",
+        field,
+        "community_binding_invalid",
+        briefValue([...COUNTING_BINDING_KINDS].join(",")),
+        briefValue(binding["kind"]),
+      );
+      continue;
+    }
+    // And on a proof of the same kind, checked. Without one an upgrade is the
+    // record's own word that a key exists somewhere, which is the thing a
+    // binding exists to replace and which no reader could falsify (the review
+    // of #105). The fold refuses such an event too (src/derive.ts,
+    // `communityOperatorsAt`), so the rung does not lift on either side.
+    const upgradeProof = payload["proof"];
+    if (!isRecord(upgradeProof) || upgradeProof["kind"] !== binding["kind"]) {
+      report.add(
+        "community_binding",
+        field,
+        "community_binding_invalid",
+        briefValue(binding["kind"]),
+        briefValue(isRecord(upgradeProof) ? upgradeProof["kind"] : null),
+      );
+      continue;
+    }
+
+    if (binding["kind"] === "registry") {
+      // A registry upgrade's proof is a registry proof and is checked by the
+      // same code a line's is, against the same pin: a witnessed leaf in the
+      // founding registry's log, for this handle, naming this event's own
+      // fingerprint.
+      const parsed = parseCommunityOperatorId(operator);
+      const bound = await verifyConfirmationProof(
+        upgradeProof["proof"],
+        trust,
+        {
+          handle: parsed === null ? operator : parsed.handle,
+          fingerprint: payload["fingerprint"] as string,
+        },
+      );
+      if (!bound) {
+        report.add("community_binding", field, "community_binding_invalid");
+      }
+      continue;
+    }
+
+    // A profile binding is a key on a page, so the page has to be in the
+    // bundle under the hash the binding names, with that key in its bytes —
+    // the same two facts `verifyProfileBinding` asks of a registration's.
+    const captureHash = payload["capture_hash"];
+    const capture =
+      typeof captureHash === "string"
+        ? bundle.captures?.[captureHash]
+        : undefined;
+    let shows = false;
+    try {
+      const publicKey = binding["public_key"];
+      if (capture !== undefined && typeof publicKey === "string") {
+        const bytes = base64Decode(
+          (capture as unknown as Json)["body_base64"] as string,
+        );
+        shows = new TextDecoder().decode(bytes).includes(publicKey);
+      }
+    } catch {
+      shows = false;
+    }
+    if (!shows) {
+      report.add("community_binding", field, "community_binding_invalid");
+    }
+  }
+}
+
+/**
+ * When this entry's consensus closed, off the bundle's own fold.
+ *
+ * The promoting decision's `verified_at`, recomputed and never read from the
+ * stored entry: the sunset is a rule about when a consensus formed, and reading
+ * the instant off the row being checked would let the row choose its own
+ * deadline. Null while the entry has verified nothing.
+ */
+function promotingInstantOf(bundle: LogBundle, entryId: string): string | null {
+  try {
+    const derived = deriveEntry(bundle.events, entryId, { now: bundle.as_of });
+    const at = (derived.entry as unknown as Json)["verified_at"];
+    return typeof at === "string" && at !== "" ? at : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a binding is one of the two the world can recheck against a key.
+ *
+ * `COUNTING_BINDING_KINDS` in src/policy.ts, asked of a payload rather than of
+ * a type: this side reads a stranger's bytes.
+ */
+function isKeyBinding(binding: Json): boolean {
+  return (
+    typeof binding["kind"] === "string" &&
+    (COUNTING_BINDING_KINDS as readonly string[]).includes(
+      binding["kind"] as string,
+    )
+  );
+}
+
+/** Whether a hash is one this record could have written: `sha256:<64 hex>`. */
+function isHash(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
+/**
+ * Whether an archived capture's bytes really hash to the hash it is filed
+ * under, recomputed under the same normalization a citation's snapshot is.
+ *
+ * The whole of what an account binding proves, so it is recomputed rather than
+ * read: a capture map is a stranger's object, and a key in it is a claim until
+ * the bytes under it are hashed again.
+ */
+async function captureHashes(capture: unknown, claimed: string): Promise<boolean> {
+  if (!isRecord(capture)) return false;
+  let bytes: Uint8Array;
+  try {
+    bytes = base64Decode(capture["body_base64"] as string);
+  } catch {
+    return false;
+  }
+  const contentType = capture["content_type"];
+  const result = await snapshotHash(
+    bytes,
+    typeof contentType === "string" ? contentType : null,
+  );
+  return result.ok && result.hash === claimed;
+}
+
+/** Whether one instant is strictly earlier than another, both parsed. */
+function isBefore(value: string, limit: string): boolean {
+  const at = Date.parse(value);
+  const bound = Date.parse(limit);
+  if (Number.isNaN(at) || Number.isNaN(bound)) return false;
+  return at < bound;
+}
+
+/**
+ * An account binding's two captures, rechecked against the bundle (D-142).
+ *
+ * The rung carries no key and therefore no signature, so what a reader can
+ * check is what was archived and who it was archived from:
+ *
+ * - two hashes this record could have written, both present in the bundle and
+ *   both hashing back to their own bytes — the profile's named identically by
+ *   the binding and by the proof, because the profile is the operator's and is
+ *   fixed at its registration, and the comment's read off the proof, because
+ *   every line has a comment of its own;
+ * - the comment capture's bytes naming this entry, so the page under that hash
+ *   is the page the line was read from and not some other page of the same
+ *   board;
+ * - the profile capture's bytes naming this handle, so the account the rung is
+ *   about is the account the capture is of;
+ * - and both URLs under the venue's own origin (`CONFIRMATION_VENUES`), so a
+ *   binding cannot point at a page on a site the record never reads.
+ *
+ * The entry id and the handle, and not the canonical confirm line itself: a
+ * capture is whatever the venue's public door answered, and on two of the three
+ * venues that is a JSON rendering of the comment rather than its raw text
+ * (D-138 item 2, and K2's adapters), so the line's exact bytes may be escaped,
+ * re-wrapped or split across fields. The entry id and the handle are opaque
+ * tokens that survive every rendering of the same content, which is what makes
+ * them the two things worth asking for. So the claim is: these bytes are a page
+ * of this venue, about this entry and this account, archived under these
+ * hashes, and nobody signed any of it.
+ *
+ * Never throws: a stranger's proof is always answered with a verdict.
+ */
+async function accountCapturesHold(
+  bundle: LogBundle,
+  binding: Json,
+  proof: unknown,
+  venue: string,
+  handle: string,
+  entryId: string,
+): Promise<boolean> {
+  try {
+    if (!isRecord(proof)) return false;
+
+    // The profile is the OPERATOR'S and is fixed at the registration, so the
+    // proof may not name one of its own: the account the rung is about is the
+    // account the registration captured, and a line is by that operator or by
+    // nobody.
+    const profile = binding["profile_capture_hash"];
+    if (!isHash(profile)) return false;
+    if (proof["profile_capture_hash"] !== profile) return false;
+
+    // The comment is the LINE'S, and every line has its own, so it is read off
+    // the proof. What ties it to this operator is the profile beside it and the
+    // registration behind both; what ties it to this entry is its own bytes.
+    const comment = proof["comment_capture_hash"];
+    if (!isHash(comment)) return false;
+
+    // Both of the registration's pages on the venue's own site. The origin is
+    // policy's (`CONFIRMATION_VENUES`), so a venue this build does not publish
+    // has no origin to be under and the binding is refused rather than waved
+    // through.
+    const origin = venueOrigin(venue);
+    if (origin === null) return false;
+    if (!isUnder(binding["comment_url"], origin)) return false;
+    if (!isUnder(binding["profile_url"], origin)) return false;
+
+    for (const [hash, names] of [
+      [comment, entryId],
+      [profile, handle],
+    ] as const) {
+      const capture = bundle.captures?.[hash];
+      if (capture === undefined) return false;
+      if (!(await captureHashes(capture, hash))) return false;
+      if (!captureNames(capture, names)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The origin a venue's public doors answer on, or null for one we do not publish. */
+function venueOrigin(venue: string): string | null {
+  const row = CONFIRMATION_VENUES.find((each) => each.venue === venue);
+  return row === undefined ? null : row.origin;
+}
+
+/**
+ * Whether a URL is on an origin, parsed rather than matched as a prefix.
+ *
+ * `https://example.test.evil.com/` starts with no origin it is not on, and a
+ * prefix test would have said otherwise.
+ */
+function isUnder(value: unknown, origin: string): boolean {
+  if (typeof value !== "string") return false;
+  try {
+    return new URL(value).origin === new URL(origin).origin;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether an archived capture's bytes name a token: the id, or the handle. */
+function captureNames(capture: unknown, token: string): boolean {
+  if (!isRecord(capture) || token === "") return false;
+  try {
+    const bytes = base64Decode(capture["body_base64"] as string);
+    return new TextDecoder().decode(bytes).includes(token);
+  } catch {
+    return false;
   }
 }
 
@@ -1930,6 +2428,7 @@ async function runChecks(
       readable,
       entryId,
       domainOf(logCore as unknown as Parameters<typeof domainOf>[0]),
+      logCore as Json,
       options.confirmations ?? pinnedConfirmationTrust(),
       report,
     );
