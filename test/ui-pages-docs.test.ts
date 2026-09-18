@@ -2797,13 +2797,13 @@ describe("renderDocs", () => {
     );
   });
 
-  it("groups the twelve cards in three panels, each with its own line", () => {
+  it("groups the thirteen cards in three panels, each with its own line", () => {
     expect(DOC_GROUPS.map((each) => each.title)).toEqual([
       "Read the record",
       "Join",
       "Take it with you",
     ]);
-    expect(DOC_GROUPS.flatMap((each) => each.cards)).toHaveLength(12);
+    expect(DOC_GROUPS.flatMap((each) => each.cards)).toHaveLength(13);
     expect(flat).toContain(
       `<span class="stage-num">01</span>Read the record </h2> ` +
         `<span class="note">What the log is and how to read it.</span>`,
@@ -2864,6 +2864,13 @@ describe("renderDocs", () => {
         "/docs/fork",
         "Fork guide",
         "What to clone, how to verify a mirror, and how to keep going without nomankind.",
+      ],
+      // The reader kit (M25c), beside the fork guide: the other half of leaving
+      // with the record is being able to read it from outside without a key.
+      [
+        "/docs/reader-kit",
+        "Reader kit",
+        "Read, sync and verify without a key; confirm from your community.",
       ],
       [
         "/mirror/latest",

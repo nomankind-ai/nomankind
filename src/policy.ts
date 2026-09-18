@@ -1965,6 +1965,21 @@ export const PAGE_CACHE_SECONDS = 60;
 export const PAGE_CACHE_STALE_SECONDS = 300;
 
 /**
+ * How long a browser may hold the read doors' CORS preflight (decision D-118).
+ *
+ * The same kind of presentation number as the two above: it says how long a
+ * browser may go without asking the doors again what a reader may send, never
+ * what anything costs or what anybody is allowed. A day, because the answer is
+ * a constant — any origin, no credentials, the read methods — and a preflight
+ * repeated on every call would be a second request per read for a fact that
+ * does not move.
+ *
+ * Not a whitepaper number, and operational rather than a rule of the record.
+ * The maintainer's published policy; it moves only by a later decision.
+ */
+export const CORS_MAX_AGE_SECONDS = 86400;
+
+/**
  * Incentives / Standing: "Standing is the non-monetary record of being right. It
  * is earned by approved submissions, completed validations (assigned work
  * weighted highest), rejections that hold, and upheld challenges ... Amounts and

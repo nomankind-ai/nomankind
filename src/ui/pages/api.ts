@@ -25,6 +25,7 @@ import {
   CONFIRMATION_FORM_PREFIX,
   CONFIRMATION_SIGNATURE_TOKEN_PREFIX,
   CONFIRMATION_VENUES,
+  CORS_MAX_AGE_SECONDS,
   DISPUTE_STAKE_STANDING,
   DRAW_DRAFT_MAX_AGE_DAYS,
   FREE_READS_PER_DAY_GLOBAL,
@@ -1742,6 +1743,54 @@ npm run sync -- ${origin} --from 1 --limit ${LIST_PAGE_LIMIT} [--domain &lt;slug
         </p>
         <pre class="block mono">npm run mirror -- ${origin} ./mirror
 npm run verify-mirror -- ./mirror/&lt;env&gt; [--captures &lt;url-or-dir&gt;] [--entry &lt;id&gt;]</pre>
+      </section>
+
+      <section class="panel" id="reader-kit">
+        <h2 class="panel-title">Reader kit</h2>
+        <p class="note">
+          <a href="/docs/reader-kit">The reader kit</a> is the short way in for
+          somebody who wants to read this log rather than join it: read one
+          entry, sync the delta, verify what came back against the seal, and
+          confirm an entry from a community account with
+          <span class="mono">npm run confirm</span> — no key, no registration,
+          no account here at all. The document is served here beside the fork
+          guide, and it names every door it uses, so a reader can check the kit
+          against this page line by line.
+        </p>
+        <p class="note">
+          The read doors answer a browser from any origin:
+          <span class="mono">access-control-allow-origin: *</span> on every
+          <span class="mono">GET</span> and <span class="mono">HEAD</span>, with
+          <span class="mono">access-control-expose-headers</span> naming the
+          <span class="mono">x-nomankind-*</span> tier, limit, remaining and
+          archive-hash headers and
+          <span class="mono">retry-after</span>, and a preflight answered
+          <span class="mono">204</span> with
+          <span class="mono">GET, HEAD, OPTIONS</span> and a
+          <span class="mono">max-age</span> of ${CORS_MAX_AGE_SECONDS} seconds.
+          No credentials header is sent, ever, and no write door carries any of
+          this: a page in a browser may read the whole record and may not write
+          a word of it. A key presented as
+          <span class="mono">Authorization: Bearer</span> is a header a caller
+          sets deliberately, so a keyed read is answered cross-origin like any
+          other; <span class="mono">POST /keys/free</span> and the submit door
+          are not, and their <span class="mono">OPTIONS</span> is the
+          <span class="mono">405</span> it has always been.
+        </p>
+        <p class="note">
+          One note about the client itself. Send a
+          <span class="mono">User-Agent</span> that names it: the kit sends
+          <span class="mono">nomankind-reader-kit/&lt;version&gt;</span> on every
+          call, and a client that says what it is can be allowed, metered or
+          refused on purpose where one that says nothing leaves an operator
+          guessing. The stock Python agents —
+          <span class="mono">python-requests/…</span>,
+          <span class="mono">Python-urllib/…</span> — are let through on the demo
+          and app deployments by an edge exception made on 2026-09-18, so a
+          notebook that forgot to set one still reads the log. That is an
+          exception and not the rule: it can be narrowed, and it says nothing
+          about any other deployment or any other stock agent.
+        </p>
       </section>
 
       <section class="panel">

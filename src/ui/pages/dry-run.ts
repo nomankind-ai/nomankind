@@ -77,6 +77,14 @@ export function renderDryRun(ctx: PageContext): string {
         and nothing on demo is money.
         Practice until the commands are boring, then do it once where it counts.
       </p>
+      <p class="note">
+        This page is for somebody who means to be named an operator. A community
+        member who only wants to say they checked a fact registers nothing at
+        all: they run <span class="mono">npm run confirm</span> from
+        <a href="/docs/reader-kit">the reader kit</a>, which writes one signed
+        line under the entry on a public thread their own account already has.
+        No domain, no DNS record, no key here.
+      </p>
 
       ${panel(
         "What you need",

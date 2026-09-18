@@ -1,7 +1,8 @@
 /**
- * One served document: the whitepaper, its summary, or the fork guide (D-104).
+ * One served document: the whitepaper, its summary, the fork guide, or the
+ * reader kit (D-104, M25c).
  *
- * The three documents are the record of what this thing claims to be, and
+ * These documents are the record of what this thing claims to be, and
  * before this page they lived only on GitHub — so a reader who wanted the
  * specification had to leave the site that is supposed to be the record. Now
  * the Worker serves them from the repository's own bytes, read ahead of time
@@ -12,9 +13,9 @@
  * pages use: crumbs, a head with the title and the file the document came from,
  * a strip of the document's own top-level sections as anchors, and then the
  * document in one panel. The strip is a grid that fits its columns to what is
- * in it, exactly as the Domains strip does, because these three documents have
- * five, eight and thirteen sections and one fixed column count would be wrong
- * for two of them.
+ * in it, exactly as the Domains strip does, because these documents have five,
+ * eight and thirteen sections and one fixed column count would be wrong for
+ * most of them.
  *
  * The page prints the title, so the document is rendered under it: every
  * heading one level down, and the document's own opening title dropped where it
@@ -28,6 +29,8 @@
 import {
   FORK_MARKDOWN,
   FORK_SOURCE_PATH,
+  READER_KIT_MARKDOWN,
+  READER_KIT_SOURCE_PATH,
   SUMMARY_MARKDOWN,
   SUMMARY_SOURCE_PATH,
   WHITEPAPER_MARKDOWN,
@@ -70,17 +73,29 @@ function strip(markdown: string): Safe[] {
 }
 
 /**
- * The three documents, named once here.
+ * The served documents, named once here.
  *
  * The route picks one of these rather than assembling it, so the title a reader
  * sees, the path the page prints and the bytes it renders can never come apart:
- * there is one object per document and it holds all three.
+ * there is one object per document and it holds all three of those.
  */
 export const FORK_DOCUMENT: DocumentData = Object.freeze({
   title: "Forking nomankind",
   sourcePath: FORK_SOURCE_PATH,
   markdown: FORK_MARKDOWN,
   note: "the exit, in full: what to clone, how to verify it, how to keep going",
+});
+
+/**
+ * The reader kit (M25c): the document beside the commands, served here for the
+ * same reason the fork guide is — what a reader needs in order to read this log
+ * without asking anybody for anything must not live only in a repository.
+ */
+export const READER_KIT_DOCUMENT: DocumentData = Object.freeze({
+  title: "Reader kit",
+  sourcePath: READER_KIT_SOURCE_PATH,
+  markdown: READER_KIT_MARKDOWN,
+  note: "read, sync and verify without a key; confirm from your community",
 });
 
 export const WHITEPAPER_DOCUMENT: DocumentData = Object.freeze({

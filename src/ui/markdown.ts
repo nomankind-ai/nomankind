@@ -29,7 +29,7 @@ import { escapeHtml, raw, safeHref, type Safe } from "./html.js";
 const BLOB_BASE = "https://github.com/nomankind-ai/nomankind/blob/main/";
 
 /**
- * The three documents this Worker serves, by the file name a sibling document
+ * The documents this Worker serves, by the file name a sibling document
  * links them as. A cross-reference between them stays on this site: the reader
  * following it asked for the other document, not for GitHub's view of it.
  */
@@ -37,6 +37,7 @@ const SERVED: Readonly<Record<string, string>> = Object.freeze({
   "WHITEPAPER.md": "/docs/whitepaper",
   "SUMMARY.md": "/docs/summary",
   "FORK.md": "/docs/fork",
+  "READER-KIT.md": "/docs/reader-kit",
 });
 
 /** One heading of the document, as the strip across the top shows it. */

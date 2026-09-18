@@ -52,7 +52,7 @@
  * has to work before any migration has run, so it asks D1 the one question that
  * needs no schema.
  *
- * Three rules live around the routing rather than inside it, because each is
+ * Four rules live around the routing rather than inside it, because each is
  * one rule and a door that had to remember it would be a door that could
  * forget. The anonymous pages are served through the Cache API (the QA of
  * 2026-09-12): Cloudflare does not cache a Worker's own response on a
@@ -66,7 +66,10 @@
  * and JSON to everyone else carries `vary: Accept` on both variants and on its
  * refusals. And a HEAD is a GET
  * without the body: every read door answers it, and the body is dropped once,
- * here.
+ * here. And the read doors answer a browser from any origin (decision D-118):
+ * the two CORS headers go on every GET and HEAD a read door answers, a
+ * browser's preflight to one of them is answered 204, and a write door — the
+ * free key door and the submit door included — carries none of it.
  *
  * No policy number lives here — nothing in this file is a policy number; the
  * bare integers are HTTP status codes, and the cache's two are
@@ -82,9 +85,17 @@
 import { DrandReader, type BeaconReader } from "../adapters/beacon.js";
 import { DohResolver, type DnsResolver } from "../adapters/dns.js";
 import { WebFetcher, type SnapshotFetcher } from "../adapters/fetch.js";
-import { PAGE_CACHE_SECONDS, PAGE_CACHE_STALE_SECONDS } from "../policy.js";
+import {
+  CORS_MAX_AGE_SECONDS,
+  PAGE_CACHE_SECONDS,
+  PAGE_CACHE_STALE_SECONDS,
+} from "../policy.js";
 import { HEADER_AGENT } from "../request.js";
-import { APP_CSS_HREF, htmlResponse } from "../ui/html.js";
+import {
+  APP_CSS_HREF,
+  STRICT_TRANSPORT_SECURITY,
+  htmlResponse,
+} from "../ui/html.js";
 import { renderNotFound } from "../ui/pages/errors.js";
 import {
   ENVIRONMENT_MISCONFIGURED,
@@ -463,6 +474,130 @@ function forPageCache(response: Response): Response {
   });
 }
 
+// ---------------------------------------------------------------------------
+// The read doors answer any origin (decision D-118)
+// ---------------------------------------------------------------------------
+
+/**
+ * Any origin, and no credentials, ever.
+ *
+ * The record is public and CC0 from the seal that covers it, so a page in a
+ * browser may read it exactly as an agent may: a reader who wants to build a
+ * dashboard over this log should not have to run a proxy to get past the same
+ * origin rule. `*` and not an echo of the caller's `Origin`, because an echo is
+ * a per-origin answer and these doors have one answer for everybody — which is
+ * also what lets the edge cache hold a page with these headers already on it.
+ *
+ * No `access-control-allow-credentials` anywhere, on purpose. With `*` a browser
+ * sends no cookie and no `Authorization` of its own accord, and a key is a
+ * header a caller sets deliberately rather than an ambient credential — so
+ * there is nothing for a hostile page to spend on a reader's behalf. The write
+ * doors carry none of this: a signed write is never something a browser should
+ * be able to make on somebody else's say-so.
+ */
+const CORS_ALLOW_ORIGIN = "*";
+
+/**
+ * What a reader may read off the answer.
+ *
+ * A browser hides every response header but a handful unless the door names
+ * them, so the three the access gate sets (src/worker/access.ts) and the one
+ * the capture doors set (src/worker/submit.ts) are named here — a reader
+ * watching their own bucket drain, or checking the address the archive served
+ * bytes under, must be able to see them from a page. `retry-after` is the read
+ * door's own (src/worker/read.ts).
+ */
+const CORS_EXPOSE_HEADERS = [
+  "x-nomankind-tier",
+  "x-nomankind-limit",
+  "x-nomankind-remaining",
+  "x-nomankind-archive-hash",
+  "retry-after",
+].join(", ");
+
+/** The methods a preflight is answered with: the read methods, and itself. */
+const CORS_ALLOW_METHODS = `${READ_METHODS}, OPTIONS`;
+
+/**
+ * What a reader may send. `authorization` is the key header — a key is asked
+ * for at `POST /keys/free` and presented as `Bearer <key>` — and the signed
+ * write headers are deliberately absent: nothing signed is read cross-origin.
+ */
+const CORS_ALLOW_HEADERS = "accept, authorization, content-type";
+
+/** The methods a preflight may ask about and be told yes. */
+const PREFLIGHT_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Whether this 405 came from a door that takes a read at all.
+ *
+ * The doors already say which methods they take, in `Allow`, so no second list
+ * of read doors lives here to fall out of step with them: a refusal naming
+ * `GET` is a read door refusing a method, and one naming only `POST` — the free
+ * key door, the submit door on a path of its own — is a write door, which gets
+ * no CORS header of any kind.
+ */
+function allowsRead(response: Response): boolean {
+  if (response.status !== 405) return false;
+  const allow = response.headers.get("allow");
+  if (allow === null) return false;
+  return allow.split(",").some((each) => each.trim().toUpperCase() === "GET");
+}
+
+/**
+ * The CORS headers, added once around the dispatch and nowhere else.
+ *
+ * A GET or a HEAD carries them whatever answered — a page, a JSON door, a 404,
+ * a refusal — because they are constant and because a reader has to be able to
+ * read an error cross-origin as well as an answer. The one exception is a read
+ * method refused by a door that takes no read: a write door says nothing to a
+ * browser. A keyed or signed GET carries them too: with `*` and no credentials
+ * header the browser sent nothing ambient, so there is nothing to protect.
+ */
+function withCors(request: Request, response: Response): Response {
+  if (request.method === "OPTIONS") return preflight(request, response);
+  if (request.method !== "GET" && request.method !== "HEAD") return response;
+  if (response.status === 405 && !allowsRead(response)) return response;
+  const headers = new Headers(response.headers);
+  headers.set("access-control-allow-origin", CORS_ALLOW_ORIGIN);
+  headers.set("access-control-expose-headers", CORS_EXPOSE_HEADERS);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/**
+ * The preflight: 204 and the four headers, or the answer the door already gave.
+ *
+ * A browser's preflight carries `Origin` and `Access-Control-Request-Method`,
+ * and it is that request and only that one which is answered here — a bare
+ * `OPTIONS` from a client that is not asking a browser's question gets the 405
+ * with `Allow` it has always got. A preflight for a write is not answered
+ * either: the requested method has to be one of the read methods, and the door
+ * has to be one that takes a read.
+ */
+function preflight(request: Request, response: Response): Response {
+  if (request.headers.get("origin") === null) return response;
+  const asked = request.headers.get("access-control-request-method");
+  if (asked !== null && !PREFLIGHT_METHODS.has(asked.trim().toUpperCase())) {
+    return response;
+  }
+  if (!allowsRead(response)) return response;
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "access-control-allow-origin": CORS_ALLOW_ORIGIN,
+      "access-control-allow-methods": CORS_ALLOW_METHODS,
+      "access-control-allow-headers": CORS_ALLOW_HEADERS,
+      "access-control-max-age": String(CORS_MAX_AGE_SECONDS),
+      "cache-control": "no-store",
+      "strict-transport-security": STRICT_TRANSPORT_SECURITY,
+    },
+  });
+}
+
 /**
  * The one answer a misconfigured deployment gives, on every path.
  *
@@ -487,11 +622,12 @@ function misconfigured(env: Env): Response {
 /**
  * The router. Exported by name so tests can call it without a fetch stack.
  *
- * Three things happen around the dispatch below and nowhere else in the system:
+ * Four things happen around the dispatch below and nowhere else in the system:
  * the anonymous pages are looked up in and written to the edge cache, a
  * negotiated path's answer is given `vary: Accept` on whichever variant
- * answered, and a HEAD is turned into its GET without a body. Each is one rule
- * in one place, so no door can forget it.
+ * answered, a read door's answer is given the CORS headers (D-118), and a HEAD
+ * is turned into its GET without a body. Each is one rule in one place, so no
+ * door can forget it.
  */
 export async function handleRequest(
   request: Request,
@@ -525,9 +661,13 @@ export async function handleRequest(
     if (hit !== undefined) return hit;
   }
 
-  const answered = varyOnNegotiated(
-    url.pathname,
-    await dispatch(request, env, deps),
+  // The CORS headers go on before the page is stored, so a cached page carries
+  // them on the second read exactly as it did on the first: they are the same
+  // two headers for every reader (D-118), so there is nothing here for a cache
+  // to mix up and nothing to key on.
+  const answered = withCors(
+    request,
+    varyOnNegotiated(url.pathname, await dispatch(request, env, deps)),
   );
 
   if (cache !== undefined && key !== null && storable(url.pathname, answered)) {

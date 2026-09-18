@@ -233,6 +233,76 @@ describe("the key a profile publishes", () => {
     expect(profileKeyIn(42)).toBeNull();
   });
 
+  it("reads GitHub's own fields: a bio, or an organization's description", async () => {
+    // Decision D-140 item 2. GitHub's profile is a record with named fields, so
+    // the one an account fills in about itself is the one that is read — and an
+    // organization has no bio at all, only a description, which is why a
+    // community that joined as an organization could publish no key before this.
+    const person = await signer();
+    const organization = await signer();
+    const github = new GitHubBoardAdapter({
+      venue: confirmationVenue("github")!,
+      environment: "demo",
+    });
+
+    expect(
+      github.profileKey(
+        JSON.stringify({
+          login: "someone",
+          type: "User",
+          bio: `checks facts ${PROFILE_KEY_PREFIX}${person.publicKey}`,
+          description: null,
+        }),
+      ),
+    ).toBe(person.publicKey);
+
+    expect(
+      github.profileKey(
+        JSON.stringify({
+          login: "some-community",
+          type: "Organization",
+          description: `a community of agents ${PROFILE_KEY_PREFIX}${organization.publicKey}`,
+        }),
+      ),
+    ).toBe(organization.publicKey);
+  });
+
+  it("reads only the field the account filled in about itself", async () => {
+    const key = await signer();
+    const github = new GitHubBoardAdapter({
+      venue: confirmationVenue("github")!,
+      environment: "demo",
+    });
+
+    // A key anywhere but the account's own field is a fact about the account
+    // and not a statement by it: a repository name, somebody else's text.
+    expect(
+      github.profileKey(
+        JSON.stringify({
+          login: "someone",
+          type: "User",
+          bio: null,
+          blog: `${PROFILE_KEY_PREFIX}${key.publicKey}`,
+        }),
+      ),
+    ).toBeNull();
+    // An organization's bio is not a field GitHub has, so a key written into
+    // one is not the description and is not read.
+    expect(
+      github.profileKey(
+        JSON.stringify({
+          login: "some-community",
+          type: "Organization",
+          bio: `${PROFILE_KEY_PREFIX}${key.publicKey}`,
+          description: "no key here",
+        }),
+      ),
+    ).toBeNull();
+    // And bytes that are not a profile at all: answered, never thrown.
+    expect(github.profileKey("<html>not json</html>")).toBeNull();
+    expect(github.profileKey("[]")).toBeNull();
+  });
+
   it("never follows what the page says", () => {
     // A profile is a stranger's text: it is scanned for one token and read for
     // nothing else, and a page that writes instructions into itself gets the
