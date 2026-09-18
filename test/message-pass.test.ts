@@ -238,6 +238,7 @@ const sidecar: Sidecar = {
     {
       kind: "decision",
       class: "mixed",
+      binding: "key",
       seq: 14,
       at: "2026-09-08T13:00:00.000Z",
       operator: null,

@@ -284,6 +284,8 @@ describe("the class an entry is decided at", () => {
       {
         kind: "decision",
         class: "registered",
+        // Domain operators stand on keys, so the rung is `key` (D-142).
+        binding: "key",
         // The position of the decision that promoted it: the second approval.
         seq: log.events[log.events.length - 1]!.seq,
         at: log.events[log.events.length - 1]!.at,

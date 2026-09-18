@@ -168,6 +168,9 @@ describe("a verified entry", () => {
         agent: "1F916:k1",
         operator: "k1.example",
         kind: "domain",
+        // A domain operator stands on a key, and a community line sealed
+        // before D-142 names no rung and reads as one (D-142).
+        binding: "key",
         decision: "approve",
         assigned_random: false,
       },
@@ -175,6 +178,7 @@ describe("a verified entry", () => {
         agent: "1F916:k2",
         operator: "k2.example",
         kind: "domain",
+        binding: "key",
         decision: "approve",
         assigned_random: true,
       },
@@ -184,6 +188,7 @@ describe("a verified entry", () => {
         agent: "1F916:community",
         operator: "reddit:checker",
         kind: "community",
+        binding: "key",
         decision: "approve",
         assigned_random: false,
       },

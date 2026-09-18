@@ -94,6 +94,7 @@ const registeredSidecar: Sidecar = {
     {
       kind: "decision",
       class: "registered",
+      binding: "key",
       seq: 14,
       at: "2026-09-08T13:00:00.000Z",
       operator: null,
@@ -111,6 +112,7 @@ const communitySidecar: Sidecar = {
     {
       kind: "decision",
       class: "community",
+      binding: "key",
       seq: 14,
       at: "2026-09-08T13:00:00.000Z",
       operator: null,
@@ -118,6 +120,7 @@ const communitySidecar: Sidecar = {
     {
       kind: "reconfirmation",
       class: "registered",
+      binding: "key",
       seq: 41,
       at: "2026-09-14T09:00:00.000Z",
       operator: "k1.example",
@@ -135,6 +138,7 @@ const mixedSidecar: Sidecar = {
     {
       kind: "decision",
       class: "mixed",
+      binding: "key",
       seq: 14,
       at: "2026-09-08T13:00:00.000Z",
       operator: null,
