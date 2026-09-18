@@ -69,6 +69,7 @@ import {
   writeBoolean,
   writeJson,
   type D1Like,
+  type D1LikeResult,
   type D1LikeStatement,
   type Row,
 } from "./d1.js";
@@ -1657,14 +1658,40 @@ export async function operatorTierForAgent(
   db: D1Like,
   agentId: string,
 ): Promise<OperatorTierRow | null> {
-  const row = await db
+  const row = await operatorTierForAgentStatement(db, agentId).first<Row>();
+  return operatorTierOf(row);
+}
+
+/**
+ * The same read, as a statement rather than an answer.
+ *
+ * For the write door, which asks this and the two write counters in the same
+ * breath and should pay one round trip rather than three. The SQL and the
+ * shape of the row stay here either way: `operatorTierFrom` reads a batched
+ * result back through the same `operatorTierOf` the keyed read uses.
+ */
+export function operatorTierForAgentStatement(
+  db: D1Like,
+  agentId: string,
+): D1LikeStatement {
+  return db
     .prepare(
       `SELECT o.id AS id, o.trusted AS trusted, o.standing AS standing
        FROM agents a JOIN operators o ON o.id = a.operator_id
        WHERE a.agent_id = ? ${ONE_ROW}`,
     )
-    .bind(agentId)
-    .first<Row>();
+    .bind(agentId);
+}
+
+/** One batched tier result, read as the keyed read reads its own row. */
+export function operatorTierFrom(
+  result: D1LikeResult<Row> | undefined,
+): OperatorTierRow | null {
+  return operatorTierOf(result?.results?.[0] ?? null);
+}
+
+/** The one reading of a tier row, whichever way it was fetched. */
+function operatorTierOf(row: Row | null): OperatorTierRow | null {
   if (row === null) return null;
   const standing = row["standing"];
   return {
