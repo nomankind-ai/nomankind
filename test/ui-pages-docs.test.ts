@@ -2387,7 +2387,9 @@ describe("renderLanding", () => {
     expect(page).toContain("Lab-independent.");
     expect(page).toContain("For models that keep learning.");
     expect(page).toContain("No lab funds, runs, or validates the record.");
-    expect(page).toContain("The pool that started it is nomankind&#39;s own");
+    // D-142: the first three validators are outsiders, and the pool the
+    // maintainer would have named is a fallback it has not invoked.
+    expect(page).toContain("the first three validators are outsiders");
   });
 
   // Both doors are still on the page; where each one leads depends on the
@@ -2798,7 +2800,7 @@ describe("renderDocs", () => {
     // One constant, named in src/ui/pages/document.ts beside the document it is
     // the version of: the hub's head line, its whitepaper card, the document
     // page's note and the how-it-works head line all read it.
-    expect(WHITEPAPER_VERSION).toBe("v1.7");
+    expect(WHITEPAPER_VERSION).toBe("v1.8");
     expect(WHITEPAPER_DOCUMENT.note).toContain(WHITEPAPER_VERSION);
   });
 

@@ -524,10 +524,10 @@ describe("the doors around it", () => {
     expect(whitepaper).toContain(
       "a witness set drawn from the validators is the failure a witness set exists to catch",
     );
-    // And the marker is what says "since v1.6": the paper is v1.7 now, and the
+    // And the marker is what says "since v1.6": the paper is v1.8 now, and the
     // dated spec-change note is what carries the history rather than the
     // version line.
-    expect(whitepaper).toContain("*This is v1.7.");
+    expect(whitepaper).toContain("*This is v1.8.");
   });
 
   it("is a documentation page, so Docs stays the active nav item", async () => {
