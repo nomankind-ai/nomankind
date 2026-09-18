@@ -312,6 +312,9 @@ describe("a bounded export of a verified entry", () => {
       // event, but the registration behind it is a registry event a bounded
       // bundle does not carry.
       "community_binding",
+      // The rotations (D-095, D-097 item 3), for the same reason: which keys
+      // had been retired by a given position is a registry fact.
+      "key_rotation",
       "exclusions",
       "derived",
       "attestations",

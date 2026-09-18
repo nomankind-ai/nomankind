@@ -2268,6 +2268,23 @@ export const ALERT_DELIVERIES_PER_RUN = 8;
 export const ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE = 5;
 
 /**
+ * How many legacy plain secrets one sweep run wraps (decision D-118 item a).
+ *
+ * Migration 0026 added the wrapped column and could not fill it: wrapping needs
+ * the ALERT_SIGNING_KEY Worker secret, which no migration has, so the rows 0015
+ * wrote are converted by code and the sweep is where code runs on a clock. The
+ * same shape and the same reason as DUPLICATE_BACKFILL_PER_RUN, with a much
+ * smaller number: this pass shares its run with the deliveries above, each row
+ * costs an HKDF and an AES-GCM encrypt, and there are never many rows — an
+ * endpoint cap of ALERT_ENDPOINTS_PER_KEY per key means a deployment's whole
+ * backlog is measured in tens.
+ *
+ * On a deployment that has finished wrapping, or one with no key configured,
+ * the pass is one bounded index seek that comes back empty and writes nothing.
+ */
+export const ALERT_SECRETS_WRAPPED_PER_RUN = 4;
+
+/**
  * What a change alert can be about: the seven moments in an entry's life a
  * subscriber is told about. Every one of them is a fact already in the sealed
  * log, so an alert is a notification of something public and never a fact of
@@ -2629,6 +2646,7 @@ export const POLICY = Object.freeze({
   ALERT_EVENTS_PER_RUN,
   ALERT_DELIVERIES_PER_RUN,
   ALERT_ENDPOINT_TIMEOUTS_TO_DISABLE,
+  ALERT_SECRETS_WRAPPED_PER_RUN,
   ALERT_KINDS,
   MIRROR,
   NORM_VERSION,

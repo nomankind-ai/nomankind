@@ -831,7 +831,12 @@ describe("15. change alerts", () => {
 
   it("is idle while nobody has subscribed", () => {
     expect(stateOf(swept(), "change alerts")).toBe("idle");
-    expect(rowOf(swept(), "change alerts").last).toBe("no endpoint");
+    // The secrets note is on the line in every state (D-118 item a): a
+    // deployment with no endpoint yet is exactly the one whose maintainer wants
+    // to know whether the key is set before the first subscriber arrives.
+    expect(rowOf(swept(), "change alerts").last).toBe(
+      "no endpoint · secrets: plain (no ALERT_SIGNING_KEY)",
+    );
   });
 
   it("is idle with endpoints but nothing sealed to tell them about", () => {
@@ -839,7 +844,9 @@ describe("15. change alerts", () => {
       alerts: { endpoints: 2, cursor: -1, due: 0, failed: 0 },
     });
     expect(stateOf(input, "change alerts")).toBe("idle");
-    expect(rowOf(input, "change alerts").last).toBe("nothing sealed");
+    expect(rowOf(input, "change alerts").last).toBe(
+      "nothing sealed · secrets: plain (no ALERT_SIGNING_KEY)",
+    );
   });
 
   it("is ok when the step has read to the sealed head with nothing due", () => {

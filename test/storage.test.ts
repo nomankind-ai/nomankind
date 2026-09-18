@@ -886,6 +886,7 @@ describe("migrations", () => {
       "0023_money_removed.sql",
       "0024_derived_kernel.sql",
       "0025_operator_kind.sql",
+      "0026_alert_secret_wrapped.sql",
     ]);
 
     // Forward-only (D-022): 0004 adds a column and an index and reshapes
@@ -1085,6 +1086,7 @@ describe("migrations", () => {
       "0023_money_removed.sql",
       "0024_derived_kernel.sql",
       "0025_operator_kind.sql",
+      "0026_alert_secret_wrapped.sql",
     ]);
   });
 });

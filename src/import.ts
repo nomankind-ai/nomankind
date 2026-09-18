@@ -92,8 +92,10 @@ const REQUIRED_FILES: readonly string[] = Object.freeze([
  * Required of a v2 directory and not of a v1 one, which was written before any
  * of the three existed. Both are recomputed from the events on the way in
  * anyway (src/cli/import-mirror.ts), so a v1 mirror is replayed with the same
- * ledger and the same standing a v2 one is: what the older layout costs is the
- * model's answers, and nothing else.
+ * ledger and the same standing a v2 one is — the operators' counts included
+ * (decision D-140 item 7), because the fold that produces them runs over the
+ * events the clone carries rather than over this file. What the older layout
+ * costs is the model's answers, and nothing else.
  */
 const V2_FILES: readonly string[] = Object.freeze([
   "standing.json",

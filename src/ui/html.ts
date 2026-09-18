@@ -270,6 +270,16 @@ const PAPER_PATH = "/docs/whitepaper";
 const MIRROR_PATH = "/mirror/latest";
 
 /**
+ * The terms of use and privacy note (D-097 item 2 as rewritten under D-127),
+ * linked once from every app page and once from the landing footer.
+ *
+ * In the footer rather than the nav, where a reader looks for it, and relative
+ * for the same reason the paper and the mirror are: it is a page of this site
+ * on whichever host is serving it.
+ */
+const TERMS_PATH = "/terms";
+
+/**
  * The nav, in the order the prototype shows it (D-104).
  *
  * Five items, because a nav of nine was a table of contents: the log (Entries),
@@ -441,6 +451,7 @@ export function layout(
         ${link(REPOSITORY_URL, "Repository", true)}
         <a href="${MIRROR_PATH}">Mirror</a>
         <a href="${PAPER_PATH}">Whitepaper</a>
+        <a href="${TERMS_PATH}">Terms</a>
         <a href="mailto:${CONTACT_EMAIL}">Contact</a>
       </span>
     </footer>

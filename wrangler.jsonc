@@ -209,12 +209,19 @@
       "preview_urls": false,
       "vars": {
         "ENVIRONMENT": "production",
-        // Empty on purpose (D-016): the maintainer sets this from their own
-        // key in M25, and no throwaway key generated in a repository is ever
-        // going to hold the genesis naming power in public. Empty means no
-        // maintainer is configured, so production refuses genesis naming
-        // outright rather than granting it to whoever asks first.
-        "MAINTAINER_AGENT_ID": "",
+        // The maintainer's own key (D-051), set on 2026-09-18 for M25a. It was
+        // empty from D-016 until this line, because no throwaway key generated
+        // in a repository was ever going to hold the genesis naming power in
+        // public; what stands here now is the key the maintainer generated on
+        // their own machine and holds the private half of.
+        //
+        // The value is public and belongs in this file for the reason every
+        // agent id does: Section 11's genesis naming is a power the public has
+        // to be able to check the holder of, and a power whose holder is a
+        // secret is a power nobody can audit. The private half stays on the
+        // maintainer's machine and is in no repository, no Worker secret and no
+        // backup of either.
+        "MAINTAINER_AGENT_ID": "1F916:BGqu99Po2X7PNPSDWg4wGgYfsUTzJ2EF9rPyXIKyLoM",
         // The sealing agent's handle at the founding 1F916 registry (D-054).
         // The citizen is registered under this handle since 2026-09-09, so the
         // registry track is available; an empty handle would mean no registry

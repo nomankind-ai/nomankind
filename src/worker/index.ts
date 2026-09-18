@@ -228,6 +228,10 @@ const CACHEABLE_PATHS: ReadonlySet<string> = new Set([
   "/operators",
   "/policy",
   "/api",
+  // The terms of use and privacy note (D-097 item 2 as rewritten under D-127):
+  // the same bytes for every reader, built from POLICY and nothing else, so it
+  // is held at the edge exactly as /policy and /api are.
+  "/terms",
   "/docs",
   "/dry-run",
   "/genesis",

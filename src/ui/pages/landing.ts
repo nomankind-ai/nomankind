@@ -82,6 +82,12 @@ const LANDING_DESCRIPTION = LANDING_SENTENCE;
  * external, because the code and the log live in git.
  */
 const PAPER_PATH = "/docs/whitepaper";
+/**
+ * The terms of use and privacy note (D-097 item 2 as rewritten under D-127), in
+ * the footer beside the licence line it is the long form of. Relative like the
+ * paper: the Worker serves it on the apex as well as on the app host.
+ */
+const TERMS_PATH = "/terms";
 const CODE_URL = "https://github.com/nomankind-ai/nomankind";
 const LOG_URL = "https://github.com/nomankind-ai/log";
 const REGISTRY_URL = "https://1f916.org";
@@ -486,7 +492,7 @@ export function renderLanding(ctx: PageContext, data: LandingData): string {
       <footer class="landing-footer row mono">
         <span>CODE APACHE-2.0 · DATA CC0 FROM THE SEAL · TRAINING ON THE DATA IS FREE</span>
         <span
-          >NOMANKIND.AI ·
+          >NOMANKIND.AI · <a href="${TERMS_PATH}">TERMS</a> ·
           <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL.toUpperCase()}</a></span
         >
       </footer>

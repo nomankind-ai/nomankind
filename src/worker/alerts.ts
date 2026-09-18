@@ -34,6 +34,8 @@ import {
   isAlertUrl,
   signAlert,
   staleDeliveryId,
+  unwrapAlertSecret,
+  wrapAlertSecret,
   type AlertBody,
   type AlertFilter,
 } from "../alerts.js";
@@ -49,6 +51,7 @@ import {
   ALERT_EVENTS_PER_RUN,
   ALERT_KINDS,
   ALERT_RETRY_MINUTES,
+  ALERT_SECRETS_WRAPPED_PER_RUN,
   ALERT_TIMEOUT_MS,
   LIST_PAGE_LIMIT,
   isRegisteredDomain,
@@ -65,10 +68,12 @@ import {
   dueDeliveries,
   enabledAlertEndpoints,
   markDelivery,
+  plainSecretEndpoints,
   putAlertDeliveries,
   putAlertDeliveriesIfNew,
   putAlertEndpoint,
   recentAttempts,
+  wrapAlertEndpointSecret,
   setAlertCursor,
   setStaleAlertCursor,
   staleAlertCursor,
@@ -149,6 +154,46 @@ function newSecret(): string {
   return base64urlEncode(
     globalThis.crypto.getRandomValues(new Uint8Array(SECRET_BYTES)),
   );
+}
+
+/**
+ * The environment's wrapping key, or null when none is configured (decision
+ * D-118 item a).
+ *
+ * An unset binding and an empty one are the same absence, exactly as every
+ * other optional secret in src/worker/env.ts is read: a deployment that has not
+ * set ALERT_SIGNING_KEY behaves as it did before 0026 — the secrets stay in the
+ * plain column, the doors and the deliveries work unchanged — and `/status`
+ * says so in as many words rather than leaving the gap invisible.
+ */
+export function alertSigningKey(env: Env): string | null {
+  const value = env.ALERT_SIGNING_KEY;
+  return value === undefined || value === "" ? null : value;
+}
+
+/**
+ * The plain secret one delivery signs with, whichever column the row holds it
+ * in, or null when it cannot be recovered.
+ *
+ * Three answers and not two. A row holding the plain secret hands it over,
+ * which is every row on a deployment with no key and every row the wrapping
+ * pass has not reached yet. A wrapped row is unwrapped under the environment's
+ * key. A wrapped row on an environment with no key, or under the wrong key, is
+ * null — and null is a refusal to send rather than a delivery signed with
+ * something a subscriber cannot check: a signature only the sender can verify
+ * is worse than a missing alert, because a subscriber would have no way to tell
+ * a rotated key from a forgery.
+ *
+ * The secret never reaches a log line or an error message from here: it is
+ * returned to exactly one caller, which passes it to `signAlert` and drops it.
+ */
+async function secretOf(
+  endpoint: AlertEndpointRecord,
+  signingKey: string | null,
+): Promise<string | null> {
+  if (endpoint.secret !== null) return endpoint.secret;
+  if (endpoint.secret_wrapped === null || signingKey === null) return null;
+  return unwrapAlertSecret(signingKey, endpoint.id, endpoint.secret_wrapped);
 }
 
 /** One endpoint's filter, as the kernel takes it. */
@@ -307,6 +352,7 @@ async function subscribe(
   db: D1Like,
   key: KeyRecord,
   now: Date,
+  signingKey: string | null,
 ): Promise<Response> {
   // The cap before the read, and the read before the parse: this door takes a
   // key rather than a signature, but a body is a body and no door parses one it
@@ -362,11 +408,22 @@ async function subscribe(
     return refuse(409, "endpoint_limit");
   }
 
+  // The secret is minted, shown once in the 201, and stored wrapped wherever
+  // the environment can wrap it (decision D-118 item a). The id is drawn first
+  // because it is the HKDF info: one endpoint's ciphertext is under a key no
+  // other endpoint shares, so a row lifted from the table cannot be unwrapped
+  // as somebody else's.
+  const id = endpointId();
+  const secret = newSecret();
   const stored = await putAlertEndpoint(db, {
-    id: endpointId(),
+    id,
     keyId: key.id,
     url,
-    secret: newSecret(),
+    secret:
+      signingKey === null
+        ? secret
+        : await wrapAlertSecret(signingKey, id, secret),
+    wrapped: signingKey !== null,
     domain: domain.value,
     subject: subject.value,
     category: category.value,
@@ -374,7 +431,9 @@ async function subscribe(
     createdAt: now.toISOString(),
   });
 
-  return json({ ...endpointView(stored, true), secret: stored.secret }, 201);
+  // The plain secret and never the column: a wrapped row's `secret` is null,
+  // and the one door that shows a secret shows the one its holder has to keep.
+  return json({ ...endpointView(stored, true), secret }, 201);
 }
 
 /** The key's live endpoints. No secrets: they were shown once. */
@@ -495,6 +554,7 @@ async function route(
   request: Request,
   db: D1Like,
   deps: { now: Date },
+  signingKey: string | null,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -506,7 +566,7 @@ async function route(
     const held = await keyOf(db, request);
     if (!held.ok) return held.response;
     return request.method === "POST"
-      ? subscribe(request, db, held.key, deps.now)
+      ? subscribe(request, db, held.key, deps.now, signingKey)
       : listEndpoints(db, held.key);
   }
 
@@ -540,7 +600,7 @@ export async function handleAlerts(
 ): Promise<Response | null> {
   const db = guardDatabase(env.DB);
   try {
-    return await route(request, db, deps);
+    return await route(request, db, deps, alertSigningKey(env));
   } catch (error) {
     if (error instanceof StorageUnreachable) {
       // The message only: no binding contents, no request data, no secret.
@@ -561,6 +621,14 @@ export interface AlertStepReport {
   readonly delivered: number;
   readonly failed: number;
   readonly retried: number;
+  /**
+   * How many legacy plain secrets this run wrapped (decision D-118 item a).
+   *
+   * Zero on every run of a deployment with no ALERT_SIGNING_KEY, and zero on
+   * every run after the last legacy row was converted, which is where a
+   * deployment that sets the key ends up and stays.
+   */
+  readonly wrapped: number;
 }
 
 /** One alert, once the entry behind it has been re-derived. */
@@ -875,7 +943,12 @@ async function deliver(
     body: Record<string, unknown>;
     kind: AlertKind;
   },
-  input: { now: Date; fetch: typeof fetch; timeoutMs?: number },
+  input: {
+    now: Date;
+    fetch: typeof fetch;
+    timeoutMs?: number;
+    signingKey?: string | null;
+  },
   off: Map<string, boolean>,
 ): Promise<"delivered" | "retried" | "failed"> {
   const at = input.now.toISOString();
@@ -903,11 +976,29 @@ async function deliver(
     return "failed";
   }
 
+  // The secret, out of whichever column holds it and unwrapped when it is the
+  // wrapped one (decision D-118 item a). A secret that cannot be recovered —
+  // a wrapped row on an environment whose ALERT_SIGNING_KEY is absent or has
+  // changed — is not a delivery this step sends unsigned or signs with
+  // anything else: the row is left pending on the retry ladder, so setting the
+  // right key sends it rather than having to rebuild it.
+  const secret = await secretOf(endpoint, input.signingKey ?? null);
+  if (secret === null) {
+    return retry(
+      db,
+      delivery.id,
+      delivery.attempts + 1,
+      input.now,
+      null,
+      "secret_unavailable",
+    );
+  }
+
   const body = JSON.stringify(delivery.body);
   const timestamp = Math.floor(input.now.getTime() / 1000);
   const signature = alertSignatureHeader(
     timestamp,
-    await signAlert(endpoint.secret, timestamp, body),
+    await signAlert(secret, timestamp, body),
   );
 
   const attempts = delivery.attempts + 1;
@@ -987,6 +1078,45 @@ async function retry(
 }
 
 /**
+ * Wrap the legacy plain secrets, a bounded few per run (decision D-118 item a).
+ *
+ * Migration 0026 added the column and could not fill it: wrapping needs the
+ * ALERT_SIGNING_KEY Worker secret, which no migration has. So the rows 0015
+ * wrote are converted here, ALERT_SECRETS_WRAPPED_PER_RUN at a time, and the
+ * next run takes whatever is left — the same shape as the duplicate-key
+ * backfill, for the same reason.
+ *
+ * Each row is wrapped and nulled in one statement (`wrapAlertEndpointSecret`),
+ * so a run killed between two rows has converted some of them and left the rest
+ * exactly as they were. There is no cursor and none is needed: the pass reads
+ * the rows that still hold a plain secret, and a row it converts is no longer
+ * one of them.
+ *
+ * Nothing at all when no key is configured, which is what makes the absent
+ * secret today's behaviour rather than a half-migrated table.
+ */
+async function wrapLegacySecrets(
+  db: D1Like,
+  signingKey: string | null,
+): Promise<number> {
+  if (signingKey === null) return 0;
+  const rows = await plainSecretEndpoints(db, ALERT_SECRETS_WRAPPED_PER_RUN);
+  let wrapped = 0;
+  for (const row of rows) {
+    // Belt and braces against a row the index answered for and the read did
+    // not: nothing wraps a null, and nothing here throws over one.
+    if (row.secret === null) continue;
+    await wrapAlertEndpointSecret(
+      db,
+      row.id,
+      await wrapAlertSecret(signingKey, row.id, row.secret),
+    );
+    wrapped += 1;
+  }
+  return wrapped;
+}
+
+/**
  * Derive the alerts the newly sealed events call for, add the windows that
  * closed, and deliver what is due.
  *
@@ -1015,6 +1145,13 @@ export async function runAlertStep(
      * the real one, exactly as the adapters' own constructors allow.
      */
     timeoutMs?: number;
+    /**
+     * The environment's ALERT_SIGNING_KEY, or null when none is configured
+     * (decision D-118 item a): what a wrapped secret is unwrapped with before a
+     * delivery is signed, and what the legacy pass wraps the plain rows under.
+     * Absent and null are the same thing, which is today's plain behaviour.
+     */
+    signingKey?: string | null;
   },
   skip: (reason: string) => void,
 ): Promise<AlertStepReport> {
@@ -1053,5 +1190,11 @@ export async function runAlertStep(
     else retried += 1;
   }
 
-  return { created, delivered, failed, retried };
+  // Last, and after the deliveries rather than before them: wrapping a row
+  // changes nothing a delivery in this run needed, and a run whose budget ran
+  // out has spent it on telling subscribers rather than on a migration that
+  // waits perfectly well for the next five minutes.
+  const wrapped = await wrapLegacySecrets(db, input.signingKey ?? null);
+
+  return { created, delivered, failed, retried, wrapped };
 }

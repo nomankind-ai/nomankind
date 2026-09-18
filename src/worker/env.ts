@@ -151,6 +151,35 @@ export type Env = {
    * neither the key nor the token it mints appears in any refusal detail.
    */
   MIRROR_APP_PRIVATE_KEY?: string;
+  /**
+   * The key an alert endpoint's shared secret is wrapped under at rest
+   * (decision D-118 item a).
+   *
+   * Migration 0015 left the subscriber's HMAC secret in a plain column and said
+   * so in as many words — "stored plain, a GAP for at-rest encryption" — which
+   * means a copy of the database is a copy of every subscriber's signing key.
+   * This closes it: the secret is stored as AES-GCM ciphertext under a key
+   * derived from this one with HKDF-SHA-256, and the plain column is nulled the
+   * moment the wrapped one is written (src/alerts.ts, `wrapAlertSecret`).
+   *
+   * A Worker secret the maintainer sets (D-016). Never in this repository,
+   * never in wrangler.jsonc, and never logged or returned — an adapter that put
+   * it in an error message would publish the key every subscriber's secret is
+   * under, which is worse than publishing one secret.
+   *
+   * Optional, and absent is today's behaviour rather than a failure: the
+   * secrets stay in the plain column, the doors and the deliveries work exactly
+   * as they did, and `/status` says `secrets: plain (no ALERT_SIGNING_KEY)` so
+   * the gap is visible on the page rather than only in this comment. A
+   * deployment that sets it wraps its legacy rows a few per sweep run and then
+   * reads `secrets: wrapped`.
+   *
+   * Rotating it is not a thing this build does: every wrapped secret is under
+   * the key it was wrapped with, and a changed ALERT_SIGNING_KEY leaves rows
+   * nothing can unwrap. GAP: a second key and a rewrap pass, for a later
+   * decision.
+   */
+  ALERT_SIGNING_KEY?: string;
   /*
    * No payment provider secret is named here (decision D-127, "the record is
    * free, no money anywhere"). The paid loop's two secrets went with the doors

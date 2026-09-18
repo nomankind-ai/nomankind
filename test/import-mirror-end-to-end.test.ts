@@ -783,17 +783,17 @@ describe("the fork answers what nomankind answered", () => {
     // that named it, so a replay can say that the operator is trusted and from
     // which position — `trusted` and `trusted_seq` are compared here and agree —
     // and cannot invent the agent. Left off the row rather than guessed.
+    //
+    // `counts` used to be a fourth (decision D-130): the sweep's accumulator is
+    // a cache of the fold, and the import wrote only the cached number, so a
+    // fresh fork's directory showed a standing with nothing behind it until its
+    // own first sweep ran. D-140 item 7 closed that — the export carries every
+    // operator's counts and the import replays the whole accumulator — so rank,
+    // tier, standing and counts are compared here like everything else.
     const missing = [
       "details/payout_status",
       "details/payout_reference",
       "details/named_by",
-      // The sweep's own accumulator (decision D-130), which is a cache of the
-      // fold and not part of the log: a fork holds every event the standing is
-      // derived from and none of the rows the origin's sweep left behind, so
-      // its counts are null until its own sweep runs. `npm run standing` folds
-      // the same log to the same numbers on either side, which is the promise
-      // that matters here.
-      "counts",
     ];
     await sameAnswer(
       "/operators",

@@ -96,7 +96,7 @@ function clone(log: readonly Event[]): Event[] {
 }
 
 describe("event types", () => {
-  it("names exactly the twenty-nine event types", () => {
+  it("names exactly the thirty event types", () => {
     expect(EVENT_TYPES).toEqual([
       "operator_registered",
       "operator_trusted",
@@ -129,8 +129,11 @@ describe("event types", () => {
       "community_validation",
       // The governance vote (D-130 item 4).
       "vote_cast",
+      // A key changed hands (D-095, D-097 item 3, D-140 item 5): a registry
+      // event, so it carries a null entry_id.
+      "key_rotated",
     ]);
-    expect(new Set(EVENT_TYPES).size).toBe(29);
+    expect(new Set(EVENT_TYPES).size).toBe(30);
   });
 
   it("scopes fifteen of them to an entry", () => {

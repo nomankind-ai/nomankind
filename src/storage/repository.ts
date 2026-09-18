@@ -46,6 +46,7 @@ import {
   type ReadCountRow,
 } from "../events.js";
 import type { ReadReceipt, SyncReceipt } from "../receipt.js";
+import { retiredAgentsAt } from "../rotation.js";
 // The one thing the store and the status rules have to agree on about a step
 // row: how a thrown step is marked in it. Written here, read there.
 import { THROWN_REASON_PREFIX } from "../status.js";
@@ -1757,6 +1758,91 @@ export async function recordAgentBind(
   );
   await db.batch(statements);
   return bound;
+}
+
+/**
+ * Record a key rotation: append the `key_rotated` event and bind the new key,
+ * atomically, for the reason `recordAgentBind` is atomic (decisions D-095,
+ * D-097 item 3, D-140 item 5).
+ *
+ * The retired key's row is left exactly where it is, and that is deliberate.
+ * The row says which operator a key belonged to, and it still belonged to it:
+ * every signature it made before this position stays resolvable, the
+ * certificate that names it still names it, and nothing can rebind the key
+ * elsewhere (`operatorForAgent` still answers). What makes it stop speaking is
+ * the event, folded at a position — `retiredAgentsAt` in src/rotation.ts — and
+ * not the absence of a row. A retirement expressed as a deletion would be a
+ * fact with no position, which is exactly the thing this record does not have.
+ *
+ * A community rotation (`binding` present) also rewrites the operators row's
+ * own copy of which key and which binding the world checks it against, for the
+ * reason `recordCommunityOperatorJoinedDomain` keeps its `domains` in step: the
+ * pages and the mirror read the record rather than the events, and a record
+ * naming the key the operator no longer signs with would send a reader to the
+ * wrong profile. The id, the standing and the marks are untouched, because the
+ * operator did not change — only its key did.
+ */
+export async function recordKeyRotation(
+  db: D1Like,
+  input: EventInput<"key_rotated">,
+): Promise<Event<"key_rotated">> {
+  const { event, statements } = await sealOntoHead(db, input);
+  const rotated = event as Event<"key_rotated">;
+  const payload = rotated.payload;
+  statements.push(
+    agentStatement(db, {
+      agentId: payload.new_agent,
+      operatorId: payload.operator,
+      registeredSeq: rotated.seq,
+    }),
+  );
+  if (payload.binding !== null) {
+    const record = await getOperator(db, payload.operator);
+    if (record !== null) {
+      statements.push(
+        operatorStatement(db, {
+          ...record,
+          details: {
+            ...record.details,
+            agent: payload.new_agent,
+            binding: payload.binding,
+          },
+        }),
+      );
+    }
+  }
+  await db.batch(statements);
+  return rotated;
+}
+
+/**
+ * Every key the log has retired, and the position each was retired at.
+ *
+ * Read through the (type, seq) index and paged to exhaustion with the caller's
+ * own page size, exactly as `registryEvents` reads each of its types: a
+ * rotation is rare, the set is small, and the cost is one indexed range rather
+ * than a scan of the log. The fold itself is src/rotation.ts's, asked here so
+ * the doors and derivation cannot come to two different readings of it.
+ *
+ * Folded to the head and not to a position, because its one caller is the
+ * authenticate step, which is asking about a request being made now: "has this
+ * key stopped answering for its operator?" Every rule that judges something
+ * already in the log asks `retiredAgentsAt` at that thing's own position
+ * instead, and gets a different and older answer on purpose.
+ */
+export async function retiredAgents(
+  db: D1Like,
+  pageSize: number,
+): Promise<Map<string, number>> {
+  const events: Event[] = [];
+  let after = -1;
+  for (;;) {
+    const page = await eventsOfType(db, "key_rotated", after, pageSize);
+    events.push(...page);
+    if (page.length < pageSize) break;
+    after = page[page.length - 1]!.seq;
+  }
+  return retiredAgentsAt(events, Number.MAX_SAFE_INTEGER);
 }
 
 /**

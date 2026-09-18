@@ -8,7 +8,7 @@
  * that list, grouped the way a reader arrives: what the log is, how to join it,
  * and how to leave with it.
  *
- * Three groups and thirteen cards, and every card is a page this Worker serves —
+ * Three groups and fourteen cards, and every card is a page this Worker serves —
  * including the whitepaper, the summary and the reader kit, which are served
  * here now, so nothing about the design lives only in a repository.
  *
@@ -66,6 +66,14 @@ export const DOC_GROUPS: readonly Group[] = Object.freeze([
         href: "/independence",
         title: "Independence",
         line: "The validator set and the pinned witness set side by side, their intersection, and what object each signature covers.",
+      }),
+      Object.freeze({
+        // The terms of use and privacy note (D-097 item 2 as rewritten under
+        // D-127). Here rather than under Take it with you: it is what the record
+        // is free to be read and trained on under, which is a reading question.
+        href: "/terms",
+        title: "Terms",
+        line: "What the record is free to do with, what it does not promise, and what is stored about whom.",
       }),
     ]),
   }),

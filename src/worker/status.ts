@@ -47,6 +47,7 @@ import {
   countAlertEndpoints,
   countDueDeliveries,
   countFailedDeliveries,
+  countPlainSecretEndpoints,
 } from "../storage/alerts.js";
 import {
   countAttestations,
@@ -74,6 +75,7 @@ import {
   unsealedEvents,
   type Counters,
 } from "../storage/repository.js";
+import { alertSigningKey } from "./alerts.js";
 import type { Env } from "./env.js";
 import {
   StorageUnreachable,
@@ -440,12 +442,22 @@ export async function statusInput(
               url: mirror.url,
             },
     },
-    // Change alerts (M24), through the four counts the alert step left behind.
+    // Change alerts (M24), through the four counts the alert step left behind,
+    // and how the subscribers' secrets are held at rest (D-118 item a). The
+    // last one is asked of the binding and of the rows together: a key with
+    // legacy rows still to convert is `wrapping` and not yet `wrapped`, so the
+    // line says the migration is running rather than claiming it is done.
     alerts: {
       endpoints: swept.alert_endpoints,
       cursor: swept.alert_cursor,
       due: swept.alert_due,
       failed: swept.alert_failed,
+      secrets:
+        alertSigningKey(env) === null
+          ? "plain"
+          : (await countPlainSecretEndpoints(db)) === 0
+            ? "wrapped"
+            : "wrapping",
     },
     exercised: {
       submission:

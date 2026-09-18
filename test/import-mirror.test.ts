@@ -94,6 +94,7 @@ import {
   ledgerCursor,
   operatorDomains,
   operatorStanding,
+  storedStandingOf,
   putEntry,
   rederiveDue,
   recordAttestationAnswers,
@@ -858,6 +859,14 @@ describe("a fresh database replays the whole record", () => {
       expect(standing.standing).toBe(
         (await operatorStanding(origin.db, party.operator))!.standing,
       );
+      // And the accumulator the number was folded from (decision D-140 item 7),
+      // which is what the operator directory prints beside it: the import
+      // replays the whole row, so the fork's page is the origin's page rather
+      // than a standing with nothing behind it.
+      expect([party.operator, await storedStandingOf(fork.db, party.operator)]).toEqual([
+        party.operator,
+        await storedStandingOf(origin.db, party.operator),
+      ]);
     }
   }, 600_000);
 
@@ -1227,6 +1236,70 @@ describe("a v2 mirror is still an exit", () => {
     expect(summary.entries).toBe(2);
     expect(await headSeq(fork.db)).toBe(firstSeal.last_seq);
     expect(await getEntry(fork.db, entryId)).not.toBeNull();
+  }, 600_000);
+});
+
+/**
+ * A clone whose standing rows carry no counts (decision D-140 item 7).
+ *
+ * Every mirror pushed before the counts were part of the row looks like this,
+ * and it is still somebody's exit: the verifier reads such a row as carrying no
+ * counts and holds it to everything else it does carry, and the import folds
+ * the counts out of the events the clone carries rather than out of the file, so
+ * the fork ends up with the whole accumulator either way.
+ */
+describe("a clone written before the counts", () => {
+  let fork: TestDatabase;
+  let dir = "";
+
+  beforeAll(async () => {
+    const files = new Map(v2MirrorFiles());
+    const standing = JSON.parse(files.get("standing.json")!) as {
+      operators: Record<string, unknown>[];
+    };
+    for (const row of standing.operators) delete row["counts"];
+    files.set("standing.json", `${JSON.stringify(standing, null, 2)}\n`);
+
+    dir = join(workspace, "no-counts", ENVIRONMENT);
+    await writeMirrorDirectory(dir, files);
+    fork = await freshDatabase();
+  }, 600_000);
+
+  it("still verifies whole", async () => {
+    const io = recorder();
+    const code = await verifyMirror([dir], io.io, new InProcessHttp());
+    expect([code, io.out.join("\n")]).toEqual([0, io.out.join("\n")]);
+    expect(io.out).toContain("ok standing");
+  }, 600_000);
+
+  it("still replays with every operator's counts", async () => {
+    const summary = await replay(fork, { dir });
+    expect(summary.head).toBe(firstSeal.last_seq);
+    for (const party of [k1, k2, k3]) {
+      const stored = await storedStandingOf(fork.db, party.operator);
+      expect([party.operator, stored === null]).toEqual([party.operator, false]);
+      expect([party.operator, stored!.position]).toEqual([
+        party.operator,
+        firstSeal.last_seq,
+      ]);
+    }
+  }, 600_000);
+
+  it("refuses a standing row whose counts were edited rather than dropped", async () => {
+    const files = new Map(v2MirrorFiles());
+    const standing = JSON.parse(files.get("standing.json")!) as {
+      operators: Record<string, unknown>[];
+    };
+    const counts = standing.operators[0]!["counts"] as Record<string, number>;
+    counts["validations_volunteered"] += 1;
+    files.set("standing.json", `${JSON.stringify(standing, null, 2)}\n`);
+
+    const edited = join(workspace, "edited-counts", ENVIRONMENT);
+    await writeMirrorDirectory(edited, files);
+    const io = recorder();
+    const code = await verifyMirror([edited], io.io, new InProcessHttp());
+    expect(code).toBe(1);
+    expect(io.out.join("\n")).toContain("/operators/0/counts");
   }, 600_000);
 });
 

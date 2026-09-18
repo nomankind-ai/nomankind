@@ -2786,7 +2786,7 @@ describe("the release window, as the pages publish it", () => {
  * Before this page the answer to "where is this written down" was a list
  * somebody had to know, and two of the documents were only on GitHub. The hub
  * is that list, and the assertions below are the mockup the maintainer
- * approved: three groups, twelve cards, every card a page this Worker serves.
+ * approved: three groups, and every card a page this Worker serves.
  */
 describe("renderDocs", () => {
   const docsCtx: PageContext = { ...ctx, path: "/docs" };
@@ -2816,13 +2816,13 @@ describe("renderDocs", () => {
     );
   });
 
-  it("groups the thirteen cards in three panels, each with its own line", () => {
+  it("groups the fourteen cards in three panels, each with its own line", () => {
     expect(DOC_GROUPS.map((each) => each.title)).toEqual([
       "Read the record",
       "Join",
       "Take it with you",
     ]);
-    expect(DOC_GROUPS.flatMap((each) => each.cards)).toHaveLength(13);
+    expect(DOC_GROUPS.flatMap((each) => each.cards)).toHaveLength(14);
     expect(flat).toContain(
       `<span class="stage-num">01</span>Read the record </h2> ` +
         `<span class="note">What the log is and how to read it.</span>`,
@@ -2863,6 +2863,14 @@ describe("renderDocs", () => {
         "/independence",
         "Independence",
         "The validator set and the pinned witness set side by side, their intersection, and what object each signature covers.",
+      ],
+      // The terms of use and privacy note (D-097 item 2 as rewritten under
+      // D-127), under Read the record: what the record is free to be read and
+      // trained on under is a reading question.
+      [
+        "/terms",
+        "Terms",
+        "What the record is free to do with, what it does not promise, and what is stored about whom.",
       ],
       [
         "/genesis",
