@@ -8,9 +8,9 @@
  * that list, grouped the way a reader arrives: what the log is, how to join it,
  * and how to leave with it.
  *
- * Three groups and eleven cards, and every card is a page this Worker serves —
- * including the whitepaper and the summary, which are served here now, so
- * nothing about the design lives only in a repository.
+ * Three groups and thirteen cards, and every card is a page this Worker serves —
+ * including the whitepaper, the summary and the reader kit, which are served
+ * here now, so nothing about the design lives only in a repository.
  *
  * Pure: the head line's versions are read from src/policy.ts, and nothing here
  * reads a store, a clock or the network.
@@ -100,6 +100,13 @@ export const DOC_GROUPS: readonly Group[] = Object.freeze([
         href: "/docs/fork",
         title: "Fork guide",
         line: "What to clone, how to verify a mirror, and how to keep going without nomankind.",
+      }),
+      Object.freeze({
+        // The reader kit (M25c): the commands a reader runs from outside, and
+        // the way a community member confirms an entry without registering.
+        href: "/docs/reader-kit",
+        title: "Reader kit",
+        line: "Read, sync and verify without a key; confirm from your community.",
       }),
       Object.freeze({
         // The mockup writes this card's href as /mirror; the page itself is

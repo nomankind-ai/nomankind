@@ -1,9 +1,9 @@
 /**
- * gen:docs: write the three served documents into a module the Worker can hold.
+ * gen:docs: write the served documents into a module the Worker can hold.
  *
- * Decision D-104: the whitepaper, its summary and the fork guide are served by
- * this Worker rather than only by GitHub, and a Worker has no file system to
- * read them from at run time. So they are read here and committed as string
+ * Decision D-104: the whitepaper, its summary, the fork guide and the reader
+ * kit (M25c) are served by this Worker rather than only by GitHub, and a Worker
+ * has no file system to read them from at run time. So they are read here and committed as string
  * constants, exactly as the entry validator is compiled ahead of time and
  * committed (D-041). test/docs-generation.test.ts regenerates this module in
  * memory and compares it with the committed one byte for byte, so an edit to a
@@ -27,12 +27,17 @@ export interface DocumentSource {
 }
 
 /**
- * The three documents, in the order the docs hub lists them. Adding a fourth is
+ * The four documents, in the order the docs hub lists them. Adding a fifth is
  * this list, a route, and a run of the command: nothing else reads the file
  * system on the way to a page.
  */
 export const DOCUMENT_SOURCES: readonly DocumentSource[] = Object.freeze([
   Object.freeze({ constant: "FORK", path: "docs/FORK.md" }),
+  // The reader kit (M25c): read, sync and verify without a key, and confirm
+  // from a community. Served here for the same reason the fork guide is — the
+  // instructions for leaving with the record, and for reading it from outside,
+  // must not live only in a repository.
+  Object.freeze({ constant: "READER_KIT", path: "docs/READER-KIT.md" }),
   Object.freeze({ constant: "WHITEPAPER", path: "paper/WHITEPAPER.md" }),
   Object.freeze({ constant: "SUMMARY", path: "paper/SUMMARY.md" }),
 ]);
@@ -46,7 +51,7 @@ const DEFAULT_TARGET = fileURLToPath(
 );
 
 const HEADER = `/**
- * The three documents this Worker serves, as strings. GENERATED — do not edit.
+ * The documents this Worker serves, as strings. GENERATED — do not edit.
  *
  * Written by \`npm run gen:docs\` from the files named below, because a Worker
  * has no file system to read them from at run time (D-104). Edit the documents

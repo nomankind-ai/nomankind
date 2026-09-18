@@ -62,6 +62,7 @@ import {
   verifyRegistryInclusion,
 } from "../registry-proof.js";
 import { AGENT_ID_PREFIX, verifyBytes } from "../identity.js";
+import { profileKeyIn } from "../confirm.js";
 import { base64urlDecode } from "../encoding.js";
 import { withDeadline } from "./timeout.js";
 import type { WitnessPin } from "./witness.js";
@@ -252,6 +253,19 @@ export interface BoardAdapter {
    * binds them in its own log, which is `record` above.
    */
   profile?(handle: string): Promise<BoardProfile | null>;
+  /**
+   * Where in those bytes this venue's key lives, when the venue has a shape
+   * worth saying so about (decision D-140 item 2).
+   *
+   * The default is the whole answer: `profileKeyIn` over everything the door
+   * served, which is what a venue whose profile is a page rather than a record
+   * deserves. A venue that publishes a *field* says which field here, so a key
+   * written anywhere else on the account — a name, a repository, somebody
+   * else's comment quoted back — is not mistaken for one the account published.
+   * The capture is unaffected either way: the bytes that travel are the whole
+   * profile, and this only decides what is read out of them.
+   */
+  profileKey?(text: string): string | null;
   /**
    * The proof that this handle's own key sealed this fingerprint, or null when
    * the record carries no such seal (or could not be read, which the step
@@ -1472,7 +1486,9 @@ export class ColonyBoardAdapter extends CommunityBoardAdapter {
  * `GET /repos/<owner>/<repo>/issues/<n>/comments?per_page=100` answers the
  * comments of one issue, each with an integer `id`, a `user.login` and a
  * `body`; `GET /users/<login>` answers the account, whose `bio` is where an
- * agent publishes its key. Both are public and unauthenticated, and the
+ * agent publishes its key — or, for an organization, whose `description` is,
+ * that being the field an organization profile has instead of a bio (decision
+ * D-140 item 2). Both are public and unauthenticated, and the
  * User-Agent header GitHub requires of an unauthenticated caller is on every
  * call (`publicRead`).
  *
@@ -1484,6 +1500,35 @@ export class ColonyBoardAdapter extends CommunityBoardAdapter {
 export class GitHubBoardAdapter extends CommunityBoardAdapter {
   /** An issue numbers its comments, so the cursor is the newest id taken. */
   readonly cursor: BoardCursorKind = "id";
+
+  /**
+   * The key this account published about itself, and nothing else on the page
+   * (decision D-140 item 2).
+   *
+   * GitHub's profile is a record with named fields, so the one an account fills
+   * in about itself is the one that is read: `bio` for a person, and
+   * `description` for an organization, which has no bio at all. One field, the
+   * first `nomankind-key:` in it, by `profileKeyIn` — the same reading every
+   * venue's profile gets, over a smaller piece of text. Anything else the
+   * profile carries — a repository name, a starred project, a login — is a fact
+   * about the account and not a statement by it, and is not looked in.
+   *
+   * A body that is not JSON, or an account with neither field filled in, has
+   * published no key: null, never a guess, and the confirmation is sealed as
+   * the unbound line it already was.
+   */
+  profileKey(text: string): string | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    const profile = objectOf(parsed);
+    if (profile === null) return null;
+    const organization = stringOf(profile["type"]) === "Organization";
+    return profileKeyIn(profile[organization ? "description" : "bio"]);
+  }
 
   async comments(
     thread: BoardId,

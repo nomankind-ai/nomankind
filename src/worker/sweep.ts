@@ -1483,6 +1483,19 @@ async function profileCaptureFor(
   return taken;
 }
 
+/**
+ * The key a profile published, read the way its own venue publishes keys.
+ *
+ * One call, so the default — the first `nomankind-key:` anywhere in the bytes —
+ * and a venue's own field-scoped reading are the same step rather than two
+ * places a binding could be decided.
+ */
+function keyPublishedIn(board: BoardAdapter, text: string): string | null {
+  return board.profileKey === undefined
+    ? profileKeyIn(text)
+    : board.profileKey(text);
+}
+
 async function takeProfile(
   board: BoardAdapter,
   captures: R2Like | undefined,
@@ -1528,7 +1541,11 @@ async function takeProfile(
   return {
     url: answered.url,
     capture_hash: captureHash,
-    public_key: profileKeyIn(new TextDecoder().decode(answered.bytes)),
+    // The whole answer, unless the venue says which field of it is the account's
+    // own word about its key (decision D-140 item 2, GitHub's `bio` and an
+    // organization's `description`). Either way the bytes archived above are the
+    // whole profile: this only decides what is read out of them.
+    public_key: keyPublishedIn(board, new TextDecoder().decode(answered.bytes)),
     media_type: answered.content_type ?? "application/json",
     size: answered.bytes.byteLength,
   };

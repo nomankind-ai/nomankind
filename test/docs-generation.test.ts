@@ -1,7 +1,7 @@
 /**
  * The committed documents module, against a fresh generation (D-104).
  *
- * A Worker has no file system, so the three documents it serves are read from
+ * A Worker has no file system, so the documents it serves are read from
  * the repository ahead of time and committed as src/ui/docs.generated.ts,
  * exactly as the entry validator is compiled ahead of time and committed
  * (D-041). Which leaves one way for the site to start lying: somebody edits the
@@ -21,6 +21,8 @@ import { DOCUMENT_SOURCES, generateDocsSource } from "../src/cli/gen-docs.js";
 import {
   FORK_MARKDOWN,
   FORK_SOURCE_PATH,
+  READER_KIT_MARKDOWN,
+  READER_KIT_SOURCE_PATH,
   SUMMARY_MARKDOWN,
   SUMMARY_SOURCE_PATH,
   WHITEPAPER_MARKDOWN,
@@ -48,19 +50,23 @@ describe("the generated documents module", () => {
     expect(committed).toContain("npm run gen:docs");
   });
 
-  it("names the three documents and where each was read from", () => {
+  it("names the documents and where each was read from", () => {
     expect(DOCUMENT_SOURCES.map((each) => each.path)).toEqual([
       "docs/FORK.md",
+      // The reader kit (M25c), served beside the fork guide.
+      "docs/READER-KIT.md",
       "paper/WHITEPAPER.md",
       "paper/SUMMARY.md",
     ]);
     expect(FORK_SOURCE_PATH).toBe("docs/FORK.md");
+    expect(READER_KIT_SOURCE_PATH).toBe("docs/READER-KIT.md");
     expect(WHITEPAPER_SOURCE_PATH).toBe("paper/WHITEPAPER.md");
     expect(SUMMARY_SOURCE_PATH).toBe("paper/SUMMARY.md");
   });
 
   it("holds each document verbatim, to the last byte", () => {
     expect(FORK_MARKDOWN).toBe(read("docs/FORK.md"));
+    expect(READER_KIT_MARKDOWN).toBe(read("docs/READER-KIT.md"));
     expect(WHITEPAPER_MARKDOWN).toBe(read("paper/WHITEPAPER.md"));
     expect(SUMMARY_MARKDOWN).toBe(read("paper/SUMMARY.md"));
   });

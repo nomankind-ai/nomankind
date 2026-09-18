@@ -151,6 +151,7 @@ import {
 import { renderApi } from "../ui/pages/api.js";
 import {
   FORK_DOCUMENT,
+  READER_KIT_DOCUMENT,
   SUMMARY_DOCUMENT,
   WHITEPAPER_DOCUMENT,
   renderDocument,
@@ -249,6 +250,7 @@ const PAGE_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/api",
   "/docs",
   "/docs/fork",
+  "/docs/reader-kit",
   "/docs/whitepaper",
   "/docs/summary",
   "/dry-run",
@@ -1774,6 +1776,7 @@ const SITEMAP_STATIC_PATHS: readonly string[] = Object.freeze([
   "/votes",
   "/docs",
   "/docs/fork",
+  "/docs/reader-kit",
   "/docs/whitepaper",
   "/docs/summary",
   "/mirror/latest",
@@ -2191,12 +2194,16 @@ async function route(
 
   if (path === "/api") return htmlResponse(renderApi(ctx));
 
-  // The documentation hub and the three documents it serves (D-104). Like /api
+  // The documentation hub and the documents it serves (D-104, and the reader
+  // kit with them at M25c). Like /api
   // and /dry-run they answer HTML to any GET: there is no JSON twin of a
   // whitepaper for a request to have meant instead, and the markdown they
   // render is in the repository for anyone who wants the source.
   if (path === "/docs") return htmlResponse(renderDocs(ctx));
   if (path === "/docs/fork") return htmlResponse(renderDocument(ctx, FORK_DOCUMENT));
+  if (path === "/docs/reader-kit") {
+    return htmlResponse(renderDocument(ctx, READER_KIT_DOCUMENT));
+  }
   if (path === "/docs/whitepaper") {
     return htmlResponse(renderDocument(ctx, WHITEPAPER_DOCUMENT));
   }
