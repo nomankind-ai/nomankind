@@ -137,6 +137,7 @@ import {
   appendEvent,
   eventHash,
   type CommunityBinding,
+  type CommunityBindingProof,
   type Event,
   type EventPayloads,
   type EventType,
@@ -1505,6 +1506,28 @@ async function confirmationsStep(
   return nothing();
 }
 
+/**
+ * Whether an operator id is one of nomankind's own accounts (D-142).
+ *
+ * One name, asked at every place this step decides a perimeter, so the rule
+ * lives in one place rather than in each call site — which is the whole of the
+ * finding this closes (the review of #105, reviewer 6): a venue token and a
+ * handle have a case and an encoding, and two comparisons written separately
+ * are two comparisons that can come to disagree about which accounts are the
+ * maintainer's own.
+ *
+ * The comparison itself belongs in src/registry.ts beside `communityOperatorId`,
+ * which is what mints these ids, and K1's fix commit puts it there as
+ * `isPerimeterAccount`. This function is the seam until it lands: it does what
+ * the code has always done and invents no normalization of its own, because a
+ * second normalization rule written here is exactly the thing the finding is
+ * about. When the helper arrives, this becomes an import of it and no call site
+ * moves.
+ */
+function isPerimeterAccount(operator: string): boolean {
+  return PERIMETER_ACCOUNTS.includes(operator);
+}
+
 /** A plain object off a stored payload, or null. */
 function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -2503,6 +2526,34 @@ async function communityLine(
               (await board.record(comment.handle))?.key_bind_event_id ?? null,
           };
   const attestation = { version, domain };
+  // What a reader with the bundle rechecks about this line, built once and
+  // sealed in two places: on the validation, where it always was, and on the
+  // upgrade this line may carry with it (decision D-142, the review of #105).
+  //
+  // An upgrade that named a stronger binding and carried nothing to check it by
+  // was a claim an offline reader had to take on the record's word — and a
+  // `registry` upgrade is exactly where that bites, because a registry binding
+  // names a key-bind event id and the proof of it is the thing this object
+  // holds. So the same proof travels on both, and the verifier rechecks the
+  // upgrade by the same code it rechecks the validation by.
+  const bindingProof: CommunityBindingProof =
+    binding.kind === "account"
+      ? {
+          // The account rung's evidence, and no signature, because there is no
+          // key to have made one (D-142). What a reader with the bundle checks
+          // is exactly what the rung claims.
+          kind: "account",
+          comment_capture_hash: binding.comment_capture_hash,
+          profile_capture_hash: binding.profile_capture_hash,
+        }
+      : binding.kind === "profile"
+        ? {
+            kind: "profile",
+            public_key: binding.public_key,
+            signature: binding.signature,
+            capture_hash: binding.capture_hash,
+          }
+        : { kind: "registry", proof: binding.sealed.proof };
   const extra: Event[] = [];
 
   try {
@@ -2636,6 +2687,13 @@ async function communityLine(
               // on a registry one, mirroring `key_rotated`'s own field.
               capture_hash:
                 binding.kind === "profile" ? binding.capture_hash : null,
+              // What the world rechecks the stronger binding by, and never null
+              // here: this branch runs only where the line reached a key rung,
+              // so the proof is the registry seal or the profile signature the
+              // validation beside it carries. A `registry` upgrade without one
+              // was unfalsifiable offline, which is the finding this closes.
+              // D-142: payload field from K1's fix commit.
+              proof: bindingProof,
               fingerprint,
               // What a reader rechecks the upgrade against (D-142, the review
               // of #105): the same proof this very line carries, so an upgrade
@@ -2776,24 +2834,7 @@ async function communityLine(
           reason: line.reason,
           attestation_version: version,
           fingerprint,
-          binding_proof:
-            binding.kind === "account"
-              ? {
-                  // The account rung's evidence, and no signature, because
-                  // there is no key to have made one (D-142). What a reader
-                  // with the bundle checks is exactly what the rung claims.
-                  kind: "account",
-                  comment_capture_hash: binding.comment_capture_hash,
-                  profile_capture_hash: binding.profile_capture_hash,
-                }
-              : binding.kind === "profile"
-                ? {
-                    kind: "profile",
-                    public_key: binding.public_key,
-                    signature: binding.signature,
-                    capture_hash: binding.capture_hash,
-                  }
-                : { kind: "registry", proof: binding.sealed.proof },
+          binding_proof: bindingProof,
           // The rung this line stood on when it counted, and the perimeter word
           // where the account is one of nomankind's own (D-142). Snapshotted
           // rather than read from the registry later: an account that publishes
@@ -2801,9 +2842,7 @@ async function communityLine(
           // read from today's registry would relabel a consensus that closed
           // months ago. What this says is what was true when it counted.
           binding_kind: binding.kind,
-          perimeter: PERIMETER_ACCOUNTS.includes(operator)
-            ? PERIMETER_WORD
-            : null,
+          perimeter: isPerimeterAccount(operator) ? PERIMETER_WORD : null,
           comment_id: comment.id,
           line: line.line,
           posted_at: comment.posted_at,
@@ -2837,7 +2876,7 @@ async function communityLine(
         // The rung and the perimeter as this line sealed them (D-142), so the
         // run's own report says what its detail counts.
         binding_kind: binding.kind,
-        perimeter: PERIMETER_ACCOUNTS.includes(operator) ? PERIMETER_WORD : null,
+        perimeter: isPerimeterAccount(operator) ? PERIMETER_WORD : null,
         seq: validated.seq,
       },
     };
@@ -5674,16 +5713,25 @@ function stepRows(
             joined: report.community_validations.filter((one) => one.joined)
               .length,
             // D-142: the three things the account rung added, each counted on
-            // its own because each is a different fact about a run. How many
-            // lines were taken at the lowest rung — a board authenticated the
-            // author and nothing else did; how many were nomankind's own
-            // accounts, sealed and disclosed and counted toward nothing; and
-            // how many operators climbed off the account rung onto a key this
-            // run. A single total would hide every one of them.
-            account_bound: report.community_validations.filter(
+            // its own because each is a different fact about a run. A single
+            // total would hide every one of them.
+            //
+            // `sealed_account_bound` is how many lines this run SEALED at the
+            // account rung, and that is all it can be: the sweep seals a line
+            // and derivation decides afterwards which lines a consensus counts,
+            // so a step detail that said "counted" would be the door reporting
+            // a number the kernel owns (the review of #105). What a consensus
+            // counted is on the entry, as `verification_binding`.
+            sealed_account_bound: report.community_validations.filter(
               (one) => one.binding_kind === "account",
             ).length,
-            perimeter: report.community_validations.filter(
+            // Lines sealed from nomankind's own accounts, disclosed here for
+            // the same reason they are disclosed on the entry: the record
+            // looked at its own entry, and a run that did not say so would be
+            // hiding the one thing the perimeter exists to show. Counted toward
+            // no consensus at any rung, which is derivation's doing and not
+            // this number's.
+            sealed_perimeter: report.community_validations.filter(
               (one) => one.perimeter !== null,
             ).length,
             upgraded: report.community_validations.filter((one) => one.upgraded)

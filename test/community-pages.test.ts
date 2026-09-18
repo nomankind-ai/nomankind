@@ -262,7 +262,7 @@ describe("the entry page and its JSON view model", () => {
     expect(html).not.toContain("Verified by community validators");
     // D-142: "no class" reads as a verdict where a draft is simply waiting.
     expect(html).toContain("Awaiting validators");
-    expect(html).toContain("nothing has been counted toward this entry yet");
+    expect(html).toContain("nothing has been decided about this entry yet");
   });
 
   it("shows a community validator with its kind, venue and handle", () => {

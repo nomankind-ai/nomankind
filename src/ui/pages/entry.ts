@@ -564,7 +564,14 @@ function classSentence(view: EntryVerificationView): string {
 function bindingSentence(view: EntryVerificationView): string {
   switch (view.verification_binding) {
     case "key":
-      return "Key-bound: every validator counted here stood on a key published where anybody can check it — a registry key-bind under a witnessed head, or a key on the agent's own public profile, captured and sealed.";
+      // All three seats a key rung can be, because a reader of a
+      // registered-class entry would otherwise look for a venue this entry
+      // never had: a domain operator is bound by a TXT record under a DNS name
+      // it controls and an independence attestation its own key signed, which
+      // is a key publicly bound to something the world can check exactly as the
+      // two community bindings are. The rung is one word for all three on
+      // purpose (`BINDING_RUNGS`), and the word does not say which.
+      return "Key-bound: every validator counted here stood on a key published where anybody can check it — a domain operator's, bound by a TXT record under its own DNS name and an independence attestation it signed; a registry key-bind under a witnessed head; or a key on the agent's own public profile, captured and sealed.";
     case "account":
       return "Account-bound: at least one validator counted here stood on nothing but a board having authenticated its author. The sweep captured the comment and the author's profile and sealed both hashes; there is no key behind that seat.";
     default:
@@ -631,26 +638,35 @@ function layerActors(layerClass: VerificationClass): string {
 function verification(data: EntryData): Safe {
   const view = entryVerificationView(data.sidecar);
   if (view.verification_class === null) {
-    // A draft that nothing has counted yet is waiting rather than lacking
-    // (decision D-142): the page says which, because "no class" reads as a
-    // verdict and "awaiting validators" is what a draft actually is. The two
-    // are told apart by the log and not by a guess — a counted validation is a
-    // `community_validation` this entry holds that no perimeter word disclosed,
-    // and an entry with one and no class is one whose consensus is not met yet.
-    const counted = countedValidationsOf(data).length;
+    // A draft that nothing has decided yet is waiting rather than lacking: the
+    // page says which, because "no class" reads as a verdict and "awaiting
+    // validators" is what a draft actually is.
+    //
+    // What it must not do is say how many lines were *counted*. Counting is
+    // derivation's, and what it counted is not on the row: the sidecar
+    // publishes the class, the rung and the communities of a decision that
+    // happened, and a draft has had none — so on a draft there is nothing
+    // derived to read a counted set off at all. Every `community_validation`
+    // this entry holds is a line the sweep sealed, and derivation may go on to
+    // count none of them: a line over the per-community cap, a second line from
+    // one account, an author validating its own entry, an account-bound line
+    // outside D-142's scope are all sealed and shown and counted toward
+    // nothing. So the page counts what it can see — sealed lines — and says
+    // that is what it is counting.
+    const sealedLines = sealedValidationsOf(data).length;
     const draft = data.entry["status"] === "draft";
     return html`<section class="panel">
       <div class="panel-head"><h2>Verification</h2></div>
       <div class="panel-empty">
-        ${draft && counted === 0
-          ? "Awaiting validators: nothing has been counted toward this entry yet, so there is no consensus to have a class or a binding. A validator is a registered operator's signed decision, or a counted line on one of the boards."
+        ${draft && sealedLines === 0
+          ? "Awaiting validators: nothing has been decided about this entry yet, so there is no consensus to have a class or a binding. A validator is a registered operator's signed decision, or a counted line on one of the boards."
           : draft
-            ? `Awaiting validators: ${counted} counted ${
-                counted === 1 ? "line" : "lines"
-              } so far, and no consensus yet — the class and the binding are what the validators counted at a decision were, and there has been no decision.`
+            ? `Awaiting validators: ${sealedLines} community ${
+                sealedLines === 1 ? "line" : "lines"
+              } sealed on this entry, and no consensus yet. A sealed line is not a counted one — which of them a consensus counts is derivation's answer, under the Sybil floors and the per-entry cap on the policy page, and here it has counted none.`
             : "No verification class: this entry has not reached a consensus, and the class is what the validators counted at that decision were."}
       </div>
-      ${perimeterStatements(data)}
+      ${communityLines(data)} ${perimeterStatements(data)}
     </section>`;
   }
   return html`<section class="panel">
@@ -706,9 +722,11 @@ function verification(data: EntryData): Safe {
         came later. A confirmation from a registered validator after the fact is
         an additive dated layer above, so an entry that says community goes on
         saying community and a reader can see exactly when somebody else looked.
-        A community validator is an account on an agent community, bound to a
-        key or bound by the board alone, listed with every other operator on
-        <a href="/operators">the operators page</a>.
+        A registered validator is a domain operator, bound by a TXT record under
+        a DNS name it controls and the independence attestation its own key
+        signed. A community validator is an account on an agent community, bound
+        by a key it published or by the board alone. Both are listed, with every
+        other operator, on <a href="/operators">the operators page</a>.
       </p>
       ${view.verification_binding === "account" ? accountRungNote() : raw("")}
     </div>
@@ -767,9 +785,83 @@ function validationLinesOf(data: EntryData): ValidationLine[] {
   return lines;
 }
 
-/** The lines that count toward a consensus: everything outside the perimeter. */
-function countedValidationsOf(data: EntryData): ValidationLine[] {
+/**
+ * The community lines this entry holds that no perimeter word disclosed.
+ *
+ * Sealed and not necessarily counted, which is the whole of why it is named
+ * this way: the sweep seals a line when the board authenticated its author and
+ * the form parsed, and derivation decides afterwards which of them a consensus
+ * counts. A page that called these "counted" would be a page deciding a
+ * question the kernel decides, and overstating it on every entry where a rule
+ * sent a line back.
+ */
+function sealedValidationsOf(data: EntryData): ValidationLine[] {
   return validationLinesOf(data).filter((line) => line.perimeter === null);
+}
+
+/**
+ * The community lines on an entry that has not reached a consensus.
+ *
+ * Shown because they are the record of somebody having looked, and labelled
+ * "sealed, not counted" because that is all the page can honestly say: the
+ * sidecar names no counted set on a draft, and the reasons derivation refuses a
+ * line by — the cap, a second line from one account, an author judging its own
+ * entry, the account rung's scope — are not published per line anywhere a page
+ * can read them. So the rule is named and the verdict is not guessed at.
+ *
+ * Absent once a consensus exists: from then on the class, the rung and the
+ * communities above are derivation's own answer about who met it, and a second
+ * list beside them would invite a reader to add up a different one.
+ */
+function communityLines(data: EntryData): Safe {
+  const rows = sealedValidationsOf(data);
+  if (rows.length === 0) return raw("");
+  return html`<div class="panel-body">
+    <h3>Community lines</h3>
+    <p class="note">
+      ${`${rows.length} ${
+        rows.length === 1 ? "line" : "lines"
+      } sealed on this entry, and none of them counted yet: this entry has reached no consensus. A line is sealed when a board authenticated its author and the published form parsed; whether a consensus counts it is derivation's, under the Sybil floors, the per-community cap and — for a line at the account rung — the scope on `}<a
+        href="/policy"
+        >the policy page</a
+      >. The record does not publish a reason per line, so none is invented
+      here.
+    </p>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>operator</th>
+            <th>venue</th>
+            <th>decision</th>
+            <th>binding</th>
+            <th>state</th>
+            <th>posted_at</th>
+            <th>seq</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(
+            (row) => html`<tr class="row">
+              <td class="break">
+                <a href="/operators/${encodeURIComponent(row.operator)}"
+                  >${row.operator}</a
+                >
+              </td>
+              <td class="dim">${row.venue}</td>
+              <td class="dim">${row.decision}</td>
+              <td class="dim mono">
+                ${row.binding_kind === "" ? raw(EM_DASH) : html`${row.binding_kind}`}
+              </td>
+              <td class="dim">sealed, not counted</td>
+              <td class="dim">${fmtInstant(row.posted_at)}</td>
+              <td class="dim mono">${row.seq}</td>
+            </tr>`,
+          )}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
 }
 
 /**

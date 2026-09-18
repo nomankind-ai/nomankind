@@ -43,6 +43,7 @@ import {
   TXT_RECORD_PREFIX,
 } from "../src/registry.js";
 import { READ_QUERY_REFUSALS } from "../src/read.js";
+import { ENTRIES_QUERY_REFUSALS } from "../src/ui/query.js";
 import { STAGE_COUNT } from "../src/status.js";
 import { SUBMISSION_REFUSALS } from "../src/submit.js";
 import { SYNC_QUERY_REFUSALS } from "../src/sync.js";
@@ -1301,19 +1302,13 @@ describe("renderApi", () => {
     };
     inOrder('<td class="mono">/read</td>', READ_QUERY_REFUSALS);
     inOrder('<td class="mono">/sync</td>', SYNC_QUERY_REFUSALS);
-    // The listing's own refusals, in src/ui/query.ts's order.
-    inOrder('<td class="mono">/entries</td>', [
-      "unknown_parameter",
-      "repeated_parameter",
-      "bad_category",
-      "bad_status",
-      "unknown_domain",
-      "bad_source",
-      "bad_tier",
-      "bad_min_class",
-      "bad_fresh",
-      "bad_before",
-    ]);
+    // The listing's own refusals, asked of the constant rather than retyped
+    // from it, exactly as /read's and /sync's are above. The retyped copy said
+    // the source before the tier where the parser checks the tier first, so the
+    // page documented an order the code does not refuse in and the test agreed
+    // with the page; a list only the page and the test know is a list the code
+    // can walk away from (the review of #105).
+    inOrder('<td class="mono">/entries</td>', ENTRIES_QUERY_REFUSALS);
     // The home page refuses a slug nobody registered rather than counting the
     // whole log under a name the reader mistyped.
     inOrder('<td class="mono">/</td>', ["domain=&lt;slug&gt;", "unknown_domain"]);

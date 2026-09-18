@@ -245,7 +245,7 @@ const READ_PATH: readonly Endpoint[] = [
     answers:
       "A page for a reader and a listing for a program: with Accept: application/json it answers { entries, next, as_of } — one row per entry carrying id, status, domain, subject, category, effective_at, submitted_at, sealed_position, verification_class, verification_binding and bootstrap, newest sealed position first, one keyset page, with next the before cursor for the page after it and null at the end — and everything else gets the browsing page. The rows are the same rows under either Accept, narrowed by the same filters, so a program and a reader are looking at one listing. A chip group carries each filter, domain and source among them, and every chip and the pager keep the rest of the query as it stands; each row shows the entry's registered domain beside its category, on every page and under every filter. The n-of-m line counts by status and domain, which are indexed columns; category, source, tier and freshness narrow the page rather than the total, and the line says so. The page size is the published one and is not a parameter: limit is refused as unknown_parameter, answered as the Bad query page with 400, rather than honored or ignored.",
     refusals:
-      "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_source, bad_tier, bad_min_class, bad_min_binding, bad_fresh, bad_before. An empty value (?category= or ?min_class=) is a refusal and not an absence.",
+      "400 unknown_parameter, repeated_parameter, bad_category, bad_status, unknown_domain, bad_tier, bad_source, bad_min_class, bad_min_binding, bad_fresh, bad_before. An empty value (?category= or ?min_class=) is a refusal and not an absence.",
   },
   {
     method: "GET",

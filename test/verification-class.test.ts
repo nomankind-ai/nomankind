@@ -549,6 +549,10 @@ describe("min_class", () => {
         subject: "x",
         category: "pricing",
         min_class: "mixed",
+        // D-142 added the binding floor to the same shape, the way D-138 added
+        // the class floor: null rather than absent, so the shape of a subject
+        // query never depends on whether the parameter was written.
+        min_binding: null,
       },
     });
     expect(

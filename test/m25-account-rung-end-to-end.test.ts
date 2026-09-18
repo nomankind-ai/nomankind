@@ -793,6 +793,23 @@ describe("the account rung, end to end", () => {
     expect(binding["kind"]).toBe("profile");
     expect(binding["public_key"]).toBe(promoted.publicKey);
     expect(String(upgrade["capture_hash"])).toMatch(/^sha256:/);
+    // What an offline reader rechecks the stronger binding by (the review of
+    // #105): an upgrade that named a key and carried nothing to check it by was
+    // a claim nobody could falsify. This one carries the same proof the
+    // validation beside it carries.
+    const proof = upgrade["proof"] as Record<string, unknown>;
+    expect(proof).toBeDefined();
+    expect(proof["kind"]).toBe("profile");
+    expect(proof["public_key"]).toBe(promoted.publicKey);
+    expect(typeof proof["signature"]).toBe("string");
+    expect(String(proof["capture_hash"])).toMatch(/^sha256:/);
+    const validation = payloadsOf(await sealedOf("community_validation")).find(
+      (payload) =>
+        payload["operator"] === operator &&
+        payload["entry_id"] === ENTRY_EDGE,
+    )!;
+    // The same object, so the verifier rechecks both by one code path.
+    expect(proof).toEqual(validation["binding_proof"]);
 
     // Additive: the registration that made it an operator is still there saying
     // what it said, and there is exactly one of it.
@@ -917,9 +934,20 @@ describe("the account rung, end to end", () => {
     const html = renderEntry(ctx, data);
     expect(html).toContain("Perimeter statements");
     expect(html).toContain(PERIMETER_OPERATOR);
-    // A draft is waiting rather than lacking, and the count it is waiting on
-    // does not include the maintainer's own line.
+    // A draft is waiting rather than lacking, and what it is waiting on is not
+    // the maintainer's own line: the perimeter line is listed under its own
+    // heading and is not among the sealed community lines counted in the
+    // sentence.
     expect(html).toContain("Awaiting validators");
+    // One community line is sealed on this entry by now — the upgraded
+    // operator's, from the test above — and the maintainer's own is not counted
+    // among them. The page says "sealed", never "counted": which lines a
+    // consensus counts is derivation's, and on a draft it has counted none
+    // (the review of #105).
+    expect(html).toContain("1 community line sealed on this entry");
+    expect(html).toContain("A sealed line is not a counted one");
+    expect(html).toContain("sealed, not counted");
+    expect(html).not.toContain("counted lines so far");
   }, 600_000);
 
   it("keeps the core's own field list untouched by any of it", () => {
