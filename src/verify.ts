@@ -1744,12 +1744,21 @@ function captureCarriesBothVerdicts(
  *   they are compared as the strings the payload and the document both spell
  *   them with. The thread's own post is never fallen back to: on a batch thread
  *   that post is the ask, and reading it as somebody's comment is the whole
- *   fault this exists to avoid.
- * - one comment on its own door, `{..., body: "..."}`, which is GitHub's shape
- *   and the fixture board's. An `id` on it must be this comment's; a document
- *   with no id at all is taken as the comment, because a per-comment door
- *   answers one comment by construction and the capture was fetched at that
- *   comment's own address.
+ *   fault this exists to avoid. The FIRST row with the wanted id and no other,
+ *   which is deliberate: the capture's bytes are sealed and content-addressed,
+ *   so a comment cannot grow a sibling row after the fact, and picking between
+ *   two rows of one archived document would be this reader choosing which of
+ *   them somebody wrote.
+ * - one comment on its own door, `{..., id, body: "..."}`, which is GitHub's
+ *   shape and the fixture board's. The id has to be there and has to be this
+ *   comment's.
+ *
+ * The second reading is a positive id match and nothing looser, and a document
+ * carrying a `post` or a `comments` key at all never reaches it (the review of
+ * #107). Both rules exist for the same case: a whole-post rendering whose
+ * comments were omitted, or given as an object rather than an array, or whose
+ * own id is missing, must not have its own `body` — the ask — read as somebody's
+ * comment. A thread's post is a comment of nobody's.
  *
  * Anything else is null, and null is not a refusal: a rendering this build does
  * not recognise is a reading it cannot make, not evidence of a fault.
@@ -1770,8 +1779,10 @@ function commentBodyIn(text: string, commentId: unknown): string | null {
   }
   if (!isRecord(document)) return null;
 
-  const rows = document["comments"];
-  if (Array.isArray(rows)) {
+  // A document that speaks of a thread is read as one or not at all.
+  if ("comments" in document || "post" in document) {
+    const rows = document["comments"];
+    if (!Array.isArray(rows)) return null;
     for (const each of rows) {
       if (!isRecord(each)) continue;
       const id = each["id"] ?? each["comment_id"];
@@ -1783,7 +1794,8 @@ function commentBodyIn(text: string, commentId: unknown): string | null {
   }
 
   const own = document["id"];
-  if (own !== undefined && own !== null && String(own) !== wanted) return null;
+  if (own === undefined || own === null) return null;
+  if (String(own) !== wanted) return null;
   return typeof document["body"] === "string" ? document["body"] : null;
 }
 

@@ -1098,6 +1098,44 @@ describe("the verifier's account-binding checks", () => {
     expect(await bindingDiffs(built)).toEqual([]);
   });
 
+  it("never reads a thread's own post as the comment", async () => {
+    // The re-review of #107. A whole-post rendering whose comments are omitted,
+    // or given as an object rather than an array, or whose own id is missing,
+    // must not fall through to the per-comment reading and have its own body —
+    // the ask — read as somebody's comment. A thread's post is a comment of
+    // nobody's, so both probes are unlocatable and neither is a refusal.
+    const probes = [
+      // Comments present but not a list: it speaks of a thread, so it is read
+      // as one or not at all.
+      JSON.stringify({ comments: { count: 1 }, body: askPost }),
+      // And a post with no id to match against.
+      JSON.stringify({ body: askPost }),
+    ];
+    for (const comment of probes) {
+      const built = await bundleFor({ pages: { comment }, counted: "accounts" });
+      expect(await bindingDiffs(built)).toEqual([]);
+    }
+  });
+
+  it("still reads a per-comment document that names its own id", async () => {
+    // The other side of that tightening: GitHub's shape and the fixture
+    // board's both carry the id, so the reading they were always given is
+    // unchanged and a block pasted into one of them is still the form.
+    for (const comment of [
+      githubComment(formReply),
+      JSON.stringify({
+        id: 701,
+        thread: 1,
+        handle,
+        body: formReply,
+        posted_at: "2026-09-06T10:00:00.000Z",
+      }),
+    ]) {
+      const built = await bundleFor({ pages: { comment }, counted: "accounts" });
+      expect(await bindingDiffs(built)).toContain("confirmation_form_counted");
+    }
+  });
+
   it("says nothing about the same comment on an uncounted line", async () => {
     // The scoping the review of #105 asked for, and the reason production's own
     // seq 16 to 35 verify clean: those lines were read off the ask before the
