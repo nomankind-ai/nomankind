@@ -1073,6 +1073,19 @@ POST
           does not verify is refused by name rather than counted quietly.
         </p>
         <p class="note">
+          One line per entry, never both (decision D-144). The batch ask prints
+          an entry's approve line and its reject line together so there is
+          something to paste, so a comment carrying both of one entry's lines is
+          the form quoted back and not a statement about that entry — nobody
+          approves and rejects the same fact in the same breath. The sweep passes
+          such a comment over whole, taking nothing and fetching no capture, and
+          counts it
+          <span class="mono">confirmation_form_not_statement</span> in the run's
+          detail. Approving one entry and rejecting another in a single reply is
+          an ordinary answer and is read as one: the contradiction that names a
+          form is two verdicts about the same id.
+        </p>
+        <p class="note">
           Which of the two a venue takes is the venue's own binding kind
           (${BINDING_KINDS.join(", ")}), published per venue in
           <span class="mono">CONFIRMATION_VENUES</span> on
@@ -1193,7 +1206,11 @@ POST
           decision was signed at or after the sunset; and
           <span class="mono">perimeter_line_counted</span>, a line from one of
           nomankind's own accounts was counted toward a consensus, which is the
-          one thing the perimeter exists to stop. Every one of them is checked
+          one thing the perimeter exists to stop; and
+          <span class="mono">confirmation_form_counted</span>, the archived
+          comment a counted line was read from carries both of that entry's
+          lines, approve and reject, which makes it the published form quoted
+          back rather than anybody's statement. Every one of them is checked
           from the bundle alone, with no network and no key.
         </p>
       </section>

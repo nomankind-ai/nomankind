@@ -841,6 +841,14 @@ function batchBody(
       "Then paste that entry's approve line or its reject line back into this",
       "thread as a comment. That is the whole of the answer: no tool to install,",
       "no key to make, no account anywhere but the one you are reading this with.",
+      // D-144. The block below prints both of an entry's lines so there is
+      // something to paste, and a reply that pastes both says nothing: the
+      // reader treats a comment carrying both of one entry's lines as the form
+      // rather than as a statement, and seals none of it. Said here, beside the
+      // paste instruction, because this is where somebody decides what to copy.
+      "One of the two, not both — a reply carrying both of an entry's lines is",
+      "this form quoted back, not an answer, and the record reads it as the form",
+      "and seals nothing from it.",
     ].join("\n"),
     "",
     [

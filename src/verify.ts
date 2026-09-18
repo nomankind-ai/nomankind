@@ -37,6 +37,7 @@ import {
 } from "./attest.js";
 import {
   canonicalConfirmationLine,
+  carriesBothVerdicts,
   confirmationFingerprint,
   confirmationPayloadOf,
   pinnedConfirmationTrust,
@@ -298,7 +299,7 @@ export const CHECKS: readonly EntryCheck[] = Object.freeze([
 ] as const);
 
 /**
- * The five ways an account-bound line can be wrong (decision D-142).
+ * The six ways an account-bound line can be wrong (decisions D-142, D-144).
  *
  * Named here rather than written inline where they are raised, because each one
  * is a different sentence to the reader holding the bundle and a report that
@@ -316,10 +317,16 @@ export const CHECKS: readonly EntryCheck[] = Object.freeze([
  * `perimeter_line_counted` — a line from one of nomankind's own accounts
  * (`PERIMETER_ACCOUNTS`) was counted into a consensus. Sealing and showing such
  * a line is correct; counting it is the record verifying itself.
+ * `confirmation_form_counted` — the comment the counted line was read from
+ * carries BOTH of that entry's lines, approve and reject (decision D-144). A
+ * text holding both is the published ask, or a quotation of it, and not
+ * anybody's statement about the entry; counting it is the record reading its
+ * own words back as an answer.
  *
- * All five are raised under the existing `community_binding` check: an account
- * binding is a community binding, and a sixth check name would say a reader has
- * two things to look at where it has one. D-142: logic in the kernel pass.
+ * All six are raised under the existing `community_binding` check: an account
+ * binding is a community binding, and a seventh check name would say a reader
+ * has two things to look at where it has one. D-142 and D-144: logic in the
+ * kernel pass.
  */
 export const ACCOUNT_BINDING_REFUSALS = Object.freeze({
   proof_invalid: "account_binding_proof_invalid",
@@ -327,6 +334,7 @@ export const ACCOUNT_BINDING_REFUSALS = Object.freeze({
   too_new: "account_binding_too_new",
   after_sunset: "account_binding_after_sunset",
   perimeter_counted: "perimeter_line_counted",
+  form_counted: "confirmation_form_counted",
 } as const);
 
 export type AccountBindingRefusal =
@@ -1251,6 +1259,42 @@ async function checkCommunityBindings(
         continue;
       }
       if (counted.has(operator)) {
+        // The form (decision D-144). The comment those captures hold is the
+        // evidence the rung rests on, so a reader can ask of it the one
+        // question the door now asks before it takes anything: does this text
+        // carry BOTH of this entry's lines? A text that does is the ask this
+        // record posts on every batch thread, or a quotation of it, and nobody
+        // approves and rejects the same fact in the same breath — so a
+        // consensus that counted it counted the record's own words.
+        //
+        // Scoped exactly as `perimeter_line_counted` above is, and for the same
+        // reason (the review of #105). A line the fold left uncounted moved
+        // nothing: production's own seq 16 to 35 are lines the door read off
+        // the ask before this rule existed, sealed at the perimeter and counted
+        // toward nothing, and a check that fired on them would refuse a mirror
+        // for holding comments that changed nothing. What names the fault is
+        // the counting.
+        //
+        // Read off the capture and not off the sealed payload, because the
+        // payload holds one line's verdict and the fault is what the COMMENT
+        // held. The bytes are the ones `accountCapturesHold` just re-hashed, so
+        // this asks nothing the bundle has not already proved.
+        if (
+          captureCarriesBothVerdicts(
+            bundle,
+            (proof as Json)["comment_capture_hash"],
+            entryId,
+          )
+        ) {
+          report.add(
+            "community_binding",
+            field,
+            ACCOUNT_BINDING_REFUSALS.form_counted,
+            briefValue(entryId),
+            briefValue((proof as Json)["comment_capture_hash"]),
+          );
+          continue;
+        }
         if (!tierInScope) {
           report.add(
             "community_binding",
@@ -1631,6 +1675,35 @@ function captureNames(capture: unknown, token: string): boolean {
   try {
     const bytes = base64Decode(capture["body_base64"] as string);
     return new TextDecoder().decode(bytes).includes(token);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the comment a binding archived carries both of one entry's lines
+ * (decision D-144).
+ *
+ * The bytes under the hash the proof names, read with the kernel's own rule
+ * (`carriesBothVerdicts`, src/confirm.ts) and with no rule of this file's own:
+ * the door and the verifier have to agree about what a form is, and a second
+ * reading here would be a second rule.
+ *
+ * False for a hash the bundle holds nothing under and false for bytes that do
+ * not decode. Both are already `account_binding_proof_invalid` by the time this
+ * is asked, and a missing capture is not evidence that a comment was a form.
+ */
+function captureCarriesBothVerdicts(
+  bundle: LogBundle,
+  hash: unknown,
+  entryId: string,
+): boolean {
+  if (typeof hash !== "string") return false;
+  const capture = bundle.captures?.[hash];
+  if (!isRecord(capture)) return false;
+  try {
+    const bytes = base64Decode(capture["body_base64"] as string);
+    return carriesBothVerdicts(new TextDecoder().decode(bytes), entryId);
   } catch {
     return false;
   }

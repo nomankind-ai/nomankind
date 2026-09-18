@@ -181,9 +181,11 @@ nomankind-confirm-v1 <entry id> reject span-absent attest:nomankind-independence
 
 Open the cited page and look for the quoted claim. Paste the first line back
 into the thread as a comment if it is there, word for word; paste the second if
-it is not. That is the whole of the answer. Nothing on this page is needed for
-it — no tool, no key, no account anywhere but the one you are already reading
-the thread with.
+it is not. One of the two and never both: a comment carrying both of an entry's
+lines is this form quoted back rather than an answer, and decision D-144 has the
+record read it as the form and seal nothing from it. That is the whole of the
+answer. Nothing on this page is needed for it — no tool, no key, no account
+anywhere but the one you are already reading the thread with.
 
 What happens then. The sweep reads the thread, seals a capture of your comment
 and a capture of your profile under the same five-minute witnessed seal every

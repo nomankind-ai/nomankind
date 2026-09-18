@@ -61,6 +61,7 @@ import {
   BINDING_RUNGS,
   COMMUNITY_MIN_ACCOUNTS,
   COMMUNITY_MIN_COMMUNITIES,
+  CONFIRMATION_FORM_PREFIX,
   CONFIRMATION_VENUES,
   countingCommunities,
   PERIMETER_ACCOUNTS,
@@ -956,6 +957,71 @@ describe("the verifier's account-binding checks", () => {
     expect(await bindingDiffs(built)).toContain(
       "account_binding_after_sunset",
     );
+  });
+
+  // The form (decision D-144), scoped exactly as the perimeter is.
+
+  /**
+   * A comment capture holding BOTH of this entry's lines: the ask, quoted back.
+   *
+   * Prose on the first line on purpose — a capture is a rendering of a comment,
+   * and the confirm lines sit inside it rather than at its very beginning,
+   * which is where the reader's rule can see them.
+   */
+  const bothVerdicts = [
+    `{"body":"I could not decide, so here is the whole block`,
+    `${CONFIRMATION_FORM_PREFIX} ${ENTRY_ID} approve span-present`,
+    `${CONFIRMATION_FORM_PREFIX} ${ENTRY_ID} reject span-absent`,
+    `"}`,
+  ].join("\n");
+
+  it("refuses a counted account line whose comment carried both verdicts", async () => {
+    // Nobody approves and rejects the same fact in the same breath, so the
+    // comment behind this line was the published form and not a statement — and
+    // a consensus that counted it counted the record's own words back.
+    const built = await bundleFor({
+      pages: { comment: bothVerdicts },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toContain("confirmation_form_counted");
+  });
+
+  it("says nothing about the same comment on an uncounted line", async () => {
+    // The scoping the review of #105 asked for, and the reason production's own
+    // seq 16 to 35 verify clean: those lines were read off the ask before the
+    // door knew better, and the fold counts them toward nothing. A check that
+    // fired on them would refuse every published mirror for holding comments
+    // that moved nothing.
+    //
+    // Uncounted here by the tier, which is the shortest way to a line the fold
+    // leaves out: an observed entry is not one this rung may speak to at all.
+    const built = await bundleFor({
+      core: coreFrom({ evidence_tier: "observed" }),
+      pages: { comment: bothVerdicts },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toEqual([]);
+    expect(built.entry["status"]).toBe("draft");
+  });
+
+  it("says nothing about a perimeter line whose comment carried both", async () => {
+    // Production's case exactly: the ask posted from nomankind's own login, its
+    // lines sealed as that account's statements at the perimeter. Uncounted at
+    // two rules at once, and silent here for the same reason.
+    const built = await bundleFor({
+      pages: { comment: bothVerdicts },
+      operatorAs: PERIMETER_ACCOUNTS[0]!,
+    });
+    expect(await bindingDiffs(built)).not.toContain(
+      "confirmation_form_counted",
+    );
+  });
+
+  it("says nothing about a counted line whose comment carried one", async () => {
+    // The control: the ordinary capture every other case above uses holds one
+    // verdict, and a counted line resting on it is a line somebody meant.
+    const built = await bundleFor({ counted: "accounts" });
+    expect(await bindingDiffs(built)).toEqual([]);
   });
 
   it("says nothing about a perimeter line the fold refused to count", async () => {

@@ -255,6 +255,95 @@ export function parseConfirmationLine(
 }
 
 /**
+ * The entries a comment carries BOTH verdicts for: the form, not a statement
+ * (decision D-144).
+ *
+ * The ask this record posts on every batch thread prints, under each entry, the
+ * approve line and the reject line, so that a replier can paste one of them
+ * back (src/cli/batch-post.ts). A text holding both lines for one entry is
+ * therefore the ask itself, or a quotation of it, or a reply that pasted the
+ * whole block — and whatever it is, it is not a statement about that entry,
+ * because no author approves and rejects the same fact in the same breath. On
+ * 2026-09-18 the reader had no way to tell the two apart: the ask was posted
+ * from the maintainer's own login and the door read its lines as that account's
+ * statements, sealing one of each per entry (production seq 15 to 35, perimeter
+ * and counted toward nothing). Those events stay, because this log is
+ * append-only; this rule is what stops it happening again, for any poster.
+ *
+ * Per entry id and never per comment. Approving one entry and rejecting another
+ * in a single reply is an ordinary answer to a batch ask — a replier who
+ * checked two pages and found one claim present and the other absent has said
+ * exactly what they meant — so the contradiction that names a form is two
+ * verdicts about the SAME id.
+ *
+ * Pure, and about the parsed lines alone: who posted the comment, which venue
+ * it is on and what the log holds are all questions this does not ask. D-144,
+ * building on D-142 and D-138.
+ */
+export function formEntryIds(
+  lines: readonly ConfirmationLine[],
+): Set<string> {
+  const approved = new Set<string>();
+  const rejected = new Set<string>();
+  for (const line of lines) {
+    (line.verdict === "approve" ? approved : rejected).add(line.entry_id);
+  }
+  const both = new Set<string>();
+  for (const id of approved) if (rejected.has(id)) both.add(id);
+  return both;
+}
+
+/**
+ * The same rule asked of raw text: does this text carry both verdicts for this
+ * entry (decision D-144).
+ *
+ * The twin the offline verifier needs. What a reader holding a bundle has of a
+ * comment is the archived capture's bytes, not a parsed line, so the rule has
+ * to be askable of a text — and it is asked the one way this module asks
+ * anything of a stranger's text: `parseConfirmationComment` reads it line by
+ * line for the published form, and `formEntryIds` says what the lines add up
+ * to. No pattern is matched against the text directly, because a loose match
+ * for the prefix and a verdict would fire on a sentence ABOUT the form, and a
+ * sentence about the form is prose.
+ *
+ * Only this entry's lines are read — `isKnownEntry` here means "the one we are
+ * asking about" — so a capture of a thread naming fifty entries answers a
+ * question about one of them.
+ *
+ * The line breaks are the one place this is wider than the door's own reading.
+ * A capture is whatever the venue's public door answered, and on two of the
+ * three venues that is a JSON rendering of the comment (D-138 item 2), where
+ * the body's newlines are the two characters `\` and `n` rather than one
+ * newline. A reading that split on real newlines alone would see the form in a
+ * raw capture and miss it in a rendered one, which would make this rule a fact
+ * about the venue rather than about the comment. So an escaped break is a break
+ * too. That widens what counts as a line and nothing else: each line is still
+ * parsed by `parseConfirmationLine` exactly, or it is prose.
+ *
+ * What that deliberately does not buy is a line the rendering glued its own
+ * text to — `{"body":"nomankind-confirm-v1 ...` begins with a word that is not
+ * the prefix, so it is prose here as it would be at the door. This rule
+ * under-fires there rather than guessing at where a field began, which is the
+ * safe direction for a refusal: a reader refusing somebody's mirror is owed a
+ * fault that is certain, and the door now passes a form over before it can
+ * reach a log at all.
+ *
+ * Never throws: a stranger's bytes are always answered with a verdict.
+ */
+export function carriesBothVerdicts(text: string, entryId: string): boolean {
+  if (typeof text !== "string" || entryId === "") return false;
+  const unwrapped = text.replace(ESCAPED_BREAKS, "\n");
+  const lines = parseConfirmationComment(
+    unwrapped,
+    (id) => id === entryId,
+  );
+  return formEntryIds(lines).has(entryId);
+}
+
+/** A line break as a JSON rendering of a comment spells one: `\r\n` or `\n`. */
+const ESCAPED_BREAKS = /\\r\\n|\\n/g;
+
+/**
  * The key a profile publishes, or null when its bytes publish none.
  *
  * The whole of what a `profile` binding reads out of a page (decision D-138
