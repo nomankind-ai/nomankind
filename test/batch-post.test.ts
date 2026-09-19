@@ -638,6 +638,57 @@ describe("the composed post", () => {
     }
   });
 
+  // The D-144 follow-up. The first outsider reply on production stopped at
+  // `span-present` and left the attestation token behind, so the statement was
+  // made and counted toward nothing.
+  it("says where the line ends, and that a line that lost its tail counts for nothing", () => {
+    for (const body of bodies) {
+      expect(body.body).toContain(
+        `Copy the whole line, to its end: it ends at ${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}`,
+      );
+      expect(body.body).toContain("a line that lost its tail is shown on the entry");
+      // And the two sentences about the token read as the one rule they are:
+      // keep it whole if it is true of you, take it out on purpose if not.
+      // Asserted as the post wraps them — the first is cut after "of" — so a
+      // rewrap that changed the words would fail rather than pass quietly.
+      expect(body.body).toContain("keep it whole if it is true of");
+      expect(body.body).toContain("take it out on purpose if it is not");
+      expect(body.body).toContain("on purpose, which is the same rule as copying");
+      // "further down" and not "below": the attestation paragraph is six
+      // paragraphs further on, and a pointer that lies is worse than none.
+      expect(body.body).toContain("which is further down");
+      expect(body.body).not.toContain("the paragraph below");
+    }
+  });
+
+  it("gives every paste line a paragraph of its own, flush left", () => {
+    // A line in a paragraph of its own, with no indent where every other line
+    // of the block has one, is a line a triple-click and a drag both take
+    // whole — and one whose end reads as the end of something. The lines
+    // themselves are byte for byte what `replyLines` composes; what this pins
+    // is the whitespace around them, because that is what a cursor sees.
+    for (const body of bodies) {
+      const rows = body.body.split("\n");
+      const paste = new Set<string>();
+      for (const entry of entries) {
+        const lines = replyLines(entry.id);
+        paste.add(lines.approve);
+        paste.add(lines.reject);
+      }
+      let seen = 0;
+      for (const [index, row] of rows.entries()) {
+        if (!paste.has(row)) continue;
+        seen += 1;
+        // Flush left: the row IS the line, with nothing around it.
+        expect(row).toBe(row.trim());
+        // An empty line above, and an empty line or the end below.
+        expect(rows[index - 1] ?? "").toBe("");
+        expect(rows[index + 1] ?? "").toBe("");
+      }
+      expect(seen).toBe(entries.length * 2);
+    }
+  });
+
   it("says what a reply does, what rung it counts at, and what a key buys", () => {
     for (const body of bodies) {
       // No tool and no key, and what the record does with the reply.
@@ -859,6 +910,40 @@ describe("fitting a batch to a board", () => {
       });
       expect(post.body.length).toBeLessThanOrEqual(venuePostLimit(venue));
       expect(post.asked.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("fits the same entries per venue as before the paste lines stood alone", () => {
+    // The D-144 follow-up moved whitespace and added four lines of prose, and
+    // both change how much of a batch a small board takes. Measured rather
+    // than assumed: each entry's block is two characters SHORTER (two blank
+    // lines added, two indents of two spaces dropped) and the frame is longer
+    // by the new sentences, and the counts come out the same at all three —
+    // six at 1F916's 8000, ten at The Colony's 10000, a hundred and twenty-one
+    // at GitHub's 65536.
+    //
+    // A tripwire and meant to be one. A future word that pushes a venue over
+    // drops a whole entry from that day's ask, silently, and this is where it
+    // is seen. The fix is to weigh the word against the entry and then update
+    // the number here, with the reason.
+    const full = Array.from({ length: BATCH_ASK_LIMIT }, (_, index) =>
+      ask({ id: `nmk_${String(index + 1).padStart(32, "0")}` }),
+    );
+    const fits: Readonly<Record<string, number>> = {
+      "1f916": 6,
+      colony: 10,
+      github: 121,
+    };
+    for (const venue of BATCH_VENUES) {
+      const post = composeBatchPost({
+        venue,
+        entries: full,
+        baseUrl: BASE,
+        communities: [...BATCH_VENUES],
+        now: NOW,
+      });
+      expect(post.asked).toHaveLength(fits[venue]!);
+      expect(post.body.length).toBeLessThanOrEqual(venuePostLimit(venue));
     }
   });
 

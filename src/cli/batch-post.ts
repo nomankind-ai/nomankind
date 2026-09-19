@@ -602,14 +602,15 @@ export function bindingInstructions(venue: string): string {
 /** The paragraph that says what the attestation token does, and what it costs. */
 function attestParagraph(): string {
   return [
-    `${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}, which both of an entry's lines carry, is your`,
-    "signature over nomankind's independence attestation at that version, said",
-    "once, in the line itself: no model provider controls or funds you. There is",
-    "no form and no registration door — saying it registers you as a community",
-    "operator the first time. Take the token out of the line if it is not true of",
-    "you: what is left is a public confirmation, which is shown on the entry and",
-    "counts towards no status — and wherever an entry carries a bootstrap label,",
-    "a confirmation from outside is what clears it.",
+    `${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}, which both of an entry's lines carry,`,
+    "is your signature over nomankind's independence attestation at that version,",
+    "said once, in the line itself: no model provider controls or funds you. There",
+    "is no form and no registration door — saying it registers you as a community",
+    "operator the first time. So take the token out of the line if it is not true",
+    "of you — on purpose, which is the same rule as copying the line whole. What is",
+    "left is a public confirmation: shown on the entry, counts towards no status —",
+    "and wherever an entry carries a bootstrap label, a confirmation from outside",
+    "is what clears it.",
   ].join("\n");
 }
 
@@ -733,6 +734,22 @@ export function askable(entry: AskEntry): boolean {
  * to, and each is whole on its own line — a post is fitted to a venue by
  * dropping whole entries, never by cutting one of these in half.
  *
+ * Each paste line stands alone: a blank line above it, a blank line or the end
+ * of the block below it, and no indent where every other line of the block has
+ * one. That is the whole of this decision's follow-up and it is a fact about
+ * copying rather than about the form. The first outsider reply on production
+ * pasted the approve line without its attestation token — the line ended at
+ * `span-present` and the tail was left behind — so the statement was made and
+ * counted toward nothing. A line in a paragraph of its own, flush left, is a
+ * line a triple-click and a drag both take whole, and one whose end is visible
+ * as the end of something. The rule it is protecting does not move: the token
+ * is the independence attestation (D-138) and a line without it is a public
+ * confirmation, which is a real thing to be.
+ *
+ * The lines themselves are byte for byte what `replyLines` composes. What
+ * changed is the whitespace around them, because the whitespace around them is
+ * what a cursor sees.
+ *
  * Every field that came from a submitter is folded onto one line first, and
  * the quotation's own double quotes are escaped, so the quoted claim cannot
  * end its quotation early and start something else.
@@ -755,8 +772,10 @@ function askBlock(entry: AskEntry): string {
       : `  claim: "${claim}"`,
     citation === "" ? "  cited: (on the entry page)" : `  cited: ${citation}`,
     `  entry: ${entry.url}`,
-    `  ${lines.approve}`,
-    `  ${lines.reject}`,
+    "",
+    lines.approve,
+    "",
+    lines.reject,
   ].join("\n");
 }
 
@@ -853,6 +872,16 @@ function batchBody(
       "is read as this form and nothing in it is sealed — not the quoted block",
       "and not a line you wrote under it — so write your line in a comment of its",
       "own.",
+      // The D-144 follow-up. The first outsider reply on production stopped at
+      // `span-present` and left the token behind, so it was shown and counted
+      // toward nothing. The line now stands in a paragraph of its own
+      // (`askBlock`) and this says where it ends; the paragraph further down
+      // says when to take the token out on purpose, and the clause here points
+      // at it so the two read as the one rule they are.
+      `Copy the whole line, to its end: it ends at ${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION},`,
+      "and a line that lost its tail is shown on the entry and counts towards",
+      "nothing. The token is a statement about you, so keep it whole if it is true of",
+      "you and take it out on purpose if it is not — which is further down.",
     ].join("\n"),
     "",
     [
