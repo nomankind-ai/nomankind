@@ -174,6 +174,7 @@ import type {
   BoardComment,
   BoardId,
   BoardProfile,
+  BoardRecord,
   BoardSealProof,
 } from "../adapters/board.js";
 import {
@@ -1670,9 +1671,21 @@ async function profileCaptureFor(
  * places a binding could be decided.
  */
 function keyPublishedIn(board: BoardAdapter, text: string): string | null {
-  return board.profileKey === undefined
-    ? profileKeyIn(text)
-    : board.profileKey(text);
+  if (board.profileKey === undefined) return profileKeyIn(text);
+  try {
+    return board.profileKey(text);
+  } catch {
+    // An adapter that broke its own contract read no key out of the page, the
+    // same answer a page with no key in it gets (decision D-145, the review of
+    // #109). The venue's own reading of its own field is the only thing that
+    // threw; the capture is already archived and the line is already sealed as
+    // the account statement it is, and the caller counts it
+    // `confirmation_profile_unkeyed` as it would any page publishing none.
+    // Falling back to `profileKeyIn` over the whole page instead would be this
+    // step overruling a venue's field-scoped reading the moment it failed,
+    // which is the one thing that reading exists to prevent.
+    return null;
+  }
 }
 
 async function takeProfile(
@@ -2195,7 +2208,19 @@ async function registryBindingFor(
   handle: string,
   fingerprint: string,
 ): Promise<LineBinding | null> {
-  const sealed = await board.sealProof(handle, fingerprint);
+  // A registry that did not answer and an adapter that threw asking it are one
+  // thing to this line (decision D-145, the review of #109): there is no proof
+  // in hand either way, so the line falls through to the rung below exactly as
+  // it does for a handle with no seal — uncounted, and named by the caller's
+  // own `confirmation_unsealed` rather than by a reason invented here. Silent,
+  // because the null beside it is silent: a throw must not make a line louder
+  // than the answer it stands in for.
+  let sealed: BoardSealProof | null;
+  try {
+    sealed = await board.sealProof(handle, fingerprint);
+  } catch {
+    sealed = null;
+  }
   if (sealed === null) return null;
   const holds = await verifyConfirmationProof(sealed.proof, trust, {
     handle,
@@ -2522,8 +2547,19 @@ async function communityLine(
   // which event bound it. Two reads of one record for one line was a cost
   // nobody chose, and the second was only ever made because the two halves
   // were read in two places.
-  const record =
-    binding.kind === "registry" ? await board.record(comment.handle) : null;
+  let record: BoardRecord | null = null;
+  if (binding.kind === "registry") {
+    try {
+      record = await board.record(comment.handle);
+    } catch {
+      // A record door that threw said nothing about this handle, which is what
+      // a record door answering null says (decision D-145, the review of
+      // #109). The line has no key to name, so it falls back to the public
+      // confirmation it already was and the run counts it `unbound` — the same
+      // fallback a registry with no word about the handle produces.
+      record = null;
+    }
+  }
 
   const agent =
     binding.kind === "account"

@@ -45,15 +45,25 @@ import { FixtureBeacon } from "../src/adapters/beacon.js";
 import {
   MockBoardAdapter,
   type BoardAdapter,
+  type BoardCapture,
   type BoardComment,
   type BoardId,
+  type BoardProfile,
+  type BoardRecord,
+  type BoardSealProof,
 } from "../src/adapters/board.js";
-import { canonicalConfirmationLine } from "../src/confirm.js";
+import {
+  canonicalConfirmationLine,
+  confirmationFingerprint,
+  profileKeyIn,
+  type ConfirmationTrust,
+} from "../src/confirm.js";
 import { type Core } from "../src/core.js";
 import { deriveEntry } from "../src/derive.js";
 import { base64urlEncode } from "../src/encoding.js";
 import {
   appendEvent,
+  type ConfirmationProof,
   type Event,
   type EventType,
 } from "../src/events.js";
@@ -64,6 +74,10 @@ import {
   generateKeypair,
   signBytes,
 } from "../src/identity.js";
+import {
+  registryCheckpointPayload,
+  registryWitnessPayload,
+} from "../src/registry-proof.js";
 import { archiveAddress, snapshotHash } from "../src/normalize.js";
 import { signCore } from "../src/sign.js";
 import { archiveCapture, readCapture } from "../src/storage/r2.js";
@@ -93,6 +107,7 @@ import {
 import type { Env } from "../src/worker/env.js";
 import { runSweep } from "../src/worker/sweep.js";
 import { openTestDatabase, type TestDatabase } from "./helpers/d1.js";
+import { leafOf, pathOf, rootOf } from "./helpers/registry-tree.js";
 
 const CAPTURE_HTML = [
   "<!doctype html>",
@@ -534,47 +549,212 @@ async function moltbookBoard(): Promise<MockBoardAdapter> {
   });
 }
 
+/** Which door of a board this test makes break. */
+type Door = "threads" | "comments" | "sealProof" | "record" | "profileKey";
+
 /**
- * A board that breaks its own contract: `comments` throws instead of answering
- * null (the review of #109).
+ * A board that breaks its own contract at one door (the review of #109).
  *
  * Every adapter in this record promises to answer null for a board that did not
  * answer, because the sweep runs on a timer and a board being down is weather
  * rather than a rule. A promise is not a guarantee: a stranger's document deep
  * enough to overflow a recursive walk made the Moltbook adapter throw, and the
- * call site was bare, so one thread of one venue took the other venues and
+ * call sites were bare, so one thread of one venue took the venues after it and
  * every step after them down with it — on every run, until somebody unpinned
- * the thread. This is that adapter, standing in for any of them.
+ * the thread.
+ *
+ * A decorator and not a stub, so what is under test is one door failing inside
+ * a board that otherwise works: everything but the chosen door is the real
+ * fixture's answer, and a run that survives has survived a venue that was
+ * halfway useful rather than one that was obviously broken.
  */
 class ThrowingBoardAdapter implements BoardAdapter {
-  readonly venue = "colony";
-  readonly binding = "profile" as const;
-  readonly cursor = "time" as const;
+  readonly venue: string;
+  readonly binding: BoardAdapter["binding"];
+  readonly cursor: BoardAdapter["cursor"];
 
-  /** Which door breaks: listing the threads, or reading one's comments. */
-  constructor(private readonly breaks: "threads" | "comments") {}
+  constructor(
+    private readonly inner: BoardAdapter,
+    private readonly breaks: Door,
+  ) {
+    this.venue = inner.venue;
+    this.binding = inner.binding;
+    this.cursor = inner.cursor;
+  }
 
-  async threads(): Promise<readonly BoardId[]> {
+  async threads(): Promise<readonly BoardId[] | null> {
     if (this.breaks === "threads") {
       throw new TypeError("board.posts is not iterable");
     }
-    return ["09ed63ba-438a-41e8-b352-f065b376106e"];
+    return this.inner.threads();
   }
 
-  async comments(): Promise<readonly BoardComment[] | null> {
+  async comments(
+    thread: BoardId,
+    afterId: number,
+    limit: number,
+  ): Promise<readonly BoardComment[] | null> {
     if (this.breaks === "comments") {
       throw new RangeError("Maximum call stack size exceeded");
     }
-    return [];
+    return this.inner.comments(thread, afterId, limit);
   }
 
-  async sealProof(): Promise<null> {
-    return null;
+  async profile(handle: string): Promise<BoardProfile | null> {
+    return (await this.inner.profile?.(handle)) ?? null;
   }
 
-  async record(): Promise<null> {
-    return null;
+  async comment(comment: BoardComment): Promise<BoardCapture | null> {
+    return (await this.inner.comment?.(comment)) ?? null;
   }
+
+  profileKey(text: string): string | null {
+    if (this.breaks === "profileKey") {
+      throw new TypeError("Cannot read properties of undefined (reading 'description')");
+    }
+    return this.inner.profileKey?.(text) ?? profileKeyIn(text);
+  }
+
+  async sealProof(
+    handle: string,
+    fingerprint: string,
+  ): Promise<BoardSealProof | null> {
+    if (this.breaks === "sealProof") {
+      throw new Error("registry read failed");
+    }
+    return this.inner.sealProof(handle, fingerprint);
+  }
+
+  async record(handle: string): Promise<BoardRecord | null> {
+    if (this.breaks === "record") {
+      throw new Error("registry read failed");
+    }
+    return this.inner.record(handle);
+  }
+}
+
+/** A registry venue's thread, and the one handle that seals on it. */
+const REGISTRY_VENUE = "1f916";
+const REGISTRY_ORIGIN = "https://registry.test";
+const REGISTRY_LOG = "identity_events";
+const REGISTRY_EVENT_HASH = "1".repeat(64);
+/**
+ * One thread and one sealer per registry case.
+ *
+ * The cases in the table below share a database, because they share the world
+ * `beforeAll` built. Two of them read a registry venue, and a comment read
+ * twice is sealed once by the dedup key on (venue, comment, line) — so two
+ * cases on one thread would leave the second reading a line the first had
+ * already sealed, and it would count nothing and prove nothing. Each gets its
+ * own thread, its own comment and its own handle, which is also what two
+ * separate runs of a real board would look like.
+ */
+const REGISTRY_THREADS: Readonly<Record<string, number>> = {
+  sealProof: 5212,
+  record: 5213,
+};
+const SEALERS: Readonly<Record<string, string>> = {
+  sealProof: "sealed-reader",
+  record: "recorded-reader",
+};
+/** A handle nobody has registered, whose signed line makes the profile be read. */
+const FRESH_KEYED = "fresh-signer";
+
+/**
+ * A registry log, its key and a witness: a seal proof that really verifies.
+ *
+ * The two registry doors below — `sealProof` and `record` — are only reached on
+ * a venue whose binding is `registry`, and `record` only after a proof has
+ * already been verified, so a case about either has to build the real thing.
+ * The tree, the checkpoint and the countersignature are the same construction
+ * test/m25-community-end-to-end.test.ts makes, in the smallest form that holds.
+ */
+async function registryTrust(): Promise<{
+  trust: ConfirmationTrust;
+  proofFor: (handle: string, fingerprint: string) => ConfirmationProof;
+}> {
+  const registry = await generateKeypair();
+  const registryRaw = await exportPublicKeyRaw(registry.publicKey);
+  const witness = await generateKeypair();
+  const witnessRaw = await exportPublicKeyRaw(witness.publicKey);
+
+  const hashes = [REGISTRY_EVENT_HASH, "2".repeat(64)];
+  const leaves = await Promise.all(hashes.map((hash) => leafOf(hash)));
+  const root = await rootOf(leaves);
+  const treeSize = leaves.length;
+  const createdAt = 1_789_000_000_000;
+
+  const registrySig = base64urlEncode(
+    await signBytes(
+      registry.privateKey,
+      registryCheckpointPayload({
+        log: REGISTRY_LOG,
+        tree_size: treeSize,
+        root,
+        created_at: createdAt,
+      }),
+    ),
+  );
+  const witnessSig = base64urlEncode(
+    await signBytes(
+      witness.privateKey,
+      registryWitnessPayload({
+        registry: REGISTRY_ORIGIN,
+        log: REGISTRY_LOG,
+        tree_size: treeSize,
+        root,
+      }),
+    ),
+  );
+  const path = await pathOf(leaves, 0);
+
+  return {
+    trust: {
+      registry: {
+        origin: REGISTRY_ORIGIN,
+        log: REGISTRY_LOG,
+        public_key: base64urlEncode(registryRaw),
+      },
+      witnesses: [
+        { agent: agentIdFromPublicKey(witnessRaw), operator: "witness-a" },
+      ],
+      required: 1,
+    },
+    proofFor: (handle, fingerprint) => ({
+      registry: REGISTRY_ORIGIN,
+      log: REGISTRY_LOG,
+      event_hash: REGISTRY_EVENT_HASH,
+      leaf: {
+        citizen: handle,
+        event_id: 15_387,
+        kind: "memory.seal",
+        detail: `label='nomankind-confirm' sha256=${fingerprint.slice("sha256:".length)}, signed by AAA`,
+        created_at: 1_789_000_000_001,
+      },
+      leaf_index: 0,
+      proof: path,
+      checkpoint: {
+        tree_size: treeSize,
+        root,
+        created_at: createdAt,
+        registry_sig: registrySig,
+      },
+      witnesses: [
+        {
+          agent: agentIdFromPublicKey(witnessRaw),
+          signature: witnessSig,
+          head: {
+            tree_size: treeSize,
+            root,
+            created_at: createdAt,
+            registry_sig: registrySig,
+          },
+          consistency: "verified from 2",
+          consistency_proof: [],
+        },
+      ],
+    }),
+  };
 }
 
 describe("Moltbook, end to end", () => {
@@ -789,38 +969,173 @@ describe("Moltbook, end to end", () => {
     ).toHaveLength(1);
   }, 600_000);
 
+  /**
+   * The board each case breaks a door of, and what reaching that door needs.
+   *
+   * Two of the five doors are only reached on a venue whose binding is
+   * `registry`, and one only on a profile the run has not read before, so a
+   * table that pointed every case at the same board would be a table whose
+   * last three cases passed without the door ever being called. Each row
+   * brings the world its own door lives in.
+   */
+  async function worldFor(breaks: Door): Promise<{
+    board: BoardAdapter;
+    inner: MockBoardAdapter;
+    trust?: ConfirmationTrust;
+  }> {
+    if (breaks === "threads" || breaks === "comments") {
+      const inner = await moltbookBoard();
+      return { board: new ThrowingBoardAdapter(inner, breaks), inner };
+    }
+
+    if (breaks === "profileKey") {
+      // A handle the log holds no registration for, so its signed line sends
+      // the run to the profile door and the venue's own reading of its own
+      // field — which is the thing that throws.
+      rewindThread(7_200_000);
+      const signer = await keypair();
+      const inner = new MockBoardAdapter({
+        venue: VENUE,
+        binding: "profile",
+        cursor: "time",
+        threads: [THREAD],
+        comments: new Map([
+          [
+            THREAD,
+            [
+              comment(
+                "f0e1d2c3-b4a5-4968-8778-695a4b3c2d1e",
+                FRESH_KEYED,
+                await signedLine(signer, ENTRY_FORM, "and I signed for it"),
+              ),
+            ],
+          ],
+        ]),
+        profiles: new Map([
+          [FRESH_KEYED, profileJson(FRESH_KEYED, signer.publicKey)],
+        ]),
+        accounts: new Map([[FRESH_KEYED, CREATED_AT]]),
+      });
+      return { board: new ThrowingBoardAdapter(inner, breaks), inner };
+    }
+
+    // The two registry doors. `sealProof` is asked of any well-formed line on
+    // such a venue, so a token line is enough; `record` is asked only after a
+    // proof has verified, so that case carries one that really does.
+    const { trust, proofFor } = await registryTrust();
+    rewindThread(10_800_000);
+    const thread = REGISTRY_THREADS[breaks]!;
+    const sealer = SEALERS[breaks]!;
+    const fingerprint = await confirmationFingerprint({
+      entry_id: ENTRY_FORM,
+      verdict: "approve",
+      check: { kind: "hash", value: snapshot },
+      attestation_version: ATTESTATION_VERSION,
+    });
+    const inner = new MockBoardAdapter({
+      venue: REGISTRY_VENUE,
+      binding: "registry",
+      cursor: "id",
+      threads: [thread],
+      comments: new Map([
+        [
+          thread,
+          [
+            {
+              ...comment("x", sealer, bareLine(ENTRY_FORM, "sealed it myself")),
+              id: thread * 10,
+              thread,
+            },
+          ],
+        ],
+      ]),
+      seals: new Map<string, BoardSealProof>([
+        [
+          `${sealer} ${fingerprint}`,
+          { registry_event_id: 15_387, proof: proofFor(sealer, fingerprint) },
+        ],
+      ]),
+      records: new Map([
+        [sealer, { agent: `1F916:${"a".repeat(43)}`, key_bind_event_id: 11 }],
+      ]),
+    });
+    return { board: new ThrowingBoardAdapter(inner, breaks), trust, inner };
+  }
+
   it.each([
-    ["comments", "moltbook-throws-comments"],
-    ["threads", "moltbook-throws-threads"],
+    ["threads"],
+    ["comments"],
+    ["sealProof"],
+    ["record"],
+    ["profileKey"],
   ] as const)(
     "survives an adapter whose %s throws, and goes on reading the other venues",
-    async (breaks, round) => {
-      // The review of #109. Both of the confirmations step's board calls are
-      // read the same way — null and a throw both mean this venue did not
-      // answer — because both are network reads with every other venue queued
-      // behind them, and either one escaping takes the venues after it and
-      // every step after the run down with it.
+    async (breaks) => {
+      // The review of #109. Every board door the confirmations step calls is
+      // read the same way — null and a throw both mean this venue said nothing
+      // here — because each of them is somebody else's server answering, and
+      // any one of them escaping takes the venues after it and every step after
+      // the run down with it. The reading is the neighbouring guard's, never a
+      // louder one: a throw from `threads` or `comments` is the venue's own
+      // `board_unavailable`, a throw from `sealProof` leaves the line to the
+      // rung below exactly as a handle with no seal does, a throw from `record`
+      // leaves it the public confirmation it already was, and a throw from
+      // `profileKey` reads no key off the page, exactly as a page with no key
+      // on it reads.
       //
-      // The thrower is FIRST in the list, so a run that let the throw escape
-      // would never reach the venue after it and would have no report to
-      // answer with at all.
+      // The thrower is FIRST in the board list, so a run that let the throw
+      // escape would never reach the venue behind it and would have no report
+      // to answer with at all.
+      const broken = await worldFor(breaks);
       const working = await moltbookBoard();
       const again = await runSweep(envOf(), {
         now: new Date(NOW.getTime() + 600_000),
-        beacon: new FixtureBeacon(round),
-        board: [new ThrowingBoardAdapter(breaks), working],
+        beacon: new FixtureBeacon(`moltbook-throws-${breaks}`),
+        board: [broken.board, working],
+        ...(broken.trust === undefined
+          ? {}
+          : { confirmationTrust: broken.trust }),
       });
 
       // The run completed: there is a report, and the steps after the
       // confirmations one did their work rather than being skipped by a throw.
       expect(again).toBeDefined();
       expect(again.chain?.break ?? null).toBeNull();
-      // A board that threw is a board that did not answer, by that reason's
-      // own name — never a run that died.
-      expect(again.skipped["board_unavailable"]).toBe(1);
-      // And the venue after it was read, which is the whole point.
+      // And the venue after the broken one was read, which is the whole point.
       expect(working.reads).toContain(THREAD);
-      expect(again.confirmations_read.threads).toBe(1);
+
+      if (breaks === "threads" || breaks === "comments") {
+        // A board that would not list or serve is that board's own silence.
+        expect(again.skipped["board_unavailable"]).toBe(1);
+        expect(again.confirmations_read.threads).toBe(1);
+        return;
+      }
+
+      // The other three reached their door, so the broken venue's thread was
+      // read like any other and the line it carried is what fell through.
+      expect(again.confirmations_read.threads).toBe(2);
+      expect(again.skipped["board_unavailable"]).toBeUndefined();
+
+      if (breaks === "sealProof") {
+        // No proof in hand, so the line falls through to the rung below and is
+        // named by the caller's own reason — the same one a handle that sealed
+        // nothing gets. The account rung refuses it too, because a registry
+        // venue publishes no profile door to capture.
+        expect(again.skipped["confirmation_unsealed"]).toBeGreaterThanOrEqual(1);
+      }
+      if (breaks === "record") {
+        // The proof verified, so the binding is a registry one — and then the
+        // registry could not say which key stands behind the handle. The line
+        // falls back to the public confirmation it already was.
+        expect(again.confirmation_fallbacks["unbound"]).toBe(1);
+      }
+      if (breaks === "profileKey") {
+        // The page was fetched and read, and the venue's own reading of its own
+        // field threw: no key published, exactly as a page carrying none.
+        expect(
+          again.skipped["confirmation_profile_unkeyed"],
+        ).toBeGreaterThanOrEqual(1);
+      }
     },
     600_000,
   );
