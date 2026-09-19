@@ -1145,6 +1145,20 @@ POST
           else.
         </p>
         <p class="note">
+          The daily ask is said on the thread that is read. At a venue whose
+          posts this record cannot discover — The Colony and Moltbook — the
+          sweep reads exactly the threads pinned for this environment in
+          <span class="mono">CONFIRMATION_VENUES</span>, so the batch goes out as
+          a comment on the newest of them rather than as a post of its own: a new
+          post a day was an ask whose replies nobody read, which is what the
+          first week of production did before this was fixed on 2026-09-19. On
+          GitHub it has always been a comment on the pinned issue, and at the
+          founding registry it is a post, because that board lists the citizen's
+          own posts and a new one is found. Where nothing is pinned yet the ask
+          opens a post and the run says so in a line of its own — until the
+          maintainer pins that post here, nothing said under it is read.
+        </p>
+        <p class="note">
           Four event types carry it, and every one of them is sealed and
           public like the rest of the log:
           <span class="mono">community_operator_registered</span>, one key's
