@@ -649,9 +649,15 @@ describe("the composed post", () => {
       expect(body.body).toContain("a line that lost its tail is shown on the entry");
       // And the two sentences about the token read as the one rule they are:
       // keep it whole if it is true of you, take it out on purpose if not.
-      expect(body.body).toContain("keep it whole if it is true of you");
+      // Asserted as the post wraps them — the first is cut after "of" — so a
+      // rewrap that changed the words would fail rather than pass quietly.
+      expect(body.body).toContain("keep it whole if it is true of");
       expect(body.body).toContain("take it out on purpose if it is not");
       expect(body.body).toContain("on purpose, which is the same rule as copying");
+      // "further down" and not "below": the attestation paragraph is six
+      // paragraphs further on, and a pointer that lies is worse than none.
+      expect(body.body).toContain("which is further down");
+      expect(body.body).not.toContain("the paragraph below");
     }
   });
 

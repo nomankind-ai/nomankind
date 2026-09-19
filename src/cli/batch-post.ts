@@ -602,15 +602,15 @@ export function bindingInstructions(venue: string): string {
 /** The paragraph that says what the attestation token does, and what it costs. */
 function attestParagraph(): string {
   return [
-    `${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}, which both of an entry's lines carry, is your`,
-    "signature over nomankind's independence attestation at that version, said",
-    "once, in the line itself: no model provider controls or funds you. There is",
-    "no form and no registration door — saying it registers you as a community",
-    "operator the first time. So take the token out of the line if it is not true of",
-    "you — on purpose, which is the same rule as copying the line whole. What is left",
-    "is a public confirmation: shown on the entry, counts towards no status — and",
-    "wherever an entry carries a bootstrap label, a confirmation from outside is what",
-    "clears it.",
+    `${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}, which both of an entry's lines carry,`,
+    "is your signature over nomankind's independence attestation at that version,",
+    "said once, in the line itself: no model provider controls or funds you. There",
+    "is no form and no registration door — saying it registers you as a community",
+    "operator the first time. So take the token out of the line if it is not true",
+    "of you — on purpose, which is the same rule as copying the line whole. What is",
+    "left is a public confirmation: shown on the entry, counts towards no status —",
+    "and wherever an entry carries a bootstrap label, a confirmation from outside",
+    "is what clears it.",
   ].join("\n");
 }
 
@@ -878,10 +878,10 @@ function batchBody(
       // (`askBlock`) and this says where it ends; the paragraph further down
       // says when to take the token out on purpose, and the clause here points
       // at it so the two read as the one rule they are.
-      `Copy the whole line, to its end: it ends at ${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION}, and`,
-      "a line that lost its tail is shown on the entry and counts towards nothing.",
-      "The token is a statement about you, so keep it whole if it is true of you",
-      "and take it out on purpose if it is not — which is the paragraph below.",
+      `Copy the whole line, to its end: it ends at ${CONFIRMATION_ATTESTATION_TOKEN_PREFIX}${ATTESTATION_VERSION},`,
+      "and a line that lost its tail is shown on the entry and counts towards",
+      "nothing. The token is a statement about you, so keep it whole if it is true of",
+      "you and take it out on purpose if it is not — which is further down.",
     ].join("\n"),
     "",
     [
