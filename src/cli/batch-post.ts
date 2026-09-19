@@ -1397,8 +1397,15 @@ export async function runBatchPost(
     // An entry the composer would not print is named, with the reason, before
     // anything else about this venue: a silent refusal is an entry that looks
     // to an operator exactly like an entry nobody has got to yet.
+    // Folded like everything else printed off a wire. These ids come from this
+    // record's own doors rather than from a board, so nothing here is a
+    // stranger's text — but a line of stdout is a line of stdout, and the rule
+    // that holds only where somebody remembered the bytes were somebody else's
+    // is the rule that gets forgotten.
     for (const entry of body.refused) {
-      deps.io.stdout(`not asked ${entry.id}: claim text in the confirm form`);
+      deps.io.stdout(
+        `not asked ${oneLine(entry.id)}: claim text in the confirm form`,
+      );
     }
 
     // What did not fit is said on every run and not only on a dry one: an
@@ -1408,7 +1415,7 @@ export async function runBatchPost(
       deps.io.stdout(
         `waiting ${venue}: ${body.deferred.length} entries did not fit inside ` +
           `${body.limitChars} characters and are named in a later batch — ` +
-          body.deferred.map((entry) => entry.id).join(", "),
+          body.deferred.map((entry) => oneLine(entry.id)).join(", "),
       );
     }
 
@@ -1437,19 +1444,36 @@ export async function runBatchPost(
       const poster = await deps.posterFor(venue, plan);
       result = await poster.post(body);
     } catch (error) {
-      // The venue's own answer, whole and unedited, exactly as it has always
-      // been printed: the board said it, and a run that paraphrased a refusal
-      // would be a run the operator had to go and check.
-      const answer = error instanceof Error ? error.message : String(error);
+      // The venue's own answer, whole and unparaphrased: the board said it,
+      // and a run that summarised a refusal would be a run the operator had to
+      // go and check. Folded onto one line, though, for the reason every other
+      // string off a wire is — a refusal body with a newline in it writes a
+      // line of this run's stdout that the run never said, and a board that
+      // was refusing the post is the last place to take that on trust.
+      const answer = oneLine(
+        error instanceof Error ? error.message : String(error),
+      );
       deps.io.stdout(`failed ${venue}: ${answer}`);
       const advice = capRowAdvice(venue, answer);
       if (advice !== null) deps.io.stdout(advice);
       failed = true;
       continue;
     }
+    // The state keeps the board's id and URL exactly as the board spelled
+    // them, whatever is in them: it is JSON, which escapes a newline rather
+    // than being broken by one, and the once-a-day check and the link have to
+    // be the board's own strings and not a tidied copy of them.
     next[venue] = { date: day, id: result.id, url: result.url };
     posted = true;
-    deps.io.stdout(`posted ${venue} ${result.id} ${result.url}`);
+    // Folded for the line, though, and not for the file. Both of these are a
+    // board's strings — an id it minted and, at Moltbook, a URL it chose — and
+    // a newline in either writes a line of this run's stdout that the run
+    // never said: a convincing second `posted ...` for a post that does not
+    // exist. The same fault the challenge fields had, fixed the same way (the
+    // review of #109, D-145).
+    deps.io.stdout(
+      `posted ${venue} ${oneLine(result.id)} ${oneLine(result.url)}`,
+    );
     // A challenge the board attached to the post, printed and not answered
     // (decision D-145 item 4). The post is made and the day is spent, so the
     // state above already records it; what is left is a call for a person to

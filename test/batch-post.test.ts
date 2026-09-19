@@ -1835,6 +1835,47 @@ describe("the run, on a venue whose thread is pinned", () => {
     expect(state.written).toHaveLength(0);
   });
 
+  it("folds a board's id and URL onto the one line it prints them on", async () => {
+    // The fault #109 fixed for the challenge fields, at the door beside them:
+    // both of these are a board's own strings, and a newline in either writes a
+    // line of this run's stdout that the run never said — a convincing second
+    // `posted ...` for a post that does not exist.
+    const forged = "posted colony forged-9 https://thecolony.ai/posts/evil";
+    const id = `aec1028d\n${forged}`;
+    const url = `https://thecolony.ai/posts/1\nposted moltbook f2 https://x`;
+    const state = memoryState();
+    const io = lines();
+    const run: BatchPostDeps = {
+      http: recordDoors(),
+      io,
+      now: NOW,
+      state,
+      posterFor: async (venue: string): Promise<Poster> => ({
+        venue,
+        post: async (): Promise<Posted> => ({ id, url }),
+      }),
+    };
+
+    expect(await runBatchPost(["colony", PRODUCTION], run)).toBe(0);
+    // One line, and not the one the board tried to write.
+    const said = io.out.filter((line) => line.startsWith("posted "));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toBe(
+      `posted colony aec1028d ${forged} https://thecolony.ai/posts/1 ` +
+        "posted moltbook f2 https://x",
+    );
+    expect(io.out).not.toContain(forged);
+
+    // And the file keeps what the board actually said, whatever is in it: it
+    // is JSON, which escapes a newline rather than being broken by one, and
+    // the once-a-day check and the link have to be the board's own strings.
+    const text = state.written[state.written.length - 1] ?? null;
+    expect(text).toContain("\\n");
+    const written = parseState(text);
+    expect(written["colony"]).toEqual({ date: utcDay(NOW), id, url });
+    expect(postedOn(written, "colony", utcDay(NOW))).toBe(true);
+  });
+
   it("keeps the pin note off the venues that never had one", async () => {
     // Production pins The Colony's thread and GitHub's issue, and the founding
     // registry discovers its own posts above the pinned floor. Moltbook is the
