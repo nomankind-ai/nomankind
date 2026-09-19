@@ -551,12 +551,21 @@ class ThrowingBoardAdapter implements BoardAdapter {
   readonly binding = "profile" as const;
   readonly cursor = "time" as const;
 
+  /** Which door breaks: listing the threads, or reading one's comments. */
+  constructor(private readonly breaks: "threads" | "comments") {}
+
   async threads(): Promise<readonly BoardId[]> {
+    if (this.breaks === "threads") {
+      throw new TypeError("board.posts is not iterable");
+    }
     return ["09ed63ba-438a-41e8-b352-f065b376106e"];
   }
 
   async comments(): Promise<readonly BoardComment[] | null> {
-    throw new RangeError("Maximum call stack size exceeded");
+    if (this.breaks === "comments") {
+      throw new RangeError("Maximum call stack size exceeded");
+    }
+    return [];
   }
 
   async sealProof(): Promise<null> {
@@ -780,28 +789,41 @@ describe("Moltbook, end to end", () => {
     ).toHaveLength(1);
   }, 600_000);
 
-  it("survives an adapter that throws, and goes on reading the other venues", async () => {
-    // The review of #109, both halves at once. The thrower is first in the
-    // list, so a run that let the throw escape would never reach the venue
-    // after it and would have no report to answer with at all.
-    const working = await moltbookBoard();
-    const again = await runSweep(envOf(), {
-      now: new Date(NOW.getTime() + 600_000),
-      beacon: new FixtureBeacon("moltbook-throws"),
-      board: [new ThrowingBoardAdapter(), working],
-    });
+  it.each([
+    ["comments", "moltbook-throws-comments"],
+    ["threads", "moltbook-throws-threads"],
+  ] as const)(
+    "survives an adapter whose %s throws, and goes on reading the other venues",
+    async (breaks, round) => {
+      // The review of #109. Both of the confirmations step's board calls are
+      // read the same way — null and a throw both mean this venue did not
+      // answer — because both are network reads with every other venue queued
+      // behind them, and either one escaping takes the venues after it and
+      // every step after the run down with it.
+      //
+      // The thrower is FIRST in the list, so a run that let the throw escape
+      // would never reach the venue after it and would have no report to
+      // answer with at all.
+      const working = await moltbookBoard();
+      const again = await runSweep(envOf(), {
+        now: new Date(NOW.getTime() + 600_000),
+        beacon: new FixtureBeacon(round),
+        board: [new ThrowingBoardAdapter(breaks), working],
+      });
 
-    // The run completed: there is a report, and the steps after the
-    // confirmations one did their work rather than being skipped by a throw.
-    expect(again).toBeDefined();
-    expect(again.chain?.break ?? null).toBeNull();
-    // A board that threw is a board that did not answer, by that reason's own
-    // name — never a run that died.
-    expect(again.skipped["board_unavailable"]).toBe(1);
-    // And the venue after it was read, which is the whole point.
-    expect(working.reads).toContain(THREAD);
-    expect(again.confirmations_read.threads).toBe(1);
-  }, 600_000);
+      // The run completed: there is a report, and the steps after the
+      // confirmations one did their work rather than being skipped by a throw.
+      expect(again).toBeDefined();
+      expect(again.chain?.break ?? null).toBeNull();
+      // A board that threw is a board that did not answer, by that reason's
+      // own name — never a run that died.
+      expect(again.skipped["board_unavailable"]).toBe(1);
+      // And the venue after it was read, which is the whole point.
+      expect(working.reads).toContain(THREAD);
+      expect(again.confirmations_read.threads).toBe(1);
+    },
+    600_000,
+  );
 
   it("passes over the comment that carried both of an entry's lines", async () => {
     // Decision D-144, at the door, on a venue that did not exist when it was

@@ -1437,7 +1437,20 @@ async function confirmationsStep(
   for (const board of boards) {
     if (sealed.length + validations.length >= CONFIRMATIONS_PER_RUN) break;
 
-    const threads = await board.threads();
+    // Listing the threads is a read like any other, and is read like any other
+    // (decision D-145, the review of #109). A venue that discovers its threads
+    // asks the board for them — `RegistryBoardAdapter.threads` fetches the
+    // citizen's posts — so this is a network call at the top of the loop with
+    // every other venue queued behind it, and an adapter that threw here would
+    // take the ones after it down exactly as a throw from `comments` below did.
+    // Null and a throw mean the same thing and are answered the same way: this
+    // venue did not answer, the loop goes on to the next one.
+    let threads: readonly BoardId[] | null;
+    try {
+      threads = await board.threads();
+    } catch {
+      threads = null;
+    }
     if (threads === null) {
       skip("board_unavailable");
       continue;
