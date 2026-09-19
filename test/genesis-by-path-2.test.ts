@@ -1035,6 +1035,50 @@ describe("the verifier's account-binding checks", () => {
   const githubComment = (body: string): string =>
     JSON.stringify({ id: 701, user: { login: handle }, body });
 
+  /**
+   * Moltbook's comments door, whose replies are nested (decision D-145).
+   *
+   * `GET /api/v1/posts/<uuid>/comments` answers
+   * `{success, comments:[...], has_more, next_cursor}`, each root comment
+   * carrying its own `replies` tree, its author under `author.name` and its
+   * text under `content` rather than `body` (src/adapters/board.ts). The
+   * counted line here is the REPLY and not the root: somebody else's root
+   * comment is the row the document lists, and the line the record sealed is
+   * one level down inside it — which is the whole reason the verifier's
+   * locating had to learn to descend.
+   */
+  const moltbookComments = (body: string): string =>
+    JSON.stringify({
+      success: true,
+      post_id: "19b6e9bf-6ff9-4ea5-834a-cbbac714f546",
+      sort: "new",
+      comments: [
+        {
+          id: "2a501eb7-bf3a-485b-939c-d86e7b3cc85f",
+          author: { name: "someone-else" },
+          content: "good question, does the page still say that?",
+          depth: 0,
+          is_deleted: false,
+          verification_status: "verified",
+          created_at: "2026-09-06T09:00:00.000Z",
+          replies: [
+            {
+              id: "701",
+              author: { name: handle },
+              content: body,
+              depth: 1,
+              is_deleted: false,
+              verification_status: "pending",
+              created_at: "2026-09-06T10:00:00.000Z",
+              replies: [],
+            },
+          ],
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+
   it("says nothing about an honest reply on a thread whose post is the ask", async () => {
     // The Colony has no per-comment door, so the capture of this reply holds the
     // whole thread — the ask included, with both of the entry's lines in it. A
@@ -1172,6 +1216,35 @@ describe("the verifier's account-binding checks", () => {
     expect(await bindingDiffs(built)).not.toContain(
       "confirmation_form_counted",
     );
+  });
+
+  it("finds a Moltbook reply nested inside somebody else's comment", async () => {
+    // Decision D-145. The capture is a page of the thread's comments, and the
+    // counted line is a reply one level down inside a root comment that is not
+    // this account's at all. A locating that read only the top rows would find
+    // no body, and D-144's rule would then be asked of nothing — under-firing
+    // quietly on exactly the lines a nested board produces.
+    //
+    // Honest here, so what is proved is that the reply was located and read as
+    // the statement it is: silence, with the ask's own both-verdict block
+    // sitting in the same bundle at the venue's own thread.
+    const built = await bundleFor({
+      pages: { comment: moltbookComments(honestReply) },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toEqual([]);
+  });
+
+  it("asks the form rule of that reply's body and nothing else", async () => {
+    // The other half: the same nested position, the block pasted back whole.
+    // The rule fires, and it fires on the reply's own `content` — the root
+    // comment above it says something else entirely, and the document's own
+    // post is not in these bytes at all.
+    const built = await bundleFor({
+      pages: { comment: moltbookComments(formReply) },
+      counted: "accounts",
+    });
+    expect(await bindingDiffs(built)).toContain("confirmation_form_counted");
   });
 
   it("says nothing about a counted line whose comment carried one", async () => {

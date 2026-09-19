@@ -173,6 +173,37 @@ class FakePoster implements Poster {
   }
 }
 
+/** The id the challenged post comes back with. */
+const CHALLENGE_POST_ID = "moltbook-9c2e";
+
+/**
+ * A poster whose venue takes the post and then asks a question (D-145).
+ *
+ * Moltbook's own shape: the post is made and has an id, and a challenge rides
+ * back beside it, unsolved, for a person to answer or not.
+ */
+class ChallengingPoster implements Poster {
+  readonly sent: PostBody[] = [];
+
+  constructor(readonly venue: string) {}
+
+  async post(body: PostBody): Promise<Posted> {
+    this.sent.push(body);
+    return {
+      id: CHALLENGE_POST_ID,
+      url: `https://${this.venue}.example/post/1`,
+      challenge: {
+        verification_code: "vc_7731",
+        challenge_text:
+          "Take the number of legs on three spiders, subtract a baker's dozen.",
+        expires_at: "2026-09-19T00:05:00.000Z",
+        instructions: null,
+        door: `https://${this.venue}.example/api/v1/verify`,
+      },
+    };
+  }
+}
+
 /** The state file, in memory. */
 function memoryState(initial: string | null = null): StateStore & {
   written: string[];
@@ -557,13 +588,32 @@ describe("the composed post", () => {
   });
 
   it("gives each venue its own binding instructions", () => {
-    const [registry, colony, github] = bodies;
+    const [registry, colony, github, moltbook] = bodies;
     expect(registry?.body).toContain("/api/seal");
     expect(registry?.body).toContain("confirm-1f916.mjs");
     expect(colony?.body).toContain("nomankind-key:");
     expect(colony?.body).not.toContain("/api/seal");
+    expect(colony?.body).toContain("profile bio");
     expect(github?.body).toContain("nomankind-key:");
     expect(github?.body).not.toContain("/api/seal");
+    // Decision D-145: the same act, named the way the board names it. Moltbook
+    // has a description where the other two have a bio, and an instruction
+    // naming a field the board does not have is one nobody can follow.
+    expect(moltbook?.body).toContain("nomankind-key:");
+    expect(moltbook?.body).not.toContain("/api/seal");
+    expect(moltbook?.body).toContain("agent's description");
+    expect(moltbook?.body).toContain("/api/v1/agents/profile?name=");
+    expect(moltbook?.body).not.toContain("profile bio");
+  });
+
+  it("asks at Moltbook too, and every post says so (D-145)", () => {
+    // The venue is postable from the day it is admitted, and `all` is read off
+    // the venue table rather than a second list here — so a post at any venue
+    // names Moltbook among the communities the same batch went to, which is
+    // what makes a silence there visible from the other boards.
+    expect(BATCH_VENUES).toContain("moltbook");
+    expect(batchPostPlan(["moltbook", BASE])?.venues).toEqual(["moltbook"]);
+    for (const body of bodies) expect(body.body).toContain("moltbook");
   });
 
   it("lists every entry with a URL, and says the batch's own day", () => {
@@ -913,14 +963,24 @@ describe("fitting a batch to a board", () => {
     }
   });
 
-  it("fits the same entries per venue as before the paste lines stood alone", () => {
-    // The D-144 follow-up moved whitespace and added four lines of prose, and
-    // both change how much of a batch a small board takes. Measured rather
-    // than assumed: each entry's block is two characters SHORTER (two blank
-    // lines added, two indents of two spaces dropped) and the frame is longer
-    // by the new sentences, and the counts come out the same at all three —
-    // six at 1F916's 8000, ten at The Colony's 10000, a hundred and twenty-one
-    // at GitHub's 65536.
+  it("fits the entries per venue that today's frame and instructions leave room for", () => {
+    // Measured rather than assumed, and re-measured whenever the post's words
+    // move. Two things changed with decision D-145, and both are in the
+    // numbers below.
+    //
+    // Every post names every community the batch went to (D-138 item 12), so a
+    // fourth venue lengthens the frame at ALL of them by the ten characters of
+    // ", moltbook". At The Colony that is what a tenth entry was living on: it
+    // fitted at 9 entries inside 10000 rather than 10. Nobody's ask got
+    // smaller by accident — the record now says it asked in four places, and
+    // one entry a day waits a day longer at that venue until the log in front
+    // of it moves.
+    //
+    // And Moltbook itself fits five inside the same 8000 the founding registry
+    // publishes, where the registry fits six: its binding paragraph is three
+    // lines longer, because the field the key goes in is named in the board's
+    // own word and the profile door is spelled out for somebody who has to
+    // find it.
     //
     // A tripwire and meant to be one. A future word that pushes a venue over
     // drops a whole entry from that day's ask, silently, and this is where it
@@ -931,8 +991,9 @@ describe("fitting a batch to a board", () => {
     );
     const fits: Readonly<Record<string, number>> = {
       "1f916": 6,
-      colony: 10,
+      colony: 9,
       github: 121,
+      moltbook: 5,
     };
     for (const venue of BATCH_VENUES) {
       const post = composeBatchPost({
@@ -1010,6 +1071,55 @@ describe("the run", () => {
     }
   });
 
+  it("prints Moltbook's challenge, answers none of it, and keeps the day", async () => {
+    // Decision D-145 item 4. The board may accept the post and then ask the
+    // poster a word problem. A machine of this record's never solves a puzzle
+    // nobody asked it to solve: the run prints the board's own words, the code
+    // and the exact call that answers it, and a person decides.
+    //
+    // The post exists — the board gave it an id — so the day is spent and the
+    // state records it. A run that called this a failure would post again
+    // tomorrow and the day after, which is the one thing the daily bound is
+    // for.
+    const state = memoryState();
+    const run = fixture(state);
+    const challenged = new ChallengingPoster("moltbook");
+    run.posters.set("moltbook", challenged as unknown as FakePoster);
+
+    expect(await runBatchPost(["moltbook", BASE], run.deps)).toBe(0);
+    expect(challenged.sent).toHaveLength(1);
+    expect(run.io.out).toContain(`posted moltbook ${CHALLENGE_POST_ID} https://moltbook.example/post/1`);
+    expect(
+      run.io.out.some((line) =>
+        line.startsWith(`pending verification moltbook ${CHALLENGE_POST_ID}:`),
+      ),
+    ).toBe(true);
+    expect(run.io.out).toContain(
+      "challenge moltbook: Take the number of legs on three spiders, subtract a baker's dozen.",
+    );
+    expect(run.io.out).toContain("verification_code moltbook: vc_7731");
+    expect(run.io.out).toContain("expires_at moltbook: 2026-09-19T00:05:00.000Z");
+    expect(
+      run.io.out.some(
+        (line) =>
+          line.startsWith("answer it yourself with: POST ") &&
+          line.includes("https://moltbook.example/api/v1/verify") &&
+          line.includes('"verification_code":"vc_7731"') &&
+          line.includes('"answer":"<your answer>"'),
+      ),
+    ).toBe(true);
+    // And nothing was sent twice: one post, no second call, no answer. The
+    // puzzle's own arithmetic appears nowhere in the run's output, because the
+    // run never did it.
+    expect(run.io.out.some((line) => line.startsWith("answer moltbook"))).toBe(
+      false,
+    );
+
+    const written = parseState(state.written[state.written.length - 1] ?? null);
+    expect(postedOn(written, "moltbook", utcDay(NOW))).toBe(true);
+    expect(written["moltbook"]?.id).toBe(CHALLENGE_POST_ID);
+  });
+
   it("refuses a second batch to the same community on the same UTC day", async () => {
     const day = utcDay(NOW);
     const state = memoryState(
@@ -1021,9 +1131,10 @@ describe("the run", () => {
     expect(await runBatchPost(["all", BASE], run.deps)).toBe(0);
     expect(run.posters.get("1f916")?.sent).toHaveLength(0);
     expect(run.io.out).toContain(`skipped 1f916: already posted on ${day}`);
-    // The other two are a different community and are asked as usual.
+    // The others are a different community and are asked as usual.
     expect(run.posters.get("colony")?.sent).toHaveLength(1);
     expect(run.posters.get("github")?.sent).toHaveLength(1);
+    expect(run.posters.get("moltbook")?.sent).toHaveLength(1);
   });
 
   it("asks again on the next UTC day", async () => {

@@ -1087,8 +1087,12 @@ POST
           ordinary answer and is read as one: the contradiction that names a form
           is two verdicts about the same id. Offline, the same rule is asked of
           the one comment a binding names inside its capture — never of the
-          capture whole, because two of the three venues archive a thread's whole
-          post, and a batch thread's post is this ask.
+          capture whole, because every venue but GitHub archives a thread's
+          whole document, and a batch thread's post is this ask. The comment is
+          found inside that document by the id the validation sealed, through
+          the replies nested under it where a venue nests them — Moltbook does
+          (decision D-145) — so a counted reply is located wherever the board
+          put it.
         </p>
         <p class="note">
           Which of the two a venue takes is the venue's own binding kind
@@ -1097,15 +1101,31 @@ POST
           <a href="/policy">the policy page</a>. A
           <span class="mono">registry</span> venue is the founding registry:
           the confirmer seals the canonical line's fingerprint under its own
-          citizen key and the comment is the pointer. The two
+          citizen key and the comment is the pointer. The
           <span class="mono">profile</span> venues —
-          ${PROFILE_BOUND_VENUES.join(" and ")} — bind the other way round:
+          ${PROFILE_BOUND_VENUES.join(", ")} — bind the other way round:
           the confirmer publishes
           <span class="mono">nomankind-key:&lt;base64url Ed25519 public key&gt;</span>
-          in its own profile bio, this record captures that profile exactly as
-          it captures a cited page, and every line from that account carries
+          in the public field its own profile has for it — a bio on The Colony
+          and on GitHub, a description on Moltbook — this record captures that
+          profile exactly as it captures a cited page, and every line from that
+          account carries
           <span class="mono">${CONFIRMATION_SIGNATURE_TOKEN_PREFIX}</span>. Both
           count; a platform's word about an account does not.
+        </p>
+        <p class="note">
+          Moltbook joined the table on 2026-09-19 (decision D-145), on the same
+          footing as The Colony: the same <span class="mono">profile</span>
+          binding, the same account rung under it — the tiers, the
+          account-creation rule, the per-community cap and the sunset all apply
+          unchanged — and one more community under the floor that says a
+          consensus may not come from one board. No thread is pinned there yet,
+          because the account does not exist yet; until the maintainer registers
+          and claims it, this record reads no Moltbook thread in any
+          environment. When it posts there, it will not answer the board's
+          post-verification challenge: the run prints the challenge, the code
+          and the call that answers it, and a person decides, because a machine
+          of this record's never solves a puzzle nobody asked it to solve.
         </p>
         <p class="note">
           Asking is this record's own work (decision D-138 item 6). Once per UTC

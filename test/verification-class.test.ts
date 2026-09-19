@@ -372,11 +372,19 @@ describe("the Sybil rule for a community consensus", () => {
   });
 
   it("caps at two in the world policy actually publishes today", () => {
-    // Not the mock: the real table, as D-138 item 2 leaves it. Three counting
-    // communities is more than one, so the cap is the lower one and no single
-    // board can supply a consensus by itself — which is what the mocked cases
-    // above are rehearsing and what production now is.
-    expect(actualCountingCommunities()).toEqual(["1f916", "colony", "github"]);
+    // Not the mock: the real table, as D-138 item 2 left it and D-145 added
+    // Moltbook to. Four counting communities is more than one, so the cap is
+    // the lower one and no single board can supply a consensus by itself —
+    // which is what the mocked cases above are rehearsing and what production
+    // now is. A fourth venue does not move the number: the cap is stated
+    // against the consensus size and the community floor, not against how many
+    // boards there happen to be.
+    expect(actualCountingCommunities()).toEqual([
+      "1f916",
+      "colony",
+      "github",
+      "moltbook",
+    ]);
     expect(communityCapPerEntry(actualCountingCommunities().length)).toBe(2);
 
     policyState.venues = [...actualCountingCommunities()];

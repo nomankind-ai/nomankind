@@ -39,6 +39,7 @@ import {
   ColonyBoardAdapter,
   GitHubBoardAdapter,
   RegistryBoardAdapter,
+  UnavailableBoardAdapter,
   boardAdaptersFor,
   confirmationVenue,
   pinnedThreadsFor,
@@ -319,12 +320,32 @@ describe("the key a profile publishes", () => {
 // ---------------------------------------------------------------------------
 
 describe("the venue table", () => {
-  it("names three venues: the registry, The Colony and GitHub", () => {
+  it("names four venues: the registry, The Colony, GitHub and Moltbook", () => {
     expect(CONFIRMATION_VENUES.map((row) => row.venue)).toEqual([
       "1f916",
       "colony",
       "github",
+      "moltbook",
     ]);
+  });
+
+  it("carries Moltbook's public doors, read on 2026-09-19 (D-145)", () => {
+    const row = confirmationVenue("moltbook")!;
+    expect(row.origin).toBe("https://www.moltbook.com");
+    expect(row.citizen).toBe("nomankind");
+    expect(row.repository).toBeNull();
+    // The Colony's binding, on the same footing: the key is published in the
+    // field this board calls a description, and the line carries `sig:`.
+    expect(row.binding).toBe("profile");
+    expect(row.profile_door).toBe("/api/v1/agents/profile?name={handle}");
+    expect(row.comments_door).toBe("/api/v1/posts/{thread}/comments");
+    expect(row.discover).toBe(false);
+    // No thread anywhere, because the account does not exist yet: the venue is
+    // in the table the day it is admitted, and a thread is pinned the day
+    // there is one.
+    for (const environment of ["demo", "production", "local"]) {
+      expect(pinnedThreadsFor(row, environment)).toEqual([]);
+    }
   });
 
   it("carries The Colony's public doors, read on 2026-09-17", () => {
@@ -380,7 +401,13 @@ describe("the venue table", () => {
     // is the door being open exactly where the maintainer opened it.
     expect(
       CONFIRMATION_VENUES.map((row) => pinnedThreadsFor(row, "production")),
-    ).toEqual([[5891], ["bae0e581-d7e2-4a25-9451-9a9bb3083a41"], [2]]);
+    ).toEqual([
+      [5891],
+      ["bae0e581-d7e2-4a25-9451-9a9bb3083a41"],
+      [2],
+      // Moltbook names none, on production as everywhere else (D-145).
+      [],
+    ]);
     for (const row of CONFIRMATION_VENUES) {
       expect(pinnedThreadsFor(row, "local")).toEqual([]);
       // Production's thread is never demo's: a comment on one must never be
@@ -402,12 +429,28 @@ describe("the venue table", () => {
     expect(confirmationVenue("colony")!.post_max_chars).toBe(10000);
   });
 
-  it("counts all three, because both binding kinds count", () => {
-    expect(countingCommunities()).toEqual(["1f916", "colony", "github"]);
+  it("counts all four, because both binding kinds count", () => {
+    expect(countingCommunities()).toEqual([
+      "1f916",
+      "colony",
+      "github",
+      "moltbook",
+    ]);
     for (const venue of CONFIRMATION_VENUES) {
       expect(COUNTING_BINDING_KINDS).toContain(venue.binding);
     }
     expect(isSingleCountingCommunity(countingCommunities().length)).toBe(false);
+  });
+
+  it("carries the cap Moltbook has not published, which is the table's smallest", () => {
+    // Decision D-145. The board states no limit of its own, so the row takes
+    // the smallest number already in the table — the founding registry's own
+    // published 8000 — rather than a fresh guess: a batch that fits the
+    // strictest board is a batch no board has to refuse.
+    expect(confirmationVenue("moltbook")!.post_max_chars).toBe(8000);
+    expect(confirmationVenue("moltbook")!.post_max_chars).toBe(
+      Math.min(...CONFIRMATION_VENUES.map((row) => row.post_max_chars)),
+    );
   });
 
   it("drops the per-entry cap to two now that more than one community counts", () => {
@@ -440,11 +483,17 @@ describe("the boards an environment listens to", () => {
       "1f916",
       "colony",
       "github",
+      "moltbook",
     ]);
     expect(boards[1]).toBeInstanceOf(ColonyBoardAdapter);
     expect(boards[2]).toBeInstanceOf(GitHubBoardAdapter);
+    // Moltbook is in the table and has no thread pinned anywhere, so what this
+    // environment gets is the board nobody can reach — the door open exactly
+    // where the maintainer opened it (D-145).
+    expect(boards[3]).toBeInstanceOf(UnavailableBoardAdapter);
     expect(boards.map((board) => board.binding)).toEqual([
       "registry",
+      "profile",
       "profile",
       "profile",
     ]);
@@ -454,7 +503,7 @@ describe("the boards an environment listens to", () => {
     // Local only, now that production has its threads: the door is open where
     // the maintainer opened it and nowhere else, and local is nowhere else.
     const boards = boardAdaptersFor(envOf("local"));
-    expect(boards).toHaveLength(3);
+    expect(boards).toHaveLength(4);
     for (const board of boards) {
       // Null and not an empty list: the step counts `board_unavailable` and
       // says why, rather than claiming a board said nothing.
@@ -580,10 +629,16 @@ describe("the boards an environment listens to", () => {
       "1f916",
       "colony",
       "github",
+      "moltbook",
     ]);
     expect(boards[0]).toBeInstanceOf(RegistryBoardAdapter);
     expect(boards[1]).toBeInstanceOf(ColonyBoardAdapter);
     expect(boards[2]).toBeInstanceOf(GitHubBoardAdapter);
+    // Three and not four: Moltbook is in the table from D-145 and has no
+    // thread pinned on any environment, so production reads no board there
+    // and the step says `board_unavailable` rather than claiming a silence.
+    expect(boards[3]).toBeInstanceOf(UnavailableBoardAdapter);
+    expect(await boards[3]!.threads()).toBeNull();
     // The two that discover nothing answer their pinned thread and only that,
     // with no network read at all: the pinned list is the whole door there.
     expect(await boards[1]!.threads()).toEqual([

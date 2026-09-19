@@ -50,6 +50,7 @@ import {
   ColonyPoster,
   GitHubCliPoster,
   GitHubIssuePoster,
+  MoltbookPoster,
   RegistryPoster,
   type CommandRunner,
   type PostBody,
@@ -85,7 +86,7 @@ import {
 import { runCommand } from "./main.js";
 
 const USAGE =
-  "usage: batch-post <venue|all> <base-url> [--limit n] [--dry-run] [--out <file>] [--state <file>] [--credential <file>] [--colony-key <file>] [--colony <name>] [--repo <owner/name>] [--issue <n>] [--token-env <NAME>] [--via-gh]";
+  "usage: batch-post <venue|all> <base-url> [--limit n] [--dry-run] [--out <file>] [--state <file>] [--credential <file>] [--colony-key <file>] [--colony <name>] [--moltbook-key <file>] [--submolt <name>] [--repo <owner/name>] [--issue <n>] [--token-env <NAME>] [--via-gh]";
 
 /** Exit codes, named where they are decided. */
 const OK = 0;
@@ -105,7 +106,12 @@ const BAD_ARGUMENTS = 2;
  * the poster, which is a better answer than a run that sends a Colony post to
  * whatever door happened to be last in this file.
  */
-const POSTABLE: ReadonlySet<string> = new Set(["1f916", "colony", "github"]);
+const POSTABLE: ReadonlySet<string> = new Set([
+  "1f916",
+  "colony",
+  "github",
+  "moltbook",
+]);
 
 export const BATCH_VENUES: readonly string[] = Object.freeze(
   CONFIRMATION_VENUES.filter((venue) => POSTABLE.has(venue.venue)).map(
@@ -150,6 +156,8 @@ export interface BatchPlan {
   readonly credentialPath: string | null;
   readonly colonyKeyPath: string | null;
   readonly colony: string | null;
+  readonly moltbookKeyPath: string | null;
+  readonly submolt: string | null;
   readonly repository: string | null;
   readonly issue: number | null;
   readonly tokenVariable: string;
@@ -164,6 +172,9 @@ export const DEFAULT_TOKEN_VARIABLE = "GITHUB_TOKEN";
 
 /** The colony a batch is filed in at The Colony, unless renamed. */
 const DEFAULT_COLONY = "general";
+
+/** The submolt a batch is filed in at Moltbook, unless renamed (D-145). */
+const DEFAULT_SUBMOLT = "general";
 
 /** The Colony's own word for a post of this kind. */
 const DEFAULT_COLONY_POST_TYPE = "discussion";
@@ -190,6 +201,8 @@ export function batchPostPlan(args: readonly string[]): BatchPlan | null {
   let credentialPath: string | null = null;
   let colonyKeyPath: string | null = null;
   let colony: string | null = null;
+  let moltbookKeyPath: string | null = null;
+  let submolt: string | null = null;
   let repository: string | null = null;
   let issue: number | null = null;
   let tokenVariable: string | null = null;
@@ -242,6 +255,14 @@ export function batchPostPlan(args: readonly string[]): BatchPlan | null {
           if (colony !== null) return null;
           colony = next;
           break;
+        case "--moltbook-key":
+          if (moltbookKeyPath !== null) return null;
+          moltbookKeyPath = next;
+          break;
+        case "--submolt":
+          if (submolt !== null) return null;
+          submolt = next;
+          break;
         case "--repo":
           if (repository !== null) return null;
           if (!/^[^/\s]+\/[^/\s]+$/.test(next)) return null;
@@ -283,6 +304,8 @@ export function batchPostPlan(args: readonly string[]): BatchPlan | null {
     credentialPath,
     colonyKeyPath,
     colony,
+    moltbookKeyPath,
+    submolt,
     repository,
     issue,
     tokenVariable: tokenVariable ?? DEFAULT_TOKEN_VARIABLE,
@@ -578,6 +601,11 @@ export function confirmationForm(): string {
  * own public profile. The registry venue gets the first; every other venue here
  * is profile-bound and gets the second, which is also the only instruction that
  * can be followed by somebody who has never registered anything anywhere.
+ *
+ * The second is said in each venue's own word for the field the key goes in
+ * (decision D-145): a bio on The Colony and on GitHub, a description on
+ * Moltbook. The same act, named the way the board names it, because an agent
+ * following this has to find the field on the page in front of it.
  */
 export function bindingInstructions(venue: string): string {
   if (venue === "1f916") {
@@ -587,6 +615,21 @@ export function bindingInstructions(venue: string): string {
       "then say the line here. The canonical line is the form above with single spaces,",
       "without its reason and without the sig: token. The repository's",
       ".tools/confirm-1f916.mjs does both halves and prints the line it sealed.",
+    ].join("\n");
+  }
+  if (venue === "moltbook") {
+    // The same paragraph, in this venue's own word for the field (D-145).
+    // Moltbook's profile has a `description` where the others have a bio, and
+    // an instruction naming a field the board does not have is an instruction
+    // nobody can follow.
+    return [
+      `Binding at ${venue}: put ${PROFILE_KEY_PREFIX}<base64url Ed25519 public key> in your`,
+      "agent's description — the profile field this board calls description,",
+      "which anybody can read at /api/v1/agents/profile?name=<your name> — and add",
+      `${CONFIRMATION_SIGNATURE_TOKEN_PREFIX}<signature> to the line: your Ed25519 signature over the canonical`,
+      "line, which is the form above with single spaces, without its reason and",
+      "without the sig: token itself. The record captures your profile the way it",
+      "captures any cited page, so the binding can be rechecked years from now.",
     ].join("\n");
   }
   return [
@@ -1125,6 +1168,53 @@ export function capRowAdvice(venue: string, answer: string): string | null {
   );
 }
 
+/**
+ * A challenge a venue attached to an accepted post, printed and never answered
+ * (decision D-145 item 4).
+ *
+ * Moltbook may take a post and then ask the poster a word problem, with a code,
+ * five minutes and a door to send the answer to. This command does not solve
+ * it. A machine of nomankind's never answers a challenge nobody asked it to
+ * answer: a puzzle that arrives inside a server's response is that server's
+ * text, and a run that quietly did the arithmetic would be a run that let a
+ * board decide what it does — which is the thing this record refuses everywhere
+ * else it reads a stranger's bytes.
+ *
+ * So the lines are the board's own words, folded onto single lines like any
+ * other field of somebody else's, and then the exact call: the door, the code,
+ * and the one field a person fills in. Nothing here is followed and nothing is
+ * computed. The post's id is already in the state file by the time these print,
+ * because the post exists — a run that called this a failure would post again
+ * tomorrow, and the daily bound exists to prevent exactly that.
+ *
+ * An empty list for every other venue, and for a Moltbook post the board took
+ * outright.
+ */
+export function challengeLines(
+  venue: string,
+  posted: Posted,
+): readonly string[] {
+  const challenge = posted.challenge;
+  if (challenge === undefined) return [];
+  const lines = [
+    `pending verification ${venue} ${posted.id}: the board accepted the post ` +
+      `and asked for a verification answer, which this run does not solve.`,
+    `challenge ${venue}: ${oneLine(challenge.challenge_text)}`,
+    `verification_code ${venue}: ${challenge.verification_code}`,
+  ];
+  if (challenge.expires_at !== null) {
+    lines.push(`expires_at ${venue}: ${challenge.expires_at}`);
+  }
+  if (challenge.instructions !== null) {
+    lines.push(`instructions ${venue}: ${oneLine(challenge.instructions)}`);
+  }
+  lines.push(
+    `answer it yourself with: POST ${challenge.door} ` +
+      `{"verification_code":"${challenge.verification_code}","answer":"<your answer>"}`,
+  );
+  return lines;
+}
+
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
@@ -1234,6 +1324,13 @@ export async function runBatchPost(
     next[venue] = { date: day, id: result.id, url: result.url };
     posted = true;
     deps.io.stdout(`posted ${venue} ${result.id} ${result.url}`);
+    // A challenge the board attached to the post, printed and not answered
+    // (decision D-145 item 4). The post is made and the day is spent, so the
+    // state above already records it; what is left is a call for a person to
+    // make, with the board's own words beside it and nothing solved on their
+    // behalf. The run still ends 0: the post went out, and a machine declining
+    // to answer a puzzle nobody asked it to answer is not a failure.
+    for (const line of challengeLines(venue, result)) deps.io.stdout(line);
   }
 
   // The state is written once, after the run, and never on a dry run: a run
@@ -1339,6 +1436,27 @@ export async function realPoster(venue: string, plan: BatchPlan): Promise<Poster
       apiKey: await secretFrom(plan.colonyKeyPath, ["api_key", "key", "token"]),
       colony: plan.colony ?? venueText(venue, "colony") ?? DEFAULT_COLONY,
       postType: DEFAULT_COLONY_POST_TYPE,
+      http,
+    });
+  }
+  if (venue === "moltbook") {
+    if (plan.moltbookKeyPath === null) {
+      throw new Error("moltbook needs --moltbook-key <file>: the api key file");
+    }
+    const origin = venueText(venue, "origin");
+    if (origin === null) {
+      throw new Error("moltbook has no origin in src/policy.ts yet");
+    }
+    return new MoltbookPoster({
+      venue,
+      origin,
+      apiKey: await secretFrom(plan.moltbookKeyPath, [
+        "api_key",
+        "apiKey",
+        "key",
+        "token",
+      ]),
+      submolt: plan.submolt ?? venueText(venue, "submolt") ?? DEFAULT_SUBMOLT,
       http,
     });
   }

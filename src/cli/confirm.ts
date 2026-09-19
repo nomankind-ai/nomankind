@@ -4,7 +4,7 @@
  * Whitepaper Section 11's joining steps as amended by decision D-138, item 6.
  * Everything a confirmer has to do that a machine can do for them:
  *
- *   npm run confirm -- <base-url> <entry-id> [approve|reject] --venue <1f916|colony|github>
+ *   npm run confirm -- <base-url> <entry-id> [approve|reject] --venue <1f916|colony|github|moltbook>
  *     [--key <key.json> | --generate <key.json>] [--attest]
  *     [--check hash|span-present|span-absent] [--reason <text>]
  *
@@ -57,7 +57,7 @@ import { runCommand } from "./main.js";
 import type { ValidatorIo } from "./validator.js";
 
 const USAGE =
-  "usage: confirm <base-url> <entry-id> [approve|reject] --venue <1f916|colony|github>" +
+  "usage: confirm <base-url> <entry-id> [approve|reject] --venue <1f916|colony|github|moltbook>" +
   " [--key <key.json> | --generate <key.json>] [--attest]" +
   " [--check hash|span-present|span-absent] [--reason <text>]";
 
