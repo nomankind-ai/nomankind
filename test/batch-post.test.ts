@@ -25,6 +25,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   askable,
   BATCH_ASK_LIMIT,
+  challengeLines,
   BATCH_VENUES,
   batchPostPlan,
   capRowAdvice,
@@ -1025,6 +1026,67 @@ describe("fitting a batch to a board", () => {
   });
 });
 
+describe("a venue's challenge, printed and not answered", () => {
+  const posted = { id: "9c2e", url: "https://moltbook.example/post/9c2e" };
+
+  it("says nothing at all for a post no venue challenged", () => {
+    expect(challengeLines("moltbook", posted)).toEqual([]);
+    expect(challengeLines("colony", { ...posted })).toEqual([]);
+  });
+
+  it("folds every one of the board's four strings onto its own line", () => {
+    // The review of #109. A newline in a code or an expiry writes a line of
+    // this command's own stdout — the reviewer produced a convincing
+    // `posted moltbook <id> <url>` that way — and breaks the JSON of the
+    // printed call into something nobody can paste. All four are a server's
+    // strings, so all four go through the same folder the composer puts a
+    // stranger's claim through, and not only the two that read like prose.
+    const lines = challengeLines("moltbook", {
+      ...posted,
+      challenge: {
+        verification_code: `vc_7731"}\nposted moltbook forged https://evil.example/1\n{"x":"`,
+        challenge_text: "three spiders\nminus a baker's dozen",
+        expires_at: "2026-09-19T00:05:00.000Z\nposted moltbook forged https://evil.example/2",
+        instructions: "answer it\nwithin five minutes",
+        door: "https://www.moltbook.com/api/v1/verify",
+      },
+    });
+
+    for (const line of lines) {
+      expect(line).not.toContain("\n");
+      expect(line).not.toContain("\r");
+    }
+    // Not one forged line anywhere in it: every line the command printed is
+    // one the command wrote.
+    expect(lines.some((line) => line.startsWith("posted "))).toBe(false);
+    // And the call is still a call. Folding alone would not have got here: the
+    // code above also carries a quotation mark and a brace, which break a
+    // hand-spelled object exactly as a newline breaks a line, so the body is
+    // built by `JSON.stringify` and escaped.
+    const call = lines[lines.length - 1]!;
+    expect(call.startsWith("answer it yourself with: POST ")).toBe(true);
+    const json = call.slice(call.indexOf("{"));
+    expect(() => JSON.parse(json) as unknown).not.toThrow();
+    expect((JSON.parse(json) as { answer: string }).answer).toBe("<your answer>");
+  });
+
+  it("leaves out an expiry and instructions the board did not give", () => {
+    const lines = challengeLines("moltbook", {
+      ...posted,
+      challenge: {
+        verification_code: "vc_7731",
+        challenge_text: "what is two and two",
+        expires_at: null,
+        instructions: null,
+        door: "https://www.moltbook.com/api/v1/verify",
+      },
+    });
+    expect(lines.some((line) => line.startsWith("expires_at "))).toBe(false);
+    expect(lines.some((line) => line.startsWith("instructions "))).toBe(false);
+    expect(lines).toHaveLength(4);
+  });
+});
+
 describe("the run", () => {
   /** What the entry door answers for the two entries the listing is asking about. */
   const doors = new Map<string, AskEntry>([
@@ -1086,7 +1148,10 @@ describe("the run", () => {
     const challenged = new ChallengingPoster("moltbook");
     run.posters.set("moltbook", challenged as unknown as FakePoster);
 
-    expect(await runBatchPost(["moltbook", BASE], run.deps)).toBe(0);
+    // Exit 3 and not 0: 0 and 1 already mean two things an unattended run acts
+    // on — the batch was said, or a board refused it — and a post sitting
+    // behind an unanswered puzzle is neither (the review of #109).
+    expect(await runBatchPost(["moltbook", BASE], run.deps)).toBe(3);
     expect(challenged.sent).toHaveLength(1);
     expect(run.io.out).toContain(`posted moltbook ${CHALLENGE_POST_ID} https://moltbook.example/post/1`);
     expect(
@@ -1113,6 +1178,14 @@ describe("the run", () => {
     // run never did it.
     expect(run.io.out.some((line) => line.startsWith("answer moltbook"))).toBe(
       false,
+    );
+    // Said on stderr as well, which is where an unattended run's output is
+    // read when it is read at all: with the exit code, that is the whole
+    // difference between a post the world can see and a post nobody can.
+    expect(run.io.err).toHaveLength(1);
+    expect(run.io.err[0]).toBe(
+      `pending verification moltbook ${CHALLENGE_POST_ID}: the board accepted ` +
+        `the post and asked for a verification answer, which this run does not solve.`,
     );
 
     const written = parseState(state.written[state.written.length - 1] ?? null);

@@ -86,12 +86,30 @@ import {
 import { runCommand } from "./main.js";
 
 const USAGE =
-  "usage: batch-post <venue|all> <base-url> [--limit n] [--dry-run] [--out <file>] [--state <file>] [--credential <file>] [--colony-key <file>] [--colony <name>] [--moltbook-key <file>] [--submolt <name>] [--repo <owner/name>] [--issue <n>] [--token-env <NAME>] [--via-gh]";
+  "usage: batch-post <venue|all> <base-url> [--limit n] [--dry-run] [--out <file>] [--state <file>] [--credential <file>] [--colony-key <file>] [--colony <name>] [--moltbook-key <file>] [--submolt <name>] [--repo <owner/name>] [--issue <n>] [--token-env <NAME>] [--via-gh]\n" +
+  "exit 0 posted or already asked today; 1 a venue refused; 2 bad arguments; " +
+  "3 the post was made and the venue left it pending verification — the day is " +
+  "recorded and somebody has to answer the challenge printed on stderr.";
 
 /** Exit codes, named where they are decided. */
 const OK = 0;
 const FAILED = 1;
 const BAD_ARGUMENTS = 2;
+
+/**
+ * A post that was made and is not visible yet (decision D-145).
+ *
+ * Its own code, and not 0, because 0 and 1 already mean two things an
+ * unattended run acts on — it said the batch, or a board refused it — and a
+ * post sitting behind an unanswered challenge is neither. Exiting 0 would
+ * leave a cron job unable to tell a visible post from an invisible one, and
+ * exiting 1 would say the venue refused something it accepted.
+ *
+ * The state is written either way. The post exists, the day is spent, and a
+ * run that posted again tomorrow because nobody answered a puzzle would be the
+ * daily bound failing at the one thing it is for.
+ */
+const PENDING_VERIFICATION = 3;
 
 /**
  * The communities this command knows how to post to, in the order a batch goes
@@ -1196,21 +1214,37 @@ export function challengeLines(
 ): readonly string[] {
   const challenge = posted.challenge;
   if (challenge === undefined) return [];
+  // Every one of the four folded, and not only the two that read like prose.
+  // All four are a server's strings: a newline in a code or an expiry writes a
+  // line of its own in this command's stdout — a reviewer produced a convincing
+  // `posted moltbook <id> <url>` that way — and breaks the JSON of the call
+  // printed below into something nobody can paste. `oneLine` is the same folder
+  // the composer puts a stranger's claim through before publishing it, and for
+  // the same reason (D-145, the review of #109).
+  const code = oneLine(challenge.verification_code);
   const lines = [
     `pending verification ${venue} ${posted.id}: the board accepted the post ` +
       `and asked for a verification answer, which this run does not solve.`,
     `challenge ${venue}: ${oneLine(challenge.challenge_text)}`,
-    `verification_code ${venue}: ${challenge.verification_code}`,
+    `verification_code ${venue}: ${code}`,
   ];
   if (challenge.expires_at !== null) {
-    lines.push(`expires_at ${venue}: ${challenge.expires_at}`);
+    lines.push(`expires_at ${venue}: ${oneLine(challenge.expires_at)}`);
   }
   if (challenge.instructions !== null) {
     lines.push(`instructions ${venue}: ${oneLine(challenge.instructions)}`);
   }
+  // The body built by `JSON.stringify` and not by concatenation, for the half
+  // of the same fault folding does not reach: a quotation mark or a brace in
+  // the board's code breaks a hand-spelled object exactly as a newline breaks
+  // a line, and the operator is left with a call they cannot paste. Escaped
+  // here, so whatever the board said, the line printed is one line and parses
+  // as the object it looks like.
   lines.push(
-    `answer it yourself with: POST ${challenge.door} ` +
-      `{"verification_code":"${challenge.verification_code}","answer":"<your answer>"}`,
+    `answer it yourself with: POST ${oneLine(challenge.door)} ` +
+      oneLine(
+        JSON.stringify({ verification_code: code, answer: "<your answer>" }),
+      ),
   );
   return lines;
 }
@@ -1234,9 +1268,10 @@ export interface BatchPostDeps {
  * Read the record, compose one post per community, and say them.
  *
  * Returns the process's exit code: 2 for arguments that are not a batch, 1 when
- * a venue refused, 0 when every asked community was posted to or was already
- * asked today. A venue that was already asked today is not a failure — it is
- * the bound working — and the line says so.
+ * a venue refused, 3 when a venue took a post and left it pending verification,
+ * 0 when every asked community was posted to or was already asked today. A
+ * venue that was already asked today is not a failure — it is the bound
+ * working — and the line says so.
  */
 export async function runBatchPost(
   args: readonly string[],
@@ -1261,6 +1296,7 @@ export async function runBatchPost(
   const written: string[] = [];
   let failed = false;
   let posted = false;
+  let pending = false;
   const next: BatchState = { ...state };
 
   for (const venue of plan.venues) {
@@ -1328,9 +1364,20 @@ export async function runBatchPost(
     // (decision D-145 item 4). The post is made and the day is spent, so the
     // state above already records it; what is left is a call for a person to
     // make, with the board's own words beside it and nothing solved on their
-    // behalf. The run still ends 0: the post went out, and a machine declining
-    // to answer a puzzle nobody asked it to answer is not a failure.
-    for (const line of challengeLines(venue, result)) deps.io.stdout(line);
+    // behalf.
+    //
+    // And said twice, on purpose: on stdout with the rest of the run's account
+    // of itself, and once on stderr, where an unattended run's output is read
+    // when it is read at all. With the exit code below, that is the whole
+    // difference between a post the world can see and a post sitting behind a
+    // puzzle nobody answered — which a run that ended 0 and printed a note
+    // into a log could not tell anybody (the review of #109).
+    const challenge = challengeLines(venue, result);
+    for (const line of challenge) deps.io.stdout(line);
+    if (challenge.length > 0) {
+      pending = true;
+      deps.io.stderr(challenge[0]!);
+    }
   }
 
   // The state is written once, after the run, and never on a dry run: a run
@@ -1340,7 +1387,10 @@ export async function runBatchPost(
     await deps.writeOut(plan.outPath, `${written.join("\n\n")}\n`);
     deps.io.stdout(`wrote ${plan.outPath}`);
   }
-  return failed ? FAILED : OK;
+  // A refusal outranks a pending post: a venue that would not take the batch is
+  // the louder fact, and the pending one is still on stderr and in the state.
+  if (failed) return FAILED;
+  return pending ? PENDING_VERIFICATION : OK;
 }
 
 // ---------------------------------------------------------------------------

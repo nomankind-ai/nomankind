@@ -42,6 +42,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  COMMENT_TREE_TOO_DEEP,
   MoltbookBoardAdapter,
   confirmationVenue,
   type BoardComment,
@@ -315,6 +316,76 @@ describe("the Moltbook comments door", () => {
       ]),
     });
     expect(ids(await board.comments(THREAD, 0, 100))).toEqual(["whole"]);
+  });
+
+  it("walks a tree twenty thousand deep without falling over", async () => {
+    // The review of #109. A JSON document declares its own nesting for free:
+    // this one is about 900 KB, inside `BOARD_READ_MAX_BYTES`, and `JSON.parse`
+    // takes it without complaint. Every row is deleted, so the caller's bound
+    // is never reached — nothing is ever taken — and a recursive walk descended
+    // the whole way and threw `RangeError` at a few thousand levels, into a
+    // sweep that was not expecting one.
+    //
+    // Two things are asserted and both matter. It returns, which is the walk
+    // being stacked on the heap rather than on this process's call stack: no
+    // input can overflow it at any bound. And it says what it left behind,
+    // once, rather than passing a thread it only partly read off as a thread
+    // that held nothing.
+    const deep = 20_000;
+    let chain = "";
+    for (let level = 0; level < deep; level += 1) {
+      chain += `{"id":"x${level}","is_deleted":true,"replies":[`;
+    }
+    chain += "]";
+    for (let level = 0; level < deep - 1; level += 1) chain += "}]";
+    chain += "}";
+    const document = `{"success":true,"comments":[${chain}],"has_more":false,"next_cursor":null}`;
+    expect(document.length).toBeGreaterThan(500_000);
+
+    const board = boardOf({ [page(null)]: document });
+    const comments = await board.comments(THREAD, 0, 100);
+    expect(comments).toEqual([]);
+    expect(board.readSkips()).toEqual([COMMENT_TREE_TOO_DEEP]);
+  });
+
+  it("takes what it can reach inside the bound, and only says so when it stopped", async () => {
+    // A live reply sits at depth 0, 1 or 2, so an honest thread is read whole
+    // and the reason is never said. The counted line here is three deep.
+    const nested = row("depth-3", HANDLE, "the line", "2026-09-06T12:00:00Z", {
+      depth: 3,
+    });
+    const tree = row("depth-0", "someone-else", "a", "2026-09-06T09:00:00Z", {
+      replies: [
+        row("depth-1", "someone-else", "b", "2026-09-06T10:00:00Z", {
+          replies: [
+            row("depth-2", "someone-else", "c", "2026-09-06T11:00:00Z", {
+              replies: [nested],
+            }),
+          ],
+        }),
+      ],
+    });
+    const board = boardOf({ [page(null)]: answer([tree]) });
+    expect(ids(await board.comments(THREAD, 0, 100))).toEqual([
+      "depth-0",
+      "depth-1",
+      "depth-2",
+      "depth-3",
+    ]);
+    expect(board.readSkips()).toEqual([]);
+  });
+
+  it("clears what it left behind when the next read reaches everything", async () => {
+    // The reason is about the read the caller is being handed, so a thread
+    // read whole today must not report yesterday's depth.
+    const board = boardOf({
+      [page(null)]: answer([
+        row("only", HANDLE, "one line", "2026-09-06T10:00:00Z"),
+      ]),
+    });
+    expect(board.readSkips()).toEqual([]);
+    await board.comments(THREAD, 0, 100);
+    expect(board.readSkips()).toEqual([]);
   });
 
   it("answers null for a door that did not answer, and an empty list for one with no comments", async () => {

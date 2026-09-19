@@ -123,6 +123,39 @@ const MAX_RECORD_PAGES = 10;
  */
 const MAX_COMMENT_PAGES = 10;
 
+/**
+ * How deep into a nested comment tree one read descends (decision D-145).
+ *
+ * A board that nests its replies inside the comments they answer publishes a
+ * tree, and a tree off somebody else's server has whatever depth that server
+ * allowed. The bound is what keeps the walk below finite whatever arrives:
+ * rows deeper than this are passed over, and the read says so once by name
+ * rather than going on forever or falling over.
+ *
+ * Sixty-four is far past any thread a person reads — Moltbook's own replies sit
+ * at depth 0, 1 and 2 on a live post — and the reason it is here at all is not
+ * politeness. A JSON document declares its own nesting for free: some 900 KB of
+ * `{"replies":[{"replies":[...` is twenty thousand levels and fits inside
+ * `BOARD_READ_MAX_BYTES` with room to spare, and `JSON.parse` takes it without
+ * complaint. So the bound and the iterative walk below are one fix: a depth a
+ * stranger chooses must not be able to decide how deep this record recurses.
+ *
+ * A wire bound of this adapter's own and not a policy number, exactly as the
+ * page cap above is: policy says how many comments a run takes from a thread,
+ * and this says how far into one document it will look for them.
+ */
+const MAX_COMMENT_DEPTH = 64;
+
+/**
+ * The reason a read passed part of a document over: the tree ran deeper than
+ * `MAX_COMMENT_DEPTH` (decision D-145).
+ *
+ * Named here and counted once per read by the sweep, because a run that
+ * quietly read less of a thread than the thread held would be a run whose
+ * silence meant two different things.
+ */
+export const COMMENT_TREE_TOO_DEEP = "comment_tree_too_deep";
+
 /** A thread or a comment id, as the venue spells one (decision D-138 item 2). */
 export type BoardId = number | string;
 
@@ -344,6 +377,21 @@ export interface BoardAdapter {
    * profile, and this only decides what is read out of them.
    */
   profileKey?(text: string): string | null;
+  /**
+   * What the last `comments` read passed over on this adapter's own account,
+   * by the reason's own name (decision D-145).
+   *
+   * A venue whose document can be bigger than one read will look at says so
+   * here, and the step counts each reason once per read beside its other
+   * skips. Absent on an adapter that reads a thread whole and means it: the
+   * two community venues before this one answer a post's entire context, so
+   * there is nothing for them to have left behind.
+   *
+   * Reasons and not counts, and read after the page rather than during it: a
+   * run that passed over a subtree has one fact to report about that read, and
+   * a number per row would be the adapter counting a stranger's nesting.
+   */
+  readSkips?(): readonly string[];
   /**
    * The proof that this handle's own key sealed this fingerprint, or null when
    * the record carries no such seal (or could not be read, which the step
@@ -1866,6 +1914,21 @@ export class MoltbookBoardAdapter extends CommunityBoardAdapter {
    */
   readonly cursor: BoardCursorKind = "time";
 
+  /** What the last read passed over on its own account, by name (D-145). */
+  #skips: readonly string[] = [];
+
+  /**
+   * The reasons this adapter left part of the last read behind.
+   *
+   * One entry at most today, and once however many pages the read took: a
+   * thread nested past `MAX_COMMENT_DEPTH` is one fact about that read, and
+   * the step counts it beside its other skips so a run that saw less of a
+   * thread than the thread held says so.
+   */
+  readSkips(): readonly string[] {
+    return this.#skips;
+  }
+
   /**
    * The account's beginning, out of the envelope this venue wraps it in.
    *
@@ -1935,6 +1998,12 @@ export class MoltbookBoardAdapter extends CommunityBoardAdapter {
     const bound = Math.min(limit, CONFIRMATION_COMMENTS_PER_THREAD);
     const comments: BoardComment[] = [];
     let cursor: string | null = null;
+    // Cleared at the start of the read and not at the end of it: what this
+    // answers is about the read the caller is about to be handed, and a reason
+    // left over from an earlier one would be this adapter reporting a thread
+    // it is no longer reading.
+    let deeper = false;
+    this.#skips = [];
 
     for (let page = 0; page < MAX_COMMENT_PAGES; page += 1) {
       const body = objectOf(await this.json(this.#page(thread, cursor, bound)));
@@ -1943,13 +2012,17 @@ export class MoltbookBoardAdapter extends CommunityBoardAdapter {
       // does not answer ends the paging instead, because what was already read
       // is what the board said, and the rest is the next run's.
       if (body === null || body["success"] === false) {
+        if (deeper) this.#skips = [COMMENT_TREE_TOO_DEEP];
         return page === 0 ? null : trimComments(comments, afterId, bound);
       }
       const rows = body["comments"];
       if (!Array.isArray(rows)) {
+        if (deeper) this.#skips = [COMMENT_TREE_TOO_DEEP];
         return page === 0 ? [] : trimComments(comments, afterId, bound);
       }
-      flattenMoltbookComments(rows, thread, comments, bound);
+      // Once for the whole read and not once per page: a thread nested past
+      // the bound is one fact about this read, however many pages it took.
+      deeper = flattenMoltbookComments(rows, thread, comments, bound) || deeper;
       cursor = stringOf(body["next_cursor"]);
       // Paging stops at the board's own word, at the bound this run reads to,
       // and at the page cap above — whichever comes first.
@@ -1957,6 +2030,7 @@ export class MoltbookBoardAdapter extends CommunityBoardAdapter {
       if (comments.length >= bound) break;
     }
 
+    if (deeper) this.#skips = [COMMENT_TREE_TOO_DEEP];
     return trimComments(comments, afterId, bound);
   }
 }
@@ -1994,17 +2068,48 @@ function moltbookAgentIn(bytes: Uint8Array): Record<string, unknown> | null {
  * withdrawn by somebody else. `verification_status` is not read: the board sets
  * it `pending` on arrival, and refusing that would refuse most of the board.
  *
- * The bound is the caller's, counted over the flattened tree, so a thread whose
- * replies run deeper than the run reads stops where the run stops.
+ * Two bounds and not one, because they stop different things. The caller's
+ * bound is counted over the comments this takes, so a thread with more replies
+ * than the run reads stops where the run stops. `MAX_COMMENT_DEPTH` is counted
+ * over the document's own nesting, which nothing the caller asks for can limit:
+ * a chain of rows this passes over — deleted, or missing a field — takes
+ * nothing and would otherwise descend as far as a stranger cared to nest, and
+ * the caller's bound would never be reached to stop it. True comes back when
+ * something was left below that depth, and the caller names it once.
+ *
+ * Explicitly stacked rather than recursive, so the depth a stranger chooses is
+ * heap and never this process's call stack. The recursive version of this
+ * walked as deep as it was handed and fell over at a few thousand levels —
+ * about 585 KB of nesting, well inside `BOARD_READ_MAX_BYTES`, parsed without
+ * complaint by `JSON.parse` — and the throw escaped into a sweep that was not
+ * expecting one. A bound alone would have fixed the case and left the shape:
+ * whatever number were chosen, the walk would still be one input away from
+ * being as deep as that number. So the walk cannot overflow at any bound, and
+ * the bound decides how much is read rather than whether the run survives.
  */
 function flattenMoltbookComments(
   rows: readonly unknown[],
   thread: BoardId,
   into: BoardComment[],
   bound: number,
-): void {
-  for (const each of rows) {
-    if (into.length >= bound) return;
+): boolean {
+  let deeper = false;
+  // One frame per level, at most `MAX_COMMENT_DEPTH` + 1 of them, each holding
+  // where in its own list the walk had got to.
+  const stack: { rows: readonly unknown[]; index: number; depth: number }[] = [
+    { rows, index: 0, depth: 0 },
+  ];
+
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1]!;
+    if (frame.index >= frame.rows.length) {
+      stack.pop();
+      continue;
+    }
+    if (into.length >= bound) break;
+    const each = frame.rows[frame.index];
+    frame.index += 1;
+
     const row = objectOf(each);
     if (row === null) continue;
     const id = stringOf(row["id"]);
@@ -2024,11 +2129,17 @@ function flattenMoltbookComments(
     ) {
       into.push({ id, thread, handle, body: text, posted_at: postedAt });
     }
+
     const replies = row["replies"];
-    if (Array.isArray(replies)) {
-      flattenMoltbookComments(replies, thread, into, bound);
+    if (!Array.isArray(replies) || replies.length === 0) continue;
+    if (frame.depth >= MAX_COMMENT_DEPTH) {
+      deeper = true;
+      continue;
     }
+    stack.push({ rows: replies, index: 0, depth: frame.depth + 1 });
   }
+
+  return deeper;
 }
 
 /**

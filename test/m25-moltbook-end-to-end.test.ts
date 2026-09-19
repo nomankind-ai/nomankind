@@ -42,7 +42,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { FixtureBeacon } from "../src/adapters/beacon.js";
-import { MockBoardAdapter, type BoardComment } from "../src/adapters/board.js";
+import {
+  MockBoardAdapter,
+  type BoardAdapter,
+  type BoardComment,
+  type BoardId,
+} from "../src/adapters/board.js";
 import { canonicalConfirmationLine } from "../src/confirm.js";
 import { type Core } from "../src/core.js";
 import { deriveEntry } from "../src/derive.js";
@@ -529,6 +534,40 @@ async function moltbookBoard(): Promise<MockBoardAdapter> {
   });
 }
 
+/**
+ * A board that breaks its own contract: `comments` throws instead of answering
+ * null (the review of #109).
+ *
+ * Every adapter in this record promises to answer null for a board that did not
+ * answer, because the sweep runs on a timer and a board being down is weather
+ * rather than a rule. A promise is not a guarantee: a stranger's document deep
+ * enough to overflow a recursive walk made the Moltbook adapter throw, and the
+ * call site was bare, so one thread of one venue took the other venues and
+ * every step after them down with it — on every run, until somebody unpinned
+ * the thread. This is that adapter, standing in for any of them.
+ */
+class ThrowingBoardAdapter implements BoardAdapter {
+  readonly venue = "colony";
+  readonly binding = "profile" as const;
+  readonly cursor = "time" as const;
+
+  async threads(): Promise<readonly BoardId[]> {
+    return ["09ed63ba-438a-41e8-b352-f065b376106e"];
+  }
+
+  async comments(): Promise<readonly BoardComment[] | null> {
+    throw new RangeError("Maximum call stack size exceeded");
+  }
+
+  async sealProof(): Promise<null> {
+    return null;
+  }
+
+  async record(): Promise<null> {
+    return null;
+  }
+}
+
 describe("Moltbook, end to end", () => {
   beforeAll(async () => {
     store = await openTestDatabase();
@@ -739,6 +778,29 @@ describe("Moltbook, end to end", () => {
     expect(
       report.community_validations.filter((row) => row.perimeter !== null),
     ).toHaveLength(1);
+  }, 600_000);
+
+  it("survives an adapter that throws, and goes on reading the other venues", async () => {
+    // The review of #109, both halves at once. The thrower is first in the
+    // list, so a run that let the throw escape would never reach the venue
+    // after it and would have no report to answer with at all.
+    const working = await moltbookBoard();
+    const again = await runSweep(envOf(), {
+      now: new Date(NOW.getTime() + 600_000),
+      beacon: new FixtureBeacon("moltbook-throws"),
+      board: [new ThrowingBoardAdapter(), working],
+    });
+
+    // The run completed: there is a report, and the steps after the
+    // confirmations one did their work rather than being skipped by a throw.
+    expect(again).toBeDefined();
+    expect(again.chain?.break ?? null).toBeNull();
+    // A board that threw is a board that did not answer, by that reason's own
+    // name — never a run that died.
+    expect(again.skipped["board_unavailable"]).toBe(1);
+    // And the venue after it was read, which is the whole point.
+    expect(working.reads).toContain(THREAD);
+    expect(again.confirmations_read.threads).toBe(1);
   }, 600_000);
 
   it("passes over the comment that carried both of an entry's lines", async () => {

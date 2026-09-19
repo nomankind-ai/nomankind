@@ -1455,15 +1455,33 @@ async function confirmationsStep(
       // thread nobody has written on since the last run costs one read and
       // answers nothing.
       const cursor = (await readConfirmationCursor(db, board.venue, thread)) ?? 0;
-      const comments = await board.comments(
-        thread,
-        cursor,
-        CONFIRMATION_COMMENTS_PER_THREAD,
-      );
+      // An adapter that broke its own contract is a board that did not answer,
+      // exactly as `takeComment` reads one (decision D-145). Every adapter here
+      // promises to answer null rather than throw — the sweep runs on a timer
+      // and a board that fell over is a step with a skip reason — but a promise
+      // is not a guarantee, and the cost of trusting it was the whole run: this
+      // call was bare, so one throw on one thread of one venue took the other
+      // venues and every step after it down with it, on every run, until
+      // somebody unpinned the thread. A stranger's document should never be
+      // able to decide that.
+      let comments: readonly BoardComment[] | null;
+      try {
+        comments = await board.comments(
+          thread,
+          cursor,
+          CONFIRMATION_COMMENTS_PER_THREAD,
+        );
+      } catch {
+        comments = null;
+      }
       if (comments === null) {
         skip("board_unavailable");
         continue;
       }
+      // What the adapter left behind of a document it did read, if anything:
+      // a thread nested deeper than one read looks is counted by its own name
+      // rather than passing for a thread that held nothing (D-145).
+      for (const reason of board.readSkips?.() ?? []) skip(reason);
       // Counted whatever came of them: this is the step saying it reached the
       // board at all, which a count of what it sealed cannot say. A thread read
       // and found unchanged and a thread never read look identical in a detail

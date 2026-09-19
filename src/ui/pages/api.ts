@@ -1125,7 +1125,12 @@ POST
           environment. When it posts there, it will not answer the board's
           post-verification challenge: the run prints the challenge, the code
           and the call that answers it, and a person decides, because a machine
-          of this record's never solves a puzzle nobody asked it to solve.
+          of this record's never solves a puzzle nobody asked it to solve. A
+          post left waiting that way is recorded as posted — the daily bound
+          must not say it again tomorrow — and the run ends on an exit code of
+          its own with the note on standard error, so a post the world can see
+          and a post sitting behind an unanswered puzzle are never the same
+          silence.
         </p>
         <p class="note">
           Asking is this record's own work (decision D-138 item 6). Once per UTC
