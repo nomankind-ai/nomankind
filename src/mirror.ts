@@ -174,6 +174,36 @@ function originOf(environment: string): string {
   return PUBLIC_ORIGINS[environment] ?? PUBLIC_ORIGINS["local"]!;
 }
 
+/**
+ * Which deployment a base URL is: the table above, read the other way round.
+ *
+ * A command is given a base URL and nothing else, and some of what it then has
+ * to do is per environment — which threads the maintainer pinned at each venue,
+ * above all (`CONFIRMATION_VENUES`, src/policy.ts, and the daily ask that
+ * follows them in src/cli/batch-post.ts). The environment is not a thing a URL
+ * says, so it is read off the one table that already maps the two, rather than
+ * out of a second list of the same three hostnames somewhere else: two lists
+ * are two answers the day one of them moves.
+ *
+ * Anything this table does not name reads as `local`, which is what an unknown
+ * host means on a laptop, and which is also the conservative answer for the
+ * caller: `local` pins no thread anywhere, so a run against a hostname this
+ * record does not publish opens its own post and says so rather than commenting
+ * on a thread it guessed at.
+ */
+export function environmentOfBaseUrl(baseUrl: string): string {
+  let origin: string;
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch {
+    return "local";
+  }
+  const found = Object.entries(PUBLIC_ORIGINS).find(
+    ([, each]) => each === origin,
+  );
+  return found === undefined ? "local" : found[0];
+}
+
 /** The code repository the mirror points a forker at. */
 const CODE_REPOSITORY = `${MIRROR.web}/nomankind-ai/nomankind`;
 

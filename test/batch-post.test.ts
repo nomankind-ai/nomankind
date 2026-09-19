@@ -33,8 +33,11 @@ import {
   composeBatchPost,
   confirmationForm,
   entryIdsInHtml,
+  followsPin,
   oneLine,
   parseState,
+  pinNote,
+  pinnedThreadFor,
   postedOn,
   readAsks,
   readClaims,
@@ -53,7 +56,15 @@ import {
   formEntryIds,
   parseConfirmationComment,
 } from "../src/confirm.js";
-import type { PostBody, Posted, Poster } from "../src/adapters/poster.js";
+import {
+  ColonyPoster,
+  MoltbookPoster,
+  type PostBody,
+  type Posted,
+  type Poster,
+  type PosterHttp,
+} from "../src/adapters/poster.js";
+import { environmentOfBaseUrl } from "../src/mirror.js";
 import {
   ACCOUNT_BINDING_SUNSET,
   CONFIRMATION_ATTESTATION_TOKEN_PREFIX,
@@ -1413,5 +1424,472 @@ describe("the run", () => {
     expect(await runBatchPost(["all", BASE, "--dry-run", "--out", "batch.txt"], written)).toBe(0);
     const file = files.get("batch.txt") ?? "";
     for (const venue of BATCH_VENUES) expect(file).toContain(`--- ${venue} ---`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The ask follows the pinned thread (D-145, the operations of 2026-09-19)
+// ---------------------------------------------------------------------------
+
+/**
+ * A defect found in operations rather than in a test.
+ *
+ * The daily run opened a new Colony post every day, and the sweep reads exactly
+ * the threads pinned in `CONFIRMATION_VENUES` (D-143 item 14) at a venue whose
+ * posts it cannot discover. So the first day's ask was pinned and answered, and
+ * every day after that spoke into a thread nobody was listening to. The ask now
+ * goes where the reading is — a comment on the newest pinned thread — and where
+ * nothing is pinned it opens a post and says out loud that the post has to be
+ * pinned before anybody can be heard under it.
+ */
+
+/** The record's own base URL, production, whose Colony thread is pinned. */
+const PRODUCTION = "https://app.nomankind.ai";
+
+/** A poster client that answers canned responses by path, and keeps the calls. */
+class FakePosterHttp implements PosterHttp {
+  readonly sent: {
+    method: string;
+    url: string;
+    body: unknown;
+    authorization: string | null;
+  }[] = [];
+
+  constructor(private readonly answer: (path: string) => Canned) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const text = await request.text();
+    this.sent.push({
+      method: request.method,
+      url: request.url,
+      body: text === "" ? null : (JSON.parse(text) as unknown),
+      authorization: request.headers.get("authorization"),
+    });
+    const canned = this.answer(url.pathname);
+    return new Response(JSON.stringify(canned.body), {
+      status: canned.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+}
+
+/** The Colony's own preamble: the key buys a token, then whichever door. */
+function colonyDoors(answer: (path: string) => Canned): (path: string) => Canned {
+  return (path: string): Canned => {
+    if (path === "/api/v1/auth/token") {
+      return { status: 200, body: { access_token: "tok_1" } };
+    }
+    return answer(path);
+  };
+}
+
+/** One Colony poster over a fake board, with or without a thread to follow. */
+function colonyPoster(
+  http: PosterHttp,
+  thread: string | number | null,
+): ColonyPoster {
+  return new ColonyPoster({
+    venue: "colony",
+    origin: "https://thecolony.ai",
+    apiKey: "the-secret",
+    colony: "general",
+    postType: "discussion",
+    thread,
+    http,
+  });
+}
+
+describe("which thread the daily ask is said on", () => {
+  it("reads the environment off the base URL it was given", () => {
+    // The one table that maps the three deployments to the three hostnames
+    // (src/mirror.ts), read the other way round rather than copied.
+    expect(environmentOfBaseUrl(PRODUCTION)).toBe("production");
+    expect(environmentOfBaseUrl("https://demo.nomankind.ai/")).toBe("demo");
+    expect(environmentOfBaseUrl("http://localhost:8787")).toBe("local");
+    // Anything this record does not publish reads as local, which pins nothing
+    // anywhere: a run against a hostname nobody declared opens its own post
+    // rather than commenting on a thread it guessed at.
+    expect(environmentOfBaseUrl(BASE)).toBe("local");
+    expect(environmentOfBaseUrl("not a url")).toBe("local");
+  });
+
+  it("follows the pin at the venues whose posts cannot be discovered", () => {
+    // The shape of the defect and not a list of names: a venue follows the pin
+    // when the board does not list its citizen's posts and its threads are that
+    // citizen's own. GitHub's thread is an issue named on the command line, and
+    // the founding registry's posts are discovered above the pinned floor.
+    for (const venue of ["colony", "moltbook"]) {
+      expect(followsPin(venue)).toBe(true);
+    }
+    for (const venue of ["1f916", "github"]) {
+      expect(followsPin(venue)).toBe(false);
+    }
+  });
+
+  it("takes the newest thread the maintainer pinned for this environment", () => {
+    const colony = CONFIRMATION_VENUES.find((row) => row.venue === "colony");
+    const pinned = colony?.threads["production"] ?? [];
+    expect(pinned.length).toBeGreaterThan(0);
+    expect(pinnedThreadFor("colony", "production")).toBe(
+      pinned[pinned.length - 1],
+    );
+    // Nothing pinned is null and never an invented thread: Moltbook's account
+    // does not exist yet (D-145), and local reads no board anywhere.
+    expect(pinnedThreadFor("moltbook", "production")).toBeNull();
+    expect(pinnedThreadFor("colony", "local")).toBeNull();
+    expect(pinnedThreadFor("nowhere", "production")).toBeNull();
+  });
+
+  it("says, before it posts, when the ask is about to open an unread post", () => {
+    expect(pinNote("colony", PRODUCTION)).toBeNull();
+    const note = pinNote("moltbook", PRODUCTION);
+    expect(note).toContain("no pin moltbook");
+    expect(note).toContain("production");
+    expect(note).toContain("CONFIRMATION_VENUES (src/policy.ts)");
+    expect(note).toContain("nothing said under it is read");
+    // Not a line about the venues this was never true of.
+    expect(pinNote("github", BASE)).toBeNull();
+    expect(pinNote("1f916", BASE)).toBeNull();
+  });
+});
+
+describe("the Colony poster, on a pinned thread and off one", () => {
+  const body: PostBody = { title: "nomankind: 2 entries", body: "the ask" };
+
+  it("comments on the thread it was handed, and names both in the URL", async () => {
+    const http = new FakePosterHttp(
+      colonyDoors(() => ({ status: 201, body: { id: "aec1028d" } })),
+    );
+    const posted = await colonyPoster(http, "bae0e581").post(body);
+
+    // The call .tools/colony.mjs's `reply` makes, and the one the orchestrator
+    // made by hand on 2026-09-19: the comment door of that post, with `body`.
+    expect(http.sent[1]?.method).toBe("POST");
+    expect(http.sent[1]?.url).toBe(
+      "https://thecolony.ai/api/v1/posts/bae0e581/comments",
+    );
+    expect(http.sent[1]?.body).toEqual({ body: "the ask" });
+    expect(http.sent[1]?.authorization).toBe("Bearer tok_1");
+    // No colonies listing: a comment needs no colony id, so none is asked for.
+    expect(http.sent).toHaveLength(2);
+    // The URL names the thread and the comment, which is the whole of what an
+    // operator needs to go and look.
+    expect(posted.id).toBe("aec1028d");
+    expect(posted.url).toBe(
+      "https://thecolony.ai/posts/bae0e581#comment-aec1028d",
+    );
+  });
+
+  it("opens a post in the colony when no thread is pinned", async () => {
+    const http = new FakePosterHttp(
+      colonyDoors((path) =>
+        path === "/api/v1/colonies"
+          ? { status: 200, body: { colonies: [{ id: "col_7", name: "general" }] } }
+          : { status: 201, body: { id: "post_9" } },
+      ),
+    );
+    const posted = await colonyPoster(http, null).post(body);
+
+    expect(http.sent.map((each) => new URL(each.url).pathname)).toEqual([
+      "/api/v1/auth/token",
+      "/api/v1/colonies",
+      "/api/v1/posts",
+    ]);
+    expect(http.sent[2]?.body).toEqual({
+      colony_id: "col_7",
+      post_type: "discussion",
+      title: body.title,
+      body: body.body,
+    });
+    expect(posted.url).toBe("https://thecolony.ai/posts/post_9");
+  });
+
+  it("passes a refusal of the comment through, and names no credential", async () => {
+    const http = new FakePosterHttp(
+      colonyDoors(() => ({ status: 413, body: { error: "body too long" } })),
+    );
+    const poster = colonyPoster(http, "bae0e581");
+    // The refusal path is the one it always was: the venue's own words, and
+    // the policy row named beside them for a cap on length. A comment may have
+    // a smaller cap than a post, and `post_max_chars` is still the bound the
+    // composer fits to, so a board that refuses one is a board publishing a
+    // limit the table should carry.
+    await expect(poster.post(body)).rejects.toThrow(
+      /colony refused 413: .*body too long/,
+    );
+    await expect(poster.post(body)).rejects.not.toThrow(/the-secret/);
+    expect(capRowAdvice("colony", "colony refused 413: body too long")).toContain(
+      "post_max_chars for colony in src/policy.ts",
+    );
+  });
+
+  it("refuses to invent an id for a comment the board named none for", async () => {
+    const http = new FakePosterHttp(colonyDoors(() => ({ status: 201, body: {} })));
+    await expect(colonyPoster(http, "bae0e581").post(body)).rejects.toThrow(
+      /named no id/,
+    );
+  });
+});
+
+describe("the Moltbook poster, on a pinned thread", () => {
+  const body: PostBody = { title: "nomankind: 2 entries", body: "the ask" };
+
+  function moltbook(thread: string | null, http: PosterHttp): MoltbookPoster {
+    return new MoltbookPoster({
+      venue: "moltbook",
+      origin: "https://www.moltbook.com",
+      apiKey: "the-secret",
+      submolt: "general",
+      thread,
+      http,
+    });
+  }
+
+  it("comments under the key, with the board's own content field", async () => {
+    const http = new FakePosterHttp(() => ({
+      status: 200,
+      body: { success: true, comment: { id: "cmt_4f" } },
+    }));
+    const posted = await moltbook("2b1c-uuid", http).post(body);
+
+    expect(http.sent).toHaveLength(1);
+    expect(http.sent[0]?.url).toBe(
+      "https://www.moltbook.com/api/v1/posts/2b1c-uuid/comments",
+    );
+    expect(http.sent[0]?.body).toEqual({ content: "the ask" });
+    expect(http.sent[0]?.authorization).toBe("Bearer the-secret");
+    expect(posted.id).toBe("cmt_4f");
+    expect(posted.url).toBe(
+      "https://www.moltbook.com/post/2b1c-uuid#comment-cmt_4f",
+    );
+    expect(posted.challenge).toBeUndefined();
+  });
+
+  it("carries a challenge off the comment door back whole, and solves none", async () => {
+    // D-145 item 4, at the second door: the board may hold a comment behind the
+    // same puzzle it holds a post behind, and a door that quietly did the
+    // arithmetic would be the rule holding only where somebody wrote it out.
+    const http = new FakePosterHttp(() => ({
+      status: 200,
+      body: {
+        success: true,
+        comment: { id: "cmt_4f" },
+        verification_required: true,
+        verification: {
+          verification_code: "vc_7731",
+          challenge_text: "How many legs on three spiders, less a baker's dozen?",
+          expires_at: "2026-09-19T00:05:00.000Z",
+        },
+      },
+    }));
+    const posted = await moltbook("2b1c-uuid", http).post(body);
+
+    expect(posted.id).toBe("cmt_4f");
+    expect(posted.challenge).toEqual({
+      verification_code: "vc_7731",
+      challenge_text: "How many legs on three spiders, less a baker's dozen?",
+      expires_at: "2026-09-19T00:05:00.000Z",
+      instructions: null,
+      door: "https://www.moltbook.com/api/v1/verify",
+    });
+    // One call and one only: the verify door was never touched.
+    expect(http.sent).toHaveLength(1);
+    // And the run prints it, on stdout and on stderr, and exits 3: the comment
+    // exists, the day is spent, and a person answers the puzzle or nobody does.
+    const printed = challengeLines("moltbook", posted);
+    expect(printed[0]).toContain("pending verification moltbook cmt_4f");
+    expect(printed).toContain(
+      "challenge moltbook: How many legs on three spiders, less a baker's dozen?",
+    );
+  });
+
+  it("opens a post in the submolt when no thread is pinned", async () => {
+    const http = new FakePosterHttp(() => ({
+      status: 200,
+      body: { success: true, post: { id: "9c2e" } },
+    }));
+    const posted = await moltbook(null, http).post(body);
+    expect(http.sent[0]?.url).toBe("https://www.moltbook.com/api/v1/posts");
+    expect(http.sent[0]?.body).toEqual({
+      submolt_name: "general",
+      title: body.title,
+      content: body.body,
+    });
+    expect(posted.url).toBe("https://www.moltbook.com/post/9c2e");
+  });
+
+  it("refuses to invent an id for a comment the board named none for", async () => {
+    const http = new FakePosterHttp(() => ({ status: 200, body: { success: true } }));
+    await expect(moltbook("2b1c-uuid", http).post(body)).rejects.toThrow(
+      /named no id/,
+    );
+  });
+});
+
+describe("the run, on a venue whose thread is pinned", () => {
+  const doors = new Map<string, AskEntry>([
+    [DRAFT_A, ask({ id: DRAFT_A })],
+    [LABELLED, ask({ id: LABELLED, status: "verified", bootstrap: "fixtures" })],
+  ]);
+
+  function recordDoors(): FakeHttp {
+    return new FakeHttp((path) => {
+      if (path === "/entries") return listing();
+      const id = path.startsWith("/entries/")
+        ? path.slice("/entries/".length)
+        : null;
+      const entry = id === null ? undefined : doors.get(id);
+      return entry === undefined ? { status: 404, body: null } : entryDoor(entry);
+    });
+  }
+
+  /** What `realPoster` builds for The Colony, without reading a key file. */
+  function colonyRun(
+    board: PosterHttp,
+    state: StateStore,
+    io: ValidatorIo,
+  ): BatchPostDeps {
+    return {
+      http: recordDoors(),
+      io,
+      now: NOW,
+      state,
+      posterFor: async (venue: string, plan: BatchPlan): Promise<Poster> =>
+        colonyPoster(
+          board,
+          pinnedThreadFor(venue, environmentOfBaseUrl(plan.baseUrl)),
+        ),
+    };
+  }
+
+  it("comments on the pinned Colony thread and records the comment", async () => {
+    const thread = String(pinnedThreadFor("colony", "production"));
+    const board = new FakePosterHttp(
+      colonyDoors(() => ({ status: 201, body: { id: "aec1028d" } })),
+    );
+    const state = memoryState();
+    const io = lines();
+
+    expect(await runBatchPost(["colony", PRODUCTION], colonyRun(board, state, io))).toBe(0);
+    expect(board.sent[1]?.url).toBe(
+      `https://thecolony.ai/api/v1/posts/${thread}/comments`,
+    );
+
+    // The title the post door would have carried is the body's own first line,
+    // and it is not said twice: the comment door takes no title, so the body is
+    // the whole of the ask, exactly as GitHub's comment has always been.
+    const sent = (board.sent[1]?.body as { body: string }).body;
+    const title = `nomankind: 2 entries asking for a check (${utcDay(NOW)})`;
+    expect(sent.split("\n")[0]).toBe(title);
+    expect(sent.split(title)).toHaveLength(2);
+
+    // The state names the comment and a URL that names the thread and the
+    // comment, so the operator and tomorrow's run read the same place.
+    const written = parseState(state.written[state.written.length - 1] ?? null);
+    expect(written["colony"]).toEqual({
+      date: utcDay(NOW),
+      id: "aec1028d",
+      url: `https://thecolony.ai/posts/${thread}#comment-aec1028d`,
+    });
+    expect(io.out).toContain(
+      `posted colony aec1028d https://thecolony.ai/posts/${thread}#comment-aec1028d`,
+    );
+    // And no note, because there is a pin: the line means what it says.
+    expect(io.out.some((line) => line.startsWith("no pin"))).toBe(false);
+  });
+
+  it("opens a post and says it must be pinned where nothing is", async () => {
+    const board = new FakePosterHttp(
+      colonyDoors((path) =>
+        path === "/api/v1/colonies"
+          ? { status: 200, body: { colonies: [{ id: "col_7", name: "general" }] } }
+          : { status: 201, body: { id: "post_9" } },
+      ),
+    );
+    const state = memoryState();
+    const io = lines();
+
+    // BASE is nobody's deployment, so it reads as local, where no thread is
+    // pinned at all: the ask is still said, as a post, and the run says what
+    // that costs before it says it.
+    expect(await runBatchPost(["colony", BASE], colonyRun(board, state, io))).toBe(0);
+    expect(new URL(board.sent[2]?.url ?? "").pathname).toBe("/api/v1/posts");
+    expect(io.out).toContain(pinNote("colony", BASE));
+    expect(io.out).toContain(
+      "posted colony post_9 https://thecolony.ai/posts/post_9",
+    );
+  });
+
+  it("says the note on a dry run too, and sends nothing", async () => {
+    const state = memoryState();
+    const io = lines();
+    const posters = new Map(
+      BATCH_VENUES.map((venue) => [venue, new FakePoster(venue)] as const),
+    );
+    const run = deps({ http: recordDoors(), io, state, posters });
+    expect(await runBatchPost(["all", BASE, "--dry-run"], run)).toBe(0);
+    expect(io.out).toContain(pinNote("colony", BASE));
+    expect(io.out).toContain(pinNote("moltbook", BASE));
+    expect(io.out.filter((line) => line.startsWith("no pin "))).toHaveLength(2);
+    expect(state.written).toHaveLength(0);
+  });
+
+  it("folds a board's id and URL onto the one line it prints them on", async () => {
+    // The fault #109 fixed for the challenge fields, at the door beside them:
+    // both of these are a board's own strings, and a newline in either writes a
+    // line of this run's stdout that the run never said — a convincing second
+    // `posted ...` for a post that does not exist.
+    const forged = "posted colony forged-9 https://thecolony.ai/posts/evil";
+    const id = `aec1028d\n${forged}`;
+    const url = `https://thecolony.ai/posts/1\nposted moltbook f2 https://x`;
+    const state = memoryState();
+    const io = lines();
+    const run: BatchPostDeps = {
+      http: recordDoors(),
+      io,
+      now: NOW,
+      state,
+      posterFor: async (venue: string): Promise<Poster> => ({
+        venue,
+        post: async (): Promise<Posted> => ({ id, url }),
+      }),
+    };
+
+    expect(await runBatchPost(["colony", PRODUCTION], run)).toBe(0);
+    // One line, and not the one the board tried to write.
+    const said = io.out.filter((line) => line.startsWith("posted "));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toBe(
+      `posted colony aec1028d ${forged} https://thecolony.ai/posts/1 ` +
+        "posted moltbook f2 https://x",
+    );
+    expect(io.out).not.toContain(forged);
+
+    // And the file keeps what the board actually said, whatever is in it: it
+    // is JSON, which escapes a newline rather than being broken by one, and
+    // the once-a-day check and the link have to be the board's own strings.
+    const text = state.written[state.written.length - 1] ?? null;
+    expect(text).toContain("\\n");
+    const written = parseState(text);
+    expect(written["colony"]).toEqual({ date: utcDay(NOW), id, url });
+    expect(postedOn(written, "colony", utcDay(NOW))).toBe(true);
+  });
+
+  it("keeps the pin note off the venues that never had one", async () => {
+    // Production pins The Colony's thread and GitHub's issue, and the founding
+    // registry discovers its own posts above the pinned floor. Moltbook is the
+    // one venue with nothing pinned anywhere, because its account does not
+    // exist yet (D-145).
+    const state = memoryState();
+    const io = lines();
+    const posters = new Map(
+      BATCH_VENUES.map((venue) => [venue, new FakePoster(venue)] as const),
+    );
+    const run = deps({ http: recordDoors(), io, state, posters });
+    expect(await runBatchPost(["all", PRODUCTION, "--dry-run"], run)).toBe(0);
+    expect(io.out.filter((line) => line.startsWith("no pin "))).toEqual([
+      pinNote("moltbook", PRODUCTION),
+    ]);
   });
 });

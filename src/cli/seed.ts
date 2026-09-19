@@ -33,8 +33,10 @@
  * forever is refused before it is fetched rather than after it is posted. The
  * daily write cap is the door's alone: the first refusal stops the run, and the
  * run says how many rows are left so the operator knows what a second run has
- * to pick up. The log is one JSON line per row, appended, so two runs over the
- * same list read as one history.
+ * to pick up — and ends 0 when it had filed rows first, because meeting the
+ * record's own cap is the run finishing the day's share of a list rather than
+ * failing at it. The log is one JSON line per row, appended, so two runs over
+ * the same list read as one history.
  *
  * The core is exported over injected io — an http client, a snapshot fetcher, a
  * clock and a key — so a test drives the whole batch in process against
@@ -83,6 +85,20 @@ export const BAD_SOURCES = "bad_sources";
 
 /** The door's own word for a core field longer than the published ceiling. */
 export const CORE_TOO_LARGE = "core_too_large";
+
+/**
+ * The door's own word for the day's writes being spent (src/worker/registry.ts).
+ *
+ * Named here because it is the one refusal that ends a run without failing it.
+ * The cap is the record's, the run met it, and the rows before it are in the
+ * log: a list longer than a day's writes is finished by running it again
+ * tomorrow, which is what the tool is for. The workflow that runs it nightly
+ * has said so in its own comment since it was written — "a refused row and a
+ * run that met the write cap are both results, not failures" — and on
+ * 2026-09-19 a run that filed ten rows and then met the cap reported a failed
+ * conclusion anyway, which is an alert about the tool working.
+ */
+export const WRITE_QUOTA = "write_quota";
 
 /** The name of the log, in the directory the run writes it to. */
 export const SEED_LOG_NAME = "seed-log.jsonl";
@@ -366,7 +382,10 @@ export interface SeedLogLine {
 export interface SeedRun {
   /** Every row the run reached was submitted, or checked under --dry-run. */
   readonly ok: boolean;
-  /** 0 when every row passed, 1 on a refusal, 2 on a file this tool cannot read. */
+  /**
+   * 0 when every row passed and 0 when the day's write cap ended a run that
+   * had filed rows; 1 on any other refusal; 2 on a file this tool cannot read.
+   */
   readonly code: 0 | 1 | 2;
   readonly submitted: number;
   readonly checked: number;
@@ -578,9 +597,21 @@ export async function runSeed(input: {
 
   // A skipped row is not a failure and does not colour the exit code: a run
   // over a list the record already holds in full did everything asked of it.
+  //
+  // Nor is the day's write cap, once rows are in. `ok` stays false — a row the
+  // run reached was refused, and that is what `ok` is about — but the exit code
+  // is the run's own verdict on itself, and a run that filed what the day had
+  // room for and stopped where the record told it to stop did the thing it was
+  // asked to do. Its list is finished by running it again tomorrow. One
+  // refusal and no other, because a quota reached after a row was refused for
+  // its own reasons is still a run with a bad row in it, and that row is the
+  // fact worth an alert; the rows filed are counted too, so a run that met the
+  // cap having written nothing is a key with no writes left and is a failure to
+  // say so.
+  const quotaOnly = stopped === WRITE_QUOTA && refused === 1 && submitted > 0;
   return {
     ok: stopped === null && refused === 0,
-    code: stopped === null && refused === 0 ? 0 : 1,
+    code: (stopped === null && refused === 0) || quotaOnly ? 0 : 1,
     submitted,
     checked,
     refused,

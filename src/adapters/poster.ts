@@ -11,13 +11,27 @@
  *
  * One interface and four implementations, because the venues are four different
  * kinds of place. The 1F916 registry takes a post under a citizen credential.
- * The Colony takes an API key for a token and then a post in a colony. GitHub
- * takes a comment on a pinned issue under a token, or the `gh` CLI when the
- * maintainer would rather not put a token in the environment at all. Moltbook
- * takes a post in a submolt under an API key and may answer it with a challenge
+ * The Colony takes an API key for a token and then a comment on the pinned
+ * thread, or a post in a colony where nothing is pinned. GitHub takes a comment
+ * on a pinned issue under a token, or the `gh` CLI when the maintainer would
+ * rather not put a token in the environment at all. Moltbook takes the same two
+ * shapes as The Colony under an API key, and may answer either with a challenge
  * this record will not solve (decision D-145). What they have in common is all
  * the caller needs: a body goes out, and an id and a URL come back, so the run
  * can say where it spoke.
+ *
+ * The daily ask follows the pin (D-145, the operations of 2026-09-19). A venue
+ * whose threads are pinned per environment and whose posts this record cannot
+ * discover — The Colony and Moltbook, `discover: false` in
+ * `CONFIRMATION_VENUES` — is read on exactly the threads the maintainer pinned,
+ * so a new post per day was a post the sweep would never read again: the first
+ * day's ask was pinned and answered, and every day after that spoke into a
+ * thread nobody was listening to. So where the caller hands a poster a thread,
+ * the ask goes out as a comment on it, and the post door is for the day there
+ * is nothing pinned yet. Which thread that is, and whether there is one at all,
+ * is the command's reading of the venue table and never this module's: an
+ * adapter that chose a thread for itself would be an adapter deciding where the
+ * record speaks.
  *
  * No credential is ever printed, logged or put in an error message (D-016,
  * D-058). Every one of them arrives as a string this module was handed and
@@ -143,6 +157,24 @@ function idOf(body: Record<string, unknown> | null, ...names: string[]): string 
 }
 
 /**
+ * Where a comment on a thread is read: the thread's own page, with the comment
+ * named in the fragment.
+ *
+ * The same shape the board adapters seal a counted line's permalink under
+ * (`commentDoor`, src/adapters/board.ts), so the URL the state file keeps for
+ * today's ask names both the thread it was said on and the comment it is —
+ * which is the whole of what an operator needs to go and look. The fragment is
+ * never sent to a server, which is what a fragment is.
+ */
+function commentUrl(
+  posts: string,
+  thread: string | number,
+  id: string,
+): string {
+  return `${posts}/${encodeURIComponent(String(thread))}#comment-${encodeURIComponent(id)}`;
+}
+
+/**
  * The founding registry (1F916): one post under nomankind's citizen credential.
  *
  * Exactly what .tools/post-1f916.mjs does by hand — `POST /api/post` with a
@@ -187,13 +219,23 @@ export class RegistryPoster implements Poster {
 }
 
 /**
- * The Colony: a token from the API key, then a post in one colony.
+ * The Colony: a token from the API key, then a comment on the pinned thread —
+ * or a post in one colony, on the day nothing is pinned.
  *
- * Two calls and a lookup, as .tools/colony.mjs does them: the key buys a
- * short-lived token, the colonies are listed to turn the colony's name into the
- * id the post door takes, and the post goes out under the token. The name is
- * asked for rather than the id, because the name is the thing a person can
- * check by looking at the board.
+ * The key buys a short-lived token, as .tools/colony.mjs does it, and then one
+ * of two doors takes the ask. `POST /api/v1/posts/{thread}/comments` with
+ * `{body}` is the comment, which is what that file's own `reply` does and what
+ * the orchestrator did by hand on 2026-09-19 when the daily run had opened a
+ * post nobody reads. `POST /api/v1/posts` is the post, which needs the colonies
+ * listed first to turn the colony's name into the id that door takes — a lookup
+ * the comment door does not need and does not make. The name is asked for
+ * rather than the id, because the name is the thing a person can check by
+ * looking at the board.
+ *
+ * A comment has no title field, so the title is not sent: the composer keeps it
+ * as the body's own first line (src/cli/batch-post.ts), which is what GitHub's
+ * poster has always relied on, so the same body reads the same way whichever
+ * door took it.
  */
 export class ColonyPoster implements Poster {
   readonly venue: string;
@@ -208,6 +250,13 @@ export class ColonyPoster implements Poster {
       readonly colony: string;
       /** The board's own word for what kind of post this is. */
       readonly postType: string;
+      /**
+       * The pinned thread this ask is a comment on, or null to open a post.
+       *
+       * The command's reading of `CONFIRMATION_VENUES` for the environment it
+       * is posting against, handed down rather than looked up here.
+       */
+      readonly thread?: string | number | null;
       readonly http: PosterHttp;
     },
   ) {
@@ -261,7 +310,37 @@ export class ColonyPoster implements Poster {
     throw new Error(`${this.venue} has no colony named ${this.input.colony}`);
   }
 
+  /** The ask as a comment on one thread: `POST /api/v1/posts/{id}/comments`. */
+  private async comment(thread: string | number, body: PostBody): Promise<Posted> {
+    const token = await this.token();
+    const response = await this.input.http.fetch(
+      new Request(
+        `${this.input.origin}/api/v1/posts/${encodeURIComponent(String(thread))}/comments`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+            authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ body: body.body }),
+        },
+      ),
+    );
+    const { text, json } = await jsonOf(response);
+    if (!response.ok) throw refused(this.venue, response.status, text);
+    const id = idOf(json, "id", "comment_id");
+    if (id === null) {
+      throw new Error(`${this.venue} accepted the comment and named no id`);
+    }
+    return { id, url: commentUrl(`${this.input.origin}/posts`, thread, id) };
+  }
+
   async post(body: PostBody): Promise<Posted> {
+    const thread = this.input.thread;
+    if (thread !== undefined && thread !== null && String(thread) !== "") {
+      return await this.comment(thread, body);
+    }
     const token = await this.token();
     const colonyId = await this.colonyId(token);
     const response = await this.input.http.fetch(
@@ -308,13 +387,21 @@ function boundedField(
 }
 
 /**
- * Moltbook: one post in a submolt, under the agent's own API key (D-145).
+ * Moltbook: one comment on the pinned thread, or a post in a submolt, under the
+ * agent's own API key (D-145).
  *
- * One call and no token exchange: the key is the credential, carried as a
- * bearer token, and `POST /api/v1/posts` takes `{submolt_name, title, content}`
- * (read from the board's own published surface on 2026-09-19). The submolt is
- * asked for by name rather than by id, like The Colony's colony, because the
- * name is the thing a person can check by looking at the board.
+ * One call and no token exchange either way: the key is the credential, carried
+ * as a bearer token. `POST /api/v1/posts` takes `{submolt_name, title, content}`
+ * and `POST /api/v1/posts/{uuid}/comments` takes `{content}` (the board's own
+ * published surface, read on 2026-09-19; `content` is the same field its
+ * comments are read back out of). The submolt is asked for by name rather than
+ * by id, like The Colony's colony, because the name is the thing a person can
+ * check by looking at the board, and the thread is the one the maintainer
+ * pinned, handed down by the command.
+ *
+ * A comment has no title field, so the title is not sent and the composer keeps
+ * it as the body's own first line — the same arrangement The Colony's poster and
+ * GitHub's make, so the ask reads the same way whichever door took it.
  *
  * And one thing no other poster here does: the board may accept the post and
  * then answer `verification_required` with a word problem — a code, an
@@ -330,6 +417,11 @@ function boundedField(
  * the day as posted and says the post is pending verification. A run that
  * called it a failure would post again tomorrow and the day after, which is the
  * one thing the daily bound exists to prevent.
+ *
+ * The comment door carries the same handling, because the board may hold a
+ * comment behind the same puzzle it holds a post behind, and a door that solved
+ * on the quiet what the other door refuses to solve would be the rule holding
+ * only where somebody remembered to write it out.
  */
 export class MoltbookPoster implements Poster {
   readonly venue: string;
@@ -342,13 +434,86 @@ export class MoltbookPoster implements Poster {
       readonly apiKey: string;
       /** The submolt the post is filed in, by its own name. */
       readonly submolt: string;
+      /**
+       * The pinned thread this ask is a comment on, or null to open a post.
+       *
+       * The command's reading of `CONFIRMATION_VENUES` for the environment it
+       * is posting against, handed down rather than looked up here.
+       */
+      readonly thread?: string | number | null;
       readonly http: PosterHttp;
     },
   ) {
     this.venue = input.venue;
   }
 
+  /** The challenge this board attached to what it just took, or none. */
+  private challengeIn(json: Record<string, unknown> | null): PostChallenge | undefined {
+    const verification =
+      json === null
+        ? null
+        : typeof json["verification"] === "object" && json["verification"] !== null
+          ? (json["verification"] as Record<string, unknown>)
+          : null;
+    const code = boundedField(verification, "verification_code");
+    if (json?.["verification_required"] !== true || code === null) {
+      return undefined;
+    }
+    return {
+      verification_code: code,
+      challenge_text: boundedField(verification, "challenge_text") ?? "",
+      expires_at: boundedField(verification, "expires_at"),
+      instructions: boundedField(verification, "instructions"),
+      door: `${this.input.origin}/api/v1/verify`,
+    };
+  }
+
+  /** The ask as a comment on one thread: `POST /api/v1/posts/{uuid}/comments`. */
+  private async comment(thread: string | number, body: PostBody): Promise<Posted> {
+    const response = await this.input.http.fetch(
+      new Request(
+        `${this.input.origin}/api/v1/posts/${encodeURIComponent(String(thread))}/comments`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+            authorization: `Bearer ${this.input.apiKey}`,
+          },
+          body: JSON.stringify({ content: body.body }),
+        },
+      ),
+    );
+    const { text, json } = await jsonOf(response);
+    if (!response.ok) throw refused(this.venue, response.status, text);
+
+    // `{success, comment:{id, ...}}`, and the flatter shapes beside it, exactly
+    // as the post door is read: an id is the one thing the caller cannot do
+    // without.
+    const comment =
+      json === null
+        ? null
+        : typeof json["comment"] === "object" && json["comment"] !== null
+          ? (json["comment"] as Record<string, unknown>)
+          : null;
+    const id = idOf(comment, "id") ?? idOf(json, "comment_id", "id");
+    if (id === null) {
+      throw new Error(`${this.venue} accepted the comment and named no id`);
+    }
+
+    const challenge = this.challengeIn(json);
+    const posted: Posted = {
+      id,
+      url: commentUrl(`${this.input.origin}/post`, thread, id),
+    };
+    return challenge === undefined ? posted : { ...posted, challenge };
+  }
+
   async post(body: PostBody): Promise<Posted> {
+    const thread = this.input.thread;
+    if (thread !== undefined && thread !== null && String(thread) !== "") {
+      return await this.comment(thread, body);
+    }
     const response = await this.input.http.fetch(
       new Request(`${this.input.origin}/api/v1/posts`, {
         method: "POST",
@@ -387,25 +552,8 @@ export class MoltbookPoster implements Poster {
           : `${this.input.origin}/post/${id}`,
     };
 
-    const verification =
-      json === null
-        ? null
-        : typeof json["verification"] === "object" && json["verification"] !== null
-          ? (json["verification"] as Record<string, unknown>)
-          : null;
-    const code = boundedField(verification, "verification_code");
-    if (json?.["verification_required"] !== true || code === null) return posted;
-
-    return {
-      ...posted,
-      challenge: {
-        verification_code: code,
-        challenge_text: boundedField(verification, "challenge_text") ?? "",
-        expires_at: boundedField(verification, "expires_at"),
-        instructions: boundedField(verification, "instructions"),
-        door: `${this.input.origin}/api/v1/verify`,
-      },
-    };
+    const challenge = this.challengeIn(json);
+    return challenge === undefined ? posted : { ...posted, challenge };
   }
 }
 

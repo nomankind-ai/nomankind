@@ -30,6 +30,15 @@
  * nothing to the log; what comes back from a community is read by the sweep's
  * own confirmations step, which recomputes every fingerprint for itself.
  *
+ * Where the ask is said at a venue is the venue's own table and not this
+ * command's choice (D-145, the operations of 2026-09-19). At a venue whose
+ * posts this record cannot discover — The Colony and Moltbook — the sweep reads
+ * exactly the threads the maintainer pinned, so the daily ask is a comment on
+ * the newest of them; a new post a day was an ask whose replies nobody read,
+ * which is what the first week of production actually did. Where nothing is
+ * pinned yet the ask opens a post, and the run says so in a line of its own,
+ * because a post nobody has pinned is a post this record does not read either.
+ *
  * One post per community per UTC day, kept by a small state file. The bound is
  * the record's manners rather than a rule of the log: a batch that went out
  * twice in a day would be the record shouting, and the boards' own rate limits
@@ -75,6 +84,7 @@ import {
   SEAL_INTERVAL_MINUTES,
 } from "../policy.js";
 import { canonicalConfirmationLine } from "../confirm.js";
+import { environmentOfBaseUrl } from "../mirror.js";
 import { ATTESTATION_VERSION } from "../registry.js";
 import {
   getJson,
@@ -856,6 +866,73 @@ export function venuePostLimit(venue: string): number {
   );
 }
 
+/**
+ * Whether this venue's ask follows a pinned thread (D-145, operations of
+ * 2026-09-19).
+ *
+ * Read off the venue's own row and never listed here: a venue follows the pin
+ * when this record cannot discover its citizen's posts (`discover: false`) and
+ * its threads are that citizen's own posts rather than a repository's issues
+ * (`repository: null`) — which is The Colony and Moltbook, and is the shape of
+ * the defect rather than the names of the two venues that have it. The sweep
+ * reads exactly the threads the maintainer pinned at such a venue, so a new post
+ * per day is a post whose replies are never read: the first day's ask was
+ * pinned and answered, and every day after that spoke into the dark. GitHub is
+ * not in this set because its thread is an issue named on the command line and
+ * its poster has always commented on it; the founding registry is not, because
+ * its posts are discovered above the pinned floor and a new one is found.
+ */
+export function followsPin(venue: string): boolean {
+  const row = CONFIRMATION_VENUES.find((each) => each.venue === venue);
+  return row !== undefined && !row.discover && row.repository === null;
+}
+
+/**
+ * The thread today's ask is a comment on, or null where none is pinned.
+ *
+ * The newest of the environment's pinned threads, which is the last of the row's
+ * own list: the table appends a thread the day there is one, so the last is the
+ * one the maintainer pinned most recently and the one a reader arriving today
+ * is looking at. Never arithmetic and never a guess — an id here is whatever the
+ * venue calls one, an integer at the founding registry and a UUID at the other
+ * two, and it is only ever a path segment.
+ */
+export function pinnedThreadFor(
+  venue: string,
+  environment: string,
+): string | number | null {
+  const row = CONFIRMATION_VENUES.find((each) => each.venue === venue);
+  if (row === undefined) return null;
+  const pinned = row.threads[environment] ?? [];
+  return pinned.length === 0 ? null : pinned[pinned.length - 1]!;
+}
+
+/**
+ * The line a run prints when it is about to open a post nobody reads yet.
+ *
+ * A venue that follows the pin and has nothing pinned for this environment gets
+ * today's ask as a new post, because there is no thread to comment on and a
+ * batch that stayed unsaid would be the record going quiet over a table it can
+ * fix. But that post is not read: the sweep reads the pinned threads and only
+ * those, so every reply under it is invisible to the record until the maintainer
+ * pins it. That is a fact about the ask and belongs in the run's own account of
+ * itself, on a real run as on a dry one, rather than in somebody's memory of how
+ * the venue table works.
+ *
+ * Null for every other venue and for a venue whose thread is pinned, so the
+ * silence of this line means what it says.
+ */
+export function pinNote(venue: string, baseUrl: string): string | null {
+  if (!followsPin(venue)) return null;
+  const environment = environmentOfBaseUrl(baseUrl);
+  if (pinnedThreadFor(venue, environment) !== null) return null;
+  return (
+    `no pin ${venue}: no thread is pinned for ${environment} in ` +
+    `CONFIRMATION_VENUES (src/policy.ts), so this ask opens a new post — and ` +
+    `nothing said under it is read until that post is pinned there.`
+  );
+}
+
 /** The UTC day of an instant, which is the day a batch is counted against. */
 export function utcDay(now: Date): string {
   return now.toISOString().slice(0, 10);
@@ -904,6 +981,12 @@ function batchBody(
   const day = utcDay(input.now);
   const drafts = asked.filter((entry) => entry.status === "draft").length;
   const labelled = asked.length - drafts;
+  // The title, and then the same words again as the body's first line. Not a
+  // duplication to tidy away: the doors that take a comment — GitHub's, and now
+  // The Colony's and Moltbook's pinned threads (D-145) — have no title field at
+  // all, so a title kept only in `title` would be a heading the ask lost at
+  // three venues out of four. It is written once, here, and the two readings of
+  // it are the same string.
   const title = `nomankind: ${asked.length} entries asking for a check (${day})`;
   const body = [
     title,
@@ -1314,8 +1397,15 @@ export async function runBatchPost(
     // An entry the composer would not print is named, with the reason, before
     // anything else about this venue: a silent refusal is an entry that looks
     // to an operator exactly like an entry nobody has got to yet.
+    // Folded like everything else printed off a wire. These ids come from this
+    // record's own doors rather than from a board, so nothing here is a
+    // stranger's text — but a line of stdout is a line of stdout, and the rule
+    // that holds only where somebody remembered the bytes were somebody else's
+    // is the rule that gets forgotten.
     for (const entry of body.refused) {
-      deps.io.stdout(`not asked ${entry.id}: claim text in the confirm form`);
+      deps.io.stdout(
+        `not asked ${oneLine(entry.id)}: claim text in the confirm form`,
+      );
     }
 
     // What did not fit is said on every run and not only on a dry one: an
@@ -1325,9 +1415,16 @@ export async function runBatchPost(
       deps.io.stdout(
         `waiting ${venue}: ${body.deferred.length} entries did not fit inside ` +
           `${body.limitChars} characters and are named in a later batch — ` +
-          body.deferred.map((entry) => entry.id).join(", "),
+          body.deferred.map((entry) => oneLine(entry.id)).join(", "),
       );
     }
+
+    // Said before the ask goes anywhere, and on a dry run as on a real one: a
+    // venue that follows the pin and has nothing pinned is about to be given a
+    // post whose replies this record will not read, which is the thing an
+    // operator has to know before the post exists rather than after.
+    const note = pinNote(venue, plan.baseUrl);
+    if (note !== null) deps.io.stdout(note);
 
     if (plan.dryRun) {
       deps.io.stdout(body.body);
@@ -1347,19 +1444,36 @@ export async function runBatchPost(
       const poster = await deps.posterFor(venue, plan);
       result = await poster.post(body);
     } catch (error) {
-      // The venue's own answer, whole and unedited, exactly as it has always
-      // been printed: the board said it, and a run that paraphrased a refusal
-      // would be a run the operator had to go and check.
-      const answer = error instanceof Error ? error.message : String(error);
+      // The venue's own answer, whole and unparaphrased: the board said it,
+      // and a run that summarised a refusal would be a run the operator had to
+      // go and check. Folded onto one line, though, for the reason every other
+      // string off a wire is — a refusal body with a newline in it writes a
+      // line of this run's stdout that the run never said, and a board that
+      // was refusing the post is the last place to take that on trust.
+      const answer = oneLine(
+        error instanceof Error ? error.message : String(error),
+      );
       deps.io.stdout(`failed ${venue}: ${answer}`);
       const advice = capRowAdvice(venue, answer);
       if (advice !== null) deps.io.stdout(advice);
       failed = true;
       continue;
     }
+    // The state keeps the board's id and URL exactly as the board spelled
+    // them, whatever is in them: it is JSON, which escapes a newline rather
+    // than being broken by one, and the once-a-day check and the link have to
+    // be the board's own strings and not a tidied copy of them.
     next[venue] = { date: day, id: result.id, url: result.url };
     posted = true;
-    deps.io.stdout(`posted ${venue} ${result.id} ${result.url}`);
+    // Folded for the line, though, and not for the file. Both of these are a
+    // board's strings — an id it minted and, at Moltbook, a URL it chose — and
+    // a newline in either writes a line of this run's stdout that the run
+    // never said: a convincing second `posted ...` for a post that does not
+    // exist. The same fault the challenge fields had, fixed the same way (the
+    // review of #109, D-145).
+    deps.io.stdout(
+      `posted ${venue} ${oneLine(result.id)} ${oneLine(result.url)}`,
+    );
     // A challenge the board attached to the post, printed and not answered
     // (decision D-145 item 4). The post is made and the day is spent, so the
     // state above already records it; what is left is a call for a person to
@@ -1453,6 +1567,12 @@ function venueText(venue: string, name: string): string | null {
  * from the command line, or from the venue's own row in src/policy.ts when it
  * publishes one, because the pinned issue is a fact about the venue and not
  * about this command.
+ *
+ * The same is now true of the two community venues, out of the same table: the
+ * thread a Colony or Moltbook ask is a comment on is the newest one pinned for
+ * the environment this run's base URL names, and null — the post door — where
+ * the maintainer has pinned nothing there yet. The reading happens here and the
+ * poster is handed the answer, so no adapter decides where the record speaks.
  */
 export async function realPoster(venue: string, plan: BatchPlan): Promise<Poster> {
   const http: PosterHttp = new WebHttpClient();
@@ -1486,6 +1606,9 @@ export async function realPoster(venue: string, plan: BatchPlan): Promise<Poster
       apiKey: await secretFrom(plan.colonyKeyPath, ["api_key", "key", "token"]),
       colony: plan.colony ?? venueText(venue, "colony") ?? DEFAULT_COLONY,
       postType: DEFAULT_COLONY_POST_TYPE,
+      // The maintainer's pinned thread for the deployment this run is asking
+      // about, or null where none is pinned and the ask opens a post.
+      thread: pinnedThreadFor(venue, environmentOfBaseUrl(plan.baseUrl)),
       http,
     });
   }
@@ -1507,6 +1630,9 @@ export async function realPoster(venue: string, plan: BatchPlan): Promise<Poster
         "token",
       ]),
       submolt: plan.submolt ?? venueText(venue, "submolt") ?? DEFAULT_SUBMOLT,
+      // As at The Colony, and for the same reason: the sweep reads the pinned
+      // thread and nothing else here, so the ask goes where the reading is.
+      thread: pinnedThreadFor(venue, environmentOfBaseUrl(plan.baseUrl)),
       http,
     });
   }

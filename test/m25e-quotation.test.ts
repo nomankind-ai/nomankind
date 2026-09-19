@@ -253,6 +253,85 @@ describe("npm run seed builds one entry per source row", () => {
     expect(run.remaining).toBe(2);
     // One submission was attempted, and the two behind it were not.
     expect(http.posted.filter((post) => post.path === "/entries")).toHaveLength(1);
+    // Nothing was filed, so the day's cap was not the run doing its share of
+    // the list: a key with no writes left is a failure, and says so.
+    expect([run.submitted, run.code]).toEqual([0, 1]);
+  });
+
+  /**
+   * The day's write cap, after rows are in, is a result and not a failure.
+   *
+   * The workflow that runs this nightly has said so in its own comment since it
+   * was written — "a refused row and a run that met the write cap are both
+   * results, not failures" — and on 2026-09-19 a run filed ten rows, met the
+   * cap, and reported a failed conclusion: an alert about the tool working. A
+   * list longer than a day's writes is finished by running it again tomorrow.
+   */
+  it("ends 0 when the day's write cap stopped a run that had filed rows", async () => {
+    const http = new StubLog();
+    http.submitAnswers.push(
+      { status: 201, body: { status: "draft" } },
+      { status: 201, body: { status: "draft" } },
+      { status: 429, body: { error: "write_quota", bucket: "agent", limit: 100 } },
+    );
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const run = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN), rowFor(SECOND_SPAN), rowFor(SPAN), rowFor(SPAN)],
+      deps: { http, fetcher, now: NOW, io },
+    });
+
+    expect(run.stopped).toBe("write_quota");
+    expect([run.submitted, run.refused, run.remaining]).toEqual([2, 1, 1]);
+    expect(run.code).toBe(0);
+    // `ok` is about the rows the run reached, and one of them was refused, so
+    // it stays false: the exit code is the run's verdict on itself and the two
+    // are not the same sentence.
+    expect(run.ok).toBe(false);
+  });
+
+  it("keeps a non-zero exit for every other refusal that stops a run", async () => {
+    // A cap on how often, and not the day's writes: the answer to it is to wait,
+    // and an unattended run that ended 0 on it would hide a key being throttled.
+    const throttled = new StubLog();
+    throttled.submitAnswers.push(
+      { status: 201, body: { status: "draft" } },
+      { status: 429, body: { error: "rate_limited" } },
+    );
+    const fetcher = new FixtureFetcher({ [CITATION]: PAGE });
+    const first = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(SPAN), rowFor(SECOND_SPAN), rowFor(SPAN)],
+      deps: { http: throttled, fetcher, now: NOW, io },
+    });
+    expect([first.stopped, first.submitted, first.code]).toEqual([
+      "rate_limited",
+      1,
+      1,
+    ]);
+
+    // And a row refused on its own account before the cap was reached is still
+    // a bad row, which is the fact worth an alert whatever stopped the run
+    // afterwards.
+    const paraphrased = new StubLog();
+    paraphrased.submitAnswers.push(
+      { status: 201, body: { status: "draft" } },
+      { status: 429, body: { error: "write_quota", bucket: "agent", limit: 100 } },
+    );
+    const second = await runSeed({
+      key,
+      baseUrl: BASE,
+      rows: [rowFor(PARAPHRASE), rowFor(SPAN), rowFor(SECOND_SPAN), rowFor(SPAN)],
+      deps: { http: paraphrased, fetcher, now: NOW, io },
+    });
+    expect([second.stopped, second.submitted, second.refused]).toEqual([
+      "write_quota",
+      1,
+      2,
+    ]);
+    expect(second.code).toBe(1);
   });
 
   // The first real run on demo filed row 0 and was refused `duplicate_claim`
