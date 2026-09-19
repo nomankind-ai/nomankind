@@ -234,6 +234,12 @@ export const PERIMETER_ACCOUNTS: readonly string[] = Object.freeze([
   "colony:nomankind",
   "github:nomankind-ai",
   "github:rakeshm90",
+  // Moltbook, admitted as a venue by D-145. The handle is published here
+  // before the account exists rather than after it: the perimeter is a
+  // disclosure made in advance, and an account marked only once somebody
+  // noticed it would be a perimeter this record drew around what it had
+  // already said.
+  "moltbook:nomankind",
 ]);
 
 /**
@@ -1612,7 +1618,10 @@ export const WITNESS_PIN: readonly Readonly<{
  * the threads the maintainer pinned by decision, and an environment names none
  * until its first batch post exists. Production's three were pinned on
  * 2026-09-18, the day the first production batch was posted at all three
- * venues; local still names none, and reads no board.
+ * venues; local still names none, and reads no board. Moltbook joined on
+ * 2026-09-19 (decision D-145) and names none anywhere, because the account it
+ * would post under does not exist yet: a venue is in this table the day it is
+ * admitted, and a thread is pinned the day there is one.
  *
  * Not a whitepaper list. The maintainer's published choice; it moves only by a
  * later decision.
@@ -1779,6 +1788,53 @@ export const CONFIRMATION_VENUES: readonly ConfirmationVenue[] = Object.freeze([
     comments_door: "/repos/{repository}/issues/{thread}/comments?per_page={limit}",
     // GitHub's own published maximum for an issue comment body.
     post_max_chars: 65536,
+  }),
+  Object.freeze({
+    venue: "moltbook",
+    origin: "https://www.moltbook.com",
+    citizen: "nomankind",
+    repository: null,
+    threads: Object.freeze({
+      // None anywhere yet, on purpose (decision D-145). The account does not
+      // exist: the maintainer registers it and claims it by hand, and the
+      // thread it posts on is pinned by the decision that pins it. Until then
+      // every environment reads no board here, which is the door being open
+      // exactly where the maintainer opened it and nowhere else.
+      demo: Object.freeze([]),
+      production: Object.freeze([]),
+      local: Object.freeze([]),
+    }),
+    // Discovery off, like the other two community venues: which post is a batch
+    // thread is the maintainer's decision and not a property of the board.
+    discover: false,
+    // The same binding The Colony has, admitted on the same footing (D-145):
+    // the agent publishes `nomankind-key:<base64url>` in the public description
+    // its profile door answers, and the line carries `sig:` over the canonical
+    // line. The account rung below it is admitted unchanged too —
+    // `ACCOUNT_BINDING_TIERS`, the account-creation rule, the per-community cap
+    // and `ACCOUNT_BINDING_SUNSET` all apply here exactly as they do there.
+    binding: "profile",
+    // `GET /api/v1/agents/profile?name=<name>` answers
+    // `{success, agent:{..., description, created_at, ...}}` and 404s an agent
+    // it does not know (read on 2026-09-19). The key is published in
+    // `description`, and `created_at` inside the same `agent` object is the
+    // account's own beginning, so one read answers the binding and the age.
+    comments_door: "/api/v1/posts/{thread}/comments",
+    profile_door: "/api/v1/agents/profile?name={handle}",
+    // The comments door answers `{success, comments:[...], has_more,
+    // next_cursor}`. It takes `sort=new`, a `limit` of at most a hundred ROOT
+    // comments, and a `cursor` from the previous page's `next_cursor`, which is
+    // how the adapter pages it; each root comment nests its whole `replies`
+    // tree, unpaginated, and the reader flattens that tree so a reply is a
+    // comment like any other. The query is the adapter's (src/adapters/board.ts)
+    // rather than this row's, because a door that carried its own paging state
+    // would be a table a second run could not re-read.
+    // Moltbook publishes no limit of its own (read on 2026-09-19), so this is
+    // the smallest bound the table already holds — the founding registry's own
+    // published 8000 — rather than a number of the maintainer's invention. A
+    // batch that fits the strictest board is a batch no board has to refuse,
+    // and the day Moltbook states a limit, that stated number belongs here.
+    post_max_chars: 8000,
   }),
 ]);
 

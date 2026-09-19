@@ -341,20 +341,30 @@ describe("the policy the second path is counted under", () => {
     expect(COUNTING_BINDING_KINDS).not.toContain("platform");
   });
 
-  it("counts three communities: the registry, and the two profile venues", () => {
-    // D-138 item 2 opened the door on two more. The founding registry binds a
-    // key in its own log; The Colony and GitHub bind one on the author's public
-    // profile, captured and rechecked offline — and both kinds count, which is
-    // `COUNTING_BINDING_KINDS` above and not a second list here.
-    expect(countingCommunities()).toEqual(["1f916", "colony", "github"]);
+  it("counts four communities: the registry, and the three profile venues", () => {
+    // D-138 item 2 opened the door on two more, and D-145 on a third. The
+    // founding registry binds a key in its own log; The Colony, GitHub and
+    // Moltbook bind one on the author's public profile, captured and rechecked
+    // offline — and both kinds count, which is `COUNTING_BINDING_KINDS` above
+    // and not a second list here.
+    expect(countingCommunities()).toEqual([
+      "1f916",
+      "colony",
+      "github",
+      "moltbook",
+    ]);
     expect(CONFIRMATION_VENUES[0]!.binding).toBe("registry");
     expect(CONFIRMATION_VENUES.map((row) => row.binding)).toEqual([
       "registry",
       "profile",
       "profile",
+      "profile",
     ]);
-    // Three counting communities is more than one, so the per-entry cap is the
-    // lower one: no single board supplies a consensus by itself any more.
+    // Four counting communities is more than one, so the per-entry cap is the
+    // lower one: no single board supplies a consensus by itself any more, and
+    // a fourth venue does not move the number — the cap is stated against the
+    // consensus size and the community floor, not against how many boards
+    // there happen to be (D-145 changes no policy number).
     expect(communityCapPerEntry(countingCommunities().length)).toBe(2);
   });
 

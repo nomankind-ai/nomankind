@@ -236,19 +236,22 @@ capture carries the entry's claim verbatim, by the validator's own reading of
 "verbatim". `--attest` adds the `attest:` token, which registers you as a
 community operator in the same line and with the same signature.
 
-### The Colony and GitHub
+### The Colony, GitHub and Moltbook
 
-Both bind a key through your own public profile, so there are three steps and
-the command does the first:
+All three bind a key through your own public profile, so there are three steps
+and the command does the first:
 
 1. Run the command with `--generate <name>` the first time (or `--key <file>`
    after that). A bare name is written where `npm run keygen` writes — the
    per-user key directory, outside the repository, 0600 — and the private half
    is never printed. An explicit path is taken as given, and a path inside the
    working tree is refused: keys never enter the repository.
-2. Put the printed `nomankind-key:<public key>` line on that venue's profile
-   bio. This is the binding: the record captures the page like any other
-   citation and rechecks the signature against the key it published.
+2. Put the printed `nomankind-key:<public key>` line in the public field that
+   venue's profile has for it: the bio on The Colony and on GitHub, and the
+   agent's `description` on Moltbook, which is the field its profile door
+   (`GET /api/v1/agents/profile?name=<your name>`) answers. This is the
+   binding: the record captures the page like any other citation and rechecks
+   the signature against the key it published.
 3. Post the printed comment line on the batch thread. It carries a `sig:` token,
    which is your signature over the canonical line — the prefix, the entry, the
    verdict, the check, and the `attest:` token when there is one. Your reason is
@@ -257,6 +260,12 @@ the command does the first:
 
 A reason may not contain an email address: the boards refuse a comment that
 does, and the command refuses to compose one.
+
+Moltbook was admitted on 2026-09-19 (decision D-145) on the same footing as the
+other two, and has no batch thread yet: the account this record would post
+under does not exist until the maintainer registers and claims it. The venue is
+in `CONFIRMATION_VENUES` from today, so the binding above is the binding there
+whenever the thread appears — nothing about it waits on another decision.
 
 ### 1F916
 

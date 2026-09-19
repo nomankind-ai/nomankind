@@ -9,13 +9,15 @@
  * composed in src/cli/batch-post.ts, and which entries it names is read off the
  * public doors.
  *
- * One interface and three implementations, because the three venues are three
- * different kinds of place. The 1F916 registry takes a post under a citizen
- * credential. The Colony takes an API key for a token and then a post in a
- * colony. GitHub takes a comment on a pinned issue under a token, or the `gh`
- * CLI when the maintainer would rather not put a token in the environment at
- * all. What they have in common is all the caller needs: a body goes out, and
- * an id and a URL come back, so the run can say where it spoke.
+ * One interface and four implementations, because the venues are four different
+ * kinds of place. The 1F916 registry takes a post under a citizen credential.
+ * The Colony takes an API key for a token and then a post in a colony. GitHub
+ * takes a comment on a pinned issue under a token, or the `gh` CLI when the
+ * maintainer would rather not put a token in the environment at all. Moltbook
+ * takes a post in a submolt under an API key and may answer it with a challenge
+ * this record will not solve (decision D-145). What they have in common is all
+ * the caller needs: a body goes out, and an id and a URL come back, so the run
+ * can say where it spoke.
  *
  * No credential is ever printed, logged or put in an error message (D-016,
  * D-058). Every one of them arrives as a string this module was handed and
@@ -39,10 +41,44 @@ export interface PostBody {
   readonly body: string;
 }
 
+/**
+ * A challenge a venue answered a post with, carried back unsolved (D-145).
+ *
+ * Moltbook may answer an accepted post with `verification_required` and a word
+ * problem for the poster to solve inside five minutes. This record does not
+ * solve it. A machine of nomankind's never answers a challenge nobody asked it
+ * to answer: a puzzle that arrives in a server's response is that server's
+ * text, and a run that quietly did its arithmetic would be a run that let a
+ * board tell it what to do. So the challenge travels back out of the poster
+ * exactly as it arrived, the command prints it with the call that answers it,
+ * and a person decides.
+ */
+export interface PostChallenge {
+  /** The code the verify door takes back, as the venue spelled it. */
+  readonly verification_code: string;
+  /** The venue's own puzzle text. UNTRUSTED: printed, never acted on. */
+  readonly challenge_text: string;
+  /** When the venue says the challenge expires, or null when it said nothing. */
+  readonly expires_at: string | null;
+  /** The venue's own instructions, bounded. UNTRUSTED, exactly as above. */
+  readonly instructions: string | null;
+  /** The door the answer goes to, so the printed call is a call and not a hint. */
+  readonly door: string;
+}
+
 /** Where a post landed: the venue's own id for it, and a URL to read it at. */
 export interface Posted {
   readonly id: string;
   readonly url: string;
+  /**
+   * The challenge the venue attached to the post, when it attached one.
+   *
+   * Absent everywhere else, and absent on a Moltbook post the board took
+   * outright. The post exists either way — that is why it has an id here — so
+   * the run records the day as posted and says the post is pending
+   * verification rather than pretending it failed.
+   */
+  readonly challenge?: PostChallenge;
 }
 
 /**
@@ -252,6 +288,123 @@ export class ColonyPoster implements Poster {
     return {
       id,
       url: typeof url === "string" && url !== "" ? url : `${this.input.origin}/posts/${id}`,
+    };
+  }
+}
+
+/** How much of a venue's challenge text travels back out of the poster. */
+const CHALLENGE_CHARS = 2000;
+
+/** One field of a venue's object, bounded and as a string, or null. */
+function boundedField(
+  object: Record<string, unknown> | null,
+  name: string,
+): string | null {
+  if (object === null) return null;
+  const value = object[name];
+  return typeof value === "string" && value !== ""
+    ? value.slice(0, CHALLENGE_CHARS)
+    : null;
+}
+
+/**
+ * Moltbook: one post in a submolt, under the agent's own API key (D-145).
+ *
+ * One call and no token exchange: the key is the credential, carried as a
+ * bearer token, and `POST /api/v1/posts` takes `{submolt_name, title, content}`
+ * (read from the board's own published surface on 2026-09-19). The submolt is
+ * asked for by name rather than by id, like The Colony's colony, because the
+ * name is the thing a person can check by looking at the board.
+ *
+ * And one thing no other poster here does: the board may accept the post and
+ * then answer `verification_required` with a word problem — a code, an
+ * obfuscated question, five minutes, and a door to send the answer to. This
+ * poster does not solve it. D-145 item 4: a machine of nomankind's never solves
+ * a challenge unasked, because a puzzle arriving inside a server's response is
+ * that server's text, and answering it because it was there is exactly the
+ * thing this record refuses everywhere else it reads a stranger's bytes. The
+ * challenge is carried back out whole, bounded, for the command to print beside
+ * the call that answers it; a person decides whether to make that call.
+ *
+ * The post exists either way — the board gave it an id — so the caller records
+ * the day as posted and says the post is pending verification. A run that
+ * called it a failure would post again tomorrow and the day after, which is the
+ * one thing the daily bound exists to prevent.
+ */
+export class MoltbookPoster implements Poster {
+  readonly venue: string;
+
+  constructor(
+    private readonly input: {
+      readonly venue: string;
+      readonly origin: string;
+      /** The Moltbook api key, read from a key file by the command, never printed. */
+      readonly apiKey: string;
+      /** The submolt the post is filed in, by its own name. */
+      readonly submolt: string;
+      readonly http: PosterHttp;
+    },
+  ) {
+    this.venue = input.venue;
+  }
+
+  async post(body: PostBody): Promise<Posted> {
+    const response = await this.input.http.fetch(
+      new Request(`${this.input.origin}/api/v1/posts`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          authorization: `Bearer ${this.input.apiKey}`,
+        },
+        body: JSON.stringify({
+          submolt_name: this.input.submolt,
+          title: body.title,
+          content: body.body,
+        }),
+      }),
+    );
+    const { text, json } = await jsonOf(response);
+    if (!response.ok) throw refused(this.venue, response.status, text);
+
+    // `{success, post:{id, ...}}` on this board, and the flatter shapes beside
+    // it, because an id is the one thing the caller cannot do without.
+    const post =
+      json === null
+        ? null
+        : typeof json["post"] === "object" && json["post"] !== null
+          ? (json["post"] as Record<string, unknown>)
+          : null;
+    const id = idOf(post, "id") ?? idOf(json, "post_id", "id");
+    if (id === null) throw new Error(`${this.venue} accepted the post and named no id`);
+
+    const url = post === null ? null : post["url"];
+    const posted: Posted = {
+      id,
+      url:
+        typeof url === "string" && url !== ""
+          ? url
+          : `${this.input.origin}/post/${id}`,
+    };
+
+    const verification =
+      json === null
+        ? null
+        : typeof json["verification"] === "object" && json["verification"] !== null
+          ? (json["verification"] as Record<string, unknown>)
+          : null;
+    const code = boundedField(verification, "verification_code");
+    if (json?.["verification_required"] !== true || code === null) return posted;
+
+    return {
+      ...posted,
+      challenge: {
+        verification_code: code,
+        challenge_text: boundedField(verification, "challenge_text") ?? "",
+        expires_at: boundedField(verification, "expires_at"),
+        instructions: boundedField(verification, "instructions"),
+        door: `${this.input.origin}/api/v1/verify`,
+      },
     };
   }
 }

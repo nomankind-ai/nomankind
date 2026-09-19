@@ -174,6 +174,7 @@ import type {
   BoardComment,
   BoardId,
   BoardProfile,
+  BoardRecord,
   BoardSealProof,
 } from "../adapters/board.js";
 import {
@@ -1437,7 +1438,20 @@ async function confirmationsStep(
   for (const board of boards) {
     if (sealed.length + validations.length >= CONFIRMATIONS_PER_RUN) break;
 
-    const threads = await board.threads();
+    // Listing the threads is a read like any other, and is read like any other
+    // (decision D-145, the review of #109). A venue that discovers its threads
+    // asks the board for them — `RegistryBoardAdapter.threads` fetches the
+    // citizen's posts — so this is a network call at the top of the loop with
+    // every other venue queued behind it, and an adapter that threw here would
+    // take the ones after it down exactly as a throw from `comments` below did.
+    // Null and a throw mean the same thing and are answered the same way: this
+    // venue did not answer, the loop goes on to the next one.
+    let threads: readonly BoardId[] | null;
+    try {
+      threads = await board.threads();
+    } catch {
+      threads = null;
+    }
     if (threads === null) {
       skip("board_unavailable");
       continue;
@@ -1455,15 +1469,33 @@ async function confirmationsStep(
       // thread nobody has written on since the last run costs one read and
       // answers nothing.
       const cursor = (await readConfirmationCursor(db, board.venue, thread)) ?? 0;
-      const comments = await board.comments(
-        thread,
-        cursor,
-        CONFIRMATION_COMMENTS_PER_THREAD,
-      );
+      // An adapter that broke its own contract is a board that did not answer,
+      // exactly as `takeComment` reads one (decision D-145). Every adapter here
+      // promises to answer null rather than throw — the sweep runs on a timer
+      // and a board that fell over is a step with a skip reason — but a promise
+      // is not a guarantee, and the cost of trusting it was the whole run: this
+      // call was bare, so one throw on one thread of one venue took the other
+      // venues and every step after it down with it, on every run, until
+      // somebody unpinned the thread. A stranger's document should never be
+      // able to decide that.
+      let comments: readonly BoardComment[] | null;
+      try {
+        comments = await board.comments(
+          thread,
+          cursor,
+          CONFIRMATION_COMMENTS_PER_THREAD,
+        );
+      } catch {
+        comments = null;
+      }
       if (comments === null) {
         skip("board_unavailable");
         continue;
       }
+      // What the adapter left behind of a document it did read, if anything:
+      // a thread nested deeper than one read looks is counted by its own name
+      // rather than passing for a thread that held nothing (D-145).
+      for (const reason of board.readSkips?.() ?? []) skip(reason);
       // Counted whatever came of them: this is the step saying it reached the
       // board at all, which a count of what it sealed cannot say. A thread read
       // and found unchanged and a thread never read look identical in a detail
@@ -1639,9 +1671,21 @@ async function profileCaptureFor(
  * places a binding could be decided.
  */
 function keyPublishedIn(board: BoardAdapter, text: string): string | null {
-  return board.profileKey === undefined
-    ? profileKeyIn(text)
-    : board.profileKey(text);
+  if (board.profileKey === undefined) return profileKeyIn(text);
+  try {
+    return board.profileKey(text);
+  } catch {
+    // An adapter that broke its own contract read no key out of the page, the
+    // same answer a page with no key in it gets (decision D-145, the review of
+    // #109). The venue's own reading of its own field is the only thing that
+    // threw; the capture is already archived and the line is already sealed as
+    // the account statement it is, and the caller counts it
+    // `confirmation_profile_unkeyed` as it would any page publishing none.
+    // Falling back to `profileKeyIn` over the whole page instead would be this
+    // step overruling a venue's field-scoped reading the moment it failed,
+    // which is the one thing that reading exists to prevent.
+    return null;
+  }
 }
 
 async function takeProfile(
@@ -2164,7 +2208,19 @@ async function registryBindingFor(
   handle: string,
   fingerprint: string,
 ): Promise<LineBinding | null> {
-  const sealed = await board.sealProof(handle, fingerprint);
+  // A registry that did not answer and an adapter that threw asking it are one
+  // thing to this line (decision D-145, the review of #109): there is no proof
+  // in hand either way, so the line falls through to the rung below exactly as
+  // it does for a handle with no seal — uncounted, and named by the caller's
+  // own `confirmation_unsealed` rather than by a reason invented here. Silent,
+  // because the null beside it is silent: a throw must not make a line louder
+  // than the answer it stands in for.
+  let sealed: BoardSealProof | null;
+  try {
+    sealed = await board.sealProof(handle, fingerprint);
+  } catch {
+    sealed = null;
+  }
   if (sealed === null) return null;
   const holds = await verifyConfirmationProof(sealed.proof, trust, {
     handle,
@@ -2491,8 +2547,19 @@ async function communityLine(
   // which event bound it. Two reads of one record for one line was a cost
   // nobody chose, and the second was only ever made because the two halves
   // were read in two places.
-  const record =
-    binding.kind === "registry" ? await board.record(comment.handle) : null;
+  let record: BoardRecord | null = null;
+  if (binding.kind === "registry") {
+    try {
+      record = await board.record(comment.handle);
+    } catch {
+      // A record door that threw said nothing about this handle, which is what
+      // a record door answering null says (decision D-145, the review of
+      // #109). The line has no key to name, so it falls back to the public
+      // confirmation it already was and the run counts it `unbound` — the same
+      // fallback a registry with no word about the handle produces.
+      record = null;
+    }
+  }
 
   const agent =
     binding.kind === "account"

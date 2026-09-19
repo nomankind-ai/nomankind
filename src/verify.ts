@@ -1738,11 +1738,16 @@ function captureCarriesBothVerdicts(
  * The three renderings this record's own adapters document (src/adapters/board.ts)
  * and no guess beyond them:
  *
- * - a post's context or a whole post, `{..., comments: [...]}`, where the row
- *   is the one whose `id` — or `comment_id`, which is 1F916's other spelling —
- *   is this comment's. The Colony's ids are UUIDs and 1F916's are integers, so
- *   they are compared as the strings the payload and the document both spell
- *   them with. The thread's own post is never fallen back to: on a batch thread
+ * - a post's context, a whole post, or a page of a thread's comments,
+ *   `{..., comments: [...]}`, where the row is the one whose `id` — or
+ *   `comment_id`, which is 1F916's other spelling — is this comment's. The rows
+ *   are searched depth first through their own `replies`, because a venue may
+ *   nest a reply inside the comment it answers rather than listing it beside it
+ *   (Moltbook does, decision D-145), and the adapters flatten those trees so a
+ *   reply is a comment like any other. The Colony's ids are UUIDs and 1F916's
+ *   are integers, so they are compared as the strings the payload and the
+ *   document both spell them with. The thread's own post is never fallen back
+ *   to: on a batch thread
  *   that post is the ask, and reading it as somebody's comment is the whole
  *   fault this exists to avoid. The FIRST row with the wanted id and no other,
  *   which is deliberate: the capture's bytes are sealed and content-addressed,
@@ -1783,20 +1788,54 @@ function commentBodyIn(text: string, commentId: unknown): string | null {
   if ("comments" in document || "post" in document) {
     const rows = document["comments"];
     if (!Array.isArray(rows)) return null;
-    for (const each of rows) {
-      if (!isRecord(each)) continue;
-      const id = each["id"] ?? each["comment_id"];
-      if (id === undefined || id === null) continue;
-      if (String(id) !== wanted) continue;
-      return typeof each["body"] === "string" ? each["body"] : null;
-    }
-    return null;
+    return commentBodyInRows(rows, wanted);
   }
 
   const own = document["id"];
   if (own === undefined || own === null) return null;
   if (String(own) !== wanted) return null;
   return typeof document["body"] === "string" ? document["body"] : null;
+}
+
+/**
+ * One comment's body inside a thread's rows, replies and all (decision D-145).
+ *
+ * Depth first, parent before child, and the FIRST row with the wanted id wins —
+ * the same rule the flat reading has always had, and for the same reason: the
+ * capture's bytes are sealed and content-addressed, so a comment cannot grow a
+ * sibling row after the fact, and choosing between two rows of one archived
+ * document would be this reader deciding which of them somebody wrote.
+ *
+ * Nested and not only flat, because a venue may publish its replies inside the
+ * comments they answer rather than beside them: Moltbook's comments door nests
+ * a whole `replies` tree under each root comment (src/adapters/board.ts), and
+ * the adapter flattens that tree so a reply is a comment like any other. A
+ * reader that looked only at the top row of each thread would find no body for
+ * a counted reply, and D-144's form rule would then be asked of nothing — which
+ * under-fires quietly, on exactly the lines a nested board produces.
+ *
+ * The body is read under the two names the venues spell it with: `body` on the
+ * boards whose comments are bodies, and `content` on Moltbook, whose are
+ * contents. The id likewise, `id` or 1F916's `comment_id`. No other field is
+ * looked at and nothing here is followed.
+ *
+ * Null when no row carries the id, which is a reading this build cannot make
+ * rather than evidence of a fault.
+ */
+function commentBodyInRows(rows: readonly unknown[], wanted: string): string | null {
+  for (const each of rows) {
+    if (!isRecord(each)) continue;
+    const id = each["id"] ?? each["comment_id"];
+    if (id !== undefined && id !== null && String(id) === wanted) {
+      const body = each["body"] ?? each["content"];
+      return typeof body === "string" ? body : null;
+    }
+    const replies = each["replies"];
+    if (!Array.isArray(replies)) continue;
+    const nested = commentBodyInRows(replies, wanted);
+    if (nested !== null) return nested;
+  }
+  return null;
 }
 
 /**
